@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"regexp"
 	"strings"
 
 	"github.com/atomicdeploy/patris-export/pkg/paradox"
@@ -46,12 +47,17 @@ func (e *Exporter) ExportToJSON(records []paradox.Record, outputPath string) err
 	}
 	defer file.Close()
 
-	encoder := json.NewEncoder(file)
-	encoder.SetIndent("", "  ")
-	encoder.SetEscapeHTML(false)
-
-	if err := encoder.Encode(transformed); err != nil {
+	// Use custom JSON formatting to keep ANBAR inline
+	data, err := json.MarshalIndent(transformed, "", "  ")
+	if err != nil {
 		return fmt.Errorf("failed to encode JSON: %w", err)
+	}
+
+	// Post-process to make ANBAR arrays inline
+	output := makeArraysInline(string(data), "ANBAR")
+
+	if _, err := file.WriteString(output); err != nil {
+		return fmt.Errorf("failed to write JSON: %w", err)
 	}
 
 	return nil
@@ -137,7 +143,10 @@ func (e *Exporter) ExportRecordsToString(records []paradox.Record) (string, erro
 		return "", fmt.Errorf("failed to marshal JSON: %w", err)
 	}
 
-	return string(data), nil
+	// Post-process to make ANBAR arrays inline
+	output := makeArraysInline(string(data), "ANBAR")
+
+	return output, nil
 }
 
 // transformRecords transforms records for Patris81-specific output format:
@@ -193,4 +202,44 @@ func (e *Exporter) transformRecords(records []paradox.Record) map[string]interfa
 	}
 	
 	return result
+}
+
+// makeArraysInline converts multi-line numeric arrays to single-line format
+// Specifically optimized for ANBAR arrays but works for any numeric array
+func makeArraysInline(jsonStr string, fieldNames ...string) string {
+	// Build pattern to match specified field names
+	fieldPattern := strings.Join(fieldNames, "|")
+	if fieldPattern == "" {
+		return jsonStr
+	}
+	
+	// Pattern to match multi-line arrays with numeric values
+	// Matches: "ANBAR": [\n      1,\n      2,\n    ]
+	pattern := fmt.Sprintf(`("(?:%s)":\s*)\[\s*((?:\d+,?\s*)+)\]`, fieldPattern)
+	re := regexp.MustCompile(pattern)
+	
+	return re.ReplaceAllStringFunc(jsonStr, func(match string) string {
+		// Extract field name
+		fieldRe := regexp.MustCompile(`"([^"]+)":`)
+		fieldMatch := fieldRe.FindStringSubmatch(match)
+		if len(fieldMatch) < 2 {
+			return match
+		}
+		fieldName := fieldMatch[1]
+		
+		// Extract the numeric values
+		valueRe := regexp.MustCompile(`\d+`)
+		values := valueRe.FindAllString(match, -1)
+		
+		// Check if match ends with comma (not last property)
+		hasComma := strings.HasSuffix(strings.TrimSpace(match), ",")
+		
+		// Rebuild as inline with proper spacing
+		result := fmt.Sprintf(`"%s": [%s]`, fieldName, strings.Join(values, ", "))
+		if hasComma {
+			result += ","
+		}
+		
+		return result
+	})
 }
