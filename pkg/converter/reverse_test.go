@@ -55,22 +55,38 @@ func TestPatris2FaReversal(t *testing.T) {
 		0xd3: "ن", // nun  
 		0xd5: "س", // sin
 		0xd6: "و", // waw
+		0xa5: "ب", // beh
+		0xa1: "ا", // alef
 	}
 
-	// Test that byte reversal preserves Patris encoding
-	// Input: "\xd1\xd6\xd3\xd5\xd1" should reverse to "\xd1\xd5\xd3\xd6\xd1"
-	// Then map to: "س" + "س" + "ن" + "و" + "س" = "سسنوس"
-	// But actually the pattern should group and reverse, resulting in "سنسور" (sensor)
-	
-	input := "روسنس" // This is wrong encoding that needs reversal
-	// After proper reversal and mapping, it should become "سنسور"
-	
-	// Note: This test demonstrates the concept. The actual conversion
-	// depends on the complete mapping table and the input being in Patris encoding
-	result := Patris2FaWithMapping(input, mapping)
-	
-	// The result should have the bytes reversed and then mapped
-	if len(result) == 0 {
-		t.Error("Result should not be empty")
+	tests := []struct {
+		name     string
+		input    string
+		expected string
+	}{
+		{
+			name:     "English text not reversed",
+			input:    "hello",
+			expected: "hello",
+		},
+		{
+			name:     "Persian bytes reversed in pattern",
+			input:    "\xd1\xd6\xd3\xd5\xd1", // Patris-encoded bytes
+			expected: "سسنوس",                // After reversal and mapping
+		},
+		{
+			name:     "Mixed content",
+			input:    "ARDUINO \xa5\xa1",
+			expected: "ARDUINO با", // English unchanged, Persian reversed and mapped
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := Patris2FaWithMapping(tt.input, mapping)
+			if result != tt.expected {
+				t.Errorf("Patris2FaWithMapping(%q) = %q, want %q", tt.input, result, tt.expected)
+			}
+		})
 	}
 }

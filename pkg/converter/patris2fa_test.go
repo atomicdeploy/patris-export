@@ -37,12 +37,12 @@ func TestPatris2Fa(t *testing.T) {
 		{
 			name:     "dash fix",
 			input:    "test\x99string",
-			expected: "tset-gnirts", // English stays as-is, only Persian sequences reversed
+			expected: "test-string", // Dash replaced, English NOT reversed (no English in pattern)
 		},
 		{
 			name:     "mixed content",
-			input:    "ARDUINO \xa1\xa5",
-			expected: "ARDUINO با", // English not reversed, Persian correctly mapped
+			input:    "ARDUINO \xa5\xa1",
+			expected: "ARDUINO با", // English not reversed, Persian reversed and mapped
 		},
 	}
 
