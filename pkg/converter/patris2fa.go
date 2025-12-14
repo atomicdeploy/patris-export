@@ -331,13 +331,17 @@ func reversePersianNumberSequences(words [][]rune) string {
 		} else if isNumericWord(word) {
 			// Number - reverse the accumulated sequence with this number
 			if len(currentSeq) > 0 {
-				// Put number first, then reversed Persian words
-				reversed := [][]rune{word}
-				// Add non-space words from sequence in reverse
-				for i := len(currentSeq) - 1; i >= 0; i-- {
-					reversed = append(reversed, currentSeq[i])
+				// Put number first with a space, then Persian words in reverse with their spaces
+				result = append(result, word)
+				if len(currentSeq) > 0 && len(currentSeq[len(currentSeq)-1]) > 0 && unicode.IsSpace(currentSeq[len(currentSeq)-1][0]) {
+					// Add trailing space after number
+					result = append(result, currentSeq[len(currentSeq)-1])
+					currentSeq = currentSeq[:len(currentSeq)-1]
 				}
-				result = append(result, reversed...)
+				// Reverse Persian words with their preceding spaces
+				for i := len(currentSeq) - 1; i >= 0; i-- {
+					result = append(result, currentSeq[i])
+				}
 				currentSeq = nil
 			} else {
 				result = append(result, word)
@@ -381,12 +385,18 @@ func reverseScriptGroups(words [][]rune) string {
 			continue
 		}
 		
-		// Determine if this word is RTL (Persian or number)
-		wordIsRTL := len(word) > 0 && (isPersianOrArabic(word[0]) || isNumericWord(word))
+		// Determine if this word is RTL (Persian/Arabic)
+		// Numbers are neutral and join the current group if one exists
+		wordIsRTL := len(word) > 0 && isPersianOrArabic(word[0])
+		wordIsNumeric := isNumericWord(word)
 		
 		if !inGroup {
-			currentGroup = wordGroup{words: [][]rune{word}, isRTL: wordIsRTL}
+			// Start new group - numbers default to RTL if starting a group
+			currentGroup = wordGroup{words: [][]rune{word}, isRTL: wordIsRTL || wordIsNumeric}
 			inGroup = true
+		} else if wordIsNumeric {
+			// Numbers join the current group (neutral behavior)
+			currentGroup.words = append(currentGroup.words, word)
 		} else if currentGroup.isRTL == wordIsRTL {
 			currentGroup.words = append(currentGroup.words, word)
 		} else {
