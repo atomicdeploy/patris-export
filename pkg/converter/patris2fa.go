@@ -118,18 +118,10 @@ func Patris2FaWithMapping(value string, mapping CharMapping) string {
 		}
 	}
 
-	// Step 4: Re-reverse digit sequences
-	// Persian digit bytes (0xF3-0xFC) get reversed in step 2, then mapped to '0'-'9' in step 3
-	// We reverse them again here to restore the correct digit order
+	// Step 4: No digit re-reversal needed
+	// Since Persian digit bytes (0xF3-0xFC) are not reversed in step 2,
+	// they map directly to the correct digit order
 	result := output.String()
-	digitRe := regexp.MustCompile(`\d+`)
-	result = digitRe.ReplaceAllStringFunc(result, func(digits string) string {
-		runes := []rune(digits)
-		for i, j := 0, len(runes)-1; i < j; i, j = i+1, j-1 {
-			runes[i], runes[j] = runes[j], runes[i]
-		}
-		return string(runes)
-	})
 
 	// Step 5: Clean up formatting
 	// Replace [zwnj] markers with spaces for proper Persian word spacing
@@ -180,9 +172,7 @@ func reversePatrisSegments(data []byte) []byte {
 // isPatrisByte returns true if the byte should be part of a reversed Patris segment
 func isPatrisByte(b byte) bool {
 	return (b >= 0x9f && b <= 0xe0) || // Persian characters
-		b == ' ' || b == '.' || b == '(' || b == ')' || b == '#' || b == ':' ||
-		(b >= '0' && b <= '9') || // ASCII digits
-		b == 0x99 // Dash marker
+		b == ' ' || b == '\t' || b == '\n' || b == '\r' // Whitespace
 }
 
 // reverseString reverses a string byte-by-byte (matches PHP strrev behavior)
