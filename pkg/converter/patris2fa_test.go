@@ -70,25 +70,6 @@ func TestLoadCharMapping(t *testing.T) {
 	}
 }
 
-func TestReverseString(t *testing.T) {
-	tests := []struct {
-		input    string
-		expected string
-	}{
-		{"hello", "olleh"},
-		{"", ""},
-		{"a", "a"},
-		{"123", "321"},
-	}
-
-	for _, tt := range tests {
-		result := reverseString(tt.input)
-		if result != tt.expected {
-			t.Errorf("reverseString(%q) = %q, want %q", tt.input, result, tt.expected)
-		}
-	}
-}
-
 func TestSetDashFix(t *testing.T) {
 	SetDashFix(false)
 	SetDefaultMapping(CharMapping{0x99: "ـ"})
