@@ -1,4 +1,4 @@
-.PHONY: build build-linux build-windows clean test run install help
+.PHONY: build build-linux build-windows build-all clean test run install help deps
 
 # Binary names
 BINARY_NAME=patris-export
