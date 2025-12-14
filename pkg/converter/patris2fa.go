@@ -84,10 +84,10 @@ func Patris2FaWithMapping(value string, mapping CharMapping) string {
 	}
 
 	// Reverse specific character sequences (matches PHP line 42)
-	// Pattern: [\x9f-\xe0\s\.\(\)\#\:\d\x99]+ 
-	// Includes: Farsi chars (0x9f-0xe0), whitespace, dot, parens, hash, colon, ASCII digits, and 0x99
+	// Pattern: [\x9f-\xe0\xf3-\xfc\s\.\(\)\#\:\d\x99]+ 
+	// Includes: Farsi chars (0x9f-0xe0), Persian digits (0xf3-0xfc), whitespace, dot, parens, hash, colon, ASCII digits, and 0x99
 	// NOTE: Does NOT include English letters A-Za-z
-	re := regexp.MustCompile(`([\x9f-\xe0\s\.\(\)\#\:\d\x99]+)`)
+	re := regexp.MustCompile(`([\x9f-\xe0\xf3-\xfc\s\.\(\)\#\:\d\x99]+)`)
 	value = re.ReplaceAllStringFunc(value, func(match string) string {
 		return reverseString(match)
 	})

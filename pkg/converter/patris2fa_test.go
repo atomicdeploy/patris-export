@@ -14,7 +14,30 @@ func TestPatris2Fa(t *testing.T) {
 		0xa5: "ب",
 		0xb4: "د",
 		0xb6: "ر",
+		0xb8: "ژ",
+		0xd0: "ک",
+		0xd2: "گ",
+		0xd3: "ل*",
+		0xd4: "ل",
+		0xd5: "م*",
+		0xd6: "م",
+		0xd9: "و",
+		0xb9: "س*",
+		0xba: "س",
+		0xbc: "ش",
+		0xc4: "ع*",
 		0x99: "ـ",
+		// Persian digits
+		0xf3: "0",
+		0xf4: "1",
+		0xf5: "2",
+		0xf6: "3",
+		0xf7: "4",
+		0xf8: "5",
+		0xf9: "6",
+		0xfa: "7",
+		0xfb: "8",
+		0xfc: "9",
 	}
 
 	SetDefaultMapping(mapping)
@@ -44,13 +67,33 @@ func TestPatris2Fa(t *testing.T) {
 			input:    "ARDUINO \xa5\xa1",
 			expected: "ARDUINO با", // English not reversed, Persian reversed and mapped
 		},
+		{
+			name:     "113012001: English with Persian digits and Farsi - BLUE PILL STM32F103C8T6 ماژول",
+			input:    "BLUE PILL STM\xf6\xf5F\xf4\xf3\xf6C\xfbT\xf9 \xd3\xd9\xb8\xa1\xd6",
+			expected: "BLUE PILL STM32F103C8T6 ماژول",
+		},
+		{
+			name:     "Pure Farsi - ماژول",
+			input:    "\xd6\xa1\xb8\xd9\xd3", // م ا ژ و ل (reversed in input)
+			expected: "ماژول",
+		},
+		{
+			name:     "113011: ماژول شبکه",
+			input:    "\xd6\xd9\xb8\xa1\xd3 \xd0\xa5\xbc", // Should become "ماژول شبکه" (needs proper mapping)
+			expected: "ماژول شبکه",
+		},
+		{
+			name:     "102010: سنسور صوت و ارتعاش with ZWNJ",
+			input:    "\xba\xd9\xba\xba " + "\xba\xd9\xba\xba" + " \xd9 " + "\xba\xa1\xba\xa1\xba\xa1\xba",
+			expected: "سنسور صوت و ارتعاش", // Needs ZWNJ handling
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			result := Patris2Fa(tt.input)
 			if result != tt.expected {
-				t.Errorf("Patris2Fa(%q) = %q, want %q", tt.input, result, tt.expected)
+				t.Errorf("Patris2Fa(%#v) = %q, want %q", []byte(tt.input), result, tt.expected)
 			}
 		})
 	}
