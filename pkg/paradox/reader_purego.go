@@ -1,9 +1,9 @@
-//go:build windows || !cgo
-// +build windows !cgo
+//go:build !cgo
+// +build !cgo
 
 package paradox
 
-// Open opens a Paradox database file (pure Go version for Windows)
+// Open opens a Paradox database file (pure Go version for non-CGO builds)
 func Open(path string) (*Database, error) {
 	pureDB, err := OpenPureGo(path)
 	if err != nil {
