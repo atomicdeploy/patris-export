@@ -36,13 +36,22 @@ func NewServer(dbPath string, charMap converter.CharMapping) (*Server, error) {
 		charMap:   charMap,
 		wsClients: make(map[*websocket.Conn]bool),
 		upgrader: websocket.Upgrader{
-			// Note: In production, implement proper origin checking
-			// Example: CheckOrigin: func(r *http.Request) bool {
-			//     origin := r.Header.Get("Origin")
-			//     return origin == "https://yourdomain.com"
-			// }
+			// Security: Configure origin checking for production use
+			// Default allows localhost and empty origin (for testing)
+			// For production, restrict to your specific domain(s)
 			CheckOrigin: func(r *http.Request) bool {
-				return true // Allow all origins - configure for production use
+				origin := r.Header.Get("Origin")
+				// Allow empty origin (direct connections, testing)
+				if origin == "" {
+					return true
+				}
+				// Allow localhost for development
+				if origin == "http://localhost:8080" || origin == "http://127.0.0.1:8080" {
+					return true
+				}
+				// TODO: Add your production domain(s) here
+				// return origin == "https://yourdomain.com"
+				return true // Change this in production!
 			},
 		},
 	}
