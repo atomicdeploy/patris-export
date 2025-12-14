@@ -3,7 +3,7 @@
 A fast and performant application for reading, parsing, and converting Paradox/BDE database files (`*.db`) from Patris81 software.
 
 [![Build and Release](https://github.com/atomicdeploy/patris-export/actions/workflows/build.yml/badge.svg)](https://github.com/atomicdeploy/patris-export/actions/workflows/build.yml)
-[![Go Version](https://img.shields.io/badge/Go-1.24-blue.svg)](https://golang.org)
+[![Go Version](https://img.shields.io/badge/Go-1.23-blue.svg)](https://golang.org)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
 ## ✨ Features
@@ -27,7 +27,7 @@ Download the latest release for your platform from the [Releases page](https://g
 ### From Source
 
 Requirements:
-- Go 1.24 or later
+- Go 1.23 or later
 - pxlib development library
 
 **On Ubuntu/Debian:**
