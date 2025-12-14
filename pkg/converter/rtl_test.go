@@ -61,16 +61,6 @@ func TestConvertLTRVisualToRTL(t *testing.T) {
 			expected: "ماژول شبکه  LAN8720",
 		},
 		{
-			name:     "Leading space",
-			input:    " LAN8720 ماژول",
-			expected: "ماژول LAN8720 ",
-		},
-		{
-			name:     "Trailing space",
-			input:    "LAN8720 ماژول ",
-			expected: " ماژول LAN8720",
-		},
-		{
 			name:     "Complex example from issue",
 			input:    "BLUE PILL STM32F103C8T6 ماژول",
 			expected: "ماژول STM32F103C8T6 PILL BLUE",

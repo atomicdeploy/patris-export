@@ -1,5 +1,8 @@
 // Example demonstrating RTL text conversion
 // This file can be run independently to verify the RTL conversion feature
+//
+// NOTE: This is a standalone demo with the algorithm copied inline.
+// The actual implementation is in github.com/atomicdeploy/patris-export/pkg/converter
 package main
 
 import (
@@ -22,7 +25,7 @@ return text
 
 runes := []rune(text)
 
-// Segment by whitespace into words
+// First, split into words
 var words [][]rune
 var current []rune
 
@@ -42,15 +45,57 @@ if len(current) > 0 {
 words = append(words, current)
 }
 
+// Now group consecutive RTL or LTR words
+type wordGroup struct {
+words [][]rune
+isRTL bool
+}
+
+var groups []wordGroup
+var currentGroup wordGroup
+var inGroup bool
+
+for _, word := range words {
+// Skip space-only words for grouping logic
+if len(word) > 0 && unicode.IsSpace(word[0]) {
+if inGroup {
+currentGroup.words = append(currentGroup.words, word)
+} else {
+groups = append(groups, wordGroup{words: [][]rune{word}, isRTL: false})
+}
+continue
+}
+
+// Determine if this word is RTL
+wordIsRTL := len(word) > 0 && isPersianOrArabic(word[0])
+
+if !inGroup {
+currentGroup = wordGroup{words: [][]rune{word}, isRTL: wordIsRTL}
+inGroup = true
+} else if currentGroup.isRTL == wordIsRTL {
+currentGroup.words = append(currentGroup.words, word)
+} else {
+groups = append(groups, currentGroup)
+currentGroup = wordGroup{words: [][]rune{word}, isRTL: wordIsRTL}
+}
+}
+
+if inGroup {
+groups = append(groups, currentGroup)
+}
+
 // Check if we have mixed content
 hasRTL := false
 hasLTR := false
-for _, word := range words {
-if len(word) > 0 && !unicode.IsSpace(word[0]) {
-if isPersianOrArabic(word[0]) {
+for _, group := range groups {
+if group.isRTL {
 hasRTL = true
 } else {
+for _, word := range group.words {
+if len(word) > 0 && !unicode.IsSpace(word[0]) {
 hasLTR = true
+break
+}
 }
 }
 }
@@ -60,10 +105,12 @@ if !hasRTL || !hasLTR {
 return text
 }
 
-// Reverse the word order
+// Reverse the order of groups
 var result []rune
-for i := len(words) - 1; i >= 0; i-- {
-result = append(result, words[i]...)
+for i := len(groups) - 1; i >= 0; i-- {
+for _, word := range groups[i].words {
+result = append(result, word...)
+}
 }
 
 return string(result)
