@@ -135,32 +135,81 @@ func Patris2FaWithMapping(value string, mapping CharMapping) string {
 
 // reversePatrisSegments reverses byte segments containing Patris-encoded characters
 // 
-// The Patris81 encoding stores Persian CHARACTER text in reversed visual (LTR) byte order.
-// This function reverses segments containing:
-// - Persian character bytes (0x9F-0xE0) ONLY
+// The Patris81 encoding stores Persian text with segment AND byte reversal:
+// 1. Persian word segments appear in reversed order
+// 2. Bytes within each Persian segment are also reversed
 //
-// Persian digit bytes (0xF3-0xFC) are already in correct visual order and NOT reversed.
-// English letters, ASCII digits, whitespace, and punctuation are also NOT reversed,
-// allowing proper display of mixed Persian/English text like "LAN8720 ماژول"
+// This function:
+// 1. Collects all Persian segments and their positions
+// 2. Reverses the ORDER of Persian segments
+// 3. Reverses the BYTES within each Persian segment
+// 4. Keeps non-Persian content (English, spaces, digits) in original positions
 func reversePatrisSegments(data []byte) []byte {
-	result := make([]byte, 0, len(data))
+	type segment struct {
+		bytes    []byte
+		start    int
+		end      int
+		isPers   bool
+	}
+	
+	// Step 1: Identify all segments
+	var segments []segment
 	i := 0
 	
 	for i < len(data) {
+		start := i
 		if isPatrisByte(data[i]) {
-			// Found start of a Patris segment - find the end
-			segmentStart := i
+			// Persian segment
 			for i < len(data) && isPatrisByte(data[i]) {
 				i++
 			}
-			// Reverse this segment
-			for j := i - 1; j >= segmentStart; j-- {
-				result = append(result, data[j])
-			}
+			segments = append(segments, segment{
+				bytes:  data[start:i],
+				start:  start,
+				end:    i,
+				isPers: true,
+			})
 		} else {
-			// Non-Patris byte (e.g., English letter) - keep as-is
-			result = append(result, data[i])
+			// Non-Persian byte
 			i++
+			segments = append(segments, segment{
+				bytes:  data[start:i],
+				start:  start,
+				end:    i,
+				isPers: false,
+			})
+		}
+	}
+	
+	// Step 2: Collect Persian segments and reverse their order
+	var persSegments []segment
+	for _, seg := range segments {
+		if seg.isPers {
+			persSegments = append(persSegments, seg)
+		}
+	}
+	
+	// Reverse the order of Persian segments
+	for i, j := 0, len(persSegments)-1; i < j; i, j = i+1, j-1 {
+		persSegments[i], persSegments[j] = persSegments[j], persSegments[i]
+	}
+	
+	// Step 3: Build result
+	// Replace Persian segments in reversed order, keep others as-is
+	result := make([]byte, len(data))
+	copy(result, data)
+	
+	persIdx := 0
+	for _, seg := range segments {
+		if seg.isPers {
+			// Use the next Persian segment from reversed list
+			// and reverse its bytes
+			reversedBytes := make([]byte, len(persSegments[persIdx].bytes))
+			for j, b := range persSegments[persIdx].bytes {
+				reversedBytes[len(persSegments[persIdx].bytes)-1-j] = b
+			}
+			copy(result[seg.start:seg.end], reversedBytes)
+			persIdx++
 		}
 	}
 	
