@@ -30,12 +30,15 @@ func NewExporter(converter func(string) string) *Exporter {
 	}
 }
 
-// ExportToJSON exports records to JSON format
+// ExportToJSON exports records to JSON format with Patris81-specific formatting
 func (e *Exporter) ExportToJSON(records []paradox.Record, outputPath string) error {
 	// Convert string fields if converter is set
 	if e.converter != nil {
 		records = e.convertRecords(records)
 	}
+
+	// Transform records to use Code as key and optimize structure
+	transformed := e.transformRecords(records)
 
 	file, err := os.Create(outputPath)
 	if err != nil {
@@ -47,7 +50,7 @@ func (e *Exporter) ExportToJSON(records []paradox.Record, outputPath string) err
 	encoder.SetIndent("", "  ")
 	encoder.SetEscapeHTML(false)
 
-	if err := encoder.Encode(records); err != nil {
+	if err := encoder.Encode(transformed); err != nil {
 		return fmt.Errorf("failed to encode JSON: %w", err)
 	}
 
@@ -126,10 +129,68 @@ func (e *Exporter) ExportRecordsToString(records []paradox.Record) (string, erro
 		records = e.convertRecords(records)
 	}
 
-	data, err := json.MarshalIndent(records, "", "  ")
+	// Transform records to use Code as key and optimize structure
+	transformed := e.transformRecords(records)
+
+	data, err := json.MarshalIndent(transformed, "", "  ")
 	if err != nil {
 		return "", fmt.Errorf("failed to marshal JSON: %w", err)
 	}
 
 	return string(data), nil
+}
+
+// transformRecords transforms records for Patris81-specific output format:
+// - Use Code field as the key
+// - Ignore fields starting with "Sort"
+// - Combine ANBAR fields into an array
+func (e *Exporter) transformRecords(records []paradox.Record) map[string]interface{} {
+	result := make(map[string]interface{})
+	
+	for _, record := range records {
+		// Extract Code as the key
+		codeKey := ""
+		if code, ok := record["Code"]; ok {
+			codeKey = fmt.Sprintf("%v", code)
+		} else {
+			// Skip records without Code
+			continue
+		}
+		
+		// Build optimized record
+		optimized := make(map[string]interface{})
+		anbarValues := make([]interface{}, 0)
+		
+		for key, value := range record {
+			// Skip Sort fields
+			if strings.HasPrefix(key, "Sort") {
+				continue
+			}
+			
+			// Collect ANBAR fields into array
+			if strings.HasPrefix(key, "ANBAR") && len(key) > 5 {
+				// Extract ANBAR number (ANBAR1, ANBAR2, etc.)
+				anbarValues = append(anbarValues, value)
+				continue
+			}
+			
+			// Keep ALLANBAR as-is
+			if key == "ALLANBAR" {
+				optimized[key] = value
+				continue
+			}
+			
+			// Add other fields
+			optimized[key] = value
+		}
+		
+		// Add ANBAR array if we collected any
+		if len(anbarValues) > 0 {
+			optimized["ANBAR"] = anbarValues
+		}
+		
+		result[codeKey] = optimized
+	}
+	
+	return result
 }
