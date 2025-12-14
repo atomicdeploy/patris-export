@@ -1,3 +1,6 @@
+//go:build !windows && cgo
+// +build !windows,cgo
+
 package paradox
 
 /*
@@ -13,19 +16,10 @@ import (
 
 // Database represents a Paradox database file
 type Database struct {
-	pxdoc *C.pxdoc_t
-	path  string
+	pxdoc  *C.pxdoc_t
+	path   string
+	pureDB *PureGoDatabase // for compatibility
 }
-
-// Field represents a database field/column
-type Field struct {
-	Name string
-	Type string
-	Size int
-}
-
-// Record represents a database record/row
-type Record map[string]interface{}
 
 // Open opens a Paradox database file
 func Open(path string) (*Database, error) {

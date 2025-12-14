@@ -16,7 +16,7 @@ A fast and performant application for reading, parsing, and converting Paradox/B
 - 🎨 **Beautiful CLI** - Colorful terminal output with emojis
 - 🏢 **Company.inf support** - Parse company information files
 - ⚡ **Fast and lightweight** - Written in Go with native performance
-- 🐧🪟 **Cross-platform** - Supports both Linux and Windows
+- 🐧 **Linux support** - Production-ready builds for Linux (Windows support coming soon)
 
 ## 🚀 Installation
 
@@ -136,8 +136,6 @@ patris-export/
 ```bash
 make build          # Build for current platform
 make build-linux    # Build for Linux
-make build-windows  # Build for Windows
-make build-all      # Build for all platforms
 make test          # Run tests
 make clean         # Clean build artifacts
 make install       # Install to GOPATH/bin
