@@ -31,13 +31,18 @@ func TestPatris2Fa(t *testing.T) {
 		},
 		{
 			name:     "simple conversion",
-			input:    "\xa1\xa5",
-			expected: "با", // Reversed from اب because final output is reversed
+			input:    "\xa5\xa1", // Persian bytes in visual order
+			expected: "با",        // After byte reversal and mapping: با
 		},
 		{
 			name:     "dash fix",
 			input:    "test\x99string",
-			expected: "gnirts-tset", // Reversed because final output is reversed
+			expected: "tset-gnirts", // English stays as-is, only Persian sequences reversed
+		},
+		{
+			name:     "mixed content",
+			input:    "ARDUINO \xa1\xa5",
+			expected: "ARDUINO با", // English not reversed, Persian correctly mapped
 		},
 	}
 

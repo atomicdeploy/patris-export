@@ -72,7 +72,7 @@ func Patris2Fa(value string) string {
 }
 
 // Patris2FaWithMapping converts Patris-encoded text to Farsi using a specific mapping
-// This matches the PHP implementation from the legacy code
+// This EXACTLY matches the PHP implementation from the legacy code (paradox/patris2fa.php)
 func Patris2FaWithMapping(value string, mapping CharMapping) string {
 	if mapping == nil {
 		mapping = defaultMapping
@@ -84,48 +84,42 @@ func Patris2FaWithMapping(value string, mapping CharMapping) string {
 	}
 
 	// Reverse specific character sequences (matches PHP line 42)
-	// Pattern includes: Farsi chars (0x9f-0xe0), spaces, dots, parens, hash, colon, ASCII digits, and 0x99
-	// NOTE: Persian digits (0xf3-0xfc) are NOT included here - they're only in the character mapping
+	// Pattern: [\x9f-\xe0\s\.\(\)\#\:\d\x99]+ 
+	// Includes: Farsi chars (0x9f-0xe0), whitespace, dot, parens, hash, colon, ASCII digits, and 0x99
+	// NOTE: Does NOT include English letters A-Za-z
 	re := regexp.MustCompile(`([\x9f-\xe0\s\.\(\)\#\:\d\x99]+)`)
 	value = re.ReplaceAllStringFunc(value, func(match string) string {
 		return reverseString(match)
 	})
 
 	// Reverse ASCII digit sequences specifically (matches PHP line 43)
-	// Note: Persian digits (0xf3-0xfc) are handled above
 	reNum := regexp.MustCompile(`([\d]+)`)
 	value = reNum.ReplaceAllStringFunc(value, func(match string) string {
 		return reverseString(match)
 	})
 
 	// Convert characters using mapping (matches PHP line 44-47)
-	// Important: unmapped characters should remain as-is (already in UTF-8)
+	// For unmapped characters, PHP uses utf8_encode() which in Go means keeping them as-is
 	var output strings.Builder
 	for i := 0; i < len(value); i++ {
 		ch := value[i]
 		if mapped, ok := mapping[ch]; ok {
 			output.WriteString(mapped)
 		} else {
-			// Keep unmapped characters as-is (they're already UTF-8 in Go)
+			// Keep unmapped characters as-is (equivalent to PHP's utf8_encode for ASCII)
 			output.WriteByte(ch)
 		}
 	}
 
-	// Clean up zero-width non-joiners and spaces (matches PHP line 48-49)
+	// Clean up zero-width non-joiners and spaces (matches PHP line 47-48)
 	result := output.String()
+	// Replace [zwnj] followed by optional whitespace with a single space
 	result = regexp.MustCompile(`\[zwnj\]\s*`).ReplaceAllString(result, " ")
+	// Collapse multiple spaces into one
 	result = regexp.MustCompile(`\s+`).ReplaceAllString(result, " ")
 	result = strings.TrimSpace(result)
 
-	// Reverse the final UTF-8 string by runes (not bytes) to get correct RTL display
-	// This is needed because the Patris bytes are stored in visual order (LTR)
-	// and after byte-level reversal and conversion, we need to reverse again at character level
-	runes := []rune(result)
-	for i, j := 0, len(runes)-1; i < j; i, j = i+1, j-1 {
-		runes[i], runes[j] = runes[j], runes[i]
-	}
-
-	return string(runes)
+	return result
 }
 
 // reverseString reverses a string byte-by-byte (matches PHP strrev behavior)
