@@ -7,6 +7,7 @@ import (
 	"os"
 	"regexp"
 	"strings"
+	"unicode"
 )
 
 // CharMapping holds the Patris to Farsi character mappings
@@ -15,6 +16,7 @@ type CharMapping map[byte]string
 var (
 	defaultMapping CharMapping
 	dashFixEnabled = true
+	rtlConversionEnabled = false
 )
 
 // LoadCharMapping loads the character mapping from a file
@@ -130,6 +132,12 @@ func Patris2FaWithMapping(value string, mapping CharMapping) string {
 	result = regexp.MustCompile(`\s+`).ReplaceAllString(result, " ")
 	result = strings.TrimSpace(result)
 
+	// Step 6: Apply RTL conversion if enabled
+	// Converts from LTR-visual order to RTL-logical order for mixed content
+	if rtlConversionEnabled {
+		result = ConvertLTRVisualToRTL(result)
+	}
+
 	return result
 }
 
@@ -226,4 +234,97 @@ func reverseString(s string) string {
 // SetDashFix enables or disables dash fix
 func SetDashFix(enabled bool) {
 	dashFixEnabled = enabled
+}
+
+// SetRTLConversion enables or disables RTL conversion
+// When enabled, text is converted from LTR-visual order to RTL-logical order
+func SetRTLConversion(enabled bool) {
+	rtlConversionEnabled = enabled
+}
+
+// ConvertLTRVisualToRTL converts text from LTR-visual order to RTL-logical order
+// 
+// This function handles mixed Persian/English text that is stored in visual LTR order
+// and converts it to logical RTL order for proper display in RTL contexts.
+//
+// Example:
+//   Input:  "LAN8720 ماژول شبکه" (displays correctly in LTR)
+//   Output: "ماژول شبکه LAN8720" (displays correctly in RTL)
+//
+// The algorithm:
+// 1. Segments the text into words/tokens
+// 2. Identifies each segment as RTL (Persian/Arabic) or LTR (Latin/numbers)
+// 3. Reverses the order of segments while keeping each segment's internal order
+func ConvertLTRVisualToRTL(text string) string {
+	if text == "" {
+		return text
+	}
+	
+	runes := []rune(text)
+	
+	// Segment the text into words/tokens
+	type segment struct {
+		content []rune
+		isRTL   bool
+	}
+	
+	var segments []segment
+	var current []rune
+	var currentIsRTL bool
+	inFirstChar := true
+	
+	for _, r := range runes {
+		isPers := isPersianOrArabic(r)
+		isSpace := unicode.IsSpace(r)
+		
+		if inFirstChar {
+			current = []rune{r}
+			currentIsRTL = isPers && !isSpace
+			inFirstChar = false
+			continue
+		}
+		
+		if isSpace {
+			// Flush current non-space segment
+			if len(current) > 0 && !unicode.IsSpace(current[len(current)-1]) {
+				segments = append(segments, segment{current, currentIsRTL})
+				current = []rune{r}
+			} else {
+				current = append(current, r)
+			}
+			currentIsRTL = false
+		} else if isPers == currentIsRTL || len(current) == 0 {
+			// Continue current segment
+			current = append(current, r)
+		} else {
+			// Switch segment type
+			if len(current) > 0 {
+				segments = append(segments, segment{current, currentIsRTL})
+			}
+			current = []rune{r}
+			currentIsRTL = isPers
+		}
+	}
+	
+	// Flush remaining
+	if len(current) > 0 {
+		segments = append(segments, segment{current, currentIsRTL})
+	}
+	
+	// Reverse the order of segments
+	// Keep the internal order of each segment intact
+	var result []rune
+	for i := len(segments) - 1; i >= 0; i-- {
+		result = append(result, segments[i].content...)
+	}
+	
+	return string(result)
+}
+
+// isPersianOrArabic returns true if the rune is a Persian or Arabic character
+func isPersianOrArabic(r rune) bool {
+	// Persian/Arabic Unicode blocks
+	return (r >= 0x0600 && r <= 0x06FF) || // Arabic
+		(r >= 0xFB50 && r <= 0xFDFF) || // Arabic Presentation Forms-A
+		(r >= 0xFE70 && r <= 0xFEFF)    // Arabic Presentation Forms-B
 }
