@@ -26,6 +26,11 @@ func TestConvertLTRVisualToRTL(t *testing.T) {
 			expected: "ماژول",
 		},
 		{
+			name:     "pure Persian multi-word",
+			input:    "ماژول شبکه",
+			expected: "ماژول شبکه",
+		},
+		{
 			name:     "English then Persian - issue example",
 			input:    "LAN8720 ماژول شبکه",
 			expected: "ماژول شبکه LAN8720",

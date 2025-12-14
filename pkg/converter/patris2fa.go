@@ -252,9 +252,9 @@ func SetRTLConversion(enabled bool) {
 //   Output: "ماژول شبکه LAN8720" (displays correctly in RTL)
 //
 // The algorithm:
-// 1. Segments the text into words/tokens
-// 2. Identifies each segment as RTL (Persian/Arabic) or LTR (Latin/numbers)
-// 3. Reverses the order of segments while keeping each segment's internal order
+// 1. Segments the text into word groups (consecutive RTL or LTR words)
+// 2. Reverses the order of groups
+// 3. Keeps the internal order of words within each group intact
 func ConvertLTRVisualToRTL(text string) string {
 	if text == "" {
 		return text
@@ -262,60 +262,97 @@ func ConvertLTRVisualToRTL(text string) string {
 	
 	runes := []rune(text)
 	
-	// Segment the text into words/tokens
-	type segment struct {
-		content []rune
-		isRTL   bool
-	}
-	
-	var segments []segment
+	// First, split into words
+	var words [][]rune
 	var current []rune
-	var currentIsRTL bool
-	inFirstChar := true
 	
 	for _, r := range runes {
-		isPers := isPersianOrArabic(r)
-		isSpace := unicode.IsSpace(r)
-		
-		if inFirstChar {
-			current = []rune{r}
-			currentIsRTL = isPers && !isSpace
-			inFirstChar = false
+		if unicode.IsSpace(r) {
+			if len(current) > 0 {
+				words = append(words, current)
+				current = nil
+			}
+			words = append(words, []rune{r}) // Preserve spaces as separate "words"
+		} else {
+			current = append(current, r)
+		}
+	}
+	
+	if len(current) > 0 {
+		words = append(words, current)
+	}
+	
+	// Now group consecutive RTL or LTR words
+	type wordGroup struct {
+		words [][]rune
+		isRTL bool
+	}
+	
+	var groups []wordGroup
+	var currentGroup wordGroup
+	var inGroup bool
+	
+	for _, word := range words {
+		// Skip space-only words for grouping logic
+		if len(word) > 0 && unicode.IsSpace(word[0]) {
+			if inGroup {
+				currentGroup.words = append(currentGroup.words, word)
+			} else {
+				// Standalone space
+				groups = append(groups, wordGroup{words: [][]rune{word}, isRTL: false})
+			}
 			continue
 		}
 		
-		if isSpace {
-			// Flush current non-space segment
-			if len(current) > 0 && !unicode.IsSpace(current[len(current)-1]) {
-				segments = append(segments, segment{current, currentIsRTL})
-				current = []rune{r}
-			} else {
-				current = append(current, r)
-			}
-			currentIsRTL = false
-		} else if isPers == currentIsRTL || len(current) == 0 {
-			// Continue current segment
-			current = append(current, r)
+		// Determine if this word is RTL
+		wordIsRTL := len(word) > 0 && isPersianOrArabic(word[0])
+		
+		if !inGroup {
+			// Start new group
+			currentGroup = wordGroup{words: [][]rune{word}, isRTL: wordIsRTL}
+			inGroup = true
+		} else if currentGroup.isRTL == wordIsRTL {
+			// Continue current group
+			currentGroup.words = append(currentGroup.words, word)
 		} else {
-			// Switch segment type
-			if len(current) > 0 {
-				segments = append(segments, segment{current, currentIsRTL})
-			}
-			current = []rune{r}
-			currentIsRTL = isPers
+			// Finish current group and start new one
+			groups = append(groups, currentGroup)
+			currentGroup = wordGroup{words: [][]rune{word}, isRTL: wordIsRTL}
 		}
 	}
 	
-	// Flush remaining
-	if len(current) > 0 {
-		segments = append(segments, segment{current, currentIsRTL})
+	if inGroup {
+		groups = append(groups, currentGroup)
 	}
 	
-	// Reverse the order of segments
-	// Keep the internal order of each segment intact
+	// Check if we have mixed content
+	hasRTL := false
+	hasLTR := false
+	for _, group := range groups {
+		if group.isRTL {
+			hasRTL = true
+		} else {
+			// Check if group has non-space content
+			for _, word := range group.words {
+				if len(word) > 0 && !unicode.IsSpace(word[0]) {
+					hasLTR = true
+					break
+				}
+			}
+		}
+	}
+	
+	// Only reverse if we have both RTL and LTR content
+	if !hasRTL || !hasLTR {
+		return text
+	}
+	
+	// Reverse the order of groups
 	var result []rune
-	for i := len(segments) - 1; i >= 0; i-- {
-		result = append(result, segments[i].content...)
+	for i := len(groups) - 1; i >= 0; i-- {
+		for _, word := range groups[i].words {
+			result = append(result, word...)
+		}
 	}
 	
 	return string(result)
