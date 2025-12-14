@@ -69,17 +69,17 @@ func TestPatris2Fa(t *testing.T) {
 		},
 		{
 			name:     "User test case: BLUE PILL STM32F103C8T6 ماژول",
-			input:    "BLUE PILL STM\xf6\xf5F\xf4\xf3\xf6C\xfbT\xf9 \xd4\xd9\xb8\xa1\xd6",
+			input:    "BLUE PILL STM\xf6\xf5F\xf4\xf3\xf6C\xfbT\xf9 \xd3\xd9\xb8\xa1\xd6",
 			expected: "BLUE PILL STM32F103C8T6 ماژول",
 		},
 		{
 			name:     "Pure Farsi - ماژول",
-			input:    "\xd4\xd9\xb8\xa1\xd6", // ل و ژ ا م (reversed in input) → ماژول after reversal
+			input:    "\xd3\xd9\xb8\xa1\xd6", // ل[zwnj] و ژ ا م (reversed in input) → ماژول after reversal
 			expected: "ماژول",
 		},
 		{
 			name:     "LAN8720 ماژول شبکه",
-			input:    "LAN8720 \xd4\xd9\xb8\xa1\xd6 \xdc\xd0\xbc", // ماژول شبکه with correct bytes
+			input:    "LAN8720 \xd3\xd9\xb8\xa1\xd6 \xdc\xd0\xbc", // ماژول شبکه with correct bytes
 			expected: "LAN8720 ماژول شبکه",
 		},
 	}
