@@ -27,6 +27,17 @@ build-linux: ## Build for Linux
 	GOOS=linux GOARCH=amd64 CGO_ENABLED=1 go build $(LDFLAGS) -o $(BUILD_DIR)/$(BINARY_NAME)-linux-amd64 ./cmd/patris-export
 	@echo "✅ Build complete: $(BUILD_DIR)/$(BINARY_NAME)-linux-amd64"
 
+build-windows: ## Build for Windows (requires pxlib DLL - see docs/WINDOWS_BUILD.md)
+	@echo "🪟 Building for Windows..."
+	@echo "⚠️  Note: Requires pxlib built for Windows from https://github.com/DRSDavidSoft/pxlib"
+	@echo "⚠️  See docs/WINDOWS_BUILD.md for setup instructions"
+	@mkdir -p $(BUILD_DIR)
+	GOOS=windows GOARCH=amd64 CGO_ENABLED=1 CC=x86_64-w64-mingw32-gcc go build $(LDFLAGS) -o $(BUILD_DIR)/$(BINARY_NAME)-windows-amd64.exe ./cmd/patris-export
+	@echo "✅ Build complete: $(BUILD_DIR)/$(BINARY_NAME)-windows-amd64.exe"
+	@echo "⚠️  Remember to include pxlib.dll with the executable"
+
+build-all: build-linux build-windows ## Build for all platforms
+
 install: ## Install the binary to GOPATH/bin
 	@echo "📦 Installing $(BINARY_NAME)..."
 	CGO_ENABLED=1 go install $(LDFLAGS) ./cmd/patris-export

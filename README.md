@@ -16,7 +16,7 @@ A fast and performant application for reading, parsing, and converting Paradox/B
 - 🎨 **Beautiful CLI** - Colorful terminal output with emojis
 - 🏢 **Company.inf support** - Parse company information files
 - ⚡ **Fast and lightweight** - Written in Go with native performance
-- 🐧 **Linux support** - Production-ready builds for Linux (Windows support coming soon)
+- 🐧🪟 **Cross-platform** - Supports both Linux and Windows
 
 ## 🚀 Installation
 
@@ -24,11 +24,15 @@ A fast and performant application for reading, parsing, and converting Paradox/B
 
 Download the latest release for your platform from the [Releases page](https://github.com/atomicdeploy/patris-export/releases).
 
+**Windows users:** The Windows release includes the required pxlib.dll file. Make sure to keep it in the same directory as the executable.
+
 ### From Source
 
 Requirements:
 - Go 1.23 or later
 - pxlib development library
+  - **Linux:** `sudo apt-get install pxlib-dev pxlib1`
+  - **Windows:** See [docs/WINDOWS_BUILD.md](docs/WINDOWS_BUILD.md) for building pxlib
 
 **On Ubuntu/Debian:**
 ```bash
@@ -136,6 +140,8 @@ patris-export/
 ```bash
 make build          # Build for current platform
 make build-linux    # Build for Linux
+make build-windows  # Build for Windows (see docs/WINDOWS_BUILD.md)
+make build-all      # Build for all platforms
 make test          # Run tests
 make clean         # Clean build artifacts
 make install       # Install to GOPATH/bin

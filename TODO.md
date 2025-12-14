@@ -166,7 +166,8 @@ This document tracks planned features and enhancements for the Patris Export pro
 - [x] CLI with colorful output
 - [x] Company.inf file parsing
 - [x] GitHub Actions CI/CD
-- [x] Linux and Windows builds
+- [x] Linux builds
+- [x] Windows builds (using pxlib fork with CMake)
 - [x] Comprehensive README
 
 ---
