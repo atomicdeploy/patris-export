@@ -6,26 +6,28 @@ import (
 )
 
 func TestPatris2Fa(t *testing.T) {
-	// Create a simple mapping
+	// Create a simple mapping - using [zwnj] markers like the embedded map
 	mapping := CharMapping{
 		0xa1: "ا",
 		0xa2: "آ",
-		0xa4: "ب*",
+		0xa4: "ب[zwnj]",
 		0xa5: "ب",
 		0xb4: "د",
 		0xb6: "ر",
 		0xb8: "ژ",
 		0xd0: "ک",
 		0xd2: "گ",
-		0xd3: "ل*",
+		0xd3: "ل[zwnj]",
 		0xd4: "ل",
-		0xd5: "م*",
+		0xd5: "م[zwnj]",
 		0xd6: "م",
+		0xd7: "ن[zwnj]",
 		0xd9: "و",
-		0xb9: "س*",
+		0xdc: "ه",
+		0xb9: "س[zwnj]",
 		0xba: "س",
 		0xbc: "ش",
-		0xc4: "ع*",
+		0xc4: "ع[zwnj]",
 		0x99: "ـ",
 		// Persian digits
 		0xf3: "0",
@@ -54,8 +56,8 @@ func TestPatris2Fa(t *testing.T) {
 		},
 		{
 			name:     "simple conversion",
-			input:    "\xa5\xa1", // Persian bytes in visual order: ب + ا
-			expected: "با",        // After byte reversal and mapping: ا + ب = با
+			input:    "\xa1\xa5", // Persian bytes in visual order: ا + ب (reversed from reading order)
+			expected: "با",        // After byte reversal and mapping: ب + ا = با
 		},
 		{
 			name:     "dash fix",
@@ -64,7 +66,7 @@ func TestPatris2Fa(t *testing.T) {
 		},
 		{
 			name:     "mixed content",
-			input:    "ARDUINO \xa5\xa1",
+			input:    "ARDUINO \xa1\xa5",
 			expected: "ARDUINO با", // English not reversed, Persian reversed and mapped
 		},
 		{
@@ -79,7 +81,7 @@ func TestPatris2Fa(t *testing.T) {
 		},
 		{
 			name:     "LAN8720 ماژول شبکه",
-			input:    "LAN8720 \xd3\xd9\xb8\xa1\xd6 \xdc\xd0\xbc", // ماژول شبکه with correct bytes
+			input:    "LAN8720 \xd3\xd9\xb8\xa1\xd6 \xdc\xd0\xa5\xbc", // ماژول then شبکه - ه+ک+ب+ش reversed to ش+ب+ک+ه
 			expected: "LAN8720 ماژول شبکه",
 		},
 	}

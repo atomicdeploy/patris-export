@@ -35,7 +35,7 @@ func TestPatris2FaReversal(t *testing.T) {
 		},
 		{
 			name:     "Mixed content",
-			input:    "ARDUINO \xa5\xa1",
+			input:    "ARDUINO \xa1\xa5",
 			expected: "ARDUINO با", // English unchanged, Persian reversed and mapped
 		},
 	}
