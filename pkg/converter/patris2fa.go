@@ -7,6 +7,7 @@ import (
 	"os"
 	"regexp"
 	"strings"
+	"unicode"
 )
 
 // CharMapping holds the Patris to Farsi character mappings
@@ -15,6 +16,7 @@ type CharMapping map[byte]string
 var (
 	defaultMapping CharMapping
 	dashFixEnabled = true
+	rtlConversionEnabled = false
 )
 
 // LoadCharMapping loads the character mapping from a file
@@ -130,6 +132,12 @@ func Patris2FaWithMapping(value string, mapping CharMapping) string {
 	result = regexp.MustCompile(`\s+`).ReplaceAllString(result, " ")
 	result = strings.TrimSpace(result)
 
+	// Step 6: Apply RTL conversion if enabled
+	// Converts from LTR-visual order to RTL-logical order for mixed content
+	if rtlConversionEnabled {
+		result = ConvertLTRVisualToRTL(result)
+	}
+
 	return result
 }
 
@@ -226,4 +234,209 @@ func reverseString(s string) string {
 // SetDashFix enables or disables dash fix
 func SetDashFix(enabled bool) {
 	dashFixEnabled = enabled
+}
+
+// SetRTLConversion enables or disables RTL conversion
+// When enabled, text is converted from LTR-visual order to RTL-logical order
+func SetRTLConversion(enabled bool) {
+	rtlConversionEnabled = enabled
+}
+
+// ConvertLTRVisualToRTL converts text from LTR-visual order to RTL-logical order
+// 
+// This function handles mixed Persian/English text that is stored in visual LTR order
+// and converts it to logical RTL order for proper display in RTL contexts.
+//
+// Example:
+//   Input:  "LAN8720 ماژول شبکه" (displays correctly in LTR)
+//   Output: "ماژول شبکه LAN8720" (displays correctly in RTL)
+//
+// For Persian text with numbers:
+//   Input:  "لیزر میلی وات ولت 5 قرمز 5 نقطه"
+//   Output: "لیزر 5 میلی وات 5 ولت قرمز نقطه"
+//
+// The algorithm:
+// 1. Splits text into words
+// 2. Groups consecutive same-script words
+// 3. Within Persian groups, reverses sequences ending with numbers
+// 4. For mixed Persian/English, reverses the order of script groups
+func ConvertLTRVisualToRTL(text string) string {
+	if text == "" {
+		return text
+	}
+	
+	runes := []rune(text)
+	
+	// First, split into words
+	var words [][]rune
+	var current []rune
+	
+	for _, r := range runes {
+		if unicode.IsSpace(r) {
+			if len(current) > 0 {
+				words = append(words, current)
+				current = nil
+			}
+			words = append(words, []rune{r}) // Preserve spaces as separate "words"
+		} else {
+			current = append(current, r)
+		}
+	}
+	
+	if len(current) > 0 {
+		words = append(words, current)
+	}
+	
+	// Detect content types
+	hasPersian := false
+	hasLatin := false
+	for _, word := range words {
+		if len(word) > 0 && !unicode.IsSpace(word[0]) {
+			if isPersianOrArabic(word[0]) {
+				hasPersian = true
+			} else if !isNumericWord(word) {
+				hasLatin = true
+			}
+		}
+	}
+	
+	// If pure Persian (possibly with numbers), reverse number-ending sequences
+	if hasPersian && !hasLatin {
+		return reversePersianNumberSequences(words)
+	}
+	
+	// If mixed Persian and Latin, group and reverse
+	if hasPersian && hasLatin {
+		return reverseScriptGroups(words)
+	}
+	
+	// Pure Latin or empty - return as is
+	return text
+}
+
+// reversePersianNumberSequences handles pure Persian text with embedded numbers
+// It reverses sequences of Persian words that end with a number
+func reversePersianNumberSequences(words [][]rune) string {
+	var result [][]rune
+	var currentSeq [][]rune
+	
+	for _, word := range words {
+		// Skip spaces - they will be added between words during reconstruction
+		if len(word) > 0 && unicode.IsSpace(word[0]) {
+			continue
+		}
+		
+		if isNumericWord(word) {
+			// Number - reverse the accumulated sequence with this number
+			if len(currentSeq) > 0 {
+				// Put number first, then Persian words in reverse order
+				reversedSeq := [][]rune{word}
+				for i := len(currentSeq) - 1; i >= 0; i-- {
+					reversedSeq = append(reversedSeq, currentSeq[i])
+				}
+				result = append(result, reversedSeq...)
+				currentSeq = nil
+			} else {
+				// Standalone number
+				result = append(result, word)
+			}
+		} else {
+			// Persian word - add to current sequence
+			currentSeq = append(currentSeq, word)
+		}
+	}
+	
+	// Flush remaining sequence (words not followed by a number)
+	result = append(result, currentSeq...)
+	
+	// Reconstruct string with spaces between words
+	var output []rune
+	for i, word := range result {
+		if i > 0 {
+			output = append(output, ' ')
+		}
+		output = append(output, word...)
+	}
+	return string(output)
+}
+
+// reverseScriptGroups handles mixed Persian and Latin text
+func reverseScriptGroups(words [][]rune) string {
+	type wordGroup struct {
+		words [][]rune
+		isRTL bool
+	}
+	
+	var groups []wordGroup
+	var currentGroup wordGroup
+	var inGroup bool
+	
+	for _, word := range words {
+		// Skip space-only words - they will be added between groups during reversal
+		if len(word) > 0 && unicode.IsSpace(word[0]) {
+			continue
+		}
+		
+		// Determine if this word is RTL (Persian/Arabic)
+		// Numbers are treated as neutral and join the current group if one exists,
+		// or start as an RTL group if no group exists yet (defaulting to RTL context)
+		wordIsRTL := len(word) > 0 && isPersianOrArabic(word[0])
+		wordIsNumeric := isNumericWord(word)
+		
+		if !inGroup {
+			// Start new group - numbers treated as RTL when starting a group
+			currentGroup = wordGroup{words: [][]rune{word}, isRTL: wordIsRTL || wordIsNumeric}
+			inGroup = true
+		} else if wordIsNumeric {
+			// Numbers join the current group (neutral behavior)
+			currentGroup.words = append(currentGroup.words, word)
+		} else if currentGroup.isRTL == wordIsRTL {
+			currentGroup.words = append(currentGroup.words, word)
+		} else {
+			groups = append(groups, currentGroup)
+			currentGroup = wordGroup{words: [][]rune{word}, isRTL: wordIsRTL}
+		}
+	}
+	
+	if inGroup {
+		groups = append(groups, currentGroup)
+	}
+	
+	// Reverse the order of groups and add spaces between words
+	var result []rune
+	for i := len(groups) - 1; i >= 0; i-- {
+		for j, word := range groups[i].words {
+			if j > 0 {
+				result = append(result, ' ')
+			}
+			result = append(result, word...)
+		}
+		// Add space after each group except the last one
+		if i > 0 {
+			result = append(result, ' ')
+		}
+	}
+	
+	return string(result)
+}
+
+// isNumericWord returns true if the word consists only of digits
+func isNumericWord(word []rune) bool {
+	if len(word) == 0 {
+		return false
+	}
+	for _, r := range word {
+		if !unicode.IsDigit(r) {
+			return false
+		}
+	}
+	return true
+}
+
+// isPersianOrArabic returns true if the rune is a Persian or Arabic character
+func isPersianOrArabic(r rune) bool {
+	// Persian/Arabic Unicode blocks
+	return (r >= 0x0600 && r <= 0x06FF) || // Arabic
+		(r >= 0xFB50 && r <= 0xFDFF) || // Arabic Presentation Forms-A
+		(r >= 0xFE70 && r <= 0xFEFF)    // Arabic Presentation Forms-B
 }
