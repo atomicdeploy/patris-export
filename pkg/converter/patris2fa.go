@@ -386,12 +386,13 @@ func reverseScriptGroups(words [][]rune) string {
 		}
 		
 		// Determine if this word is RTL (Persian/Arabic)
-		// Numbers are neutral and join the current group if one exists
+		// Numbers are treated as neutral and join the current group if one exists,
+		// or start as an RTL group if no group exists yet (defaulting to RTL context)
 		wordIsRTL := len(word) > 0 && isPersianOrArabic(word[0])
 		wordIsNumeric := isNumericWord(word)
 		
 		if !inGroup {
-			// Start new group - numbers default to RTL if starting a group
+			// Start new group - numbers treated as RTL when starting a group
 			currentGroup = wordGroup{words: [][]rune{word}, isRTL: wordIsRTL || wordIsNumeric}
 			inGroup = true
 		} else if wordIsNumeric {
