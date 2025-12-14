@@ -17,6 +17,109 @@ return (r >= 0x0600 && r <= 0x06FF) ||
 (r >= 0xFE70 && r <= 0xFEFF)
 }
 
+// isNumericWord returns true if the word consists only of digits
+func isNumericWord(word []rune) bool {
+if len(word) == 0 {
+return false
+}
+for _, r := range word {
+if !unicode.IsDigit(r) {
+return false
+}
+}
+return true
+}
+
+// reversePersianNumberSequences handles pure Persian text with embedded numbers
+func reversePersianNumberSequences(words [][]rune) string {
+var result [][]rune
+var currentSeq [][]rune
+
+for _, word := range words {
+if len(word) > 0 && unicode.IsSpace(word[0]) {
+continue
+}
+
+if isNumericWord(word) {
+if len(currentSeq) > 0 {
+reversedSeq := [][]rune{word}
+for i := len(currentSeq) - 1; i >= 0; i-- {
+reversedSeq = append(reversedSeq, currentSeq[i])
+}
+result = append(result, reversedSeq...)
+currentSeq = nil
+} else {
+result = append(result, word)
+}
+} else {
+currentSeq = append(currentSeq, word)
+}
+}
+
+result = append(result, currentSeq...)
+
+var output []rune
+for i, word := range result {
+if i > 0 {
+output = append(output, ' ')
+}
+output = append(output, word...)
+}
+return string(output)
+}
+
+// reverseScriptGroups handles mixed Persian and Latin text
+func reverseScriptGroups(words [][]rune) string {
+type wordGroup struct {
+words [][]rune
+isRTL bool
+}
+
+var groups []wordGroup
+var currentGroup wordGroup
+var inGroup bool
+
+for _, word := range words {
+if len(word) > 0 && unicode.IsSpace(word[0]) {
+continue
+}
+
+wordIsRTL := len(word) > 0 && isPersianOrArabic(word[0])
+wordIsNumeric := isNumericWord(word)
+
+if !inGroup {
+currentGroup = wordGroup{words: [][]rune{word}, isRTL: wordIsRTL || wordIsNumeric}
+inGroup = true
+} else if wordIsNumeric {
+currentGroup.words = append(currentGroup.words, word)
+} else if currentGroup.isRTL == wordIsRTL {
+currentGroup.words = append(currentGroup.words, word)
+} else {
+groups = append(groups, currentGroup)
+currentGroup = wordGroup{words: [][]rune{word}, isRTL: wordIsRTL}
+}
+}
+
+if inGroup {
+groups = append(groups, currentGroup)
+}
+
+var result []rune
+for i := len(groups) - 1; i >= 0; i-- {
+for j, word := range groups[i].words {
+if j > 0 {
+result = append(result, ' ')
+}
+result = append(result, word...)
+}
+if i > 0 {
+result = append(result, ' ')
+}
+}
+
+return string(result)
+}
+
 // ConvertLTRVisualToRTL converts text from LTR-visual order to RTL-logical order
 func ConvertLTRVisualToRTL(text string) string {
 if text == "" {
@@ -25,7 +128,6 @@ return text
 
 runes := []rune(text)
 
-// First, split into words
 var words [][]rune
 var current []rune
 
@@ -45,75 +147,27 @@ if len(current) > 0 {
 words = append(words, current)
 }
 
-// Now group consecutive RTL or LTR words
-type wordGroup struct {
-words [][]rune
-isRTL bool
-}
-
-var groups []wordGroup
-var currentGroup wordGroup
-var inGroup bool
-
+hasPersian := false
+hasLatin := false
 for _, word := range words {
-// Skip space-only words for grouping logic
-if len(word) > 0 && unicode.IsSpace(word[0]) {
-if inGroup {
-currentGroup.words = append(currentGroup.words, word)
-} else {
-groups = append(groups, wordGroup{words: [][]rune{word}, isRTL: false})
-}
-continue
-}
-
-// Determine if this word is RTL
-wordIsRTL := len(word) > 0 && isPersianOrArabic(word[0])
-
-if !inGroup {
-currentGroup = wordGroup{words: [][]rune{word}, isRTL: wordIsRTL}
-inGroup = true
-} else if currentGroup.isRTL == wordIsRTL {
-currentGroup.words = append(currentGroup.words, word)
-} else {
-groups = append(groups, currentGroup)
-currentGroup = wordGroup{words: [][]rune{word}, isRTL: wordIsRTL}
-}
-}
-
-if inGroup {
-groups = append(groups, currentGroup)
-}
-
-// Check if we have mixed content
-hasRTL := false
-hasLTR := false
-for _, group := range groups {
-if group.isRTL {
-hasRTL = true
-} else {
-for _, word := range group.words {
 if len(word) > 0 && !unicode.IsSpace(word[0]) {
-hasLTR = true
-break
-}
+if isPersianOrArabic(word[0]) {
+hasPersian = true
+} else if !isNumericWord(word) {
+hasLatin = true
 }
 }
 }
 
-// Only reverse if we have both RTL and LTR content
-if !hasRTL || !hasLTR {
+if hasPersian && !hasLatin {
+return reversePersianNumberSequences(words)
+}
+
+if hasPersian && hasLatin {
+return reverseScriptGroups(words)
+}
+
 return text
-}
-
-// Reverse the order of groups
-var result []rune
-for i := len(groups) - 1; i >= 0; i-- {
-for _, word := range groups[i].words {
-result = append(result, word...)
-}
-}
-
-return string(result)
 }
 
 func main() {
@@ -131,6 +185,11 @@ expected string
 desc:     "Issue Example - LAN8720 ماژول شبکه",
 input:    "LAN8720 ماژول شبکه",
 expected: "ماژول شبکه LAN8720",
+},
+{
+desc:     "Issue 104001001 - Persian with numbers",
+input:    "لیزر میلی وات ولت 5 قرمز 5 نقطه",
+expected: "لیزر 5 میلی وات 5 ولت قرمز نقطه",
 },
 {
 desc:     "Simple Mixed - ARDUINO با",
