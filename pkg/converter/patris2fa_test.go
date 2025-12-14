@@ -23,6 +23,7 @@ func TestPatris2Fa(t *testing.T) {
 		0xd6: "م",
 		0xd7: "ن[zwnj]",
 		0xd9: "و",
+		0xdb: "ه[zwnj]",
 		0xdc: "ه",
 		0xb9: "س[zwnj]",
 		0xba: "س",
