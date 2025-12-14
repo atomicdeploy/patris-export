@@ -69,29 +69,73 @@ jobs:
         git checkout copilot/ensure-windows-build-success
         mkdir build
         cd build
-        cmake .. -DCMAKE_SYSTEM_NAME=Windows -DCMAKE_C_COMPILER=x86_64-w64-mingw32-gcc -DCMAKE_CXX_COMPILER=x86_64-w64-mingw32-g++ -DCMAKE_BUILD_TYPE=Release
+        
+        # Configure with CMake for Windows cross-compilation
+        cmake .. \
+          -DCMAKE_SYSTEM_NAME=Windows \
+          -DCMAKE_C_COMPILER=x86_64-w64-mingw32-gcc \
+          -DCMAKE_CXX_COMPILER=x86_64-w64-mingw32-g++ \
+          -DCMAKE_BUILD_TYPE=Release \
+          -DCMAKE_FIND_ROOT_PATH=/usr/x86_64-w64-mingw32 \
+          -DCMAKE_FIND_ROOT_PATH_MODE_PROGRAM=NEVER \
+          -DCMAKE_FIND_ROOT_PATH_MODE_LIBRARY=ONLY \
+          -DCMAKE_FIND_ROOT_PATH_MODE_INCLUDE=ONLY
+        
+        # Build the library
         cmake --build . --config Release
-        # Install headers and library
+        
+        # Install headers
         sudo mkdir -p /usr/x86_64-w64-mingw32/include
-        sudo cp ../include/paradox.h.in /usr/x86_64-w64-mingw32/include/paradox.h
-        sudo cp ../include/paradox-gsf.h /usr/x86_64-w64-mingw32/include/ || true
-        sudo cp ../include/paradox-mp.h /usr/x86_64-w64-mingw32/include/
-        sudo cp config.h /usr/x86_64-w64-mingw32/include/ || true
-        sudo cp include/paradox.h /usr/x86_64-w64-mingw32/include/paradox.h || true
-        sudo cp libpxlib.dll.a /usr/x86_64-w64-mingw32/lib/libpx.a || true
-        sudo cp libpxlib.a /usr/x86_64-w64-mingw32/lib/libpx.a || true
-        find . -name "*.dll.a" -exec sudo cp {} /usr/x86_64-w64-mingw32/lib/libpx.a \; || true
-        find . -name "*.a" -exec sudo cp {} /usr/x86_64-w64-mingw32/lib/libpx.a \; || true
-        ls -la /usr/x86_64-w64-mingw32/lib/
-        ls -la /usr/x86_64-w64-mingw32/include/
+        # Use the generated paradox.h from the build directory
+        if [ -f include/paradox.h ]; then
+          sudo cp include/paradox.h /usr/x86_64-w64-mingw32/include/
+        elif [ -f ../include/paradox.h.in ]; then
+          # If not generated, manually configure it
+          sed 's/@PX_HAVE_ICONV@/1/g; s/@PX_HAVE_RECODE@/0/g; s/@PX_HAVE_GSF@/0/g' \
+            ../include/paradox.h.in | sudo tee /usr/x86_64-w64-mingw32/include/paradox.h > /dev/null
+        fi
+        
+        # Copy additional headers
+        [ -f ../include/paradox-mp.h ] && sudo cp ../include/paradox-mp.h /usr/x86_64-w64-mingw32/include/ || true
+        [ -f config.h ] && sudo cp config.h /usr/x86_64-w64-mingw32/include/ || true
+        
+        # Install library files
+        # Find and copy the static library
+        if [ -f libpxlib.a ]; then
+          sudo cp libpxlib.a /usr/x86_64-w64-mingw32/lib/libpx.a
+        elif [ -f libpxlib.dll.a ]; then
+          sudo cp libpxlib.dll.a /usr/x86_64-w64-mingw32/lib/libpx.a
+        else
+          # Search in subdirectories
+          find . -name "libpxlib*.a" -o -name "pxlib*.a" | head -1 | xargs -I {} sudo cp {} /usr/x86_64-w64-mingw32/lib/libpx.a || true
+        fi
+        
+        echo "Installed headers:"
+        ls -la /usr/x86_64-w64-mingw32/include/paradox* || echo "No paradox headers found"
+        echo "Installed libraries:"
+        ls -la /usr/x86_64-w64-mingw32/lib/libpx* || echo "No pxlib libraries found"
         
     - name: Build Windows executable
       run: |
-        CGO_ENABLED=1 GOOS=windows GOARCH=amd64 CC=x86_64-w64-mingw32-gcc go build -ldflags "-X main.Version=1.0.0 -X main.BuildDate=$(date -u +'%Y-%m-%dT%H:%M:%SZ')" -o build/patris-export-windows-amd64.exe ./cmd/patris-export
+        mkdir -p build
+        CGO_ENABLED=1 GOOS=windows GOARCH=amd64 CC=x86_64-w64-mingw32-gcc \
+          CGO_LDFLAGS="-L/usr/x86_64-w64-mingw32/lib" \
+          CGO_CFLAGS="-I/usr/x86_64-w64-mingw32/include" \
+          go build -ldflags "-X main.Version=1.0.0 -X main.BuildDate=$(date -u +'%Y-%m-%dT%H:%M:%SZ')" \
+          -o build/patris-export-windows-amd64.exe ./cmd/patris-export
       
     - name: Copy pxlib DLL
       run: |
-        find /tmp/pxlib/build -name "*.dll" -exec cp {} build/ \;
+        # Find and copy DLL files
+        mkdir -p build
+        if find /tmp/pxlib/build -name "*.dll" -type f 2>/dev/null | grep -q .; then
+          find /tmp/pxlib/build -name "*.dll" -type f -exec cp {} build/ \;
+          echo "DLL files copied:"
+          ls -la build/*.dll
+        else
+          echo "Warning: No DLL files found - Windows executable may require runtime linking"
+        fi
+        echo "Build directory contents:"
         ls -la build/
         
     - name: Upload Windows artifact
