@@ -251,10 +251,15 @@ func SetRTLConversion(enabled bool) {
 //   Input:  "LAN8720 ماژول شبکه" (displays correctly in LTR)
 //   Output: "ماژول شبکه LAN8720" (displays correctly in RTL)
 //
+// For Persian text with numbers:
+//   Input:  "لیزر میلی وات ولت 5 قرمز 5 نقطه"
+//   Output: "لیزر 5 میلی وات 5 ولت قرمز نقطه"
+//
 // The algorithm:
-// 1. Segments the text into word groups (consecutive RTL or LTR words)
-// 2. Reverses the order of groups
-// 3. Keeps the internal order of words within each group intact
+// 1. Splits text into words
+// 2. Groups consecutive same-script words
+// 3. Within Persian groups, reverses sequences ending with numbers
+// 4. For mixed Persian/English, reverses the order of script groups
 func ConvertLTRVisualToRTL(text string) string {
 	if text == "" {
 		return text
@@ -282,7 +287,80 @@ func ConvertLTRVisualToRTL(text string) string {
 		words = append(words, current)
 	}
 	
-	// Now group consecutive RTL or LTR words
+	// Detect content types
+	hasPersian := false
+	hasLatin := false
+	for _, word := range words {
+		if len(word) > 0 && !unicode.IsSpace(word[0]) {
+			if isPersianOrArabic(word[0]) {
+				hasPersian = true
+			} else if !isNumericWord(word) {
+				hasLatin = true
+			}
+		}
+	}
+	
+	// If pure Persian (possibly with numbers), reverse number-ending sequences
+	if hasPersian && !hasLatin {
+		return reversePersianNumberSequences(words)
+	}
+	
+	// If mixed Persian and Latin, group and reverse
+	if hasPersian && hasLatin {
+		return reverseScriptGroups(words)
+	}
+	
+	// Pure Latin or empty - return as is
+	return text
+}
+
+// reversePersianNumberSequences handles pure Persian text with embedded numbers
+// It reverses sequences of Persian words that end with a number
+func reversePersianNumberSequences(words [][]rune) string {
+	var result [][]rune
+	var currentSeq [][]rune
+	
+	for _, word := range words {
+		if len(word) > 0 && unicode.IsSpace(word[0]) {
+			// Space - add to current sequence
+			if len(currentSeq) > 0 {
+				currentSeq = append(currentSeq, word)
+			} else {
+				result = append(result, word)
+			}
+		} else if isNumericWord(word) {
+			// Number - reverse the accumulated sequence with this number
+			if len(currentSeq) > 0 {
+				// Put number first, then reversed Persian words
+				reversed := [][]rune{word}
+				// Add non-space words from sequence in reverse
+				for i := len(currentSeq) - 1; i >= 0; i-- {
+					reversed = append(reversed, currentSeq[i])
+				}
+				result = append(result, reversed...)
+				currentSeq = nil
+			} else {
+				result = append(result, word)
+			}
+		} else {
+			// Persian word - add to current sequence
+			currentSeq = append(currentSeq, word)
+		}
+	}
+	
+	// Flush remaining sequence
+	result = append(result, currentSeq...)
+	
+	// Reconstruct string
+	var output []rune
+	for _, word := range result {
+		output = append(output, word...)
+	}
+	return string(output)
+}
+
+// reverseScriptGroups handles mixed Persian and Latin text
+func reverseScriptGroups(words [][]rune) string {
 	type wordGroup struct {
 		words [][]rune
 		isRTL bool
@@ -298,24 +376,20 @@ func ConvertLTRVisualToRTL(text string) string {
 			if inGroup {
 				currentGroup.words = append(currentGroup.words, word)
 			} else {
-				// Standalone space
 				groups = append(groups, wordGroup{words: [][]rune{word}, isRTL: false})
 			}
 			continue
 		}
 		
-		// Determine if this word is RTL
-		wordIsRTL := len(word) > 0 && isPersianOrArabic(word[0])
+		// Determine if this word is RTL (Persian or number)
+		wordIsRTL := len(word) > 0 && (isPersianOrArabic(word[0]) || isNumericWord(word))
 		
 		if !inGroup {
-			// Start new group
 			currentGroup = wordGroup{words: [][]rune{word}, isRTL: wordIsRTL}
 			inGroup = true
 		} else if currentGroup.isRTL == wordIsRTL {
-			// Continue current group
 			currentGroup.words = append(currentGroup.words, word)
 		} else {
-			// Finish current group and start new one
 			groups = append(groups, currentGroup)
 			currentGroup = wordGroup{words: [][]rune{word}, isRTL: wordIsRTL}
 		}
@@ -323,28 +397,6 @@ func ConvertLTRVisualToRTL(text string) string {
 	
 	if inGroup {
 		groups = append(groups, currentGroup)
-	}
-	
-	// Check if we have mixed content
-	hasRTL := false
-	hasLTR := false
-	for _, group := range groups {
-		if group.isRTL {
-			hasRTL = true
-		} else {
-			// Check if group has non-space content
-			for _, word := range group.words {
-				if len(word) > 0 && !unicode.IsSpace(word[0]) {
-					hasLTR = true
-					break
-				}
-			}
-		}
-	}
-	
-	// Only reverse if we have both RTL and LTR content
-	if !hasRTL || !hasLTR {
-		return text
 	}
 	
 	// Reverse the order of groups
@@ -356,6 +408,19 @@ func ConvertLTRVisualToRTL(text string) string {
 	}
 	
 	return string(result)
+}
+
+// isNumericWord returns true if the word consists only of digits
+func isNumericWord(word []rune) bool {
+	if len(word) == 0 {
+		return false
+	}
+	for _, r := range word {
+		if !unicode.IsDigit(r) {
+			return false
+		}
+	}
+	return true
 }
 
 // isPersianOrArabic returns true if the rune is a Persian or Arabic character
