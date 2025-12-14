@@ -80,8 +80,8 @@ func TestPatris2Fa(t *testing.T) {
 			expected: "ماژول",
 		},
 		{
-			name:     "LAN8720 ماژول شبکه",
-			input:    "LAN8720 \xd3\xd9\xb8\xa1\xd6 \xdc\xd0\xa5\xbc", // ماژول then شبکه - ه+ک+ب+ش reversed to ش+ب+ک+ه
+			name:     "LAN8720 ماژول شبکه - User's actual data",
+			input:    "\x4c\x41\x4e\xfb\xfa\xf5\xf3\x20\xdb\xd0\xa5\xbc\x20\xd3\xd9\xb8\xa1\xd6",
 			expected: "LAN8720 ماژول شبکه",
 		},
 	}

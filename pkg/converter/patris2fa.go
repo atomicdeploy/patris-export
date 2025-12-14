@@ -168,7 +168,8 @@ func reversePatrisSegments(data []byte) []byte {
 
 // isPatrisByte returns true if the byte should be part of a reversed Patris segment
 func isPatrisByte(b byte) bool {
-	return (b >= 0x9f && b <= 0xe0) // Persian characters only
+	// Persian characters (0x9F-0xE0) OR Persian digits (0xF3-0xFC)
+	return (b >= 0x9f && b <= 0xe0) || (b >= 0xf3 && b <= 0xfc)
 }
 
 // reverseString reverses a string byte-by-byte (matches PHP strrev behavior)
