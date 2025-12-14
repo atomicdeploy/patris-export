@@ -1,0 +1,322 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Patris Export WebSocket Demo</title>
+    <style>
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 10px;
+            box-shadow: 0 10px 40px rgba(0,0,0,0.2);
+            overflow: hidden;
+        }
+
+        .header {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 30px;
+            text-align: center;
+        }
+
+        .header h1 {
+            font-size: 2.5em;
+            margin-bottom: 10px;
+        }
+
+        .status {
+            padding: 20px;
+            background: #f8f9fa;
+            border-bottom: 1px solid #dee2e6;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            flex-wrap: wrap;
+        }
+
+        .status-item {
+            margin: 5px;
+            padding: 10px 20px;
+            background: white;
+            border-radius: 5px;
+            box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+        }
+
+        .status-label {
+            font-size: 0.8em;
+            color: #6c757d;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+
+        .status-value {
+            font-size: 1.5em;
+            font-weight: bold;
+            color: #2c3e50;
+        }
+
+        .connected {
+            color: #28a745;
+        }
+
+        .disconnected {
+            color: #dc3545;
+        }
+
+        .content {
+            padding: 30px;
+        }
+
+        .records-container {
+            margin-top: 20px;
+        }
+
+        .record-card {
+            background: #f8f9fa;
+            border-left: 4px solid #667eea;
+            padding: 15px;
+            margin-bottom: 10px;
+            border-radius: 5px;
+            transition: all 0.3s;
+        }
+
+        .record-card:hover {
+            box-shadow: 0 5px 15px rgba(0,0,0,0.1);
+            transform: translateX(5px);
+        }
+
+        .record-field {
+            display: grid;
+            grid-template-columns: 150px 1fr;
+            gap: 10px;
+            padding: 5px 0;
+        }
+
+        .field-name {
+            font-weight: bold;
+            color: #495057;
+        }
+
+        .field-value {
+            color: #212529;
+        }
+
+        .controls {
+            margin-top: 20px;
+            display: flex;
+            gap: 10px;
+        }
+
+        button {
+            padding: 10px 20px;
+            border: none;
+            border-radius: 5px;
+            font-size: 1em;
+            cursor: pointer;
+            transition: all 0.3s;
+        }
+
+        .btn-connect {
+            background: #28a745;
+            color: white;
+        }
+
+        .btn-disconnect {
+            background: #dc3545;
+            color: white;
+        }
+
+        .btn-connect:hover {
+            background: #218838;
+        }
+
+        .btn-disconnect:hover {
+            background: #c82333;
+        }
+
+        button:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+
+        .log {
+            margin-top: 20px;
+            background: #212529;
+            color: #00ff00;
+            padding: 20px;
+            border-radius: 5px;
+            font-family: 'Courier New', monospace;
+            font-size: 0.9em;
+            max-height: 300px;
+            overflow-y: auto;
+        }
+
+        .log-entry {
+            margin-bottom: 5px;
+        }
+
+        .timestamp {
+            color: #ffc107;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>📊 Patris Export WebSocket Demo</h1>
+            <p>Real-time database updates via WebSocket</p>
+        </div>
+
+        <div class="status">
+            <div class="status-item">
+                <div class="status-label">Connection</div>
+                <div class="status-value" id="status">Disconnected</div>
+            </div>
+            <div class="status-item">
+                <div class="status-label">Records</div>
+                <div class="status-value" id="record-count">0</div>
+            </div>
+            <div class="status-item">
+                <div class="status-label">Last Update</div>
+                <div class="status-value" id="last-update">Never</div>
+            </div>
+        </div>
+
+        <div class="content">
+            <div class="controls">
+                <button class="btn-connect" id="connect-btn" onclick="connect()">Connect</button>
+                <button class="btn-disconnect" id="disconnect-btn" onclick="disconnect()" disabled>Disconnect</button>
+            </div>
+
+            <h2>Recent Records (First 10)</h2>
+            <div class="records-container" id="records"></div>
+
+            <h2>Activity Log</h2>
+            <div class="log" id="log"></div>
+        </div>
+    </div>
+
+    <script>
+        let ws = null;
+        const wsUrl = 'ws://localhost:8080/ws';
+
+        function log(message) {
+            const logDiv = document.getElementById('log');
+            const entry = document.createElement('div');
+            entry.className = 'log-entry';
+            const now = new Date().toLocaleTimeString();
+            entry.innerHTML = `<span class="timestamp">[${now}]</span> ${message}`;
+            logDiv.insertBefore(entry, logDiv.firstChild);
+        }
+
+        function updateStatus(status, className) {
+            const statusEl = document.getElementById('status');
+            statusEl.textContent = status;
+            statusEl.className = 'status-value ' + className;
+        }
+
+        function connect() {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                log('⚠️ Already connected');
+                return;
+            }
+
+            log('🔌 Connecting to ' + wsUrl);
+            ws = new WebSocket(wsUrl);
+
+            ws.onopen = () => {
+                log('✅ Connected successfully');
+                updateStatus('Connected', 'connected');
+                document.getElementById('connect-btn').disabled = true;
+                document.getElementById('disconnect-btn').disabled = false;
+            };
+
+            ws.onmessage = (event) => {
+                const data = JSON.parse(event.data);
+                log(`📊 Received update: ${data.count} records`);
+                
+                document.getElementById('record-count').textContent = data.count;
+                document.getElementById('last-update').textContent = new Date(data.timestamp).toLocaleTimeString();
+
+                displayRecords(data.records.slice(0, 10));
+            };
+
+            ws.onerror = (error) => {
+                log('❌ WebSocket error occurred');
+                console.error('WebSocket error:', error);
+            };
+
+            ws.onclose = () => {
+                log('🔌 Connection closed');
+                updateStatus('Disconnected', 'disconnected');
+                document.getElementById('connect-btn').disabled = false;
+                document.getElementById('disconnect-btn').disabled = true;
+            };
+        }
+
+        function disconnect() {
+            if (ws) {
+                log('🔌 Disconnecting...');
+                ws.close();
+                ws = null;
+            }
+        }
+
+        function displayRecords(records) {
+            const container = document.getElementById('records');
+            container.innerHTML = '';
+
+            records.forEach((record, index) => {
+                const card = document.createElement('div');
+                card.className = 'record-card';
+                
+                let html = `<h3>Record #${index + 1}</h3>`;
+                
+                // Display key fields
+                const keyFields = ['Code', 'Name', 'Serial', 'Vahed', 'FOROSH', 'KHARYD'];
+                keyFields.forEach(field => {
+                    if (record[field] !== undefined) {
+                        html += `
+                            <div class="record-field">
+                                <div class="field-name">${field}:</div>
+                                <div class="field-value">${record[field]}</div>
+                            </div>
+                        `;
+                    }
+                });
+
+                card.innerHTML = html;
+                container.appendChild(card);
+            });
+        }
+
+        // Auto-connect on page load
+        window.onload = () => {
+            log('👋 Welcome to Patris Export WebSocket Demo');
+            log('ℹ️ Click "Connect" to start receiving real-time updates');
+        };
+
+        // Clean up on page unload
+        window.onbeforeunload = () => {
+            if (ws) {
+                ws.close();
+            }
+        };
+    </script>
+</body>
+</html>

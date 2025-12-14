@@ -1,0 +1,210 @@
+name: Build
+
+on:
+  push:
+    branches: [ main, develop ]
+    tags:
+      - 'v*'
+  pull_request:
+    branches: [ main ]
+
+permissions:
+  contents: read
+
+jobs:
+  build-linux:
+    name: Build for Linux
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: '1.23'
+        
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y pxlib-dev pxlib1
+        
+    - name: Build
+      run: make build-linux
+      
+    - name: Upload Linux artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: patris-export-linux-amd64
+        path: build/patris-export-linux-amd64
+
+  build-windows:
+    name: Build for Windows
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: '1.23'
+        
+    - name: Install cross-compilation tools
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y mingw-w64 mingw-w64-tools gcc-mingw-w64-x86-64 g++-mingw-w64-x86-64 cmake
+        
+        # Verify MinGW installation
+        echo "Checking MinGW installation..."
+        x86_64-w64-mingw32-gcc --version
+        ls -la /usr/share/mingw-w64/include/ 2>/dev/null || echo "MinGW headers not in standard location"
+
+    - name: Build pxlib for Windows
+      run: |
+        cd /tmp
+        git clone https://github.com/DRSDavidSoft/pxlib.git
+        cd pxlib
+        git checkout copilot/ensure-windows-build-success
+        
+        # Fix case-sensitive Windows.h include for case-sensitive filesystems
+        # MinGW uses lowercase windows.h
+        sed -i 's/#include <Windows\.h>/#include <windows.h>/g' src/paradox.c
+        sed -i 's/#include <Winbase\.h>/#include <winbase.h>/g' src/paradox.c
+        
+        # Create a CMake toolchain file for MinGW cross-compilation
+        cat > mingw-toolchain.cmake << 'EOF'
+        set(CMAKE_SYSTEM_NAME Windows)
+        set(CMAKE_SYSTEM_PROCESSOR x86_64)
+        
+        set(CMAKE_C_COMPILER x86_64-w64-mingw32-gcc)
+        set(CMAKE_CXX_COMPILER x86_64-w64-mingw32-g++)
+        set(CMAKE_RC_COMPILER x86_64-w64-mingw32-windres)
+        
+        set(CMAKE_FIND_ROOT_PATH /usr/x86_64-w64-mingw32)
+        set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)
+        set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)
+        set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)
+        EOF
+        
+        mkdir build
+        cd build
+        
+        # Configure with CMake using the toolchain file
+        cmake .. \
+          -DCMAKE_TOOLCHAIN_FILE=../mingw-toolchain.cmake \
+          -DCMAKE_BUILD_TYPE=Release \
+          -DENABLE_GSF=OFF
+        
+        # Build the library
+        cmake --build . --config Release -- -j$(nproc) || {
+          echo "Build failed, trying with verbose output..."
+          cmake --build . --config Release --verbose
+        }
+        
+        # Install headers
+        sudo mkdir -p /usr/x86_64-w64-mingw32/include
+        # Use the generated paradox.h from the build directory
+        if [ -f include/paradox.h ]; then
+          sudo cp include/paradox.h /usr/x86_64-w64-mingw32/include/
+        elif [ -f ../include/paradox.h.in ]; then
+          # If not generated, manually configure it
+          sed 's/@PX_HAVE_ICONV@/1/g; s/@PX_HAVE_RECODE@/0/g; s/@PX_HAVE_GSF@/0/g' \
+            ../include/paradox.h.in | sudo tee /usr/x86_64-w64-mingw32/include/paradox.h > /dev/null
+        fi
+        
+        # Copy additional headers
+        [ -f ../include/paradox-mp.h ] && sudo cp ../include/paradox-mp.h /usr/x86_64-w64-mingw32/include/ || true
+        [ -f config.h ] && sudo cp config.h /usr/x86_64-w64-mingw32/include/ || true
+        
+        # Install library files
+        # Find and copy the static library
+        if [ -f libpxlib.a ]; then
+          sudo cp libpxlib.a /usr/x86_64-w64-mingw32/lib/libpx.a
+          echo "Installed libpxlib.a as libpx.a"
+        elif [ -f libpxlib.dll.a ]; then
+          sudo cp libpxlib.dll.a /usr/x86_64-w64-mingw32/lib/libpx.a
+          echo "Installed libpxlib.dll.a as libpx.a"
+        else
+          # Search in subdirectories
+          LIBFILE=$(find . -name "libpxlib*.a" -o -name "pxlib*.a" | head -1)
+          if [ -n "$LIBFILE" ]; then
+            sudo cp "$LIBFILE" /usr/x86_64-w64-mingw32/lib/libpx.a
+            echo "Installed $LIBFILE as libpx.a"
+          else
+            echo "ERROR: No pxlib library file found!"
+            find . -name "*.a" -o -name "*.dll"
+            exit 1
+          fi
+        fi
+        
+        echo "Installed headers:"
+        ls -la /usr/x86_64-w64-mingw32/include/paradox* || echo "No paradox headers found"
+        echo "Installed libraries:"
+        ls -la /usr/x86_64-w64-mingw32/lib/libpx* || echo "No pxlib libraries found"
+        
+    - name: Build Windows executable
+      run: |
+        mkdir -p build
+        CGO_ENABLED=1 GOOS=windows GOARCH=amd64 CC=x86_64-w64-mingw32-gcc \
+          CGO_LDFLAGS="-L/usr/x86_64-w64-mingw32/lib" \
+          CGO_CFLAGS="-I/usr/x86_64-w64-mingw32/include" \
+          go build -ldflags "-X main.Version=1.0.0 -X main.BuildDate=$(date -u +'%Y-%m-%dT%H:%M:%SZ')" \
+          -o build/patris-export-windows-amd64.exe ./cmd/patris-export
+      
+    - name: Copy pxlib DLL
+      run: |
+        # Find and copy DLL files
+        mkdir -p build
+        if find /tmp/pxlib/build -name "*.dll" -type f 2>/dev/null | grep -q .; then
+          find /tmp/pxlib/build -name "*.dll" -type f -exec cp {} build/ \;
+          echo "DLL files copied:"
+          ls -la build/*.dll
+        else
+          echo "Warning: No DLL files found - Windows executable may require runtime linking"
+        fi
+        echo "Build directory contents:"
+        ls -la build/
+    
+    - name: Test Windows executable with Wine
+      run: |
+        # Install Wine to test Windows executable on Linux
+        sudo dpkg --add-architecture i386
+        sudo apt-get update
+        sudo apt-get install -y wine wine64 wine32
+        
+        # Test the Windows executable can read the test database
+        cd build
+        echo "Testing Windows executable with kala.db..."
+        wine patris-export-windows-amd64.exe info ../testdata/kala.db || {
+          echo "ERROR: Windows executable failed to read database!"
+          echo "This indicates the build is not working correctly."
+          exit 1
+        }
+        
+        # Verify it reports the correct number of records
+        RECORD_COUNT=$(wine patris-export-windows-amd64.exe info ../testdata/kala.db 2>/dev/null | grep -oP 'Records:\s+\K\d+' || echo "0")
+        echo "Windows build reports $RECORD_COUNT records"
+        if [ "$RECORD_COUNT" -eq "0" ]; then
+          echo "ERROR: Windows build reports 0 records - CGO/pxlib not working!"
+          exit 1
+        elif [ "$RECORD_COUNT" -ne "354" ]; then
+          echo "WARNING: Expected 354 records but got $RECORD_COUNT"
+          exit 1
+        else
+          echo "✅ Windows build correctly reports 354 records"
+        fi
+        
+    - name: Upload Windows artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: patris-export-windows-amd64
+        path: |
+          build/patris-export-windows-amd64.exe
+          build/*.dll
