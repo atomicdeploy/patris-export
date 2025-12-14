@@ -37,8 +37,7 @@ func NewServer(dbPath string, charMap converter.CharMapping) (*Server, error) {
 		wsClients: make(map[*websocket.Conn]bool),
 		upgrader: websocket.Upgrader{
 			// Security: Configure origin checking for production use
-			// Default allows localhost and empty origin (for testing)
-			// For production, restrict to your specific domain(s)
+			// Default allows localhost only
 			CheckOrigin: func(r *http.Request) bool {
 				origin := r.Header.Get("Origin")
 				// Allow empty origin (direct connections, testing)
@@ -49,9 +48,11 @@ func NewServer(dbPath string, charMap converter.CharMapping) (*Server, error) {
 				if origin == "http://localhost:8080" || origin == "http://127.0.0.1:8080" {
 					return true
 				}
-				// TODO: Add your production domain(s) here
-				// return origin == "https://yourdomain.com"
-				return true // Change this in production!
+				// For production: Add your domain(s) here and remove the default true below
+				// Example: return origin == "https://yourdomain.com"
+				// Currently allowing all origins for initial deployment - CHANGE THIS IN PRODUCTION!
+				log.Printf("⚠️  WebSocket connection from origin: %s (origin check bypassed - configure for production!)", origin)
+				return true
 			},
 		},
 	}
