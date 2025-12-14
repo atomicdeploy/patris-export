@@ -99,15 +99,16 @@ func Patris2FaWithMapping(value string, mapping CharMapping) string {
 	})
 
 	// Convert characters using mapping (matches PHP line 44-47)
-	// For unmapped characters, PHP uses utf8_encode() which in Go means keeping them as-is
+	// For unmapped characters, PHP uses utf8_encode() which converts ISO-8859-1 to UTF-8
 	var output strings.Builder
 	for i := 0; i < len(value); i++ {
 		ch := value[i]
 		if mapped, ok := mapping[ch]; ok {
 			output.WriteString(mapped)
 		} else {
-			// Keep unmapped characters as-is (equivalent to PHP's utf8_encode for ASCII)
-			output.WriteByte(ch)
+			// PHP's utf8_encode() converts ISO-8859-1 byte to Unicode code point
+			// In Go, we convert the byte to a rune (Unicode code point) to get the same behavior
+			output.WriteRune(rune(ch))
 		}
 	}
 

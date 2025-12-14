@@ -87,6 +87,18 @@ func TestPatris2Fa(t *testing.T) {
 			input:    "\xba\xd9\xba\xba " + "\xba\xd9\xba\xba" + " \xd9 " + "\xba\xa1\xba\xa1\xba\xa1\xba",
 			expected: "سنسور صوت و ارتعاش", // Needs ZWNJ handling
 		},
+		{
+			name:     "نمایشگر with unmapped 0xEA byte",
+			// 0xEA is NOT in the character map - PHP's utf8_encode() converts it to U+00EA (ê)
+			input:    "\xd6\xd8\xa1\xea\xbc\xd2\xb6",
+			expected: "رگشêانم", // Notice the ê for unmapped 0xEA
+		},
+		{
+			name:     "نمایشگر with unmapped 0xEB byte",
+			// 0xEB is NOT in the character map - PHP's utf8_encode() converts it to U+00EB (ë)
+			input:    "\xd6\xd8\xa1\xeb\xbc\xd2\xb6",
+			expected: "رگشëانم", // Notice the ë for unmapped 0xEB
+		},
 	}
 
 	for _, tt := range tests {
