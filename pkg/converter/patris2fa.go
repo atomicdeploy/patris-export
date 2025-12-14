@@ -71,18 +71,29 @@ func Patris2Fa(value string) string {
 	return Patris2FaWithMapping(value, defaultMapping)
 }
 
-// Patris2FaWithMapping converts Patris-encoded text to Farsi using a specific mapping
-// This EXACTLY matches the PHP implementation from the legacy code (paradox/patris2fa.php)
+// Patris2FaWithMapping converts Patris81-encoded text to Persian/Farsi
+// 
+// Patris81 Encoding Scheme:
+// - Uses byte values 0x9F-0xE0 for Persian characters
+// - Uses byte values 0xF3-0xFC for Persian digits 0-9
+// - Stores text in visual (LTR) byte order, reversed from logical reading order
+// - Uses 0x99 as a dash marker that can be converted to '-'
+// - May include [zwnj] markers for zero-width non-joiners
+//
+// Conversion Process:
+// 1. Replace dash markers (0x99) with '-' if enabled
+// 2. Reverse Persian character and digit byte segments
+// 3. Map Patris bytes to UTF-8 Persian characters
+// 4. Re-reverse digit sequences to restore correct number order
+// 5. Clean up spacing and zero-width non-joiners
 func Patris2FaWithMapping(value string, mapping CharMapping) string {
 	if mapping == nil {
 		mapping = defaultMapping
 	}
 
-	// Work with bytes throughout to handle Patris encoding correctly
-	// Even though C.GoStringN creates a "string", the bytes are preserved
 	valueBytes := []byte(value)
 
-	// Replace dash character if dashfix is enabled (matches PHP line 40)
+	// Step 1: Replace dash marker if enabled
 	if dashFixEnabled {
 		for i, b := range valueBytes {
 			if b == 0x99 {
@@ -91,56 +102,63 @@ func Patris2FaWithMapping(value string, mapping CharMapping) string {
 		}
 	}
 
-	// Reverse specific character sequences (matches PHP line 42)
-	// Pattern: [\x9f-\xe0\xf3-\xfc\s\.\(\)\#\:\d\x99]+ 
-	// We must work at byte level because UTF-8 interpretation breaks the pattern matching
+	// Step 2: Reverse Patris-encoded segments
+	// Persian characters (0x9F-0xE0) and whitespace/punctuation are stored reversed
+	// English letters are NOT reversed, allowing mixed Persian/English text
 	valueBytes = reversePatrisSegments(valueBytes)
 
-	// Convert characters using mapping (matches PHP line 44-47)
-	// For unmapped characters, PHP uses utf8_encode() which converts ISO-8859-1 to UTF-8
+	// Step 3: Map Patris bytes to UTF-8
 	var output strings.Builder
-	for _, ch := range valueBytes {
-		if mapped, ok := mapping[ch]; ok {
+	for _, b := range valueBytes {
+		if mapped, ok := mapping[b]; ok {
 			output.WriteString(mapped)
 		} else {
-			// PHP's utf8_encode() converts ISO-8859-1 byte to Unicode code point
-			// In Go, we convert the byte to a rune (Unicode code point) to get the same behavior
-			output.WriteRune(rune(ch))
+			// Unmapped bytes are converted as ISO-8859-1 to Unicode
+			output.WriteRune(rune(b))
 		}
 	}
 
-	// NOW reverse ASCII digit sequences (matches PHP line 43)
-	// This happens AFTER mapping, creating the "double reversal" effect
+	// Step 4: Re-reverse digit sequences
+	// Persian digit bytes (0xF3-0xFC) get reversed in step 2, then mapped to '0'-'9' in step 3
+	// We reverse them again here to restore the correct digit order
 	result := output.String()
-	re := regexp.MustCompile(`(\d+)`)
-	result = re.ReplaceAllStringFunc(result, func(match string) string {
-		runes := []rune(match)
+	digitRe := regexp.MustCompile(`\d+`)
+	result = digitRe.ReplaceAllStringFunc(result, func(digits string) string {
+		runes := []rune(digits)
 		for i, j := 0, len(runes)-1; i < j; i, j = i+1, j-1 {
 			runes[i], runes[j] = runes[j], runes[i]
 		}
 		return string(runes)
 	})
 
-	// Clean up zero-width non-joiners and spaces (matches PHP line 47-48)
-	// Replace [zwnj] followed by optional whitespace with a single space
+	// Step 5: Clean up formatting
+	// Replace [zwnj] markers with spaces for proper Persian word spacing
 	result = regexp.MustCompile(`\[zwnj\]\s*`).ReplaceAllString(result, " ")
-	// Collapse multiple spaces into one
+	// Normalize whitespace
 	result = regexp.MustCompile(`\s+`).ReplaceAllString(result, " ")
 	result = strings.TrimSpace(result)
 
 	return result
 }
 
-// reversePatrisSegments reverses byte segments that match the Patris pattern
-// Pattern includes: Farsi bytes (0x9f-0xe0), Persian digits (0xf3-0xfc), whitespace, punctuation
+// reversePatrisSegments reverses byte segments containing Patris-encoded characters
+// 
+// The Patris81 encoding stores Persian text in visual (LTR) byte order.
+// This function reverses segments containing:
+// - Persian character bytes (0x9F-0xE0)
+// - Persian digit bytes (0xF3-0xFC) 
+// - Whitespace and common punctuation
+// - ASCII digits (for compatibility)
+//
+// English letters and other characters are NOT reversed, allowing proper
+// display of mixed Persian/English text like "ARDUINO ماژول"
 func reversePatrisSegments(data []byte) []byte {
 	result := make([]byte, 0, len(data))
 	i := 0
 	
 	for i < len(data) {
-		// Check if current byte matches Patris pattern
 		if isPatrisByte(data[i]) {
-			// Find the end of this Patris segment
+			// Found start of a Patris segment - find the end
 			segmentStart := i
 			for i < len(data) && isPatrisByte(data[i]) {
 				i++
@@ -150,7 +168,7 @@ func reversePatrisSegments(data []byte) []byte {
 				result = append(result, data[j])
 			}
 		} else {
-			// Non-Patris byte, copy as-is
+			// Non-Patris byte (e.g., English letter) - keep as-is
 			result = append(result, data[i])
 			i++
 		}
@@ -159,40 +177,12 @@ func reversePatrisSegments(data []byte) []byte {
 	return result
 }
 
-// reverseDigitSegments reverses pure ASCII digit sequences
-// This creates the "double reversal" effect for digits
-func reverseDigitSegments(data []byte) []byte {
-	result := make([]byte, 0, len(data))
-	i := 0
-	
-	for i < len(data) {
-		// Check if current byte is an ASCII digit
-		if data[i] >= '0' && data[i] <= '9' {
-			// Find the end of this digit sequence
-			segmentStart := i
-			for i < len(data) && data[i] >= '0' && data[i] <= '9' {
-				i++
-			}
-			// Reverse this segment
-			for j := i - 1; j >= segmentStart; j-- {
-				result = append(result, data[j])
-			}
-		} else {
-			// Non-digit byte, copy as-is
-			result = append(result, data[i])
-			i++
-		}
-	}
-	
-	return result
-}
-
-// isPatrisByte checks if a byte matches the Patris reversal pattern
+// isPatrisByte returns true if the byte should be part of a reversed Patris segment
 func isPatrisByte(b byte) bool {
-	return (b >= 0x9f && b <= 0xe0) || // Farsi characters
+	return (b >= 0x9f && b <= 0xe0) || // Persian characters
 		b == ' ' || b == '.' || b == '(' || b == ')' || b == '#' || b == ':' ||
 		(b >= '0' && b <= '9') || // ASCII digits
-		b == 0x99 // Dash marker (before replacement)
+		b == 0x99 // Dash marker
 }
 
 // reverseString reverses a string byte-by-byte (matches PHP strrev behavior)
