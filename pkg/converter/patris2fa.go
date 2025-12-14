@@ -137,13 +137,10 @@ func Patris2FaWithMapping(value string, mapping CharMapping) string {
 // 
 // The Patris81 encoding stores Persian text in visual (LTR) byte order.
 // This function reverses segments containing:
-// - Persian character bytes (0x9F-0xE0)
-// - Persian digit bytes (0xF3-0xFC) 
-// - Whitespace and common punctuation
-// - ASCII digits (for compatibility)
+// - Persian character bytes (0x9F-0xE0) ONLY
 //
-// English letters and other characters are NOT reversed, allowing proper
-// display of mixed Persian/English text like "ARDUINO ماژول"
+// Everything else (English letters, digits, whitespace, punctuation) is NOT reversed,
+// allowing proper display of mixed Persian/English text like "ARDUINO ماژول"
 func reversePatrisSegments(data []byte) []byte {
 	result := make([]byte, 0, len(data))
 	i := 0
@@ -171,8 +168,7 @@ func reversePatrisSegments(data []byte) []byte {
 
 // isPatrisByte returns true if the byte should be part of a reversed Patris segment
 func isPatrisByte(b byte) bool {
-	return (b >= 0x9f && b <= 0xe0) || // Persian characters
-		b == ' ' || b == '\t' || b == '\n' || b == '\r' // Whitespace
+	return (b >= 0x9f && b <= 0xe0) // Persian characters only
 }
 
 // reverseString reverses a string byte-by-byte (matches PHP strrev behavior)
