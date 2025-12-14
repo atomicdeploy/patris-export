@@ -10,6 +10,7 @@ A fast and performant application for reading, parsing, and converting Paradox/B
 
 - 🔄 **Convert Paradox DB files** to JSON or CSV formats
 - 🎯 **Persian/Farsi encoding support** - Automatically converts Patris81 proprietary encoding
+- 🔤 **RTL text conversion** - Optimizes mixed Persian/English text for RTL display contexts
 - 👀 **File watching** - Automatically converts files when they change
 - 🌐 **REST API** - HTTP JSON API for accessing database records
 - 🔌 **WebSocket support** - Real-time updates when database changes
@@ -60,6 +61,16 @@ patris-export convert kala.db -f json -o output/
 ```bash
 patris-export convert kala.db -f csv -o output/
 ```
+
+### Convert with RTL Text Optimization
+
+For mixed Persian/English content that should display correctly in RTL contexts:
+
+```bash
+patris-export convert kala.db -f json --rtl -o output/
+```
+
+This converts text like "LAN8720 ماژول شبکه" to "ماژول شبکه LAN8720" for proper RTL display.
 
 ### Watch File for Changes
 
@@ -159,6 +170,7 @@ go test -v ./...
 
 - `-c, --charmap` - Path to character mapping file (farsi_chars.txt)
 - `-o, --output` - Output directory for converted files (default: current directory)
+- `-r, --rtl` - Enable RTL text conversion for mixed Persian/English content
 - `-v, --verbose` - Enable verbose logging
 
 ### Commands

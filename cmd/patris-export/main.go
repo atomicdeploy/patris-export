@@ -26,6 +26,7 @@ var (
 	outputFormat string
 	watchMode   bool
 	verbose     bool
+	rtlMode     bool
 
 	// Color definitions
 	successColor = color.New(color.FgGreen, color.Bold)
@@ -55,6 +56,7 @@ Supports Persian/Farsi encoding conversion and file watching.
 	rootCmd.PersistentFlags().StringVarP(&charMapFile, "charmap", "c", "", "Path to character mapping file (farsi_chars.txt)")
 	rootCmd.PersistentFlags().StringVarP(&outputDir, "output", "o", ".", "Output directory for converted files")
 	rootCmd.PersistentFlags().BoolVarP(&verbose, "verbose", "v", false, "Enable verbose logging")
+	rootCmd.PersistentFlags().BoolVarP(&rtlMode, "rtl", "r", false, "Enable RTL text conversion for mixed Persian/English content")
 
 	// Convert command
 	convertCmd := &cobra.Command{
@@ -117,6 +119,12 @@ func runConvert(cmd *cobra.Command, args []string) {
 		successColor.Println("✅ Custom character mapping loaded from file")
 	} else {
 		infoColor.Println("ℹ️  Using embedded character mapping (Patris81 default)")
+	}
+
+	// Set RTL conversion mode
+	converter.SetRTLConversion(rtlMode)
+	if rtlMode {
+		successColor.Println("✅ RTL text conversion enabled for mixed Persian/English content")
 	}
 
 	// Create output directory if it doesn't exist
@@ -263,6 +271,12 @@ func runCompany(cmd *cobra.Command, args []string) {
 		infoColor.Println("ℹ️  Using embedded character mapping (Patris81 default)")
 	}
 
+	// Set RTL conversion mode
+	converter.SetRTLConversion(rtlMode)
+	if rtlMode {
+		successColor.Println("✅ RTL text conversion enabled for mixed Persian/English content")
+	}
+
 	infoColor.Printf("🔍 Reading company info: %s\n", filepath.Base(companyFile))
 
 	info, err := paradox.ReadCompanyInfo(companyFile, converter.Patris2Fa)
@@ -305,6 +319,12 @@ func runServe(cmd *cobra.Command, args []string) {
 		successColor.Println("✅ Custom character mapping loaded from file")
 	} else {
 		infoColor.Println("ℹ️  Using embedded character mapping (Patris81 default)")
+	}
+
+	// Set RTL conversion mode
+	converter.SetRTLConversion(rtlMode)
+	if rtlMode {
+		successColor.Println("✅ RTL text conversion enabled for mixed Persian/English content")
 	}
 
 	// Create server
