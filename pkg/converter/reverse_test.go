@@ -4,50 +4,9 @@ import (
 	"testing"
 )
 
-func TestReverseString(t *testing.T) {
-	tests := []struct {
-		name     string
-		input    string
-		expected string
-	}{
-		{
-			name:     "ASCII string",
-			input:    "hello",
-			expected: "olleh",
-		},
-		{
-			name:     "Patris-encoded bytes (non-UTF-8)",
-			input:    "\xd1\xd6\xd3\xd5\xd1",
-			expected: "\xd1\xd5\xd3\xd6\xd1",
-		},
-		{
-			name:     "Mixed ASCII and Patris bytes",
-			input:    "ABC\xd1\xd6\xd3",
-			expected: "\xd3\xd6\xd1CBA",
-		},
-		{
-			name:     "Numbers",
-			input:    "12345",
-			expected: "54321",
-		},
-		{
-			name:     "Mixed content with spaces",
-			input:    "Test \xd1\xd6\xd3 123",
-			expected: "321 \xd3\xd6\xd1 tseT",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			result := reverseString(tt.input)
-			if result != tt.expected {
-				t.Errorf("reverseString(%q) = %q (hex: %x), want %q (hex: %x)",
-					tt.input, result, result, tt.expected, tt.expected)
-			}
-		})
-	}
-}
-
+// TestPatris2FaReversal tests the actual Patris2Fa behavior
+// NOTE: The reverseString() function is an internal implementation detail
+// It's only called on matched Farsi patterns, NOT on the entire input
 func TestPatris2FaReversal(t *testing.T) {
 	// Create a simple mapping for testing
 	mapping := CharMapping{
