@@ -321,29 +321,23 @@ func reversePersianNumberSequences(words [][]rune) string {
 	var currentSeq [][]rune
 	
 	for _, word := range words {
+		// Skip spaces - they will be added between words during reconstruction
 		if len(word) > 0 && unicode.IsSpace(word[0]) {
-			// Space - add to current sequence
-			if len(currentSeq) > 0 {
-				currentSeq = append(currentSeq, word)
-			} else {
-				result = append(result, word)
-			}
-		} else if isNumericWord(word) {
+			continue
+		}
+		
+		if isNumericWord(word) {
 			// Number - reverse the accumulated sequence with this number
 			if len(currentSeq) > 0 {
-				// Put number first with a space, then Persian words in reverse with their spaces
-				result = append(result, word)
-				if len(currentSeq) > 0 && len(currentSeq[len(currentSeq)-1]) > 0 && unicode.IsSpace(currentSeq[len(currentSeq)-1][0]) {
-					// Add trailing space after number
-					result = append(result, currentSeq[len(currentSeq)-1])
-					currentSeq = currentSeq[:len(currentSeq)-1]
-				}
-				// Reverse Persian words with their preceding spaces
+				// Put number first, then Persian words in reverse order
+				reversedSeq := [][]rune{word}
 				for i := len(currentSeq) - 1; i >= 0; i-- {
-					result = append(result, currentSeq[i])
+					reversedSeq = append(reversedSeq, currentSeq[i])
 				}
+				result = append(result, reversedSeq...)
 				currentSeq = nil
 			} else {
+				// Standalone number
 				result = append(result, word)
 			}
 		} else {
@@ -352,12 +346,15 @@ func reversePersianNumberSequences(words [][]rune) string {
 		}
 	}
 	
-	// Flush remaining sequence
+	// Flush remaining sequence (words not followed by a number)
 	result = append(result, currentSeq...)
 	
-	// Reconstruct string
+	// Reconstruct string with spaces between words
 	var output []rune
-	for _, word := range result {
+	for i, word := range result {
+		if i > 0 {
+			output = append(output, ' ')
+		}
 		output = append(output, word...)
 	}
 	return string(output)
@@ -375,13 +372,8 @@ func reverseScriptGroups(words [][]rune) string {
 	var inGroup bool
 	
 	for _, word := range words {
-		// Skip space-only words for grouping logic
+		// Skip space-only words - they will be added between groups during reversal
 		if len(word) > 0 && unicode.IsSpace(word[0]) {
-			if inGroup {
-				currentGroup.words = append(currentGroup.words, word)
-			} else {
-				groups = append(groups, wordGroup{words: [][]rune{word}, isRTL: false})
-			}
 			continue
 		}
 		
@@ -410,11 +402,18 @@ func reverseScriptGroups(words [][]rune) string {
 		groups = append(groups, currentGroup)
 	}
 	
-	// Reverse the order of groups
+	// Reverse the order of groups and add spaces between words
 	var result []rune
 	for i := len(groups) - 1; i >= 0; i-- {
-		for _, word := range groups[i].words {
+		for j, word := range groups[i].words {
+			if j > 0 {
+				result = append(result, ' ')
+			}
 			result = append(result, word...)
+		}
+		// Add space after each group except the last one
+		if i > 0 {
+			result = append(result, ' ')
 		}
 	}
 	
