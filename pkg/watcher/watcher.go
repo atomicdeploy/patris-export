@@ -1,7 +1,7 @@
 package watcher
 
 import (
-	"crypto/md5"
+	"crypto/sha256"
 	"fmt"
 	"io"
 	"log"
@@ -127,7 +127,7 @@ func (fw *FileWatcher) handleFileChange(path string) {
 	}
 }
 
-// getFileHash calculates MD5 hash of a file
+// getFileHash calculates SHA-256 hash of a file
 func (fw *FileWatcher) getFileHash(path string) (string, error) {
 	file, err := os.Open(path)
 	if err != nil {
@@ -135,7 +135,7 @@ func (fw *FileWatcher) getFileHash(path string) (string, error) {
 	}
 	defer file.Close()
 
-	hash := md5.New()
+	hash := sha256.New()
 	if _, err := io.Copy(hash, file); err != nil {
 		return "", err
 	}
