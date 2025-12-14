@@ -1,6 +1,3 @@
-//go:build cgo
-// +build cgo
-
 package paradox
 
 /*
@@ -16,9 +13,8 @@ import (
 
 // Database represents a Paradox database file
 type Database struct {
-	pxdoc  *C.pxdoc_t
-	path   string
-	pureDB *PureGoDatabase // for compatibility
+	pxdoc *C.pxdoc_t
+	path  string
 }
 
 // Open opens a Paradox database file
