@@ -84,9 +84,9 @@ func Patris2FaWithMapping(value string, mapping CharMapping) string {
 	}
 
 	// Reverse specific character sequences (matches PHP line 42)
-	// Pattern includes: Farsi chars (0x9f-0xe0), Persian digits (0xf3-0xfc), 
-	// spaces, dots, parens, hash, colon, ASCII digits, and 0x99
-	re := regexp.MustCompile(`([\x9f-\xe0\xf3-\xfc\s\.\(\)\#\:\d\x99]+)`)
+	// Pattern includes: Farsi chars (0x9f-0xe0), spaces, dots, parens, hash, colon, ASCII digits, and 0x99
+	// NOTE: Persian digits (0xf3-0xfc) are NOT included here - they're only in the character mapping
+	re := regexp.MustCompile(`([\x9f-\xe0\s\.\(\)\#\:\d\x99]+)`)
 	value = re.ReplaceAllStringFunc(value, func(match string) string {
 		return reverseString(match)
 	})
@@ -115,8 +115,17 @@ func Patris2FaWithMapping(value string, mapping CharMapping) string {
 	result := output.String()
 	result = regexp.MustCompile(`\[zwnj\]\s*`).ReplaceAllString(result, " ")
 	result = regexp.MustCompile(`\s+`).ReplaceAllString(result, " ")
+	result = strings.TrimSpace(result)
 
-	return strings.TrimSpace(result)
+	// Reverse the final UTF-8 string by runes (not bytes) to get correct RTL display
+	// This is needed because the Patris bytes are stored in visual order (LTR)
+	// and after byte-level reversal and conversion, we need to reverse again at character level
+	runes := []rune(result)
+	for i, j := 0, len(runes)-1; i < j; i, j = i+1, j-1 {
+		runes[i], runes[j] = runes[j], runes[i]
+	}
+
+	return string(runes)
 }
 
 // reverseString reverses a string byte-by-byte (matches PHP strrev behavior)
