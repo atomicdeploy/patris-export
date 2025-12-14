@@ -103,7 +103,7 @@ Supports Persian/Farsi encoding conversion and file watching.
 func runConvert(cmd *cobra.Command, args []string) {
 	dbFile := args[0]
 
-	// Load character mapping if provided
+	// Load character mapping if provided, otherwise use embedded default
 	var charMap converter.CharMapping
 	var err error
 	
@@ -114,7 +114,9 @@ func runConvert(cmd *cobra.Command, args []string) {
 			os.Exit(1)
 		}
 		converter.SetDefaultMapping(charMap)
-		successColor.Println("✅ Character mapping loaded")
+		successColor.Println("✅ Custom character mapping loaded from file")
+	} else {
+		infoColor.Println("ℹ️  Using embedded character mapping (Patris81 default)")
 	}
 
 	// Create output directory if it doesn't exist
@@ -245,7 +247,7 @@ func runInfo(cmd *cobra.Command, args []string) {
 func runCompany(cmd *cobra.Command, args []string) {
 	companyFile := args[0]
 
-	// Load character mapping if provided
+	// Load character mapping if provided, otherwise use embedded default
 	var charMap converter.CharMapping
 	var err error
 	
@@ -256,6 +258,9 @@ func runCompany(cmd *cobra.Command, args []string) {
 			os.Exit(1)
 		}
 		converter.SetDefaultMapping(charMap)
+		infoColor.Println("ℹ️  Using custom character mapping from file")
+	} else {
+		infoColor.Println("ℹ️  Using embedded character mapping (Patris81 default)")
 	}
 
 	infoColor.Printf("🔍 Reading company info: %s\n", filepath.Base(companyFile))
@@ -286,7 +291,7 @@ func runServe(cmd *cobra.Command, args []string) {
 	addr, _ := cmd.Flags().GetString("addr")
 	watchFile, _ := cmd.Flags().GetBool("watch")
 
-	// Load character mapping if provided
+	// Load character mapping if provided, otherwise use embedded default
 	var charMap converter.CharMapping
 	var err error
 	
@@ -297,7 +302,9 @@ func runServe(cmd *cobra.Command, args []string) {
 			os.Exit(1)
 		}
 		converter.SetDefaultMapping(charMap)
-		successColor.Println("✅ Character mapping loaded")
+		successColor.Println("✅ Custom character mapping loaded from file")
+	} else {
+		infoColor.Println("ℹ️  Using embedded character mapping (Patris81 default)")
 	}
 
 	// Create server
