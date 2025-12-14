@@ -72,40 +72,46 @@ func Patris2Fa(value string) string {
 }
 
 // Patris2FaWithMapping converts Patris-encoded text to Farsi using a specific mapping
+// This matches the PHP implementation from the legacy code
 func Patris2FaWithMapping(value string, mapping CharMapping) string {
 	if mapping == nil {
 		mapping = defaultMapping
 	}
 
-	// Replace dash character if dashfix is enabled
+	// Replace dash character if dashfix is enabled (matches PHP line 40)
 	if dashFixEnabled {
 		value = strings.ReplaceAll(value, "\x99", "-")
 	}
 
-	// Reverse specific character sequences (numbers, spaces, special chars, and Farsi chars)
-	re := regexp.MustCompile(`([\x9f-\xe0\s\.\(\)\#\:\d\x99]+)`)
+	// Reverse specific character sequences (matches PHP line 42)
+	// Pattern includes: Farsi chars (0x9f-0xe0), Persian digits (0xf3-0xfc), 
+	// spaces, dots, parens, hash, colon, ASCII digits, and 0x99
+	re := regexp.MustCompile(`([\x9f-\xe0\xf3-\xfc\s\.\(\)\#\:\d\x99]+)`)
 	value = re.ReplaceAllStringFunc(value, func(match string) string {
 		return reverseString(match)
 	})
 
-	// Reverse numbers specifically
+	// Reverse ASCII digit sequences specifically (matches PHP line 43)
+	// Note: Persian digits (0xf3-0xfc) are handled above
 	reNum := regexp.MustCompile(`([\d]+)`)
 	value = reNum.ReplaceAllStringFunc(value, func(match string) string {
 		return reverseString(match)
 	})
 
-	// Convert characters using mapping
+	// Convert characters using mapping (matches PHP line 44-47)
+	// Important: unmapped characters should remain as-is (already in UTF-8)
 	var output strings.Builder
 	for i := 0; i < len(value); i++ {
 		ch := value[i]
 		if mapped, ok := mapping[ch]; ok {
 			output.WriteString(mapped)
 		} else {
+			// Keep unmapped characters as-is (they're already UTF-8 in Go)
 			output.WriteByte(ch)
 		}
 	}
 
-	// Clean up zero-width non-joiners and spaces
+	// Clean up zero-width non-joiners and spaces (matches PHP line 48-49)
 	result := output.String()
 	result = regexp.MustCompile(`\[zwnj\]\s*`).ReplaceAllString(result, " ")
 	result = regexp.MustCompile(`\s+`).ReplaceAllString(result, " ")

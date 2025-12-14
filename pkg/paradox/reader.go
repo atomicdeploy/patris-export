@@ -186,7 +186,9 @@ func (db *Database) getFieldValue(pxval *C.pxval_t, fieldType C.char) interface{
 		}
 		str := (*strStruct)(valuePtr)
 		if str.val != nil {
-			result = C.GoString(str.val)
+			// Use C.GoStringN to preserve raw bytes, not just valid UTF-8
+			// This is critical for Patris81 encoding which uses non-UTF-8 bytes
+			result = C.GoStringN(str.val, str.len)
 		}
 
 	case C.pxfShort:
