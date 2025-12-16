@@ -1,6 +1,7 @@
 package watcher
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
@@ -48,7 +49,7 @@ func TestFileWatcher_DebounceZero(t *testing.T) {
 	// Make multiple rapid changes
 	startTime := time.Now()
 	for i := 0; i < 3; i++ {
-		if err := os.WriteFile(tmpFile, []byte("change "+string(rune(i))), 0644); err != nil {
+		if err := os.WriteFile(tmpFile, []byte(fmt.Sprintf("change %d", i)), 0644); err != nil {
 			t.Fatalf("Failed to write to file: %v", err)
 		}
 		time.Sleep(50 * time.Millisecond)
@@ -113,7 +114,7 @@ func TestFileWatcher_DebounceOneSecond(t *testing.T) {
 	// Make multiple rapid changes
 	startTime := time.Now()
 	for i := 0; i < 3; i++ {
-		if err := os.WriteFile(tmpFile, []byte("change "+string(rune(i))), 0644); err != nil {
+		if err := os.WriteFile(tmpFile, []byte(fmt.Sprintf("change %d", i)), 0644); err != nil {
 			t.Fatalf("Failed to write to file: %v", err)
 		}
 		time.Sleep(100 * time.Millisecond)
