@@ -30,41 +30,60 @@ echo "Patching CMakeLists.txt to fix windres compilation..."
 # - Keep -DHAVE_CONFIG_H in add_definitions() (needed for RC preprocessing)
 # - Move warning flags to target_compile_options() with generator expression to exclude RC files
 
-if grep -Pzo "add_definitions\([^)]*-Wall" CMakeLists.txt > /dev/null 2>&1; then
+if grep -q "add_definitions.*-Wall" CMakeLists.txt; then
     echo "  Separating compiler warning flags from preprocessor definitions..."
     
-    # Use Python to patch the CMakeLists.txt file properly
     python3 << 'PYTHON_SCRIPT'
 import re
 
 with open('CMakeLists.txt', 'r') as f:
-    content = f.read()
+    lines = f.readlines()
 
-# Find and replace the add_definitions block within CMAKE_COMPILER_IS_GNUCC
-pattern = r'if\(CMAKE_COMPILER_IS_GNUCC\)\s*add_definitions\(\s*-DHAVE_CONFIG_H\s*-Wall -Wpointer-arith -W\s*\$\{PXLIB_EXTRA_GCC_FLAGS\}\s*\)'
-replacement = '''if(CMAKE_COMPILER_IS_GNUCC)
-    add_definitions(-DHAVE_CONFIG_H)
-    # Compiler warning flags separated to avoid passing them to windres
-    set(PXLIB_WARNING_FLAGS -Wall -Wpointer-arith -W ${PXLIB_EXTRA_GCC_FLAGS})'''
+new_lines = []
+i = 0
+patched = False
 
-content = re.sub(pattern, replacement, content, flags=re.MULTILINE | re.DOTALL)
+while i < len(lines):
+    line = lines[i]
+    
+    # Look for the problematic add_definitions block
+    if 'if(CMAKE_COMPILER_IS_GNUCC)' in line:
+        # Check if this is followed by the multi-line add_definitions
+        if i+1 < len(lines) and 'add_definitions(' in lines[i+1]:
+            # Found it! Replace the entire block
+            new_lines.append(line)  # Keep the if(CMAKE_COMPILER_IS_GNUCC)
+            new_lines.append('    add_definitions(-DHAVE_CONFIG_H)\n')
+            new_lines.append('    # Compiler warning flags separated to avoid passing them to windres\n')
+            new_lines.append('    set(PXLIB_WARNING_FLAGS -Wall -Wpointer-arith -W ${PXLIB_EXTRA_GCC_FLAGS})\n')
+            
+            # Skip the old add_definitions block (lines i+1 through the closing paren)
+            i += 1
+            while i < len(lines) and ')' not in lines[i]:
+                i += 1
+            i += 1  # Skip the closing paren line
+            patched = True
+            continue
+    
+    # Look for add_library(pxlib SHARED and add target_compile_options after it
+    if 'add_library(pxlib SHARED ${SOURCES})' in line and 'target_compile_options(pxlib' not in ''.join(lines[i:i+10]):
+        new_lines.append(line)
+        new_lines.append('\n')
+        new_lines.append('# Apply warning flags only to C/C++ files, not RC files (windres doesn\'t understand them)\n')
+        new_lines.append('if(CMAKE_COMPILER_IS_GNUCC)\n')
+        new_lines.append('    target_compile_options(pxlib PRIVATE $<$<COMPILE_LANGUAGE:C>:${PXLIB_WARNING_FLAGS}>)\n')
+        new_lines.append('endif()\n')
+        i += 1
+        continue
+    
+    new_lines.append(line)
+    i += 1
 
-# Add target_compile_options after add_library(pxlib SHARED ...)
-# Use generator expression to only apply warning flags to C files, not RC files
-pattern = r'(add_library\(pxlib SHARED \$\{SOURCES\}\))'
-replacement = r'''\1
-
-# Apply warning flags only to C/C++ files, not RC files (windres doesn't understand them)
-if(CMAKE_COMPILER_IS_GNUCC)
-    target_compile_options(pxlib PRIVATE $<$<COMPILE_LANGUAGE:C>:${PXLIB_WARNING_FLAGS}>)
-endif()'''
-
-content = re.sub(pattern, replacement, content)
-
-with open('CMakeLists.txt', 'w') as f:
-    f.write(content)
-
-print("  ✓ Patched successfully")
+if patched:
+    with open('CMakeLists.txt', 'w') as f:
+        f.writelines(new_lines)
+    print("✓ Patched successfully")
+else:
+    print("✗ Warning: Pattern not found, CMakeLists.txt may have already been patched or has different format")
 PYTHON_SCRIPT
     
     echo "  ✓ Separated warning flags from definitions and applied with generator expression"
