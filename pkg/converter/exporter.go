@@ -152,6 +152,18 @@ func (e *Exporter) ExportRecordsToString(records []paradox.Record) (string, erro
 	return output, nil
 }
 
+// ConvertAndTransformRecords converts string fields and transforms records for Patris81-specific output.
+// This combines the conversion and transformation steps into a single method for use by the web server.
+func (e *Exporter) ConvertAndTransformRecords(records []paradox.Record) map[string]interface{} {
+	// Convert string fields if converter is set
+	if e.converter != nil {
+		records = e.convertRecords(records)
+	}
+	
+	// Transform records to use Code as key and optimize structure
+	return e.TransformRecords(records)
+}
+
 // TransformRecords transforms records for Patris81-specific output format:
 // - Use Code field as the key
 // - Ignore fields starting with "Sort"

@@ -304,25 +304,9 @@ func (s *Server) StartWatching() error {
 // convertAndTransformRecords converts record text encoding and transforms them
 // to match the format used by the convert command (combines ANBAR fields, removes Sort fields, etc.)
 func (s *Server) convertAndTransformRecords(records []paradox.Record) map[string]interface{} {
-	// Create exporter with Patris2Fa converter to match convert command behavior
+	// Create exporter with Patris2Fa converter and use it to convert and transform records
 	exp := converter.NewExporter(converter.Patris2Fa)
-	
-	// Convert string fields
-	convertedRecords := make([]paradox.Record, len(records))
-	for i, record := range records {
-		convertedRecord := make(paradox.Record)
-		for key, value := range record {
-			if strVal, ok := value.(string); ok {
-				convertedRecord[key] = converter.Patris2Fa(strVal)
-			} else {
-				convertedRecord[key] = value
-			}
-		}
-		convertedRecords[i] = convertedRecord
-	}
-	
-	// Transform records to match the format used by the convert command
-	return exp.TransformRecords(convertedRecords)
+	return exp.ConvertAndTransformRecords(records)
 }
 
 // Start starts the HTTP server
