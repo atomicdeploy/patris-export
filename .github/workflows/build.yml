@@ -79,7 +79,10 @@ jobs:
         
         # Patch CMakeLists.txt to skip RC file when cross-compiling
         # windres doesn't understand GCC compiler flags like -W
-        sed -i '/target_sources(pxlib PRIVATE \${CMAKE_BINARY_DIR}\/pxlib.rc)/d' CMakeLists.txt
+        if grep -q "target_sources(pxlib PRIVATE.*pxlib.rc)" CMakeLists.txt; then
+          sed -i '/target_sources(pxlib PRIVATE.*pxlib.rc)/d' CMakeLists.txt
+          echo "Removed RC file from CMakeLists.txt for cross-compilation compatibility"
+        fi
         
         # Create a CMake toolchain file for MinGW cross-compilation
         cat > mingw-toolchain.cmake << 'EOF'
