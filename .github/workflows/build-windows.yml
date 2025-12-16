@@ -98,6 +98,13 @@ jobs:
         ls -la C:/pxlib-install/lib/ || echo "No libraries installed"
         ls -la C:/pxlib-install/bin/ || echo "No DLLs installed"
         
+        # Create symlink for pxlib import library (CGO expects -lpx but pxlib builds as libpxlib)
+        if [ -f "C:/pxlib-install/lib/libpxlib.dll.a" ]; then
+          echo "Creating symlink for CGO compatibility..."
+          cp C:/pxlib-install/lib/libpxlib.dll.a C:/pxlib-install/lib/libpx.dll.a
+          ls -lh C:/pxlib-install/lib/libpx.dll.a
+        fi
+        
         # Verify critical files exist
         if [ ! -f "C:/pxlib-install/include/paradox.h" ]; then
           echo "ERROR: paradox.h not found! Listing build directory contents:"
