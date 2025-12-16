@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/atomicdeploy/patris-export/pkg/converter"
 	"github.com/atomicdeploy/patris-export/pkg/paradox"
@@ -21,11 +22,12 @@ var (
 	BuildDate = "unknown"
 
 	// Global flags
-	charMapFile string
-	outputDir   string
-	outputFormat string
-	watchMode   bool
-	verbose     bool
+	charMapFile    string
+	outputDir      string
+	outputFormat   string
+	watchMode      bool
+	verbose        bool
+	debounceString string
 
 	// Color definitions
 	successColor = color.New(color.FgGreen, color.Bold)
@@ -65,6 +67,7 @@ Supports Persian/Farsi encoding conversion and file watching.
 	}
 	convertCmd.Flags().StringVarP(&outputFormat, "format", "f", "json", "Output format (json or csv)")
 	convertCmd.Flags().BoolVarP(&watchMode, "watch", "w", false, "Watch file for changes and auto-convert")
+	convertCmd.Flags().StringVarP(&debounceString, "debounce", "d", "1s", "Debounce duration for watch mode (e.g., 0s, 500ms, 1s, 5s)")
 
 	// Info command
 	infoCmd := &cobra.Command{
@@ -91,6 +94,7 @@ Supports Persian/Farsi encoding conversion and file watching.
 	}
 	serveCmd.Flags().StringP("addr", "a", ":8080", "Server address (e.g., :8080)")
 	serveCmd.Flags().BoolP("watch", "w", true, "Watch file for changes and broadcast updates")
+	serveCmd.Flags().StringP("debounce", "d", "0s", "Debounce duration for watch mode (e.g., 0s, 500ms, 1s, 5s)")
 
 	rootCmd.AddCommand(convertCmd, infoCmd, companyCmd, serveCmd)
 
@@ -106,7 +110,7 @@ func runConvert(cmd *cobra.Command, args []string) {
 	// Load character mapping if provided, otherwise use embedded default
 	var charMap converter.CharMapping
 	var err error
-	
+
 	if charMapFile != "" {
 		charMap, err = converter.LoadCharMapping(charMapFile)
 		if err != nil {
@@ -126,13 +130,16 @@ func runConvert(cmd *cobra.Command, args []string) {
 	}
 
 	if watchMode {
+		// Parse debounce duration
+		debounceDuration := parseDebounceDuration(debounceString)
+
 		infoColor.Printf("👀 Watching file: %s\n", dbFile)
 		infoColor.Println("📝 Press Ctrl+C to stop watching")
-		
+
 		// Initial conversion
 		convertFile(dbFile, charMap)
 
-		// Set up watcher
+		// Set up watcher with configured debounce
 		fw, err := watcher.NewFileWatcher()
 		if err != nil {
 			errorColor.Printf("❌ Failed to create file watcher: %v\n", err)
@@ -141,8 +148,9 @@ func runConvert(cmd *cobra.Command, args []string) {
 		defer fw.Close()
 
 		if err := fw.Watch(dbFile, func(path string) {
+			infoColor.Printf("🔄 File changed: %s\n", filepath.Base(path))
 			convertFile(path, charMap)
-		}); err != nil {
+		}, debounceDuration); err != nil {
 			errorColor.Printf("❌ Failed to watch file: %v\n", err)
 			os.Exit(1)
 		}
@@ -182,17 +190,17 @@ func convertFile(dbFile string, charMap converter.CharMapping) {
 	// Generate output filename
 	baseName := strings.TrimSuffix(filepath.Base(dbFile), filepath.Ext(dbFile))
 	var outputFile string
-	
+
 	if outputFormat == "csv" {
 		outputFile = filepath.Join(outputDir, baseName+".csv")
-		
+
 		// Get fields for CSV header
 		fields, err := db.GetFields()
 		if err != nil {
 			errorColor.Printf("❌ Failed to get fields: %v\n", err)
 			return
 		}
-		
+
 		if err := exp.ExportToCSV(records, fields, outputFile); err != nil {
 			errorColor.Printf("❌ Failed to export to CSV: %v\n", err)
 			return
@@ -250,7 +258,7 @@ func runCompany(cmd *cobra.Command, args []string) {
 	// Load character mapping if provided, otherwise use embedded default
 	var charMap converter.CharMapping
 	var err error
-	
+
 	if charMapFile != "" {
 		charMap, err = converter.LoadCharMapping(charMapFile)
 		if err != nil {
@@ -280,6 +288,17 @@ func runCompany(cmd *cobra.Command, args []string) {
 	fmt.Println()
 }
 
+// parseDebounceDuration parses and validates a debounce duration string
+func parseDebounceDuration(durationStr string) time.Duration {
+	duration, err := time.ParseDuration(durationStr)
+	if err != nil {
+		errorColor.Printf("❌ Invalid debounce duration '%s': %v\n", durationStr, err)
+		errorColor.Println("💡 Valid examples: 0s, 500ms, 1s, 5s, 1m")
+		os.Exit(1)
+	}
+	return duration
+}
+
 func init() {
 	// Set up logging
 	log.SetFlags(0)
@@ -290,11 +309,12 @@ func runServe(cmd *cobra.Command, args []string) {
 	dbFile := args[0]
 	addr, _ := cmd.Flags().GetString("addr")
 	watchFile, _ := cmd.Flags().GetBool("watch")
+	debounceStr, _ := cmd.Flags().GetString("debounce")
 
 	// Load character mapping if provided, otherwise use embedded default
 	var charMap converter.CharMapping
 	var err error
-	
+
 	if charMapFile != "" {
 		charMap, err = converter.LoadCharMapping(charMapFile)
 		if err != nil {
@@ -317,7 +337,10 @@ func runServe(cmd *cobra.Command, args []string) {
 
 	// Start file watching if enabled
 	if watchFile {
-		if err := srv.StartWatching(); err != nil {
+		// Parse debounce duration
+		debounceDuration := parseDebounceDuration(debounceStr)
+
+		if err := srv.StartWatching(debounceDuration); err != nil {
 			errorColor.Printf("❌ Failed to start file watching: %v\n", err)
 			os.Exit(1)
 		}
@@ -326,7 +349,7 @@ func runServe(cmd *cobra.Command, args []string) {
 	// Start server
 	successColor.Printf("🌐 Server running at http://localhost%s\n", addr)
 	infoColor.Println("📝 Press Ctrl+C to stop the server")
-	
+
 	if err := srv.Start(addr); err != nil {
 		errorColor.Printf("❌ Server error: %v\n", err)
 		os.Exit(1)
