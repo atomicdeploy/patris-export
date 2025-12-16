@@ -659,3 +659,124 @@ body.dark-mode {
         padding: 0.5rem;
     }
 }
+
+// Export dropdown
+.export-container {
+    position: relative;
+    display: inline-block;
+}
+
+.export-dropdown {
+    position: absolute;
+    top: 100%;
+    right: 0;
+    margin-top: 0.5rem;
+    background: $bg-light;
+    border: 1px solid $border-light;
+    border-radius: 0.5rem;
+    box-shadow: $shadow-lg;
+    min-width: 250px;
+    opacity: 0;
+    visibility: hidden;
+    transform: translateY(-10px);
+    transition: all 0.2s ease;
+    z-index: 100;
+    
+    .dark-mode & {
+        background: $bg-dark;
+        border-color: $border-dark;
+    }
+    
+    &.open {
+        opacity: 1;
+        visibility: visible;
+        transform: translateY(0);
+    }
+}
+
+.export-option {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    width: 100%;
+    padding: 1rem;
+    background: transparent;
+    border: none;
+    border-bottom: 1px solid $border-light;
+    cursor: pointer;
+    text-align: left;
+    transition: background-color 0.15s ease;
+    
+    .dark-mode & {
+        border-bottom-color: $border-dark;
+    }
+    
+    &:last-child {
+        border-bottom: none;
+    }
+    
+    &:hover {
+        background: $bg-light-secondary;
+        
+        .dark-mode & {
+            background: $bg-dark-secondary;
+        }
+    }
+    
+    &:first-child {
+        border-top-left-radius: 0.5rem;
+        border-top-right-radius: 0.5rem;
+    }
+    
+    &:last-child {
+        border-bottom-left-radius: 0.5rem;
+        border-bottom-right-radius: 0.5rem;
+    }
+}
+
+.export-icon {
+    font-size: 1.5rem;
+    flex-shrink: 0;
+}
+
+.export-details {
+    flex: 1;
+}
+
+.export-title {
+    font-weight: 600;
+    margin-bottom: 0.25rem;
+    color: $text-light;
+    
+    .dark-mode & {
+        color: $text-dark;
+    }
+}
+
+.export-desc {
+    font-size: 0.75rem;
+    color: $text-light-secondary;
+    
+    .dark-mode & {
+        color: $text-dark-secondary;
+    }
+}
+
+// Sort indicator
+.sortable {
+    cursor: pointer;
+    user-select: none;
+    
+    &:hover {
+        background: $bg-light-secondary;
+        
+        .dark-mode & {
+            background: $bg-dark-tertiary;
+        }
+    }
+}
+
+.sort-indicator {
+    font-size: 0.75rem;
+    transition: opacity 0.15s ease;
+}

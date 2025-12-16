@@ -6,6 +6,8 @@ const state = {
     ws: null,
     searchTerm: '',
     selectedField: '',
+    sortField: 'Code',
+    sortDirection: 'asc',
     settings: {
         autoScrollToChanged: false,
         highlightChanges: true,
@@ -119,14 +121,13 @@ function handleWebSocketMessage(data) {
     
     // Extract fields from first record if not already set
     if (state.records.length > 0 && state.fields.length === 0) {
-        state.fields = Object.keys(state.records[0]);
-        // Ensure Code is always the first column
-        ensureCodeFirst();
+        extractFields();
         renderTableHeader();
         updateFieldFilter();
     }
     
     filterRecords();
+    sortRecords();
     renderTable(changedIndices);
     updateCounts();
 }
@@ -138,6 +139,32 @@ function updateStatus(status, text) {
     
     indicator.className = 'status-indicator ' + status;
     statusText.textContent = text;
+}
+
+// Extract and organize fields from records
+function extractFields() {
+    if (state.records.length === 0) return;
+    
+    const firstRecord = state.records[0];
+    const allFields = Object.keys(firstRecord);
+    
+    // Separate ANBAR array from other fields
+    const nonAnbarFields = allFields.filter(f => f !== 'ANBAR');
+    
+    // If ANBAR is an array, create separate ANBAR1, ANBAR2, etc. columns
+    if (firstRecord.ANBAR && Array.isArray(firstRecord.ANBAR)) {
+        const anbarLength = firstRecord.ANBAR.length;
+        const anbarFields = [];
+        for (let i = 0; i < anbarLength; i++) {
+            anbarFields.push(`ANBAR${i + 1}`);
+        }
+        
+        // Ensure Code is first, then other fields, then ANBAR columns
+        state.fields = ['Code', ...nonAnbarFields.filter(f => f !== 'Code'), ...anbarFields];
+    } else {
+        // Just ensure Code is first
+        state.fields = ['Code', ...nonAnbarFields.filter(f => f !== 'Code')];
+    }
 }
 
 // Ensure Code column is always first
@@ -158,11 +185,40 @@ function renderTableHeader() {
     
     state.fields.forEach(field => {
         const th = document.createElement('th');
-        th.textContent = field;
+        th.className = 'sortable';
+        
+        // Create sort indicator container
+        const sortContainer = document.createElement('div');
+        sortContainer.style.display = 'flex';
+        sortContainer.style.alignItems = 'center';
+        sortContainer.style.gap = '0.5rem';
+        sortContainer.style.cursor = 'pointer';
+        
+        const fieldName = document.createElement('span');
+        fieldName.textContent = field;
+        sortContainer.appendChild(fieldName);
+        
+        const sortIndicator = document.createElement('span');
+        sortIndicator.className = 'sort-indicator';
+        if (state.sortField === field) {
+            sortIndicator.textContent = state.sortDirection === 'asc' ? '▲' : '▼';
+            sortIndicator.style.opacity = '1';
+        } else {
+            sortIndicator.textContent = '▲';
+            sortIndicator.style.opacity = '0.3';
+        }
+        sortContainer.appendChild(sortIndicator);
+        
+        th.appendChild(sortContainer);
+        
         // Make Code column sticky
         if (field === 'Code') {
             th.classList.add('sticky-column');
         }
+        
+        // Add click handler for sorting
+        th.addEventListener('click', () => sortByField(field));
+        
         headerRow.appendChild(th);
     });
     
@@ -219,8 +275,21 @@ function renderTable(changedIndices = new Set()) {
         // Add data cells
         state.fields.forEach(field => {
             const td = document.createElement('td');
-            const value = record[field];
-            td.textContent = value !== null && value !== undefined ? value : '';
+            
+            // Handle ANBAR fields (ANBAR1, ANBAR2, etc.)
+            if (field.startsWith('ANBAR') && field.length > 5) {
+                const anbarIndex = parseInt(field.substring(5)) - 1;
+                if (record.ANBAR && Array.isArray(record.ANBAR) && anbarIndex < record.ANBAR.length) {
+                    const value = record.ANBAR[anbarIndex];
+                    td.textContent = value !== null && value !== undefined ? value : '';
+                } else {
+                    td.textContent = '';
+                }
+            } else {
+                const value = record[field];
+                td.textContent = value !== null && value !== undefined ? value : '';
+            }
+            
             // Make Code column sticky
             if (field === 'Code') {
                 td.classList.add('sticky-column');
@@ -248,6 +317,122 @@ function renderTable(changedIndices = new Set()) {
         
         tbody.appendChild(row);
     });
+}
+
+// Sort by field
+function sortByField(field) {
+    // Toggle direction if same field, otherwise reset to ascending
+    if (state.sortField === field) {
+        state.sortDirection = state.sortDirection === 'asc' ? 'desc' : 'asc';
+    } else {
+        state.sortField = field;
+        state.sortDirection = 'asc';
+    }
+    
+    sortRecords();
+    renderTableHeader();  // Re-render header to update sort indicators
+    renderTable();
+}
+
+// Sort records based on current sort field and direction
+function sortRecords() {
+    state.filteredRecords.sort((a, b) => {
+        let aVal, bVal;
+        
+        // Handle ANBAR fields (ANBAR1, ANBAR2, etc.)
+        if (state.sortField.startsWith('ANBAR') && state.sortField.length > 5) {
+            const anbarIndex = parseInt(state.sortField.substring(5)) - 1;
+            aVal = a.ANBAR && Array.isArray(a.ANBAR) && anbarIndex < a.ANBAR.length ? a.ANBAR[anbarIndex] : '';
+            bVal = b.ANBAR && Array.isArray(b.ANBAR) && anbarIndex < b.ANBAR.length ? b.ANBAR[anbarIndex] : '';
+        } else {
+            aVal = a[state.sortField];
+            bVal = b[state.sortField];
+        }
+        
+        // Special handling for Code field - right-pad to 9 characters for sorting
+        if (state.sortField === 'Code') {
+            aVal = String(aVal || '').padEnd(9, ' ');
+            bVal = String(bVal || '').padEnd(9, ' ');
+        } else {
+            // Convert to string for comparison
+            aVal = String(aVal || '');
+            bVal = String(bVal || '');
+        }
+        
+        // Perform comparison
+        let result = aVal.localeCompare(bVal, undefined, { numeric: true, sensitivity: 'base' });
+        
+        return state.sortDirection === 'asc' ? result : -result;
+    });
+}
+
+// Export data
+function exportData(format) {
+    const data = state.filteredRecords.length > 0 ? state.filteredRecords : state.records;
+    
+    if (format === 'json') {
+        // Export as JSON
+        const jsonStr = JSON.stringify(data, null, 2);
+        const blob = new Blob([jsonStr], { type: 'application/json' });
+        downloadFile(blob, 'patris-export.json');
+    } else if (format === 'csv') {
+        // Export as CSV
+        const csv = convertToCSV(data);
+        const blob = new Blob([csv], { type: 'text/csv' });
+        downloadFile(blob, 'patris-export.csv');
+    }
+    
+    // Close export dropdown
+    document.getElementById('exportDropdown').classList.remove('open');
+}
+
+// Convert data to CSV format
+function convertToCSV(data) {
+    if (data.length === 0) return '';
+    
+    // Create header row
+    const headers = state.fields.join(',');
+    
+    // Create data rows
+    const rows = data.map(record => {
+        return state.fields.map(field => {
+            let value;
+            
+            // Handle ANBAR fields (ANBAR1, ANBAR2, etc.)
+            if (field.startsWith('ANBAR') && field.length > 5) {
+                const anbarIndex = parseInt(field.substring(5)) - 1;
+                if (record.ANBAR && Array.isArray(record.ANBAR) && anbarIndex < record.ANBAR.length) {
+                    value = record.ANBAR[anbarIndex];
+                } else {
+                    value = '';
+                }
+            } else {
+                value = record[field];
+            }
+            
+            // Escape value for CSV
+            const str = value !== null && value !== undefined ? String(value) : '';
+            // Quote if contains comma, newline, or quote
+            if (str.includes(',') || str.includes('\n') || str.includes('"')) {
+                return `"${str.replace(/"/g, '""')}"`;
+            }
+            return str;
+        }).join(',');
+    });
+    
+    return [headers, ...rows].join('\n');
+}
+
+// Download file helper
+function downloadFile(blob, filename) {
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
 }
 
 // Filter records based on search term and selected field
@@ -314,7 +499,20 @@ function inspectRecord(record) {
         
         const valueDiv = document.createElement('div');
         valueDiv.className = 'inspector-field-value';
-        const value = record[field];
+        
+        // Handle ANBAR fields (ANBAR1, ANBAR2, etc.)
+        let value;
+        if (field.startsWith('ANBAR') && field.length > 5) {
+            const anbarIndex = parseInt(field.substring(5)) - 1;
+            if (record.ANBAR && Array.isArray(record.ANBAR) && anbarIndex < record.ANBAR.length) {
+                value = record.ANBAR[anbarIndex];
+            } else {
+                value = null;
+            }
+        } else {
+            value = record[field];
+        }
+        
         valueDiv.textContent = value !== null && value !== undefined ? String(value) : '(null)';
         
         fieldDiv.appendChild(nameDiv);
@@ -363,6 +561,7 @@ function init() {
     document.getElementById('searchInput').addEventListener('input', (e) => {
         state.searchTerm = e.target.value;
         filterRecords();
+        sortRecords();
         renderTable();
         updateCounts();
     });
@@ -370,11 +569,29 @@ function init() {
     document.getElementById('fieldFilter').addEventListener('change', (e) => {
         state.selectedField = e.target.value;
         filterRecords();
+        sortRecords();
         renderTable();
         updateCounts();
     });
     
     document.getElementById('themeToggle').addEventListener('click', toggleTheme);
+    
+    // Export button and dropdown
+    document.getElementById('exportBtn').addEventListener('click', () => {
+        document.getElementById('exportDropdown').classList.toggle('open');
+    });
+    
+    document.getElementById('exportJSON').addEventListener('click', () => exportData('json'));
+    document.getElementById('exportCSV').addEventListener('click', () => exportData('csv'));
+    
+    // Close export dropdown when clicking outside
+    document.addEventListener('click', (e) => {
+        const exportBtn = document.getElementById('exportBtn');
+        const exportDropdown = document.getElementById('exportDropdown');
+        if (!exportBtn.contains(e.target) && !exportDropdown.contains(e.target)) {
+            exportDropdown.classList.remove('open');
+        }
+    });
     
     document.getElementById('settingsBtn').addEventListener('click', () => {
         document.getElementById('settingsPanel').classList.toggle('open');

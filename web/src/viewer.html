@@ -30,6 +30,27 @@
                 </select>
             </div>
             <div class="toolbar-section">
+                <div class="export-container">
+                    <button class="btn btn-primary" id="exportBtn" title="Export data">
+                        📥 Export
+                    </button>
+                    <div class="export-dropdown" id="exportDropdown">
+                        <button class="export-option" id="exportJSON">
+                            <span class="export-icon">📄</span>
+                            <div class="export-details">
+                                <div class="export-title">Export as JSON</div>
+                                <div class="export-desc">JavaScript Object Notation</div>
+                            </div>
+                        </button>
+                        <button class="export-option" id="exportCSV">
+                            <span class="export-icon">📊</span>
+                            <div class="export-details">
+                                <div class="export-title">Export as CSV</div>
+                                <div class="export-desc">Comma-Separated Values</div>
+                            </div>
+                        </button>
+                    </div>
+                </div>
                 <div class="record-count">
                     Total: <strong id="totalCount">0</strong> | 
                     Filtered: <strong id="filteredCount">0</strong>
