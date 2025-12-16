@@ -22,11 +22,27 @@ function loadSettings() {
     if (saved) {
         state.settings = { ...state.settings, ...JSON.parse(saved) };
     }
+    
+    // Load sort preferences
+    const sortPrefs = localStorage.getItem('patris-sort');
+    if (sortPrefs) {
+        const { field, direction } = JSON.parse(sortPrefs);
+        state.sortField = field || 'Code';
+        state.sortDirection = direction || 'asc';
+    }
 }
 
 // Save settings to localStorage
 function saveSettings() {
     localStorage.setItem('patris-settings', JSON.stringify(state.settings));
+}
+
+// Save sort preferences to localStorage
+function saveSortPreferences() {
+    localStorage.setItem('patris-sort', JSON.stringify({
+        field: state.sortField,
+        direction: state.sortDirection
+    }));
 }
 
 // Apply settings to UI
@@ -163,11 +179,21 @@ function extractFields() {
             anbarFields.push(`ANBAR${i + 1}`);
         }
         
-        // Ensure Code is first, then other fields, then ANBAR columns
-        state.fields = ['Code', ...nonAnbarFields.filter(f => f !== 'Code'), ...anbarFields];
+        // Ensure Code is first, Name is second (if it exists), then other fields, then ANBAR columns
+        const otherFields = nonAnbarFields.filter(f => f !== 'Code' && f !== 'Name');
+        if (nonAnbarFields.includes('Name')) {
+            state.fields = ['Code', 'Name', ...otherFields, ...anbarFields];
+        } else {
+            state.fields = ['Code', ...otherFields, ...anbarFields];
+        }
     } else {
-        // Just ensure Code is first
-        state.fields = ['Code', ...nonAnbarFields.filter(f => f !== 'Code')];
+        // Ensure Code is first, Name is second (if it exists)
+        const otherFields = nonAnbarFields.filter(f => f !== 'Code' && f !== 'Name');
+        if (nonAnbarFields.includes('Name')) {
+            state.fields = ['Code', 'Name', ...otherFields];
+        } else {
+            state.fields = ['Code', ...otherFields];
+        }
     }
 }
 
@@ -185,55 +211,158 @@ function ensureCodeFirst() {
 // Render table header
 function renderTableHeader() {
     const thead = document.getElementById('tableHead');
-    const headerRow = document.createElement('tr');
     
-    state.fields.forEach(field => {
-        const th = document.createElement('th');
-        th.className = 'sortable';
-        
-        // Create sort indicator container
-        const sortContainer = document.createElement('div');
-        sortContainer.style.display = 'flex';
-        sortContainer.style.alignItems = 'center';
-        sortContainer.style.gap = '0.5rem';
-        sortContainer.style.cursor = 'pointer';
-        
-        const fieldName = document.createElement('span');
-        fieldName.textContent = field;
-        sortContainer.appendChild(fieldName);
-        
-        const sortIndicator = document.createElement('span');
-        sortIndicator.className = 'sort-indicator';
-        if (state.sortField === field) {
-            sortIndicator.textContent = state.sortDirection === 'asc' ? '▲' : '▼';
-            sortIndicator.style.opacity = '1';
-        } else {
-            sortIndicator.textContent = '▲';
-            sortIndicator.style.opacity = '0.3';
-        }
-        sortContainer.appendChild(sortIndicator);
-        
-        th.appendChild(sortContainer);
-        
-        // Make Code column sticky
-        if (field === 'Code') {
-            th.classList.add('sticky-column');
-        }
-        
-        // Add click handler for sorting
-        th.addEventListener('click', () => sortByField(field));
-        
-        headerRow.appendChild(th);
-    });
+    // Check if we have ANBAR fields to create grouped headers
+    const anbarFields = state.fields.filter(f => f.startsWith('ANBAR') && f.length > 5);
+    const hasAnbarFields = anbarFields.length > 0;
     
-    // Add actions column
-    const actionsHeader = document.createElement('th');
-    actionsHeader.textContent = 'Actions';
-    actionsHeader.style.width = '100px';
-    headerRow.appendChild(actionsHeader);
-    
-    thead.innerHTML = '';
-    thead.appendChild(headerRow);
+    if (hasAnbarFields) {
+        // Create two-row header with ANBAR group
+        const groupRow = document.createElement('tr');
+        const fieldRow = document.createElement('tr');
+        
+        // Track which fields we've processed
+        let processedAnbar = false;
+        
+        state.fields.forEach(field => {
+            // Handle ANBAR grouped columns
+            if (field.startsWith('ANBAR') && field.length > 5 && !processedAnbar) {
+                // Create group header for all ANBAR columns
+                const groupTh = document.createElement('th');
+                groupTh.textContent = 'ANBAR';
+                groupTh.setAttribute('colspan', anbarFields.length);
+                groupTh.className = 'anbar-group-header';
+                groupRow.appendChild(groupTh);
+                
+                // Create individual ANBAR column headers
+                anbarFields.forEach(anbarField => {
+                    const anbarNum = anbarField.substring(5); // Extract number
+                    const th = document.createElement('th');
+                    th.className = 'sortable anbar-column';
+                    
+                    const sortContainer = document.createElement('div');
+                    sortContainer.style.display = 'flex';
+                    sortContainer.style.alignItems = 'center';
+                    sortContainer.style.gap = '0.5rem';
+                    sortContainer.style.cursor = 'pointer';
+                    
+                    const fieldName = document.createElement('span');
+                    fieldName.textContent = anbarNum;
+                    sortContainer.appendChild(fieldName);
+                    
+                    const sortIndicator = document.createElement('span');
+                    sortIndicator.className = 'sort-indicator';
+                    if (state.sortField === anbarField) {
+                        sortIndicator.textContent = state.sortDirection === 'asc' ? '▲' : '▼';
+                        sortIndicator.style.opacity = '1';
+                    } else {
+                        sortIndicator.textContent = '▲';
+                        sortIndicator.style.opacity = '0.3';
+                    }
+                    sortContainer.appendChild(sortIndicator);
+                    
+                    th.appendChild(sortContainer);
+                    th.addEventListener('click', () => sortByField(anbarField));
+                    fieldRow.appendChild(th);
+                });
+                
+                processedAnbar = true;
+            } else if (!field.startsWith('ANBAR') || field.length <= 5) {
+                // Regular field
+                const groupTh = document.createElement('th');
+                groupTh.setAttribute('rowspan', '2');
+                groupTh.className = 'sortable';
+                
+                const sortContainer = document.createElement('div');
+                sortContainer.style.display = 'flex';
+                sortContainer.style.alignItems = 'center';
+                sortContainer.style.gap = '0.5rem';
+                sortContainer.style.cursor = 'pointer';
+                
+                const fieldName = document.createElement('span');
+                fieldName.textContent = field;
+                sortContainer.appendChild(fieldName);
+                
+                const sortIndicator = document.createElement('span');
+                sortIndicator.className = 'sort-indicator';
+                if (state.sortField === field) {
+                    sortIndicator.textContent = state.sortDirection === 'asc' ? '▲' : '▼';
+                    sortIndicator.style.opacity = '1';
+                } else {
+                    sortIndicator.textContent = '▲';
+                    sortIndicator.style.opacity = '0.3';
+                }
+                sortContainer.appendChild(sortIndicator);
+                
+                groupTh.appendChild(sortContainer);
+                
+                // Make Code column sticky
+                if (field === 'Code') {
+                    groupTh.classList.add('sticky-column');
+                }
+                
+                groupTh.addEventListener('click', () => sortByField(field));
+                groupRow.appendChild(groupTh);
+            }
+        });
+        
+        // Add actions column
+        const actionsHeader = document.createElement('th');
+        actionsHeader.textContent = 'Actions';
+        actionsHeader.setAttribute('rowspan', '2');
+        actionsHeader.style.width = '100px';
+        groupRow.appendChild(actionsHeader);
+        
+        thead.innerHTML = '';
+        thead.appendChild(groupRow);
+        thead.appendChild(fieldRow);
+    } else {
+        // Simple single-row header
+        const headerRow = document.createElement('tr');
+        
+        state.fields.forEach(field => {
+            const th = document.createElement('th');
+            th.className = 'sortable';
+            
+            const sortContainer = document.createElement('div');
+            sortContainer.style.display = 'flex';
+            sortContainer.style.alignItems = 'center';
+            sortContainer.style.gap = '0.5rem';
+            sortContainer.style.cursor = 'pointer';
+            
+            const fieldName = document.createElement('span');
+            fieldName.textContent = field;
+            sortContainer.appendChild(fieldName);
+            
+            const sortIndicator = document.createElement('span');
+            sortIndicator.className = 'sort-indicator';
+            if (state.sortField === field) {
+                sortIndicator.textContent = state.sortDirection === 'asc' ? '▲' : '▼';
+                sortIndicator.style.opacity = '1';
+            } else {
+                sortIndicator.textContent = '▲';
+                sortIndicator.style.opacity = '0.3';
+            }
+            sortContainer.appendChild(sortIndicator);
+            
+            th.appendChild(sortContainer);
+            
+            if (field === 'Code') {
+                th.classList.add('sticky-column');
+            }
+            
+            th.addEventListener('click', () => sortByField(field));
+            headerRow.appendChild(th);
+        });
+        
+        const actionsHeader = document.createElement('th');
+        actionsHeader.textContent = 'Actions';
+        actionsHeader.style.width = '100px';
+        headerRow.appendChild(actionsHeader);
+        
+        thead.innerHTML = '';
+        thead.appendChild(headerRow);
+    }
 }
 
 // Render table body
@@ -289,9 +418,17 @@ function renderTable(changedIndices = new Set()) {
                 } else {
                     td.textContent = '';
                 }
+                td.classList.add('anbar-column');
+                // Right-align numeric ANBAR values
+                td.style.textAlign = 'right';
             } else {
                 const value = record[field];
                 td.textContent = value !== null && value !== undefined ? value : '';
+                
+                // Right-align numeric fields (except Code)
+                if (field !== 'Code' && value !== null && value !== undefined && !isNaN(value)) {
+                    td.style.textAlign = 'right';
+                }
             }
             
             // Make Code column sticky
@@ -332,6 +469,9 @@ function sortByField(field) {
         state.sortField = field;
         state.sortDirection = 'asc';
     }
+    
+    // Save sort preferences
+    saveSortPreferences();
     
     sortRecords();
     renderTableHeader();  // Re-render header to update sort indicators

@@ -260,6 +260,43 @@ body.dark-mode {
     }
 }
 
+// ANBAR grouped header styles
+.data-table th.anbar-group-header {
+    text-align: center;
+    border-left: 1px dashed rgba(0, 0, 0, 0.15);
+    border-right: 1px dashed rgba(0, 0, 0, 0.15);
+    font-weight: 700;
+    
+    .dark-mode & {
+        border-left-color: rgba(255, 255, 255, 0.15);
+        border-right-color: rgba(255, 255, 255, 0.15);
+    }
+}
+
+// ANBAR column styles
+.data-table th.anbar-column,
+.data-table td.anbar-column {
+    border-left: 1px dashed rgba(0, 0, 0, 0.1);
+    
+    .dark-mode & {
+        border-left-color: rgba(255, 255, 255, 0.1);
+    }
+    
+    &:last-of-type {
+        border-right: 1px dashed rgba(0, 0, 0, 0.1);
+        
+        .dark-mode & {
+            border-right-color: rgba(255, 255, 255, 0.1);
+        }
+    }
+}
+
+.data-table th.anbar-column {
+    font-size: 0.8rem;
+    padding: 0.5rem 0.75rem;
+    text-align: center;
+}
+
 // Sticky header cell needs higher z-index than both regular headers and sticky body cells
 .data-table th.sticky-column {
     z-index: 15;
