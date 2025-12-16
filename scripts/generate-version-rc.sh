@@ -27,6 +27,16 @@ else
     REPO_NAME="Unknown"
 fi
 
+# Validate REPO_OWNER and REPO_NAME to prevent injection (allow alphanumeric, dash, underscore, dot)
+if [[ ! "$REPO_OWNER" =~ ^[a-zA-Z0-9._-]+$ ]]; then
+    echo "Warning: Invalid repository owner format, using default" >&2
+    REPO_OWNER="Unknown"
+fi
+if [[ ! "$REPO_NAME" =~ ^[a-zA-Z0-9._-]+$ ]]; then
+    echo "Warning: Invalid repository name format, using default" >&2
+    REPO_NAME="Unknown"
+fi
+
 # Function to escape strings for C string literals
 escape_c_string() {
     # Escape backslashes first, then quotes, then newlines
