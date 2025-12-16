@@ -679,22 +679,22 @@ async function fetchInitialData() {
         
         const data = await response.json();
         
-        if (data.success && data.records) {
-            // Convert records object (with Code as keys) to array
-            state.records = Object.values(data.records);
-            
-            if (state.records.length > 0) {
-                state.fields = Object.keys(state.records[0]);
-                // Ensure Code is always the first column
-                ensureCodeFirst();
-                renderTableHeader();
-                updateFieldFilter();
-            }
-            
-            filterRecords();
-            renderTable();
-            updateCounts();
+        // data is now in transformed format: { "101": {...}, "102": {...}, ... }
+        // Convert to array, adding Code field from the key
+        state.records = Object.entries(data).map(([code, record]) => ({
+            Code: code,
+            ...record
+        }));
+        
+        if (state.records.length > 0) {
+            extractFields();
+            renderTableHeader();
+            updateFieldFilter();
         }
+        
+        filterRecords();
+        renderTable();
+        updateCounts();
     } catch (error) {
         console.error('Failed to fetch initial data:', error);
     }
