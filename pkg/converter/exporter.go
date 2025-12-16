@@ -4,6 +4,7 @@ import (
 	"encoding/csv"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"regexp"
 	"strings"
@@ -100,6 +101,67 @@ func (e *Exporter) ExportToCSV(records []paradox.Record, fields []paradox.Field,
 			}
 		}
 		if err := writer.Write(row); err != nil {
+			return fmt.Errorf("failed to write CSV row: %w", err)
+		}
+	}
+
+	return nil
+}
+
+// ExportToJSONWriter exports records to JSON format writing to the provided io.Writer
+func (e *Exporter) ExportToJSONWriter(records []paradox.Record, writer io.Writer) error {
+	// Convert string fields if converter is set
+	if e.converter != nil {
+		records = e.convertRecords(records)
+	}
+
+	// Transform records to use Code as key and optimize structure
+	transformed := e.TransformRecords(records)
+
+	// Use custom JSON formatting to keep ANBAR inline
+	data, err := json.MarshalIndent(transformed, "", "  ")
+	if err != nil {
+		return fmt.Errorf("failed to encode JSON: %w", err)
+	}
+
+	// Post-process to make ANBAR arrays inline
+	output := makeArraysInline(string(data), "ANBAR")
+
+	if _, err := writer.Write([]byte(output)); err != nil {
+		return fmt.Errorf("failed to write JSON: %w", err)
+	}
+
+	return nil
+}
+
+// ExportToCSVWriter exports records to CSV format writing to the provided io.Writer
+func (e *Exporter) ExportToCSVWriter(records []paradox.Record, fields []paradox.Field, writer io.Writer) error {
+	// Convert string fields if converter is set
+	if e.converter != nil {
+		records = e.convertRecords(records)
+	}
+
+	csvWriter := csv.NewWriter(writer)
+	defer csvWriter.Flush()
+
+	// Write header
+	header := make([]string, len(fields))
+	for i, field := range fields {
+		header[i] = field.Name
+	}
+	if err := csvWriter.Write(header); err != nil {
+		return fmt.Errorf("failed to write CSV header: %w", err)
+	}
+
+	// Write records
+	for _, record := range records {
+		row := make([]string, len(fields))
+		for i, field := range fields {
+			if val, ok := record[field.Name]; ok {
+				row[i] = fmt.Sprintf("%v", val)
+			}
+		}
+		if err := csvWriter.Write(row); err != nil {
 			return fmt.Errorf("failed to write CSV row: %w", err)
 		}
 	}
