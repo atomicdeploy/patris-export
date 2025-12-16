@@ -817,3 +817,48 @@ body.dark-mode {
     font-size: 0.75rem;
     transition: opacity 0.15s ease;
 }
+
+// Footer
+.footer {
+    background: $bg-light;
+    border-top: 1px solid $border-light;
+    padding: 0.75rem 1.5rem;
+    font-size: 0.8125rem;
+    color: $text-light-secondary;
+    flex-shrink: 0;
+    
+    .dark-mode & {
+        background: $bg-dark;
+        border-top-color: $border-dark;
+        color: $text-dark-secondary;
+    }
+}
+
+.footer-content {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 2rem;
+    flex-wrap: wrap;
+}
+
+.footer-section {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+.footer-label {
+    font-weight: 500;
+    opacity: 0.7;
+}
+
+.footer-value {
+    font-family: 'SF Mono', 'Monaco', 'Inconsolata', 'Roboto Mono', 'Consolas', 'Courier New', monospace;
+    font-weight: 600;
+    color: $text-light;
+    
+    .dark-mode & {
+        color: $text-dark;
+    }
+}

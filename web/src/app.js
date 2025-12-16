@@ -102,6 +102,9 @@ function handleWebSocketMessage(data) {
     } else if (data.type === 'update') {
         // Incremental update
         
+        // Update footer timestamp
+        updateFooterLastUpdate();
+        
         // Handle deleted records (by Code)
         if (data.deleted && data.deleted.length > 0) {
             const deletedCodes = new Set(data.deleted.map(String));
@@ -159,6 +162,44 @@ function updateStatus(status, text) {
     
     indicator.className = 'status-indicator ' + status;
     statusText.textContent = text;
+    
+    // Update footer connection status
+    updateFooterConnection(text);
+}
+
+// Update footer information
+function updateFooter() {
+    // Update file name from URL or window title
+    const footerFile = document.getElementById('footerFile');
+    const fileName = window.location.pathname.split('/').pop() || 'data';
+    footerFile.textContent = fileName;
+    
+    // Update last update time
+    updateFooterLastUpdate();
+    
+    // Update record count
+    updateFooterRecordCount();
+}
+
+function updateFooterLastUpdate(timestamp) {
+    const footerLastUpdate = document.getElementById('footerLastUpdate');
+    if (timestamp) {
+        const date = new Date(timestamp);
+        footerLastUpdate.textContent = date.toLocaleString();
+    } else {
+        const now = new Date();
+        footerLastUpdate.textContent = now.toLocaleString();
+    }
+}
+
+function updateFooterRecordCount() {
+    const footerRecordCount = document.getElementById('footerRecordCount');
+    footerRecordCount.textContent = state.records.length.toLocaleString();
+}
+
+function updateFooterConnection(status) {
+    const footerConnection = document.getElementById('footerConnection');
+    footerConnection.textContent = status;
 }
 
 // Extract and organize fields from records
@@ -655,6 +696,9 @@ function updateFieldFilter() {
 function updateCounts() {
     document.getElementById('totalCount').textContent = state.records.length;
     document.getElementById('filteredCount').textContent = state.filteredRecords.length;
+    
+    // Update footer record count
+    updateFooterRecordCount();
 }
 
 // Inspect record
@@ -731,6 +775,9 @@ function init() {
     
     // Initialize theme
     initTheme();
+    
+    // Initialize footer
+    updateFooter();
     
     // Set up event listeners
     document.getElementById('searchInput').addEventListener('input', (e) => {
