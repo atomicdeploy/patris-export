@@ -185,7 +185,7 @@ func (s *Server) handleGetRecords(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"success": true,
-		"count":   len(records),
+		"count":   len(transformed),
 		"records": transformed,
 	})
 }
@@ -288,7 +288,7 @@ func (s *Server) sendRecordsToClient(conn *websocket.Conn) {
 	message := map[string]interface{}{
 		"type":      "update",
 		"timestamp": time.Now().Format(time.RFC3339),
-		"count":     len(records),
+		"count":     len(transformed),
 		"records":   transformed,
 	}
 

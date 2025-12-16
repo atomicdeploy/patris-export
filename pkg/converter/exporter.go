@@ -19,6 +19,10 @@ const (
 	FormatCSV  ExportFormat = "csv"
 )
 
+// Regular expression to match numbered ANBAR fields (ANBAR1, ANBAR2, etc.)
+var anbarFieldRegex = regexp.MustCompile(`^ANBAR\d+$`)
+
+
 // Exporter handles exporting Paradox database records
 type Exporter struct {
 	converter func(string) string
@@ -184,13 +188,12 @@ func (e *Exporter) TransformRecords(records []paradox.Record) map[string]interfa
 			}
 			
 			// Collect numbered ANBAR fields into array (ANBAR1, ANBAR2, etc.)
-			// Skip the base "ANBAR" field itself if it exists
-			if strings.HasPrefix(key, "ANBAR") && key != "ANBAR" && len(key) > 5 {
+			if anbarFieldRegex.MatchString(key) {
 				anbarValues = append(anbarValues, value)
 				continue
 			}
 			
-			// Add other fields (including base "ANBAR" if present, though unlikely)
+			// Add all other fields
 			optimized[key] = value
 		}
 		
