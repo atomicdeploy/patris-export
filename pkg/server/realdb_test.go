@@ -105,20 +105,54 @@ func TestRealDatabaseChanges(t *testing.T) {
 	}
 	
 	// Verify the specific values (allow both int and float64 since JSON uses float64 for numbers)
-	oldVal := fmt.Sprintf("%v", foreshChange.OldValue)
-	newVal := fmt.Sprintf("%v", foreshChange.NewValue)
+	// Convert to float64 for comparison since Paradox DB may return numeric values as floats
+	oldVal := normalizeNumericValue(foreshChange.OldValue)
+	newVal := normalizeNumericValue(foreshChange.NewValue)
 	
-	if oldVal != "8888" {
-		t.Errorf("Expected old FOROSH value '8888', got '%s'", oldVal)
+	expectedOld := 8888.0
+	expectedNew := 9999.0
+	
+	if oldVal != expectedOld {
+		t.Errorf("Expected old FOROSH value %.0f, got %.0f (raw: %v, type: %T)", expectedOld, oldVal, foreshChange.OldValue, foreshChange.OldValue)
 	}
-	if newVal != "9999" {
-		t.Errorf("Expected new FOROSH value '9999', got '%s'", newVal)
+	if newVal != expectedNew {
+		t.Errorf("Expected new FOROSH value %.0f, got %.0f (raw: %v, type: %T)", expectedNew, newVal, foreshChange.NewValue, foreshChange.NewValue)
 	}
 	
 	t.Logf("\n✅ Real database change detection test passed")
-	t.Logf("   Successfully detected expected change: Code=%s, FOROSH: %s → %s", 
+	t.Logf("   Successfully detected expected change: Code=%s, FOROSH: %.0f → %.0f", 
 		expectedCode, oldVal, newVal)
 	t.Logf("   This validates that field-level change tracking works with production data")
+}
+
+// normalizeNumericValue converts various numeric types to float64 for comparison
+func normalizeNumericValue(val interface{}) float64 {
+	switch v := val.(type) {
+	case float64:
+		return v
+	case float32:
+		return float64(v)
+	case int:
+		return float64(v)
+	case int32:
+		return float64(v)
+	case int64:
+		return float64(v)
+	case uint:
+		return float64(v)
+	case uint32:
+		return float64(v)
+	case uint64:
+		return float64(v)
+	default:
+		// Try to parse as string
+		if str, ok := val.(string); ok {
+			var f float64
+			fmt.Sscanf(str, "%f", &f)
+			return f
+		}
+		return 0
+	}
 }
 
 // getModifiedCodes returns a list of codes from the modified map
