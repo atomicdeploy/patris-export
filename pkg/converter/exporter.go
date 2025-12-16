@@ -177,20 +177,20 @@ func (e *Exporter) TransformRecords(records []paradox.Record) map[string]interfa
 				continue
 			}
 			
-			// Collect ANBAR fields into array
-			if strings.HasPrefix(key, "ANBAR") && len(key) > 5 {
-				// Extract ANBAR number (ANBAR1, ANBAR2, etc.)
-				anbarValues = append(anbarValues, value)
-				continue
-			}
-			
-			// Keep ALLANBAR as-is
+			// Keep ALLANBAR as-is (check first to avoid confusion with ANBAR pattern)
 			if key == "ALLANBAR" {
 				optimized[key] = value
 				continue
 			}
 			
-			// Add other fields
+			// Collect numbered ANBAR fields into array (ANBAR1, ANBAR2, etc.)
+			// Skip the base "ANBAR" field itself if it exists
+			if strings.HasPrefix(key, "ANBAR") && key != "ANBAR" && len(key) > 5 {
+				anbarValues = append(anbarValues, value)
+				continue
+			}
+			
+			// Add other fields (including base "ANBAR" if present, though unlikely)
 			optimized[key] = value
 		}
 		
