@@ -1,4 +1,4 @@
-name: Build Windows MSVC
+name: Build Windows MinGW
 
 on:
   push:
@@ -12,8 +12,8 @@ permissions:
   contents: read
 
 jobs:
-  build-windows-msvc:
-    name: Build on Windows (MSVC)
+  build-windows-mingw:
+    name: Build on Windows (MinGW)
     runs-on: windows-latest
     permissions:
       contents: read

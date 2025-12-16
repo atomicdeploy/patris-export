@@ -81,14 +81,14 @@ while i < len(lines):
 if patched:
     with open('CMakeLists.txt', 'w') as f:
         f.writelines(new_lines)
-    print("✓ Patched successfully")
+    print("Patched successfully")
 else:
-    print("✗ Warning: Pattern not found, CMakeLists.txt may have already been patched or has different format")
+    print("Warning: Pattern not found, CMakeLists.txt may have already been patched or has different format")
 PYTHON_SCRIPT
     
-    echo "  ✓ Separated warning flags from definitions and applied with generator expression"
+    echo "  Separated warning flags from definitions and applied with generator expression"
 else
     echo "  No add_definitions with warning flags found - checking if already patched..."
 fi
 
-echo "✅ pxlib CMakeLists.txt patched successfully"
+echo "pxlib CMakeLists.txt patched successfully"

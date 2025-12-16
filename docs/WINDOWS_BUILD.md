@@ -4,10 +4,10 @@ This document explains how to build the pxlib library for Windows, which is requ
 
 ## CI/CD Builds
 
-The project includes two automated Windows build workflows:
+The project includes two automated Windows build workflows, both using MinGW:
 
-1. **Windows MSVC Build** (`.github/workflows/build-windows.yml`) - Builds directly on Windows runners using MSVC
-2. **Windows MinGW Build** (`.github/workflows/build.yml`) - Cross-compiles from Linux to Windows using MinGW
+1. **Windows MinGW Build** (`.github/workflows/build-windows.yml`) - Builds on Windows runners using MinGW installed via chocolatey
+2. **Windows MinGW Cross-compile Build** (`.github/workflows/build.yml`) - Cross-compiles from Linux to Windows using MinGW cross-compiler
 
 Both workflows automatically include Windows resource files with version information for both the executable and the pxlib DLL.
 

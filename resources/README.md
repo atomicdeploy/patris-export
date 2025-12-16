@@ -12,7 +12,7 @@ For the pxlib.dll library, we use the upstream version information from the pxli
 
 Resource files are automatically compiled by the build workflows:
 - `.github/workflows/build.yml` - MinGW cross-compilation from Linux to Windows
-- `.github/workflows/build-windows.yml` - Windows MSVC build
+- `.github/workflows/build-windows.yml` - Windows MinGW build (native on Windows)
 
 The resource files are compiled using `windres` (Windows Resource Compiler) and embedded into the executables/DLLs during the build process.
 
