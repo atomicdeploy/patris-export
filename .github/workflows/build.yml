@@ -36,6 +36,12 @@ jobs:
       run: |
         sudo apt-get update
         sudo apt-get install -y pxlib-dev pxlib1
+    
+    - name: Build web frontend
+      run: |
+        cd web
+        npm install
+        npm run build
         
     - name: Build
       run: make build-linux
@@ -75,6 +81,12 @@ jobs:
         echo "Checking MinGW installation..."
         x86_64-w64-mingw32-gcc --version
         ls -la /usr/share/mingw-w64/include/ 2>/dev/null || echo "MinGW headers not in standard location"
+    
+    - name: Build web frontend
+      run: |
+        cd web
+        npm install
+        npm run build
 
     - name: Build pxlib for Windows
       run: |

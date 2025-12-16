@@ -34,6 +34,12 @@ jobs:
       run: |
         sudo apt-get update
         sudo apt-get install -y pxlib-dev pxlib1
+    
+    - name: Build web frontend
+      run: |
+        cd web
+        npm install
+        npm run build
         
     - name: Run tests
       run: go test -v ./...
