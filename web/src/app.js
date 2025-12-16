@@ -353,16 +353,17 @@ function sortRecords() {
         if (state.sortField === 'Code') {
             aVal = String(aVal || '').padEnd(9, ' ');
             bVal = String(bVal || '').padEnd(9, ' ');
+            // Use pure string comparison for Code to respect padding
+            let result = aVal < bVal ? -1 : (aVal > bVal ? 1 : 0);
+            return state.sortDirection === 'asc' ? result : -result;
         } else {
             // Convert to string for comparison
             aVal = String(aVal || '');
             bVal = String(bVal || '');
+            // Use locale comparison with numeric support for other fields
+            let result = aVal.localeCompare(bVal, undefined, { numeric: true, sensitivity: 'base' });
+            return state.sortDirection === 'asc' ? result : -result;
         }
-        
-        // Perform comparison
-        let result = aVal.localeCompare(bVal, undefined, { numeric: true, sensitivity: 'base' });
-        
-        return state.sortDirection === 'asc' ? result : -result;
     });
 }
 
