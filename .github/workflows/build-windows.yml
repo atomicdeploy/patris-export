@@ -187,8 +187,8 @@ jobs:
           exit 1
         }
         
-        # Verify it reports the correct number of records
-        RECORD_COUNT=$(./patris-export-windows-amd64.exe info ../testdata/kala.db 2>/dev/null | grep -oP 'Records:\s+\K\d+' || echo "0")
+        # Verify it reports the correct number of records (use sed for portability, avoid grep -P locale issues)
+        RECORD_COUNT=$(./patris-export-windows-amd64.exe info ../testdata/kala.db 2>/dev/null | grep 'Records:' | sed 's/.*Records:[[:space:]]*\([0-9]*\).*/\1/' || echo "0")
         echo "Windows build reports $RECORD_COUNT records"
         
         if [ "$RECORD_COUNT" -eq "0" ]; then
