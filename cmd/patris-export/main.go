@@ -133,7 +133,7 @@ func runConvert(cmd *cobra.Command, args []string) {
 		// Parse debounce duration
 		debounceDuration := parseDebounceDuration(debounceString)
 
-		infoColor.Printf("👀 Watching file: %s (debounce: %s)\n", dbFile, debounceDuration)
+		infoColor.Printf("👀 Watching file: %s\n", dbFile)
 		infoColor.Println("📝 Press Ctrl+C to stop watching")
 
 		// Initial conversion
