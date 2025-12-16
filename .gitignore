@@ -5,6 +5,9 @@
 *.so
 *.dylib
 
+# Windows resource files (generated dynamically)
+cmd/patris-export/patris-export.rc
+
 # Windows resource compiled files
 *.syso
 

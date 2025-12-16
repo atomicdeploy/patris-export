@@ -7,8 +7,9 @@ set -e
 OUTPUT_FILE="${1:-cmd/patris-export/patris-export.rc}"
 
 # Get version from git tag or default to 1.0.0
-VERSION=$(git describe --tags --abbrev=0 2>/dev/null | sed 's/^v//' || echo "1.0.0")
-VERSION_COMMA=$(echo "$VERSION" | sed 's/\./, /g')
+VERSION=$(git describe --tags --abbrev=0 2>/dev/null || echo "v1.0.0")
+VERSION=$(echo "$VERSION" | sed 's/^v//')
+VERSION_COMMA=$(echo "$VERSION" | sed 's/\./,/g')
 
 # Get current year
 CURRENT_YEAR=$(date +%Y)
@@ -70,10 +71,10 @@ COMPANY_NAME_ESCAPED=$(escape_c_string "$REPO_OWNER")
 cat > "$OUTPUT_FILE" << EOF
 #include <windows.h>
 
-#define VER_FILEVERSION             $VERSION_COMMA, 0
+#define VER_FILEVERSION             $VERSION_COMMA,0
 #define VER_FILEVERSION_STR         "$VERSION.0"
 
-#define VER_PRODUCTVERSION          $VERSION_COMMA, 0
+#define VER_PRODUCTVERSION          $VERSION_COMMA,0
 #define VER_PRODUCTVERSION_STR      "$VERSION"
 
 #define VER_COMPANYNAME_STR         "$COMPANY_NAME_ESCAPED"
