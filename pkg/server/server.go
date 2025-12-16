@@ -129,7 +129,7 @@ func (s *Server) handleGetRecords(w http.ResponseWriter, r *http.Request) {
 
 	// Transform records to use Code as key (same format as convert command)
 	exporter := converter.NewExporter(nil)
-	transformed := exporter.TransformRecords(records)
+	transformed := exporter.TransformRecordsMap(records)
 
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	if err := json.NewEncoder(w).Encode(transformed); err != nil {

@@ -164,6 +164,35 @@ func (e *Exporter) ConvertAndTransformRecords(records []paradox.Record) map[stri
 	return e.TransformRecords(records)
 }
 
+// TransformRecordsMap transforms an array of map records to Code-keyed map format
+// This is used when records are already in map[string]interface{} format (e.g., from datasource)
+func (e *Exporter) TransformRecordsMap(records []map[string]interface{}) map[string]interface{} {
+	result := make(map[string]interface{})
+	
+	for _, record := range records {
+		// Extract Code as the key
+		codeKey := ""
+		if code, ok := record["Code"]; ok {
+			codeKey = fmt.Sprintf("%v", code)
+		} else {
+			// Skip records without Code
+			continue
+		}
+		
+		// Create a copy of the record without Code field (it becomes the key)
+		transformedRecord := make(map[string]interface{})
+		for key, value := range record {
+			if key != "Code" {
+				transformedRecord[key] = value
+			}
+		}
+		
+		result[codeKey] = transformedRecord
+	}
+	
+	return result
+}
+
 // TransformRecords transforms records for Patris81-specific output format:
 // - Use Code field as the key
 // - Ignore fields starting with "Sort"
