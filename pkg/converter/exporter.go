@@ -22,7 +22,6 @@ const (
 // Regular expression to match numbered ANBAR fields (ANBAR1, ANBAR2, etc.)
 var anbarFieldRegex = regexp.MustCompile(`^ANBAR\d+$`)
 
-
 // Exporter handles exporting Paradox database records
 type Exporter struct {
 	converter func(string) string

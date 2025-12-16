@@ -162,25 +162,8 @@ func (s *Server) handleGetRecords(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Create exporter with Patris2Fa converter to match convert command behavior
-	exp := converter.NewExporter(converter.Patris2Fa)
-	
-	// Convert string fields and transform records (combine ANBAR fields, skip Sort fields, etc.)
-	convertedRecords := make([]paradox.Record, len(records))
-	for i, record := range records {
-		convertedRecord := make(paradox.Record)
-		for key, value := range record {
-			if strVal, ok := value.(string); ok {
-				convertedRecord[key] = converter.Patris2Fa(strVal)
-			} else {
-				convertedRecord[key] = value
-			}
-		}
-		convertedRecords[i] = convertedRecord
-	}
-	
-	// Transform records to match the format used by the convert command
-	transformed := exp.TransformRecords(convertedRecords)
+	// Convert and transform records to match the format used by the convert command
+	transformed := s.convertAndTransformRecords(records)
 
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	json.NewEncoder(w).Encode(map[string]interface{}{
@@ -265,25 +248,8 @@ func (s *Server) sendRecordsToClient(conn *websocket.Conn) {
 		return
 	}
 
-	// Create exporter with Patris2Fa converter to match convert command behavior
-	exp := converter.NewExporter(converter.Patris2Fa)
-	
-	// Convert string fields
-	convertedRecords := make([]paradox.Record, len(records))
-	for i, record := range records {
-		convertedRecord := make(paradox.Record)
-		for key, value := range record {
-			if strVal, ok := value.(string); ok {
-				convertedRecord[key] = converter.Patris2Fa(strVal)
-			} else {
-				convertedRecord[key] = value
-			}
-		}
-		convertedRecords[i] = convertedRecord
-	}
-	
-	// Transform records to match the format used by the convert command
-	transformed := exp.TransformRecords(convertedRecords)
+	// Convert and transform records to match the format used by the convert command
+	transformed := s.convertAndTransformRecords(records)
 
 	message := map[string]interface{}{
 		"type":      "update",
@@ -333,6 +299,30 @@ func (s *Server) StartWatching() error {
 	log.Printf("👀 Watching database file: %s", filepath.Base(s.dbPath))
 
 	return nil
+}
+
+// convertAndTransformRecords converts record text encoding and transforms them
+// to match the format used by the convert command (combines ANBAR fields, removes Sort fields, etc.)
+func (s *Server) convertAndTransformRecords(records []paradox.Record) map[string]interface{} {
+	// Create exporter with Patris2Fa converter to match convert command behavior
+	exp := converter.NewExporter(converter.Patris2Fa)
+	
+	// Convert string fields
+	convertedRecords := make([]paradox.Record, len(records))
+	for i, record := range records {
+		convertedRecord := make(paradox.Record)
+		for key, value := range record {
+			if strVal, ok := value.(string); ok {
+				convertedRecord[key] = converter.Patris2Fa(strVal)
+			} else {
+				convertedRecord[key] = value
+			}
+		}
+		convertedRecords[i] = convertedRecord
+	}
+	
+	// Transform records to match the format used by the convert command
+	return exp.TransformRecords(convertedRecords)
 }
 
 // Start starts the HTTP server
