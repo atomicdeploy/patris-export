@@ -69,13 +69,59 @@ function initWebSocket() {
     };
 }
 
+// Transform raw record to match the JSON format (combine ANBAR fields into array)
+function transformRecord(record) {
+    const transformed = {};
+    const anbarFields = [];
+    let maxAnbarIndex = 0;
+    
+    for (const [key, value] of Object.entries(record)) {
+        // Skip Sort fields
+        if (key.startsWith('Sort')) {
+            continue;
+        }
+        
+        // Keep ALLANBAR as-is
+        if (key === 'ALLANBAR') {
+            transformed[key] = value;
+            continue;
+        }
+        
+        // Collect numbered ANBAR fields
+        const anbarMatch = key.match(/^ANBAR(\d+)$/);
+        if (anbarMatch) {
+            const index = parseInt(anbarMatch[1]);
+            anbarFields[index - 1] = value;
+            if (index > maxAnbarIndex) {
+                maxAnbarIndex = index;
+            }
+            continue;
+        }
+        
+        // Add all other fields
+        transformed[key] = value;
+    }
+    
+    // Add ANBAR array if we collected any
+    if (maxAnbarIndex > 0) {
+        // Fill missing indices with 0
+        const anbarArray = [];
+        for (let i = 0; i < maxAnbarIndex; i++) {
+            anbarArray.push(anbarFields[i] !== undefined ? anbarFields[i] : 0);
+        }
+        transformed.ANBAR = anbarArray;
+    }
+    
+    return transformed;
+}
+
 // Handle WebSocket messages
 function handleWebSocketMessage(data) {
     const changedIndices = new Set();
     
     if (data.type === 'initial') {
-        // Initial load - set all records
-        state.records = data.added || [];
+        // Initial load - set all records and transform them
+        state.records = (data.added || []).map(transformRecord);
         
         // Mark all as changed for initial highlight
         if (state.settings.highlightChanges) {
@@ -97,10 +143,11 @@ function handleWebSocketMessage(data) {
         // Handle added records
         if (data.added && data.added.length > 0) {
             const startIndex = state.records.length;
-            state.records.push(...data.added);
+            const transformedAdded = data.added.map(transformRecord);
+            state.records.push(...transformedAdded);
             
             // Mark added records as changed
-            data.added.forEach((_, i) => {
+            transformedAdded.forEach((_, i) => {
                 changedIndices.add(startIndex + i);
             });
         }
@@ -111,12 +158,13 @@ function handleWebSocketMessage(data) {
         // if the backend sends explicit modified records in the future.
         if (data.modified && data.modified.length > 0) {
             data.modified.forEach(modifiedRecord => {
+                const transformed = transformRecord(modifiedRecord);
                 // Find and update the record in state
                 // Performance note: For large datasets, consider using a Map with record IDs
-                const modKey = JSON.stringify(modifiedRecord);
+                const modKey = JSON.stringify(transformed);
                 const index = state.records.findIndex(r => JSON.stringify(r) === modKey);
                 if (index !== -1) {
-                    state.records[index] = modifiedRecord;
+                    state.records[index] = transformed;
                     changedIndices.add(index);
                 }
             });
@@ -417,7 +465,8 @@ async function fetchInitialData() {
         const data = await response.json();
         
         if (data.success && data.records) {
-            state.records = data.records;
+            // Convert records object (with Code as keys) to array
+            state.records = Object.values(data.records);
             
             if (state.records.length > 0) {
                 state.fields = Object.keys(state.records[0]);

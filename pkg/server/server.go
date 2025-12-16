@@ -204,8 +204,19 @@ func (s *Server) sendRecordsToClient(conn *websocket.Conn) {
 		return
 	}
 
-	// Convert and transform records to match the format used by the convert command
-	transformed := s.convertAndTransformRecords(records)
+	// Convert records (text encoding only, no transformation)
+	convertedRecords := make([]paradox.Record, len(records))
+	for i, record := range records {
+		convertedRecord := make(paradox.Record)
+		for key, value := range record {
+			if strVal, ok := value.(string); ok {
+				convertedRecord[key] = converter.Patris2Fa(strVal)
+			} else {
+				convertedRecord[key] = value
+			}
+		}
+		convertedRecords[i] = convertedRecord
+	}
 
 	// Send as initial load (all records are "added")
 	message := ChangeSet{
