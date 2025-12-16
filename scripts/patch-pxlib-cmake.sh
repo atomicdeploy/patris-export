@@ -21,16 +21,21 @@ cd "$PXLIB_DIR"
 
 echo "Patching CMakeLists.txt to fix windres compilation..."
 
-# The issue is that CMake passes C compiler flags like -W to windres, which doesn't accept them
-# We need to set the RC compiler flags separately to prevent this
+# The issue is that CMake passes C compiler flags like -W, -Wall, etc. to windres via target_compile_options
+# windres doesn't understand these flags and fails
+# Solution: Use generator expressions to apply flags only to C/CXX files, not RC files
 
-# Find the line where the RC file is added and add proper configuration before it
-if grep -q "target_sources(pxlib PRIVATE.*pxlib.rc)" CMakeLists.txt; then
-    # Add RC compiler configuration before the target_sources line
-    sed -i '/target_sources(pxlib PRIVATE.*pxlib.rc)/i \    # Configure RC compiler to not use C compiler flags\n    set_source_files_properties(${CMAKE_BINARY_DIR}/pxlib.rc PROPERTIES\n        COMPILE_FLAGS ""\n        LANGUAGE RC\n    )' CMakeLists.txt
-    echo "  Added RC compiler configuration to CMakeLists.txt"
+# First, find all target_compile_options lines and wrap them with generator expressions
+# This ensures flags are only applied when compiling C/C++ code, not RC files
+if grep -q "target_compile_options.*-Wall\|-W" CMakeLists.txt; then
+    echo "  Wrapping compiler flags in generator expressions..."
+    # We need to wrap each flag in a generator expression that excludes RC language
+    # Replace patterns like: target_compile_options(pxlib PRIVATE -Wall -Wpointer-arith -W)
+    # With: target_compile_options(pxlib PRIVATE $<$<COMPILE_LANGUAGE:C>:-Wall -Wpointer-arith -W>)
+    sed -i '/target_compile_options.*pxlib.*PRIVATE/s/PRIVATE \(.*\))/PRIVATE $<$<COMPILE_LANGUAGE:C>:\1>)/' CMakeLists.txt
+    echo "  ✓ Wrapped compiler flags to exclude RC files"
 else
-    echo "  Warning: No RC file target_sources found in CMakeLists.txt"
+    echo "  No target_compile_options with warning flags found"
 fi
 
 echo "✅ pxlib CMakeLists.txt patched successfully"
