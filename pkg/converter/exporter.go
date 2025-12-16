@@ -221,7 +221,7 @@ func (e *Exporter) TransformRecords(records []paradox.Record) map[string]interfa
 			// Find the maximum ANBAR number to determine array size
 			maxAnbarIndex := 0
 			for index := range anbarFields {
-				if index >  maxAnbarIndex {
+				if index > maxAnbarIndex {
 					maxAnbarIndex = index
 				}
 			}
