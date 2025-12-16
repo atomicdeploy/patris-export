@@ -199,26 +199,36 @@ func (e *Exporter) TransformRecords(records []paradox.Record) map[string]interfa
 				continue
 			}
 			
-			// Collect numbered ANBAR fields (ANBAR1, ANBAR2, etc.)
-			if anbarFieldRegex.MatchString(key) {
-				// Extract the number from ANBARn
-				var index int
-				fmt.Sscanf(key, "ANBAR%d", &index)
-				anbarFields[index] = value
-				if index > maxAnbarIndex {
-					maxAnbarIndex = index
-				}
-				continue
-			}
+      // Collect numbered ANBAR fields into map (ANBAR1, ANBAR2, etc.)
+      if anbarFieldRegex.MatchString(key) {
+        // Extract the number from ANBARn field name (e.g., "ANBAR1" -> 1)
+        var index int
+        if n, _ := fmt. Sscanf(key, "ANBAR%d", &index); n == 1 && index > 0 {
+          anbarFields[index] = value
+          if index > maxAnbarIndex {
+            maxAnbarIndex = index
+          }
+        }
+        continue
+      }
 			
 			// Add all other fields
 			optimized[key] = value
 		}
 		
-		// Add ANBAR array if we collected any, in sorted order
+		// Add ANBAR array if we collected any, in sorted order by field number
 		if len(anbarFields) > 0 {
-			anbarValues := make([]interface{}, maxAnbarIndex)
-			for i := 1; i <= maxAnbarIndex; i++ {
+			// Find the maximum ANBAR number to determine array size
+			maxAnbarIndex := 0
+			for index := range anbarFields {
+				if index >  maxAnbarIndex {
+					maxAnbarIndex = index
+				}
+			}
+			
+			// Build array with correct ordering (1-indexed fields -> 0-indexed array)
+			anbarValues := make([]interface{},  maxAnbarIndex)
+			for i := 1; i <=  maxAnbarIndex; i++ {
 				if val, ok := anbarFields[i]; ok {
 					anbarValues[i-1] = val
 				} else {

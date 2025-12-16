@@ -403,8 +403,8 @@ func (s *Server) computeChangesTransformed(newRecords []map[string]interface{}) 
 	return changes
 }
 
-// StartWatching starts watching the database file for changes
-func (s *Server) StartWatching() error {
+// StartWatching starts watching the database file for changes with the specified debounce duration
+func (s *Server) StartWatching(debounceDuration time.Duration) error {
 	fw, err := watcher.NewFileWatcher()
 	if err != nil {
 		return fmt.Errorf("failed to create file watcher: %w", err)
@@ -413,9 +413,9 @@ func (s *Server) StartWatching() error {
 	s.watcher = fw
 
 	if err := fw.Watch(s.dbPath, func(path string) {
-		log.Printf("🔄 Database file changed, broadcasting to clients")
+		log.Printf("🔄 File changed: %s", filepath.Base(path))
 		s.broadcastUpdate()
-	}); err != nil {
+	}, debounceDuration); err != nil {
 		return fmt.Errorf("failed to watch file: %w", err)
 	}
 
@@ -437,7 +437,7 @@ func (s *Server) convertAndTransformRecords(records []paradox.Record) map[string
 func (s *Server) Start(addr string) error {
 	log.Printf("🚀 Starting server on %s", addr)
 	log.Printf("📊 Serving database: %s", filepath.Base(s.dbPath))
-	
+
 	if _, err := os.Stat(s.dbPath); os.IsNotExist(err) {
 		return fmt.Errorf("database file does not exist: %s", s.dbPath)
 	}
