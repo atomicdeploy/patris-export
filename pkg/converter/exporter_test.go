@@ -261,7 +261,9 @@ func TestExportToCSVWriter(t *testing.T) {
 	}
 }
 
-// jsonEqual compares two JSON objects for equality using simple marshaling
+// jsonEqual compares two JSON objects for equality.
+// Both inputs should be unmarshaled JSON structures (maps/slices).
+// This works because Go's json.Marshal produces consistent output for map types.
 func jsonEqual(a, b interface{}) bool {
 	aJSON, err := json.Marshal(a)
 	if err != nil {

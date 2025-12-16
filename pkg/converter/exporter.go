@@ -92,7 +92,6 @@ func (e *Exporter) ExportToCSVWriter(records []paradox.Record, fields []paradox.
 	}
 
 	csvWriter := csv.NewWriter(writer)
-	defer csvWriter.Flush()
 
 	// Write header
 	header := make([]string, len(fields))
@@ -114,6 +113,12 @@ func (e *Exporter) ExportToCSVWriter(records []paradox.Record, fields []paradox.
 		if err := csvWriter.Write(row); err != nil {
 			return fmt.Errorf("failed to write CSV row: %w", err)
 		}
+	}
+
+	// Explicitly flush and check for errors
+	csvWriter.Flush()
+	if err := csvWriter.Error(); err != nil {
+		return fmt.Errorf("failed to flush CSV: %w", err)
 	}
 
 	return nil
