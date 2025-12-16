@@ -4,7 +4,7 @@
 
 set -e
 
-if [ -z "$1" ]; then
+if [ -z "$1" ] || [ -z "$2" ]; then
     echo "Usage: $0 <path-to-pxlib-directory> <path-to-resource-file>"
     exit 1
 fi
