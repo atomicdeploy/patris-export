@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/atomicdeploy/patris-export/pkg/converter"
+	"github.com/atomicdeploy/patris-export/pkg/datasource"
 	"github.com/atomicdeploy/patris-export/pkg/paradox"
 	"github.com/atomicdeploy/patris-export/pkg/watcher"
 	"github.com/atomicdeploy/patris-export/web"
@@ -20,47 +21,41 @@ import (
 
 // Server represents the HTTP/WebSocket server
 type Server struct {
-	router         *mux.Router
-	dbPath         string
-	charMap        converter.CharMapping
-	watcher        *watcher.FileWatcher
-	wsClients      map[*websocket.Conn]bool
-	wsClientsMu    sync.RWMutex
-	upgrader       websocket.Upgrader
-	lastRecords    []paradox.Record
-	lastRecordsMu  sync.RWMutex
+	router          *mux.Router
+	dbPath          string
+	charMap         converter.CharMapping
+	dataSource      datasource.DataSource
+	watcher         *watcher.FileWatcher
+	wsClients       map[*websocket.Conn]*sync.Mutex
+	wsClientsMu     sync.RWMutex
+	upgrader        websocket.Upgrader
+	lastRecords     []map[string]interface{}
+	lastRecordsMu   sync.RWMutex
 }
 
 // ChangeSet represents incremental changes to the database
 type ChangeSet struct {
-	Type      string             `json:"type"`
-	Timestamp string             `json:"timestamp"`
-	Added     []paradox.Record   `json:"added,omitempty"`
-	Modified  []paradox.Record   `json:"modified,omitempty"`
-	Deleted   []int              `json:"deleted,omitempty"`
-	TotalCount int               `json:"total_count"`
-}
-
-// recordKey generates a unique key for a record
-// Note: Uses JSON serialization for simplicity and correctness.
-// For very large datasets (>10k records), consider using a hash-based approach
-// or implementing a proper record ID system for better performance.
-func recordKey(record paradox.Record) string {
-	data, err := json.Marshal(record)
-	if err != nil {
-		// Fallback to empty string if marshaling fails (shouldn't happen for valid records)
-		return ""
-	}
-	return string(data)
+	Type       string                   `json:"type"`
+	Timestamp  string                   `json:"timestamp"`
+	Added      []map[string]interface{} `json:"added,omitempty"`
+	Deleted    []string                 `json:"deleted,omitempty"`
+	TotalCount int                      `json:"total_count"`
 }
 
 // NewServer creates a new server instance
 func NewServer(dbPath string, charMap converter.CharMapping) (*Server, error) {
+	// Create data source (supports both .db and .json files)
+	ds, err := datasource.NewDataSource(dbPath, charMap)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create data source: %w", err)
+	}
+
 	s := &Server{
-		router:    mux.NewRouter(),
-		dbPath:    dbPath,
-		charMap:   charMap,
-		wsClients: make(map[*websocket.Conn]bool),
+		router:     mux.NewRouter(),
+		dbPath:     dbPath,
+		charMap:    charMap,
+		dataSource: ds,
+		wsClients:  make(map[*websocket.Conn]*sync.Mutex),
 		upgrader: websocket.Upgrader{
 			// Security: Configure origin checking for production use
 			// Default allows localhost only
@@ -112,27 +107,17 @@ func (s *Server) handleViewer(w http.ResponseWriter, r *http.Request) {
 
 // handleGetRecords returns all database records as JSON
 func (s *Server) handleGetRecords(w http.ResponseWriter, r *http.Request) {
-	db, err := paradox.Open(s.dbPath)
-	if err != nil {
-		http.Error(w, fmt.Sprintf("Failed to open database: %v", err), http.StatusInternalServerError)
-		return
-	}
-	defer db.Close()
-
-	records, err := db.GetRecords()
+	records, err := s.dataSource.GetRecords()
 	if err != nil {
 		http.Error(w, fmt.Sprintf("Failed to read records: %v", err), http.StatusInternalServerError)
 		return
 	}
 
-	// Convert and transform records to match the format used by the convert command
-	transformed := s.convertAndTransformRecords(records)
-
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"success": true,
-		"count":   len(transformed),
-		"records": transformed,
+		"count":   len(records),
+		"records": records,
 	})
 }
 
@@ -169,14 +154,15 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	connMu := &sync.Mutex{}
 	s.wsClientsMu.Lock()
-	s.wsClients[conn] = true
+	s.wsClients[conn] = connMu
 	s.wsClientsMu.Unlock()
 
 	log.Printf("🔌 New WebSocket connection (total: %d)", len(s.wsClients))
 
 	// Send initial data
-	s.sendRecordsToClient(conn)
+	s.sendRecordsToClient(conn, connMu)
 
 	// Handle disconnection
 	go func() {
@@ -197,42 +183,36 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 }
 
 // sendRecordsToClient sends current database records to a WebSocket client
-func (s *Server) sendRecordsToClient(conn *websocket.Conn) {
-	db, err := paradox.Open(s.dbPath)
-	if err != nil {
-		log.Printf("Failed to open database: %v", err)
-		return
-	}
-	defer db.Close()
-
-	records, err := db.GetRecords()
+func (s *Server) sendRecordsToClient(conn *websocket.Conn, connMu *sync.Mutex) {
+	records, err := s.dataSource.GetRecords()
 	if err != nil {
 		log.Printf("Failed to read records: %v", err)
 		return
-	}
-
-	// Convert and transform records to match JSON export format
-	transformed := s.convertAndTransformRecords(records)
-	
-	// Convert map to array of records for WebSocket transmission
-	recordsList := make([]map[string]interface{}, 0, len(transformed))
-	for _, record := range transformed {
-		if recordMap, ok := record.(map[string]interface{}); ok {
-			recordsList = append(recordsList, recordMap)
-		}
 	}
 
 	// Send as initial load (all records are "added")
 	message := map[string]interface{}{
 		"type":        "initial",
 		"timestamp":   time.Now().Format(time.RFC3339),
-		"added":       recordsList,
-		"total_count": len(recordsList),
+		"added":       records,
+		"total_count": len(records),
 	}
 
-	if err := conn.WriteJSON(message); err != nil {
+	connMu.Lock()
+	err = conn.WriteJSON(message)
+	connMu.Unlock()
+
+	if err != nil {
 		log.Printf("Failed to send to WebSocket: %v", err)
+		return
 	}
+
+	// Store current records for future change detection
+	s.lastRecordsMu.Lock()
+	s.lastRecords = records
+	s.lastRecordsMu.Unlock()
+
+	log.Printf("📤 Sent initial %d records to client", len(records))
 }
 
 // broadcastUpdate broadcasts database changes to all connected WebSocket clients
@@ -242,102 +222,55 @@ func (s *Server) broadcastUpdate() {
 	s.wsClientsMu.RUnlock()
 
 	if clientCount == 0 {
+		log.Printf("⚠️  No clients connected, skipping broadcast")
 		return
 	}
 
 	log.Printf("📡 Broadcasting update to %d clients", clientCount)
 
 	// Get current records
-	db, err := paradox.Open(s.dbPath)
-	if err != nil {
-		log.Printf("Failed to open database: %v", err)
-		return
-	}
-	defer db.Close()
-
-	records, err := db.GetRecords()
+	records, err := s.dataSource.GetRecords()
 	if err != nil {
 		log.Printf("Failed to read records: %v", err)
 		return
 	}
 
-	// Convert and transform records to match JSON export format
-	transformed := s.convertAndTransformRecords(records)
-	
-	// Convert map to array of records
-	currentRecords := make([]map[string]interface{}, 0, len(transformed))
-	for _, record := range transformed {
-		if recordMap, ok := record.(map[string]interface{}); ok {
-			currentRecords = append(currentRecords, recordMap)
-		}
-	}
-
 	// Compute changes
 	s.lastRecordsMu.Lock()
-	changes := s.computeChangesTransformed(currentRecords)
-	s.lastRecords = records // Keep raw records for future comparisons
+	changes := s.computeChanges(records)
+	s.lastRecords = records
 	s.lastRecordsMu.Unlock()
+
+	// Log what we're sending
+	added := 0
+	deleted := 0
+	if a, ok := changes["added"].([]map[string]interface{}); ok {
+		added = len(a)
+	}
+	if d, ok := changes["deleted"].([]string); ok {
+		deleted = len(d)
+	}
+	log.Printf("📊 Changes detected: %d added, %d deleted", added, deleted)
 
 	// Broadcast to all clients
 	s.wsClientsMu.RLock()
-	for conn := range s.wsClients {
-		go func(c *websocket.Conn) {
-			if err := c.WriteJSON(changes); err != nil {
+	for conn, connMu := range s.wsClients {
+		go func(c *websocket.Conn, mu *sync.Mutex) {
+			mu.Lock()
+			err := c.WriteJSON(changes)
+			mu.Unlock()
+			if err != nil {
 				log.Printf("Failed to send to WebSocket: %v", err)
 			}
-		}(conn)
+		}(conn, connMu)
 	}
 	s.wsClientsMu.RUnlock()
+
+	log.Printf("✅ Broadcast complete")
 }
 
 // computeChanges computes the difference between old and new records
-func (s *Server) computeChanges(newRecords []paradox.Record) ChangeSet {
-	changes := ChangeSet{
-		Type:       "update",
-		Timestamp:  time.Now().Format(time.RFC3339),
-		TotalCount: len(newRecords),
-	}
-
-	// If no previous records, all are new
-	if len(s.lastRecords) == 0 {
-		changes.Added = newRecords
-		return changes
-	}
-
-	// Create maps for efficient lookup
-	oldMap := make(map[string]int)
-	for i, record := range s.lastRecords {
-		oldMap[recordKey(record)] = i
-	}
-
-	newMap := make(map[string]int)
-	for i, record := range newRecords {
-		newMap[recordKey(record)] = i
-	}
-
-	// Find added records
-	for key, newIdx := range newMap {
-		if _, exists := oldMap[key]; !exists {
-			// New record
-			changes.Added = append(changes.Added, newRecords[newIdx])
-		}
-		// Note: Since recordKey is based on record content, if the key exists in both maps,
-		// the record is unchanged. We don't track "modified" separately since modification
-		// would result in a different key (different content).
-	}
-
-	// Find deleted records (by index)
-	for key, oldIdx := range oldMap {
-		if _, exists := newMap[key]; !exists {
-			changes.Deleted = append(changes.Deleted, oldIdx)
-		}
-	}
-
-	return changes
-}
-
-// computeChangesTransformed computes changes for transformed records (with Code as identifier)
-func (s *Server) computeChangesTransformed(newRecords []map[string]interface{}) map[string]interface{} {
+func (s *Server) computeChanges(newRecords []map[string]interface{}) map[string]interface{} {
 	changes := map[string]interface{}{
 		"type":        "update",
 		"timestamp":   time.Now().Format(time.RFC3339),
@@ -347,21 +280,13 @@ func (s *Server) computeChangesTransformed(newRecords []map[string]interface{}) 
 	// If no previous records, all are new
 	if len(s.lastRecords) == 0 {
 		changes["added"] = newRecords
+		log.Printf("🆕 First load: all %d records are new", len(newRecords))
 		return changes
-	}
-
-	// Convert old records to transformed format for comparison
-	oldTransformed := s.convertAndTransformRecords(s.lastRecords)
-	oldRecords := make([]map[string]interface{}, 0, len(oldTransformed))
-	for _, record := range oldTransformed {
-		if recordMap, ok := record.(map[string]interface{}); ok {
-			oldRecords = append(oldRecords, recordMap)
-		}
 	}
 
 	// Create maps by Code for efficient lookup
 	oldMap := make(map[string]map[string]interface{})
-	for _, record := range oldRecords {
+	for _, record := range s.lastRecords {
 		if code, ok := record["Code"]; ok {
 			codeStr := fmt.Sprintf("%v", code)
 			oldMap[codeStr] = record
@@ -377,12 +302,13 @@ func (s *Server) computeChangesTransformed(newRecords []map[string]interface{}) 
 	}
 
 	added := []map[string]interface{}{}
-	deleted := []string{} // Use Code strings for deleted items
+	deleted := []string{}
 
 	// Find added records
 	for code, record := range newMap {
 		if _, exists := oldMap[code]; !exists {
 			added = append(added, record)
+			log.Printf("➕ Added record: Code=%s", code)
 		}
 	}
 
@@ -390,6 +316,7 @@ func (s *Server) computeChangesTransformed(newRecords []map[string]interface{}) 
 	for code := range oldMap {
 		if _, exists := newMap[code]; !exists {
 			deleted = append(deleted, code)
+			log.Printf("➖ Deleted record: Code=%s", code)
 		}
 	}
 
@@ -420,29 +347,14 @@ func (s *Server) StartWatching(debounceDuration time.Duration) error {
 	}
 
 	fw.Start()
-	log.Printf("👀 Watching database file: %s", filepath.Base(s.dbPath))
+	ext := filepath.Ext(s.dbPath)
+	fileType := "database"
+	if ext == ".json" {
+		fileType = "JSON"
+	}
+	log.Printf("👀 Watching %s file: %s", fileType, filepath.Base(s.dbPath))
 
 	return nil
-}
-
-// convertAndTransformRecords converts record text encoding and transforms them
-// to match the format used by the convert command (combines ANBAR fields, removes Sort fields, etc.)
-func (s *Server) convertAndTransformRecords(records []paradox.Record) map[string]interface{} {
-	// Create exporter with Patris2Fa converter and use it to convert and transform records
-	exp := converter.NewExporter(converter.Patris2Fa)
-	return exp.ConvertAndTransformRecords(records)
-}
-
-// Start starts the HTTP server
-func (s *Server) Start(addr string) error {
-	log.Printf("🚀 Starting server on %s", addr)
-	log.Printf("📊 Serving database: %s", filepath.Base(s.dbPath))
-
-	if _, err := os.Stat(s.dbPath); os.IsNotExist(err) {
-		return fmt.Errorf("database file does not exist: %s", s.dbPath)
-	}
-
-	return http.ListenAndServe(addr, s.router)
 }
 
 // Close cleans up server resources
@@ -450,5 +362,20 @@ func (s *Server) Close() error {
 	if s.watcher != nil {
 		return s.watcher.Close()
 	}
+	if s.dataSource != nil {
+		return s.dataSource.Close()
+	}
 	return nil
+}
+
+// Start starts the HTTP server
+func (s *Server) Start(addr string) error {
+	log.Printf("🚀 Starting server on %s", addr)
+	log.Printf("📊 Serving file: %s", filepath.Base(s.dbPath))
+
+	if _, err := os.Stat(s.dbPath); os.IsNotExist(err) {
+		return fmt.Errorf("file does not exist: %s", s.dbPath)
+	}
+
+	return http.ListenAndServe(addr, s.router)
 }
