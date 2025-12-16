@@ -46,8 +46,11 @@ type ChangeSet struct {
 // For very large datasets (>10k records), consider using a hash-based approach
 // or implementing a proper record ID system for better performance.
 func recordKey(record paradox.Record) string {
-	// Use JSON serialization as a simple key
-	data, _ := json.Marshal(record)
+	data, err := json.Marshal(record)
+	if err != nil {
+		// Fallback to empty string if marshaling fails (shouldn't happen for valid records)
+		return ""
+	}
 	return string(data)
 }
 

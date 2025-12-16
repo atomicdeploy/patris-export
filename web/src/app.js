@@ -106,9 +106,13 @@ function handleWebSocketMessage(data) {
         }
         
         // Handle modified records
+        // Note: With content-based change detection, modified records are rare
+        // (a modification is treated as delete + add). This code handles the case
+        // if the backend sends explicit modified records in the future.
         if (data.modified && data.modified.length > 0) {
-            // For simplicity, we'll mark records as modified if they match by key
             data.modified.forEach(modifiedRecord => {
+                // Find and update the record in state
+                // Performance note: For large datasets, consider using a Map with record IDs
                 const modKey = JSON.stringify(modifiedRecord);
                 const index = state.records.findIndex(r => JSON.stringify(r) === modKey);
                 if (index !== -1) {
@@ -405,6 +409,11 @@ function init() {
 async function fetchInitialData() {
     try {
         const response = await fetch('/api/records');
+        
+        if (!response.ok) {
+            throw new Error(`HTTP error! status: ${response.status}`);
+        }
+        
         const data = await response.json();
         
         if (data.success && data.records) {
