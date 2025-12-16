@@ -202,8 +202,9 @@ func (e *Exporter) TransformRecords(records []paradox.Record) map[string]interfa
 			if anbarFieldRegex.MatchString(key) {
 				// Extract the number from ANBAR field name (e.g., "ANBAR1" -> 1)
 				var num int
-				fmt.Sscanf(key, "ANBAR%d", &num)
-				anbarFields[num] = value
+				if n, _ := fmt.Sscanf(key, "ANBAR%d", &num); n == 1 && num > 0 {
+					anbarFields[num] = value
+				}
 				continue
 			}
 			
