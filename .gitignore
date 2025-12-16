@@ -19,7 +19,6 @@ go.work
 
 # Build output
 bin/
-dist/
 build/
 
 # IDE
@@ -46,5 +45,7 @@ Thumbs.db
 web/node_modules/
 web/dist/app.js
 
-# Keep the final built HTML for embedding
+# Keep package files and built HTML for embedding
+!web/package.json
+!web/package-lock.json
 !web/dist/index.html

@@ -20,13 +20,32 @@ import (
 
 // Server represents the HTTP/WebSocket server
 type Server struct {
-	router      *mux.Router
-	dbPath      string
-	charMap     converter.CharMapping
-	watcher     *watcher.FileWatcher
-	wsClients   map[*websocket.Conn]bool
-	wsClientsMu sync.RWMutex
-	upgrader    websocket.Upgrader
+	router         *mux.Router
+	dbPath         string
+	charMap        converter.CharMapping
+	watcher        *watcher.FileWatcher
+	wsClients      map[*websocket.Conn]bool
+	wsClientsMu    sync.RWMutex
+	upgrader       websocket.Upgrader
+	lastRecords    []paradox.Record
+	lastRecordsMu  sync.RWMutex
+}
+
+// ChangeSet represents incremental changes to the database
+type ChangeSet struct {
+	Type      string             `json:"type"`
+	Timestamp string             `json:"timestamp"`
+	Added     []paradox.Record   `json:"added,omitempty"`
+	Modified  []paradox.Record   `json:"modified,omitempty"`
+	Deleted   []int              `json:"deleted,omitempty"`
+	TotalCount int               `json:"total_count"`
+}
+
+// recordKey generates a unique key for a record
+func recordKey(record paradox.Record) string {
+	// Use JSON serialization as a simple key
+	data, _ := json.Marshal(record)
+	return string(data)
 }
 
 // NewServer creates a new server instance
@@ -204,11 +223,12 @@ func (s *Server) sendRecordsToClient(conn *websocket.Conn) {
 		convertedRecords[i] = convertedRecord
 	}
 
-	message := map[string]interface{}{
-		"type":      "update",
-		"timestamp": time.Now().Format(time.RFC3339),
-		"count":     len(convertedRecords),
-		"records":   convertedRecords,
+	// Send as initial load (all records are "added")
+	message := ChangeSet{
+		Type:       "initial",
+		Timestamp:  time.Now().Format(time.RFC3339),
+		Added:      convertedRecords,
+		TotalCount: len(convertedRecords),
 	}
 
 	if err := conn.WriteJSON(message); err != nil {
@@ -219,17 +239,107 @@ func (s *Server) sendRecordsToClient(conn *websocket.Conn) {
 // broadcastUpdate broadcasts database changes to all connected WebSocket clients
 func (s *Server) broadcastUpdate() {
 	s.wsClientsMu.RLock()
-	defer s.wsClientsMu.RUnlock()
+	clientCount := len(s.wsClients)
+	s.wsClientsMu.RUnlock()
 
-	if len(s.wsClients) == 0 {
+	if clientCount == 0 {
 		return
 	}
 
-	log.Printf("📡 Broadcasting update to %d clients", len(s.wsClients))
+	log.Printf("📡 Broadcasting update to %d clients", clientCount)
 
-	for conn := range s.wsClients {
-		go s.sendRecordsToClient(conn)
+	// Get current records
+	db, err := paradox.Open(s.dbPath)
+	if err != nil {
+		log.Printf("Failed to open database: %v", err)
+		return
 	}
+	defer db.Close()
+
+	records, err := db.GetRecords()
+	if err != nil {
+		log.Printf("Failed to read records: %v", err)
+		return
+	}
+
+	// Convert records
+	convertedRecords := make([]paradox.Record, len(records))
+	for i, record := range records {
+		convertedRecord := make(paradox.Record)
+		for key, value := range record {
+			if strVal, ok := value.(string); ok {
+				convertedRecord[key] = converter.Patris2Fa(strVal)
+			} else {
+				convertedRecord[key] = value
+			}
+		}
+		convertedRecords[i] = convertedRecord
+	}
+
+	// Compute changes
+	s.lastRecordsMu.Lock()
+	changes := s.computeChanges(convertedRecords)
+	s.lastRecords = convertedRecords
+	s.lastRecordsMu.Unlock()
+
+	// Broadcast to all clients
+	s.wsClientsMu.RLock()
+	for conn := range s.wsClients {
+		go func(c *websocket.Conn) {
+			if err := c.WriteJSON(changes); err != nil {
+				log.Printf("Failed to send to WebSocket: %v", err)
+			}
+		}(conn)
+	}
+	s.wsClientsMu.RUnlock()
+}
+
+// computeChanges computes the difference between old and new records
+func (s *Server) computeChanges(newRecords []paradox.Record) ChangeSet {
+	changes := ChangeSet{
+		Type:       "update",
+		Timestamp:  time.Now().Format(time.RFC3339),
+		TotalCount: len(newRecords),
+	}
+
+	// If no previous records, all are new
+	if len(s.lastRecords) == 0 {
+		changes.Added = newRecords
+		return changes
+	}
+
+	// Create maps for efficient lookup
+	oldMap := make(map[string]int)
+	for i, record := range s.lastRecords {
+		oldMap[recordKey(record)] = i
+	}
+
+	newMap := make(map[string]int)
+	for i, record := range newRecords {
+		newMap[recordKey(record)] = i
+	}
+
+	// Find added and modified records
+	for key, newIdx := range newMap {
+		if oldIdx, exists := oldMap[key]; exists {
+			// Record exists in both - check if modified (by comparing index position)
+			if oldIdx != newIdx {
+				changes.Modified = append(changes.Modified, newRecords[newIdx])
+			}
+		} else {
+			// New record
+			changes.Added = append(changes.Added, newRecords[newIdx])
+		}
+	}
+
+	// Find deleted records (by index)
+	for key, oldIdx := range oldMap {
+		if _, exists := newMap[key]; !exists {
+			changes.Deleted = append(changes.Deleted, oldIdx)
+		}
+	}
+
+	return changes
 }
 
 // StartWatching starts watching the database file for changes

@@ -71,32 +71,64 @@ function initWebSocket() {
 
 // Handle WebSocket messages
 function handleWebSocketMessage(data) {
-    if (data.type === 'update') {
-        const oldRecordsMap = new Map(state.records.map((r, i) => [JSON.stringify(r), i]));
-        const newRecords = data.records || [];
+    const changedIndices = new Set();
+    
+    if (data.type === 'initial') {
+        // Initial load - set all records
+        state.records = data.added || [];
         
-        // Find changed records
-        const changedIndices = new Set();
-        newRecords.forEach((record, index) => {
-            const key = JSON.stringify(record);
-            if (!oldRecordsMap.has(key)) {
-                changedIndices.add(index);
-            }
-        });
+        // Mark all as changed for initial highlight
+        if (state.settings.highlightChanges) {
+            state.records.forEach((_, index) => changedIndices.add(index));
+        }
+    } else if (data.type === 'update') {
+        // Incremental update
         
-        state.records = newRecords;
-        
-        // Extract fields from first record if not already set
-        if (state.records.length > 0 && state.fields.length === 0) {
-            state.fields = Object.keys(state.records[0]);
-            renderTableHeader();
-            updateFieldFilter();
+        // Handle deleted records (from end to start to avoid index shifting)
+        if (data.deleted && data.deleted.length > 0) {
+            const sortedDeletes = [...data.deleted].sort((a, b) => b - a);
+            sortedDeletes.forEach(index => {
+                if (index >= 0 && index < state.records.length) {
+                    state.records.splice(index, 1);
+                }
+            });
         }
         
-        filterRecords();
-        renderTable(changedIndices);
-        updateCounts();
+        // Handle added records
+        if (data.added && data.added.length > 0) {
+            const startIndex = state.records.length;
+            state.records.push(...data.added);
+            
+            // Mark added records as changed
+            data.added.forEach((_, i) => {
+                changedIndices.add(startIndex + i);
+            });
+        }
+        
+        // Handle modified records
+        if (data.modified && data.modified.length > 0) {
+            // For simplicity, we'll mark records as modified if they match by key
+            data.modified.forEach(modifiedRecord => {
+                const modKey = JSON.stringify(modifiedRecord);
+                const index = state.records.findIndex(r => JSON.stringify(r) === modKey);
+                if (index !== -1) {
+                    state.records[index] = modifiedRecord;
+                    changedIndices.add(index);
+                }
+            });
+        }
     }
+    
+    // Extract fields from first record if not already set
+    if (state.records.length > 0 && state.fields.length === 0) {
+        state.fields = Object.keys(state.records[0]);
+        renderTableHeader();
+        updateFieldFilter();
+    }
+    
+    filterRecords();
+    renderTable(changedIndices);
+    updateCounts();
 }
 
 // Update connection status

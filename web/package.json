@@ -1,0 +1,14 @@
+{
+  "name": "patris-export-web",
+  "version": "1.0.0",
+  "description": "Modern SPA for Patris Export data visualization",
+  "private": true,
+  "scripts": {
+    "build": "node build.js",
+    "dev": "node build.js --watch"
+  },
+  "devDependencies": {
+    "esbuild": "^0.24.0",
+    "sass": "^1.83.0"
+  }
+}
