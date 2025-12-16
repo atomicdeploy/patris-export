@@ -104,52 +104,51 @@ func TestRealDatabaseChanges(t *testing.T) {
 		return
 	}
 	
-	// Verify the specific values (allow both int and float64 since JSON uses float64 for numbers)
-	// Convert to float64 for comparison since Paradox DB may return numeric values as floats
-	oldVal := normalizeNumericValue(foreshChange.OldValue)
-	newVal := normalizeNumericValue(foreshChange.NewValue)
+	// Verify the specific values - normalize to int to avoid float representation issues
+	oldVal := normalizeToInt(foreshChange.OldValue)
+	newVal := normalizeToInt(foreshChange.NewValue)
 	
-	expectedOld := 8888.0
-	expectedNew := 9999.0
+	expectedOld := 8888
+	expectedNew := 9999
 	
 	if oldVal != expectedOld {
-		t.Errorf("Expected old FOROSH value %.0f, got %.0f (raw: %v, type: %T)", expectedOld, oldVal, foreshChange.OldValue, foreshChange.OldValue)
+		t.Errorf("Expected old FOROSH value %d, got %d (raw: %v, type: %T)", expectedOld, oldVal, foreshChange.OldValue, foreshChange.OldValue)
 	}
 	if newVal != expectedNew {
-		t.Errorf("Expected new FOROSH value %.0f, got %.0f (raw: %v, type: %T)", expectedNew, newVal, foreshChange.NewValue, foreshChange.NewValue)
+		t.Errorf("Expected new FOROSH value %d, got %d (raw: %v, type: %T)", expectedNew, newVal, foreshChange.NewValue, foreshChange.NewValue)
 	}
 	
 	t.Logf("\n✅ Real database change detection test passed")
-	t.Logf("   Successfully detected expected change: Code=%s, FOROSH: %.0f → %.0f", 
+	t.Logf("   Successfully detected expected change: Code=%s, FOROSH: %d → %d", 
 		expectedCode, oldVal, newVal)
 	t.Logf("   This validates that field-level change tracking works with production data")
 }
 
-// normalizeNumericValue converts various numeric types to float64 for comparison
-func normalizeNumericValue(val interface{}) float64 {
+// normalizeToInt converts various numeric types to int for comparison
+func normalizeToInt(val interface{}) int {
 	switch v := val.(type) {
 	case float64:
-		return v
+		return int(v)
 	case float32:
-		return float64(v)
+		return int(v)
 	case int:
-		return float64(v)
+		return v
 	case int32:
-		return float64(v)
+		return int(v)
 	case int64:
-		return float64(v)
+		return int(v)
 	case uint:
-		return float64(v)
+		return int(v)
 	case uint32:
-		return float64(v)
+		return int(v)
 	case uint64:
-		return float64(v)
+		return int(v)
 	default:
 		// Try to parse as string
 		if str, ok := val.(string); ok {
-			var f float64
-			fmt.Sscanf(str, "%f", &f)
-			return f
+			var i int
+			fmt.Sscanf(str, "%d", &i)
+			return i
 		}
 		return 0
 	}
