@@ -296,7 +296,7 @@ func (s *Server) StartWatching(debounceDuration time.Duration) error {
 	}
 
 	fw.Start()
-	log.Printf("👀 Watching database file: %s (debounce: %s)", filepath.Base(s.dbPath), debounceDuration)
+	log.Printf("👀 Watching database file: %s", filepath.Base(s.dbPath))
 
 	return nil
 }
