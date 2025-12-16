@@ -203,7 +203,7 @@ func (e *Exporter) TransformRecords(records []paradox.Record) map[string]interfa
 			if anbarFieldRegex.MatchString(key) {
 				// Extract the number from ANBARn field name (e.g., "ANBAR1" -> 1)
 				var index int
-				if n, _ := fmt. Sscanf(key, "ANBAR%d", &index); n == 1 && index > 0 {
+				if n, _ := fmt.Sscanf(key, "ANBAR%d", &index); n == 1 && index > 0 {
 					anbarFields[index] = value
 					if index > maxAnbarIndex {
 						maxAnbarIndex = index
