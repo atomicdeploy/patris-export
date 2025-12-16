@@ -91,14 +91,21 @@ func NewServer(dbPath string, charMap converter.CharMapping) (*Server, error) {
 
 // setupRoutes configures the HTTP routes
 func (s *Server) setupRoutes() {
-	s.router.HandleFunc("/", s.handleIndex).Methods("GET")
+	s.router.HandleFunc("/", s.handleWelcome).Methods("GET")
+	s.router.HandleFunc("/viewer", s.handleViewer).Methods("GET")
 	s.router.HandleFunc("/api/records", s.handleGetRecords).Methods("GET")
 	s.router.HandleFunc("/api/info", s.handleGetInfo).Methods("GET")
 	s.router.HandleFunc("/ws", s.handleWebSocket)
 }
 
-// handleIndex serves the embedded SPA
-func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
+// handleWelcome serves the welcome page
+func (s *Server) handleWelcome(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Write(web.WelcomeHTML)
+}
+
+// handleViewer serves the SPA visualizer
+func (s *Server) handleViewer(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Write(web.IndexHTML)
 }

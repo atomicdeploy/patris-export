@@ -146,6 +146,10 @@ function renderTableHeader() {
     state.fields.forEach(field => {
         const th = document.createElement('th');
         th.textContent = field;
+        // Make Code column sticky
+        if (field === 'Code') {
+            th.classList.add('sticky-column');
+        }
         headerRow.appendChild(th);
     });
     
@@ -204,6 +208,10 @@ function renderTable(changedIndices = new Set()) {
             const td = document.createElement('td');
             const value = record[field];
             td.textContent = value !== null && value !== undefined ? value : '';
+            // Make Code column sticky
+            if (field === 'Code') {
+                td.classList.add('sticky-column');
+            }
             row.appendChild(td);
         });
         

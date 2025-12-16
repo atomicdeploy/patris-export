@@ -6,3 +6,6 @@ import (
 
 //go:embed dist/index.html
 var IndexHTML []byte
+
+//go:embed dist/welcome.html
+var WelcomeHTML []byte
