@@ -161,6 +161,8 @@ func TestWebSocketUpdates(t *testing.T) {
 
 	// Read initial message
 	var initialMsg map[string]interface{}
+	ws.SetReadDeadline(time.Now().Add(2 * time.Second))
+	
 	if err := ws.ReadJSON(&initialMsg); err != nil {
 		t.Fatalf("Failed to read initial message: %v", err)
 	}
@@ -168,8 +170,18 @@ func TestWebSocketUpdates(t *testing.T) {
 	if initialMsg["type"] != "initial" {
 		t.Errorf("Expected type=initial, got %v", initialMsg["type"])
 	}
+	
+	// Verify initial data has 1 record
+	if records, ok := initialMsg["records"].(map[string]interface{}); ok {
+		if len(records) != 1 {
+			t.Errorf("Expected 1 initial record, got %d", len(records))
+		}
+	}
+	
+	// Give file watcher time to settle after initial file creation
+	time.Sleep(200 * time.Millisecond)
 
-	// Modify the JSON file (add a new record)
+	// Now modify the JSON file (add a new record)
 	testData["102"] = map[string]interface{}{
 		"Code":   "102",
 		"Name":   "New Record",
