@@ -239,7 +239,7 @@ jobs:
     - name: Upload Windows artifact
       uses: actions/upload-artifact@v4
       with:
-        name: patris-export-windows-msvc-amd64
+        name: patris-export-windows-mingw-amd64
         path: |
           build/patris-export-windows-amd64.exe
           build/*.dll

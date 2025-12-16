@@ -9,7 +9,7 @@
 #define VER_COMPANYNAME_STR         "AtomicDeploy"
 #define VER_FILEDESCRIPTION_STR     "Paradox/BDE database file converter for Patris81"
 #define VER_INTERNALNAME_STR        "patris-export"
-#define VER_LEGALCOPYRIGHT_STR      "Copyright (C) 2024"
+#define VER_LEGALCOPYRIGHT_STR      "Copyright (C) 2024-2025"
 #define VER_ORIGINALFILENAME_STR    "patris-export.exe"
 #define VER_PRODUCTNAME_STR         "Patris Export"
 

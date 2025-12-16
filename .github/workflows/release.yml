@@ -66,18 +66,21 @@ jobs:
       with:
         name: patris-export-linux-amd64
         path: ./artifacts
+        merge-multiple: true
         
     - name: Download Windows MinGW artifact
       uses: actions/download-artifact@v4
       with:
         name: patris-export-windows-mingw-amd64
         path: ./artifacts
+        merge-multiple: true
         
     - name: Download Windows MinGW cross-compile artifact
       uses: actions/download-artifact@v4
       with:
         name: patris-export-windows-mingw-cross-amd64
         path: ./artifacts-cross
+        merge-multiple: true
       continue-on-error: true
         
     - name: Create Release

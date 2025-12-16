@@ -71,8 +71,7 @@ sudo apt-get install mingw-w64 mingw-w64-tools
 git clone https://github.com/steinm/pxlib.git
 cd pxlib
 
-# Copy the resource file for version information
-cp /path/to/patris-export/resources/pxlib.rc .
+# pxlib includes its own version information resource file (pxlib.rc.in)
 
 mkdir build-mingw
 cd build-mingw
@@ -103,7 +102,7 @@ make build-windows
 Windows executables and DLLs include embedded version information via resource (.rc) files:
 
 - `cmd/patris-export/patris-export.rc` - Version info for the main executable
-- `resources/pxlib.rc` - Version info for the pxlib DLL
+- pxlib uses its own upstream version information from `pxlib.rc.in`
 
 These are automatically compiled and embedded during the build process. To manually compile resource files:
 

@@ -34,8 +34,6 @@ if grep -q "\-Wall" CMakeLists.txt; then
     echo "  Separating compiler warning flags from preprocessor definitions..."
     
     python3 << 'PYTHON_SCRIPT'
-import re
-
 with open('CMakeLists.txt', 'r') as f:
     lines = f.readlines()
 
