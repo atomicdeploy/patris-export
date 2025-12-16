@@ -69,59 +69,13 @@ function initWebSocket() {
     };
 }
 
-// Transform raw record to match the JSON format (combine ANBAR fields into array)
-function transformRecord(record) {
-    const transformed = {};
-    const anbarFields = [];
-    let maxAnbarIndex = 0;
-    
-    for (const [key, value] of Object.entries(record)) {
-        // Skip Sort fields
-        if (key.startsWith('Sort')) {
-            continue;
-        }
-        
-        // Keep ALLANBAR as-is
-        if (key === 'ALLANBAR') {
-            transformed[key] = value;
-            continue;
-        }
-        
-        // Collect numbered ANBAR fields
-        const anbarMatch = key.match(/^ANBAR(\d+)$/);
-        if (anbarMatch) {
-            const index = parseInt(anbarMatch[1]);
-            anbarFields[index - 1] = value;
-            if (index > maxAnbarIndex) {
-                maxAnbarIndex = index;
-            }
-            continue;
-        }
-        
-        // Add all other fields
-        transformed[key] = value;
-    }
-    
-    // Add ANBAR array if we collected any
-    if (maxAnbarIndex > 0) {
-        // Fill missing indices with 0
-        const anbarArray = [];
-        for (let i = 0; i < maxAnbarIndex; i++) {
-            anbarArray.push(anbarFields[i] !== undefined ? anbarFields[i] : 0);
-        }
-        transformed.ANBAR = anbarArray;
-    }
-    
-    return transformed;
-}
-
 // Handle WebSocket messages
 function handleWebSocketMessage(data) {
     const changedIndices = new Set();
     
     if (data.type === 'initial') {
-        // Initial load - set all records and transform them
-        state.records = (data.added || []).map(transformRecord);
+        // Initial load - records are already transformed with ANBAR as array
+        state.records = data.added || [];
         
         // Mark all as changed for initial highlight
         if (state.settings.highlightChanges) {
@@ -130,41 +84,33 @@ function handleWebSocketMessage(data) {
     } else if (data.type === 'update') {
         // Incremental update
         
-        // Handle deleted records (from end to start to avoid index shifting)
+        // Handle deleted records (by Code)
         if (data.deleted && data.deleted.length > 0) {
-            const sortedDeletes = [...data.deleted].sort((a, b) => b - a);
-            sortedDeletes.forEach(index => {
-                if (index >= 0 && index < state.records.length) {
-                    state.records.splice(index, 1);
-                }
+            const deletedCodes = new Set(data.deleted.map(String));
+            state.records = state.records.filter(record => {
+                const code = String(record.Code);
+                return !deletedCodes.has(code);
             });
         }
         
         // Handle added records
         if (data.added && data.added.length > 0) {
             const startIndex = state.records.length;
-            const transformedAdded = data.added.map(transformRecord);
-            state.records.push(...transformedAdded);
+            state.records.push(...data.added);
             
             // Mark added records as changed
-            transformedAdded.forEach((_, i) => {
+            data.added.forEach((_, i) => {
                 changedIndices.add(startIndex + i);
             });
         }
         
-        // Handle modified records
-        // Note: With content-based change detection, modified records are rare
-        // (a modification is treated as delete + add). This code handles the case
-        // if the backend sends explicit modified records in the future.
+        // Handle modified records (if any)
         if (data.modified && data.modified.length > 0) {
             data.modified.forEach(modifiedRecord => {
-                const transformed = transformRecord(modifiedRecord);
-                // Find and update the record in state
-                // Performance note: For large datasets, consider using a Map with record IDs
-                const modKey = JSON.stringify(transformed);
-                const index = state.records.findIndex(r => JSON.stringify(r) === modKey);
+                const code = String(modifiedRecord.Code);
+                const index = state.records.findIndex(r => String(r.Code) === code);
                 if (index !== -1) {
-                    state.records[index] = transformed;
+                    state.records[index] = modifiedRecord;
                     changedIndices.add(index);
                 }
             });

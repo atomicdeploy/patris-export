@@ -204,26 +204,23 @@ func (s *Server) sendRecordsToClient(conn *websocket.Conn) {
 		return
 	}
 
-	// Convert records (text encoding only, no transformation)
-	convertedRecords := make([]paradox.Record, len(records))
-	for i, record := range records {
-		convertedRecord := make(paradox.Record)
-		for key, value := range record {
-			if strVal, ok := value.(string); ok {
-				convertedRecord[key] = converter.Patris2Fa(strVal)
-			} else {
-				convertedRecord[key] = value
-			}
+	// Convert and transform records to match JSON export format
+	transformed := s.convertAndTransformRecords(records)
+	
+	// Convert map to array of records for WebSocket transmission
+	recordsList := make([]map[string]interface{}, 0, len(transformed))
+	for _, record := range transformed {
+		if recordMap, ok := record.(map[string]interface{}); ok {
+			recordsList = append(recordsList, recordMap)
 		}
-		convertedRecords[i] = convertedRecord
 	}
 
 	// Send as initial load (all records are "added")
-	message := ChangeSet{
-		Type:       "initial",
-		Timestamp:  time.Now().Format(time.RFC3339),
-		Added:      convertedRecords,
-		TotalCount: len(convertedRecords),
+	message := map[string]interface{}{
+		"type":        "initial",
+		"timestamp":   time.Now().Format(time.RFC3339),
+		"added":       recordsList,
+		"total_count": len(recordsList),
 	}
 
 	if err := conn.WriteJSON(message); err != nil {
@@ -257,24 +254,21 @@ func (s *Server) broadcastUpdate() {
 		return
 	}
 
-	// Convert records
-	convertedRecords := make([]paradox.Record, len(records))
-	for i, record := range records {
-		convertedRecord := make(paradox.Record)
-		for key, value := range record {
-			if strVal, ok := value.(string); ok {
-				convertedRecord[key] = converter.Patris2Fa(strVal)
-			} else {
-				convertedRecord[key] = value
-			}
+	// Convert and transform records to match JSON export format
+	transformed := s.convertAndTransformRecords(records)
+	
+	// Convert map to array of records
+	currentRecords := make([]map[string]interface{}, 0, len(transformed))
+	for _, record := range transformed {
+		if recordMap, ok := record.(map[string]interface{}); ok {
+			currentRecords = append(currentRecords, recordMap)
 		}
-		convertedRecords[i] = convertedRecord
 	}
 
 	// Compute changes
 	s.lastRecordsMu.Lock()
-	changes := s.computeChanges(convertedRecords)
-	s.lastRecords = convertedRecords
+	changes := s.computeChangesTransformed(currentRecords)
+	s.lastRecords = records // Keep raw records for future comparisons
 	s.lastRecordsMu.Unlock()
 
 	// Broadcast to all clients
@@ -330,6 +324,73 @@ func (s *Server) computeChanges(newRecords []paradox.Record) ChangeSet {
 		if _, exists := newMap[key]; !exists {
 			changes.Deleted = append(changes.Deleted, oldIdx)
 		}
+	}
+
+	return changes
+}
+
+// computeChangesTransformed computes changes for transformed records (with Code as identifier)
+func (s *Server) computeChangesTransformed(newRecords []map[string]interface{}) map[string]interface{} {
+	changes := map[string]interface{}{
+		"type":        "update",
+		"timestamp":   time.Now().Format(time.RFC3339),
+		"total_count": len(newRecords),
+	}
+
+	// If no previous records, all are new
+	if len(s.lastRecords) == 0 {
+		changes["added"] = newRecords
+		return changes
+	}
+
+	// Convert old records to transformed format for comparison
+	oldTransformed := s.convertAndTransformRecords(s.lastRecords)
+	oldRecords := make([]map[string]interface{}, 0, len(oldTransformed))
+	for _, record := range oldTransformed {
+		if recordMap, ok := record.(map[string]interface{}); ok {
+			oldRecords = append(oldRecords, recordMap)
+		}
+	}
+
+	// Create maps by Code for efficient lookup
+	oldMap := make(map[string]map[string]interface{})
+	for _, record := range oldRecords {
+		if code, ok := record["Code"]; ok {
+			codeStr := fmt.Sprintf("%v", code)
+			oldMap[codeStr] = record
+		}
+	}
+
+	newMap := make(map[string]map[string]interface{})
+	for _, record := range newRecords {
+		if code, ok := record["Code"]; ok {
+			codeStr := fmt.Sprintf("%v", code)
+			newMap[codeStr] = record
+		}
+	}
+
+	added := []map[string]interface{}{}
+	deleted := []string{} // Use Code strings for deleted items
+
+	// Find added records
+	for code, record := range newMap {
+		if _, exists := oldMap[code]; !exists {
+			added = append(added, record)
+		}
+	}
+
+	// Find deleted records
+	for code := range oldMap {
+		if _, exists := newMap[code]; !exists {
+			deleted = append(deleted, code)
+		}
+	}
+
+	if len(added) > 0 {
+		changes["added"] = added
+	}
+	if len(deleted) > 0 {
+		changes["deleted"] = deleted
 	}
 
 	return changes
