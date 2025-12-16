@@ -6,8 +6,8 @@ This document explains how to build the pxlib library for Windows, which is requ
 
 The project includes two automated Windows build workflows:
 
-1. **Native Windows Build** (`.github/workflows/build-windows.yml`) - Builds directly on Windows runners
-2. **Cross-compilation Build** (`.github/workflows/build.yml`) - Cross-compiles from Linux to Windows using MinGW
+1. **Windows MSVC Build** (`.github/workflows/build-windows.yml`) - Builds directly on Windows runners using MSVC
+2. **Windows MinGW Build** (`.github/workflows/build.yml`) - Cross-compiles from Linux to Windows using MinGW
 
 Both workflows automatically include Windows resource files with version information for both the executable and the pxlib DLL.
 
@@ -52,9 +52,9 @@ cd /path/to/patris-export
 go build -o patris-export.exe ./cmd/patris-export
 ```
 
-## Cross-Compilation from Linux
+## MinGW Cross-Compilation from Linux
 
-For cross-compilation from Linux to Windows, you'll need:
+For cross-compiling from Linux to Windows using MinGW, you'll need:
 
 1. MinGW-w64 cross-compiler
 2. pxlib built for Windows (DLL and headers)
@@ -108,7 +108,7 @@ Windows executables and DLLs include embedded version information via resource (
 These are automatically compiled and embedded during the build process. To manually compile resource files:
 
 ```bash
-# For cross-compilation on Linux
+# For MinGW cross-compilation on Linux
 ./scripts/compile-resources.sh
 
 # Or manually with windres

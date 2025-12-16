@@ -67,16 +67,16 @@ jobs:
         name: patris-export-linux-amd64
         path: ./artifacts
         
-    - name: Download Windows native artifact
+    - name: Download Windows MSVC artifact
       uses: actions/download-artifact@v4
       with:
-        name: patris-export-windows-native-amd64
+        name: patris-export-windows-msvc-amd64
         path: ./artifacts
         
-    - name: Download Windows cross-compiled artifact
+    - name: Download Windows MinGW artifact
       uses: actions/download-artifact@v4
       with:
-        name: patris-export-windows-cross-amd64
+        name: patris-export-windows-mingw-amd64
         path: ./artifacts-cross
       continue-on-error: true
         

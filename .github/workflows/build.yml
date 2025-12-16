@@ -41,8 +41,8 @@ jobs:
         name: patris-export-linux-amd64
         path: build/patris-export-linux-amd64
 
-  build-windows-cross:
-    name: Cross-compile for Windows (Linux to Windows)
+  build-windows-mingw:
+    name: Build for Windows (MinGW cross-compile)
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -216,10 +216,10 @@ jobs:
           echo "✅ Windows build correctly reports 354 records"
         fi
         
-    - name: Upload Windows cross-compiled artifact
+    - name: Upload Windows artifact
       uses: actions/upload-artifact@v4
       with:
-        name: patris-export-windows-cross-amd64
+        name: patris-export-windows-mingw-amd64
         path: |
           build/patris-export-windows-amd64.exe
           build/*.dll
