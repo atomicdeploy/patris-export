@@ -37,75 +37,24 @@ func NewExporter(converter func(string) string) *Exporter {
 
 // ExportToJSON exports records to JSON format with Patris81-specific formatting
 func (e *Exporter) ExportToJSON(records []paradox.Record, outputPath string) error {
-	// Convert string fields if converter is set
-	if e.converter != nil {
-		records = e.convertRecords(records)
-	}
-
-	// Transform records to use Code as key and optimize structure
-	transformed := e.TransformRecords(records)
-
 	file, err := os.Create(outputPath)
 	if err != nil {
 		return fmt.Errorf("failed to create output file: %w", err)
 	}
 	defer file.Close()
 
-	// Use custom JSON formatting to keep ANBAR inline
-	data, err := json.MarshalIndent(transformed, "", "  ")
-	if err != nil {
-		return fmt.Errorf("failed to encode JSON: %w", err)
-	}
-
-	// Post-process to make ANBAR arrays inline
-	output := makeArraysInline(string(data), "ANBAR")
-
-	if _, err := file.WriteString(output); err != nil {
-		return fmt.Errorf("failed to write JSON: %w", err)
-	}
-
-	return nil
+	return e.ExportToJSONWriter(records, file)
 }
 
 // ExportToCSV exports records to CSV format
 func (e *Exporter) ExportToCSV(records []paradox.Record, fields []paradox.Field, outputPath string) error {
-	// Convert string fields if converter is set
-	if e.converter != nil {
-		records = e.convertRecords(records)
-	}
-
 	file, err := os.Create(outputPath)
 	if err != nil {
 		return fmt.Errorf("failed to create output file: %w", err)
 	}
 	defer file.Close()
 
-	writer := csv.NewWriter(file)
-	defer writer.Flush()
-
-	// Write header
-	header := make([]string, len(fields))
-	for i, field := range fields {
-		header[i] = field.Name
-	}
-	if err := writer.Write(header); err != nil {
-		return fmt.Errorf("failed to write CSV header: %w", err)
-	}
-
-	// Write records
-	for _, record := range records {
-		row := make([]string, len(fields))
-		for i, field := range fields {
-			if val, ok := record[field.Name]; ok {
-				row[i] = fmt.Sprintf("%v", val)
-			}
-		}
-		if err := writer.Write(row); err != nil {
-			return fmt.Errorf("failed to write CSV row: %w", err)
-		}
-	}
-
-	return nil
+	return e.ExportToCSVWriter(records, fields, file)
 }
 
 // ExportToJSONWriter exports records to JSON format writing to the provided io.Writer
@@ -127,7 +76,8 @@ func (e *Exporter) ExportToJSONWriter(records []paradox.Record, writer io.Writer
 	// Post-process to make ANBAR arrays inline
 	output := makeArraysInline(string(data), "ANBAR")
 
-	if _, err := writer.Write([]byte(output)); err != nil {
+	// Add trailing newline for better Unix tool compatibility
+	if _, err := writer.Write([]byte(output + "\n")); err != nil {
 		return fmt.Errorf("failed to write JSON: %w", err)
 	}
 

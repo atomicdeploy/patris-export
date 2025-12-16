@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/csv"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -49,6 +50,39 @@ func TestExportToJSONWriter(t *testing.T) {
   }
 }`,
 		},
+		{
+			name:    "Empty records",
+			records: []paradox.Record{},
+			expected: `{}`,
+		},
+		{
+			name: "Record with only Code field",
+			records: []paradox.Record{
+				{
+					"Code": "789",
+				},
+			},
+			expected: `{
+  "789": {
+    "Code": "789"
+  }
+}`,
+		},
+		{
+			name: "Record with special characters",
+			records: []paradox.Record{
+				{
+					"Code": "special",
+					"Name": "Test \"quoted\" & <special>",
+				},
+			},
+			expected: `{
+  "special": {
+    "Code": "special",
+    "Name": "Test \"quoted\" & <special>"
+  }
+}`,
+		},
 	}
 
 	for _, tt := range tests {
@@ -59,6 +93,12 @@ func TestExportToJSONWriter(t *testing.T) {
 			err := exp.ExportToJSONWriter(tt.records, &buf)
 			if err != nil {
 				t.Fatalf("ExportToJSONWriter failed: %v", err)
+			}
+
+			// Verify trailing newline
+			output := buf.String()
+			if !strings.HasSuffix(output, "\n") {
+				t.Error("Output should end with a newline")
 			}
 
 			// Parse both expected and actual JSON to compare structure
@@ -129,6 +169,33 @@ func TestExportToCSVWriter(t *testing.T) {
 				{"012", ""},
 			},
 		},
+		{
+			name:    "Empty records",
+			records: []paradox.Record{},
+			fields: []paradox.Field{
+				{Name: "Code"},
+				{Name: "Name"},
+			},
+			expectedHeaders: []string{"Code", "Name"},
+			expectedRows:    [][]string{},
+		},
+		{
+			name: "CSV with special characters",
+			records: []paradox.Record{
+				{
+					"Code": "special",
+					"Name": "Test \"quoted\", with, commas",
+				},
+			},
+			fields: []paradox.Field{
+				{Name: "Code"},
+				{Name: "Name"},
+			},
+			expectedHeaders: []string{"Code", "Name"},
+			expectedRows: [][]string{
+				{"special", "Test \"quoted\", with, commas"},
+			},
+		},
 	}
 
 	for _, tt := range tests {
@@ -194,7 +261,7 @@ func TestExportToCSVWriter(t *testing.T) {
 	}
 }
 
-// jsonEqual compares two JSON objects for equality by comparing their JSON representations
+// jsonEqual compares two JSON objects for equality using simple marshaling
 func jsonEqual(a, b interface{}) bool {
 	aJSON, err := json.Marshal(a)
 	if err != nil {
@@ -204,23 +271,55 @@ func jsonEqual(a, b interface{}) bool {
 	if err != nil {
 		return false
 	}
-
-	var aMap, bMap interface{}
-	if err := json.Unmarshal(aJSON, &aMap); err != nil {
-		return false
-	}
-	if err := json.Unmarshal(bJSON, &bMap); err != nil {
-		return false
-	}
-
-	aStr, err := json.Marshal(aMap)
-	if err != nil {
-		return false
-	}
-	bStr, err := json.Marshal(bMap)
-	if err != nil {
-		return false
-	}
-
-	return string(aStr) == string(bStr)
+	return string(aJSON) == string(bJSON)
 }
+
+// errWriter is a writer that always returns an error
+type errWriter struct{}
+
+func (e *errWriter) Write(p []byte) (n int, err error) {
+	return 0, fmt.Errorf("write error")
+}
+
+func TestExportToJSONWriterError(t *testing.T) {
+	exp := NewExporter(nil)
+	records := []paradox.Record{
+		{
+			"Code": "123",
+			"Name": "Test",
+		},
+	}
+
+	writer := &errWriter{}
+	err := exp.ExportToJSONWriter(records, writer)
+	if err == nil {
+		t.Error("Expected error when writer fails, got nil")
+	}
+	if !strings.Contains(err.Error(), "failed to write JSON") {
+		t.Errorf("Expected error message to contain 'failed to write JSON', got: %v", err)
+	}
+}
+
+func TestExportToCSVWriterError(t *testing.T) {
+	exp := NewExporter(nil)
+	records := []paradox.Record{
+		{
+			"Code": "123",
+			"Name": "Test",
+		},
+	}
+	fields := []paradox.Field{
+		{Name: "Code"},
+		{Name: "Name"},
+	}
+
+	writer := &errWriter{}
+	err := exp.ExportToCSVWriter(records, fields, writer)
+	if err == nil {
+		t.Error("Expected error when writer fails, got nil")
+	}
+	if !strings.Contains(err.Error(), "failed to write CSV") {
+		t.Errorf("Expected error message to contain 'failed to write CSV', got: %v", err)
+	}
+}
+
