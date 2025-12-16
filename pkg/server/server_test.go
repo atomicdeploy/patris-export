@@ -63,17 +63,23 @@ func TestServerJSON(t *testing.T) {
 			t.Errorf("Expected status 200, got %d", w.Code)
 		}
 
+		// The endpoint returns Code-keyed records (same format as convert command)
 		var response map[string]interface{}
 		if err := json.NewDecoder(w.Body).Decode(&response); err != nil {
 			t.Fatalf("Failed to decode response: %v", err)
 		}
 
-		if success, ok := response["success"].(bool); !ok || !success {
-			t.Error("Expected success=true")
+		// Check that we got 2 records (keyed by Code)
+		if len(response) != 2 {
+			t.Errorf("Expected 2 records, got %d", len(response))
 		}
 
-		if count, ok := response["count"].(float64); !ok || count != 2 {
-			t.Errorf("Expected count=2, got %v", response["count"])
+		// Verify the records have the expected Codes
+		if _, ok := response["101"]; !ok {
+			t.Error("Expected record with Code=101")
+		}
+		if _, ok := response["102"]; !ok {
+			t.Error("Expected record with Code=102")
 		}
 	})
 
