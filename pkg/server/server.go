@@ -427,14 +427,12 @@ func (s *Server) logDetailedChanges(added []map[string]interface{}, deleted []st
 	if !lastModTime.IsZero() {
 		log.Printf("⏰ Last modified: %s", lastModTime.Format("2006-01-02 15:04:05"))
 	}
+	if !lastModTime.IsZero() {
+		timeDiff := currentModTime.Sub(lastModTime)
+		log.Printf("⏰ Last modified: %s (%s)", lastModTime.Format("2006-01-02 15:04:05"), formatDuration(timeDiff))
+	}
 	if !currentModTime.IsZero() {
-		log.Printf("⏰ Current time:  %s", currentModTime.Format("2006-01-02 15:04:05"))
-		
-		// Show relative time difference
-		if !lastModTime.IsZero() {
-			timeDiff := currentModTime.Sub(lastModTime)
-			log.Printf("   ⏱️  Time since last change: %s", formatDuration(timeDiff))
-		}
+		log.Printf("⏱️ Current time:  %s", currentModTime.Format("2006-01-02 15:04:05"))
 	}
 	log.Println(strings.Repeat("━", 80))
 
