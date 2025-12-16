@@ -69,6 +69,19 @@ patris-export convert kala.db -f json -w
 
 This will automatically re-convert the file whenever it changes. The convert command uses a 1-second debounce by default, meaning that rapid successive changes to the file will only trigger one conversion after the changes have settled.
 
+You can customize the debounce duration with the `--debounce` flag:
+
+```bash
+# No debounce (immediate conversion on every change)
+patris-export convert kala.db -f json -w --debounce 0s
+
+# 500ms debounce
+patris-export convert kala.db -f json -w --debounce 500ms
+
+# 5 second debounce
+patris-export convert kala.db -f json -w --debounce 5s
+```
+
 ### Show Database Information
 
 ```bash
@@ -94,6 +107,16 @@ Then access:
 - WebSocket: ws://localhost:8080/ws
 
 The server watches the database file by default and broadcasts updates immediately (no debounce) to all connected WebSocket clients when changes are detected.
+
+You can customize the debounce duration for the server with the `--debounce` flag:
+
+```bash
+# 500ms debounce for server updates
+patris-export serve kala.db -a :8080 --debounce 500ms
+
+# 1 second debounce
+patris-export serve kala.db -a :8080 --debounce 1s
+```
 
 ## 🎯 Using Character Mapping
 
@@ -171,6 +194,7 @@ Convert a Paradox database file to JSON or CSV.
 **Flags:**
 - `-f, --format` - Output format: json or csv (default: json)
 - `-w, --watch` - Watch file for changes and auto-convert
+- `-d, --debounce` - Debounce duration for watch mode (default: 1s, examples: 0s, 500ms, 5s)
 
 #### `info [database-file]`
 Display information about a Paradox database file (fields, record count, etc.)
@@ -184,6 +208,7 @@ Start the REST API and WebSocket server.
 **Flags:**
 - `-a, --addr` - Server address (default: :8080)
 - `-w, --watch` - Watch file for changes and broadcast updates (default: true)
+- `-d, --debounce` - Debounce duration for watch mode (default: 0s, examples: 500ms, 1s, 5s)
 
 ## 🔧 API Reference
 

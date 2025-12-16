@@ -279,8 +279,8 @@ func (s *Server) broadcastUpdate() {
 	}
 }
 
-// StartWatching starts watching the database file for changes
-func (s *Server) StartWatching() error {
+// StartWatching starts watching the database file for changes with the specified debounce duration
+func (s *Server) StartWatching(debounceDuration time.Duration) error {
 	fw, err := watcher.NewFileWatcher()
 	if err != nil {
 		return fmt.Errorf("failed to create file watcher: %w", err)
@@ -291,12 +291,12 @@ func (s *Server) StartWatching() error {
 	if err := fw.Watch(s.dbPath, func(path string) {
 		log.Printf("🔄 File changed: %s", filepath.Base(path))
 		s.broadcastUpdate()
-	}, 0); err != nil {
+	}, debounceDuration); err != nil {
 		return fmt.Errorf("failed to watch file: %w", err)
 	}
 
 	fw.Start()
-	log.Printf("👀 Watching database file: %s", filepath.Base(s.dbPath))
+	log.Printf("👀 Watching database file: %s (debounce: %s)", filepath.Base(s.dbPath), debounceDuration)
 
 	return nil
 }
