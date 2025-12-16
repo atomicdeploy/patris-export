@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"reflect"
+	"strings"
 	"sync"
 	"time"
 
@@ -31,6 +33,17 @@ type Server struct {
 	upgrader        websocket.Upgrader
 	lastRecords     []map[string]interface{}
 	lastRecordsMu   sync.RWMutex
+	lastModTime     time.Time
+	lastModTimeMu   sync.RWMutex
+}
+
+// RecordChange represents a change to a specific record
+type RecordChange struct {
+	Code          string                 `json:"code"`
+	ChangeType    string                 `json:"change_type"` // "added", "deleted", "modified"
+	OldValues     map[string]interface{} `json:"old_values,omitempty"`
+	NewValues     map[string]interface{} `json:"new_values,omitempty"`
+	ChangedFields []string               `json:"changed_fields,omitempty"`
 }
 
 // ChangeSet represents incremental changes to the database
@@ -39,6 +52,7 @@ type ChangeSet struct {
 	Timestamp  string                   `json:"timestamp"`
 	Added      []map[string]interface{} `json:"added,omitempty"`
 	Deleted    []string                 `json:"deleted,omitempty"`
+	Modified   []RecordChange           `json:"modified,omitempty"`
 	TotalCount int                      `json:"total_count"`
 }
 
@@ -246,13 +260,17 @@ func (s *Server) broadcastUpdate() {
 	// Log what we're sending
 	added := 0
 	deleted := 0
+	modified := 0
 	if a, ok := changes["added"].([]map[string]interface{}); ok {
 		added = len(a)
 	}
 	if d, ok := changes["deleted"].([]string); ok {
 		deleted = len(d)
 	}
-	log.Printf("📊 Changes detected: %d added, %d deleted", added, deleted)
+	if m, ok := changes["modified"].([]RecordChange); ok {
+		modified = len(m)
+	}
+	log.Printf("📊 Broadcasting: %d added, %d modified, %d deleted", added, modified, deleted)
 
 	// Broadcast to all clients
 	s.wsClientsMu.RLock()
@@ -305,12 +323,12 @@ func (s *Server) computeChanges(newRecords []map[string]interface{}) map[string]
 
 	added := []map[string]interface{}{}
 	deleted := []string{}
+	modified := []RecordChange{}
 
 	// Find added records
 	for code, record := range newMap {
 		if _, exists := oldMap[code]; !exists {
 			added = append(added, record)
-			log.Printf("➕ Added record: Code=%s", code)
 		}
 	}
 
@@ -318,9 +336,61 @@ func (s *Server) computeChanges(newRecords []map[string]interface{}) map[string]
 	for code := range oldMap {
 		if _, exists := newMap[code]; !exists {
 			deleted = append(deleted, code)
-			log.Printf("➖ Deleted record: Code=%s", code)
 		}
 	}
+
+	// Find modified records (records that exist in both but have different values)
+	for code, newRecord := range newMap {
+		if oldRecord, exists := oldMap[code]; exists {
+			changedFields := []string{}
+			oldValues := make(map[string]interface{})
+			newValues := make(map[string]interface{})
+
+			// Compare each field
+			for key, newVal := range newRecord {
+				if key == "Code" {
+					continue // Skip the key field
+				}
+				oldVal, hasOldVal := oldRecord[key]
+				
+				// Check if values differ
+				if !hasOldVal || !reflect.DeepEqual(oldVal, newVal) {
+					changedFields = append(changedFields, key)
+					if hasOldVal {
+						oldValues[key] = oldVal
+					} else {
+						oldValues[key] = nil
+					}
+					newValues[key] = newVal
+				}
+			}
+
+			// Check for fields that existed in old but not in new
+			for key, oldVal := range oldRecord {
+				if key == "Code" {
+					continue
+				}
+				if _, exists := newRecord[key]; !exists {
+					changedFields = append(changedFields, key)
+					oldValues[key] = oldVal
+					newValues[key] = nil
+				}
+			}
+
+			if len(changedFields) > 0 {
+				modified = append(modified, RecordChange{
+					Code:          code,
+					ChangeType:    "modified",
+					OldValues:     oldValues,
+					NewValues:     newValues,
+					ChangedFields: changedFields,
+				})
+			}
+		}
+	}
+
+	// Log detailed change information
+	s.logDetailedChanges(added, deleted, modified)
 
 	if len(added) > 0 {
 		changes["added"] = added
@@ -328,8 +398,126 @@ func (s *Server) computeChanges(newRecords []map[string]interface{}) map[string]
 	if len(deleted) > 0 {
 		changes["deleted"] = deleted
 	}
+	if len(modified) > 0 {
+		changes["modified"] = modified
+	}
 
 	return changes
+}
+
+// logDetailedChanges logs detailed information about what changed
+func (s *Server) logDetailedChanges(added []map[string]interface{}, deleted []string, modified []RecordChange) {
+	// Get file timestamps
+	s.lastModTimeMu.Lock()
+	lastModTime := s.lastModTime
+	s.lastModTimeMu.Unlock()
+
+	fileInfo, err := os.Stat(s.dbPath)
+	var currentModTime time.Time
+	if err == nil {
+		currentModTime = fileInfo.ModTime()
+		s.lastModTimeMu.Lock()
+		s.lastModTime = currentModTime
+		s.lastModTimeMu.Unlock()
+	}
+
+	// Log file timestamps
+	log.Println(strings.Repeat("━", 80))
+	log.Printf("📁 File: %s", filepath.Base(s.dbPath))
+	if !lastModTime.IsZero() {
+		log.Printf("⏰ Last modified: %s", lastModTime.Format("2006-01-02 15:04:05"))
+	}
+	if !currentModTime.IsZero() {
+		log.Printf("⏰ Current time:  %s", currentModTime.Format("2006-01-02 15:04:05"))
+	}
+	log.Println(strings.Repeat("━", 80))
+
+	totalChanges := len(added) + len(deleted) + len(modified)
+	
+	if totalChanges == 0 {
+		log.Println("ℹ️  No changes detected")
+		return
+	}
+
+	log.Printf("📊 Total changes: %d record(s) (%d added, %d modified, %d deleted)", 
+		totalChanges, len(added), len(modified), len(deleted))
+	log.Println("")
+
+	// If more than 10 records changed, show summary only
+	if totalChanges > 10 {
+		log.Printf("⚡ Large change detected: %d record(s) modified", totalChanges)
+		log.Printf("   • Added: %d", len(added))
+		log.Printf("   • Modified: %d", len(modified))
+		log.Printf("   • Deleted: %d", len(deleted))
+		log.Println(strings.Repeat("━", 80))
+		return
+	}
+
+	// Show detailed changes for each type
+	recordsShown := 0
+	const maxDetailRecords = 5
+
+	// Log added records
+	for i, record := range added {
+		if recordsShown >= maxDetailRecords {
+			remaining := len(added) - i + len(modified) + len(deleted)
+			log.Printf("   ... & %d more record(s)", remaining)
+			break
+		}
+		code := fmt.Sprintf("%v", record["Code"])
+		log.Printf("➕ Added: Code=%s", code)
+		recordsShown++
+	}
+
+	// Log modified records
+	for i, change := range modified {
+		if recordsShown >= maxDetailRecords {
+			remaining := len(modified) - i + len(deleted)
+			log.Printf("   ... & %d more record(s)", remaining)
+			break
+		}
+
+		if len(change.ChangedFields) == 1 {
+			// Single field change - show inline
+			field := change.ChangedFields[0]
+			oldVal := change.OldValues[field]
+			newVal := change.NewValues[field]
+			log.Printf("✏️  Modified: Code=%s, Field=%s, Old=%v, New=%v", 
+				change.Code, field, oldVal, newVal)
+		} else {
+			// Multiple field changes - show as table
+			log.Printf("✏️  Modified: Code=%s (%d field(s) changed)", change.Code, len(change.ChangedFields))
+			log.Println("   ┌─────────────────┬────────────────────┬────────────────────┐")
+			log.Println("   │ Field           │ Old Value          │ New Value          │")
+			log.Println("   ├─────────────────┼────────────────────┼────────────────────┤")
+			for _, field := range change.ChangedFields {
+				oldVal := fmt.Sprintf("%v", change.OldValues[field])
+				newVal := fmt.Sprintf("%v", change.NewValues[field])
+				if len(oldVal) > 18 {
+					oldVal = oldVal[:15] + "..."
+				}
+				if len(newVal) > 18 {
+					newVal = newVal[:15] + "..."
+				}
+				log.Printf("   │ %-15s │ %-18s │ %-18s │", field, oldVal, newVal)
+			}
+			log.Println("   └─────────────────┴────────────────────┴────────────────────┘")
+		}
+		recordsShown++
+	}
+
+	// Log deleted records
+	for i, code := range deleted {
+		if recordsShown >= maxDetailRecords {
+			remaining := len(deleted) - i
+			log.Printf("   ... & %d more record(s)", remaining)
+			break
+		}
+		log.Printf("➖ Deleted: Code=%s", code)
+		recordsShown++
+	}
+
+	log.Println(strings.Repeat("━", 80))
 }
 
 // StartWatching starts watching the database file for changes with the specified debounce duration

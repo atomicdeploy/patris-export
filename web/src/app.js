@@ -108,11 +108,12 @@ function handleWebSocketMessage(data) {
         
         // Handle modified records (if any)
         if (data.modified && data.modified.length > 0) {
-            data.modified.forEach(modifiedRecord => {
-                const code = String(modifiedRecord.Code);
+            data.modified.forEach(change => {
+                const code = String(change.code);
                 const index = state.records.findIndex(r => String(r.Code) === code);
                 if (index !== -1) {
-                    state.records[index] = modifiedRecord;
+                    // Merge the new values into the existing record
+                    Object.assign(state.records[index], change.newValues);
                     changedIndices.add(index);
                 }
             });
