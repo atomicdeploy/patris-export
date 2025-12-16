@@ -6,7 +6,6 @@ import (
 	"io"
 	"log"
 	"os"
-	"path/filepath"
 	"sync"
 	"time"
 
@@ -135,7 +134,6 @@ func (fw *FileWatcher) handleFileChange(path string) {
 		fw.fileHashes[path] = newHash
 		fw.mu.Unlock()
 
-		log.Printf("🔄 File changed: %s", filepath.Base(path))
 		callback(path)
 	}
 }
