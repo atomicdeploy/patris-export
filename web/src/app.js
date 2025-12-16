@@ -371,8 +371,9 @@ function exportData(format) {
     const data = state.filteredRecords.length > 0 ? state.filteredRecords : state.records;
     
     if (format === 'json') {
-        // Export as JSON
-        const jsonStr = JSON.stringify(data, null, 2);
+        // Export as JSON in transformed format (Code as keys)
+        const transformed = transformRecordsForExport(data);
+        const jsonStr = JSON.stringify(transformed, null, 2);
         const blob = new Blob([jsonStr], { type: 'application/json' });
         downloadFile(blob, 'patris-export.json');
     } else if (format === 'csv') {
@@ -384,6 +385,35 @@ function exportData(format) {
     
     // Close export dropdown
     document.getElementById('exportDropdown').classList.remove('open');
+}
+
+// Transform records to Code-keyed format for export
+function transformRecordsForExport(records) {
+    const result = {};
+    
+    records.forEach(record => {
+        const code = record.Code;
+        if (!code) return; // Skip records without Code
+        
+        // Create a copy of the record without Code field (it becomes the key)
+        const transformedRecord = {};
+        
+        // Copy all fields except Code and ANBAR (we'll handle ANBAR specially)
+        Object.keys(record).forEach(key => {
+            if (key !== 'Code' && key !== 'ANBAR') {
+                transformedRecord[key] = record[key];
+            }
+        });
+        
+        // Add ANBAR array if it exists
+        if (record.ANBAR && Array.isArray(record.ANBAR)) {
+            transformedRecord.ANBAR = record.ANBAR;
+        }
+        
+        result[code] = transformedRecord;
+    });
+    
+    return result;
 }
 
 // Convert data to CSV format
