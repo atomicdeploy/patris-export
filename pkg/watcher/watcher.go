@@ -6,7 +6,6 @@ import (
 	"io"
 	"log"
 	"os"
-	"path/filepath"
 	"sync"
 	"time"
 
@@ -19,6 +18,7 @@ type FileWatcher struct {
 	fileHashes map[string]string
 	mu         sync.RWMutex
 	callbacks  map[string]func(string)
+	debounce   map[string]time.Duration
 }
 
 // NewFileWatcher creates a new file watcher
@@ -32,11 +32,12 @@ func NewFileWatcher() (*FileWatcher, error) {
 		watcher:    watcher,
 		fileHashes: make(map[string]string),
 		callbacks:  make(map[string]func(string)),
+		debounce:   make(map[string]time.Duration),
 	}, nil
 }
 
-// Watch starts watching a file or directory
-func (fw *FileWatcher) Watch(path string, callback func(string)) error {
+// Watch starts watching a file or directory with a configurable debounce duration
+func (fw *FileWatcher) Watch(path string, callback func(string), debounceDuration time.Duration) error {
 	fw.mu.Lock()
 	defer fw.mu.Unlock()
 
@@ -48,6 +49,7 @@ func (fw *FileWatcher) Watch(path string, callback func(string)) error {
 
 	fw.fileHashes[path] = hash
 	fw.callbacks[path] = callback
+	fw.debounce[path] = debounceDuration
 
 	// Add to watcher
 	if err := fw.watcher.Add(path); err != nil {
@@ -78,15 +80,25 @@ func (fw *FileWatcher) watchLoop() {
 			if event.Op&fsnotify.Write == fsnotify.Write || event.Op&fsnotify.Create == fsnotify.Create {
 				path := event.Name
 
-				// Debounce: wait 500ms before processing
-				if timer, exists := debounceTimers[path]; exists {
-					timer.Stop()
-				}
+				// Get debounce duration for this path
+				fw.mu.RLock()
+				debounceDuration := fw.debounce[path]
+				fw.mu.RUnlock()
 
-				debounceTimers[path] = time.AfterFunc(500*time.Millisecond, func() {
-					fw.handleFileChange(path)
-					delete(debounceTimers, path)
-				})
+				// If debounce is 0, process immediately
+				if debounceDuration == 0 {
+					go fw.handleFileChange(path)
+				} else {
+					// Debounce: wait specified duration before processing
+					if timer, exists := debounceTimers[path]; exists {
+						timer.Stop()
+					}
+
+					debounceTimers[path] = time.AfterFunc(debounceDuration, func() {
+						fw.handleFileChange(path)
+						delete(debounceTimers, path)
+					})
+				}
 			}
 
 		case err, ok := <-fw.watcher.Errors:
@@ -122,7 +134,6 @@ func (fw *FileWatcher) handleFileChange(path string) {
 		fw.fileHashes[path] = newHash
 		fw.mu.Unlock()
 
-		log.Printf("🔄 File changed: %s", filepath.Base(path))
 		callback(path)
 	}
 }
@@ -155,6 +166,7 @@ func (fw *FileWatcher) Unwatch(path string) error {
 
 	delete(fw.fileHashes, path)
 	delete(fw.callbacks, path)
+	delete(fw.debounce, path)
 
 	return fw.watcher.Remove(path)
 }
