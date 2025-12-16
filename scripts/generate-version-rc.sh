@@ -13,24 +13,48 @@ VERSION_COMMA=$(echo "$VERSION" | sed 's/\./, /g')
 # Get current year
 CURRENT_YEAR=$(date +%Y)
 
-# Try to get repository description from GitHub API
-REPO_URL=$(git config --get remote.origin.url | sed 's/\.git$//' | sed 's|^git@github.com:|https://github.com/|')
-REPO_OWNER=$(echo "$REPO_URL" | sed 's|https://github.com/||' | cut -d'/' -f1)
-REPO_NAME=$(echo "$REPO_URL" | sed 's|https://github.com/||' | cut -d'/' -f2)
+# Parse repository URL to get owner and name
+REPO_URL=$(git config --get remote.origin.url | sed 's/\.git$//')
+# Handle both SSH (git@github.com:owner/repo) and HTTPS (https://github.com/owner/repo)
+if [[ "$REPO_URL" =~ ^git@github\.com:(.+)/(.+)$ ]]; then
+    REPO_OWNER="${BASH_REMATCH[1]}"
+    REPO_NAME="${BASH_REMATCH[2]}"
+elif [[ "$REPO_URL" =~ ^https://github\.com/(.+)/(.+)$ ]]; then
+    REPO_OWNER="${BASH_REMATCH[1]}"
+    REPO_NAME="${BASH_REMATCH[2]}"
+else
+    REPO_OWNER="Unknown"
+    REPO_NAME="Unknown"
+fi
+
+# Function to escape strings for C string literals
+escape_c_string() {
+    # Escape backslashes first, then quotes, then newlines
+    echo "$1" | sed 's/\\/\\\\/g' | sed 's/"/\\"/g' | sed 's/$/\\n/' | tr -d '\n' | sed 's/\\n$//'
+}
 
 # Try to fetch description via GitHub API (no auth required for public repos)
 DESCRIPTION=""
-if command -v curl &> /dev/null; then
-    DESCRIPTION=$(curl -s "https://api.github.com/repos/$REPO_OWNER/$REPO_NAME" | grep '"description"' | head -1 | sed 's/.*"description": "\(.*\)",/\1/')
+if command -v curl &> /dev/null && [ "$REPO_OWNER" != "Unknown" ]; then
+    # Use jq if available for safer JSON parsing, otherwise fallback
+    if command -v jq &> /dev/null; then
+        DESCRIPTION=$(curl -s "https://api.github.com/repos/$REPO_OWNER/$REPO_NAME" | jq -r '.description // ""' 2>/dev/null || echo "")
+    else
+        # Safer fallback: use python if available
+        if command -v python3 &> /dev/null; then
+            DESCRIPTION=$(curl -s "https://api.github.com/repos/$REPO_OWNER/$REPO_NAME" | python3 -c "import sys, json; data = json.load(sys.stdin); print(data.get('description', ''))" 2>/dev/null || echo "")
+        fi
+    fi
 fi
 
-# Fallback to default if GitHub API fails
+# Fallback to default if GitHub API fails or returns empty
 if [ -z "$DESCRIPTION" ]; then
     DESCRIPTION="Paradox/BDE database file converter"
 fi
 
-# Get company name from repository owner
-COMPANY_NAME="$REPO_OWNER"
+# Escape strings for safe C string literal insertion
+DESCRIPTION_ESCAPED=$(escape_c_string "$DESCRIPTION")
+COMPANY_NAME_ESCAPED=$(escape_c_string "$REPO_OWNER")
 
 # Generate the resource file
 cat > "$OUTPUT_FILE" << EOF
@@ -42,8 +66,8 @@ cat > "$OUTPUT_FILE" << EOF
 #define VER_PRODUCTVERSION          $VERSION_COMMA, 0
 #define VER_PRODUCTVERSION_STR      "$VERSION"
 
-#define VER_COMPANYNAME_STR         "$COMPANY_NAME"
-#define VER_FILEDESCRIPTION_STR     "$DESCRIPTION"
+#define VER_COMPANYNAME_STR         "$COMPANY_NAME_ESCAPED"
+#define VER_FILEDESCRIPTION_STR     "$DESCRIPTION_ESCAPED"
 #define VER_INTERNALNAME_STR        "patris-export"
 #define VER_LEGALCOPYRIGHT_STR      "Copyright (C) $CURRENT_YEAR"
 #define VER_ORIGINALFILENAME_STR    "patris-export.exe"
@@ -81,6 +105,6 @@ EOF
 
 echo "Generated resource file: $OUTPUT_FILE"
 echo "  Version: $VERSION"
-echo "  Company: $COMPANY_NAME"
+echo "  Company: $REPO_OWNER"
 echo "  Description: $DESCRIPTION"
 echo "  Copyright: Copyright (C) $CURRENT_YEAR"
