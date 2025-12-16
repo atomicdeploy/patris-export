@@ -71,15 +71,63 @@ func TestRealDatabaseChanges(t *testing.T) {
 			len(beforeRecords), len(afterRecords))
 	}
 	
-	// The test should detect at least some changes (otherwise why have two files?)
-	totalChanges := len(added) + len(modified) + len(deleted)
-	if totalChanges == 0 {
-		t.Error("Expected to detect some changes between before and after databases, but found none")
-	} else {
-		t.Logf("\n✅ Real database change detection test passed")
-		t.Logf("   Detected %d total changes across the database", totalChanges)
-		t.Logf("   This validates that field-level change tracking works with production data")
+	// Validate the expected change: Code 116005, FOROSH: 8888 → 9999
+	if len(added) != 0 {
+		t.Errorf("Expected 0 added records, got %d", len(added))
 	}
+	if len(deleted) != 0 {
+		t.Errorf("Expected 0 deleted records, got %d", len(deleted))
+	}
+	if len(modified) != 1 {
+		t.Errorf("Expected exactly 1 modified record, got %d", len(modified))
+		return
+	}
+	
+	// Check the specific modified record
+	expectedCode := "116005"
+	changes, ok := modified[expectedCode]
+	if !ok {
+		t.Errorf("Expected modified record with Code=%s, but it wasn't found", expectedCode)
+		t.Logf("Modified records: %v", getModifiedCodes(modified))
+		return
+	}
+	
+	// Verify the FOROSH field changed
+	if len(changes) != 1 {
+		t.Errorf("Expected exactly 1 changed field in record %s, got %d", expectedCode, len(changes))
+	}
+	
+	foreshChange, ok := changes["FOROSH"]
+	if !ok {
+		t.Errorf("Expected field 'FOROSH' to be changed in record %s", expectedCode)
+		t.Logf("Changed fields: %v", getChangedFieldNames(changes))
+		return
+	}
+	
+	// Verify the specific values (allow both int and float64 since JSON uses float64 for numbers)
+	oldVal := fmt.Sprintf("%v", foreshChange.OldValue)
+	newVal := fmt.Sprintf("%v", foreshChange.NewValue)
+	
+	if oldVal != "8888" {
+		t.Errorf("Expected old FOROSH value '8888', got '%s'", oldVal)
+	}
+	if newVal != "9999" {
+		t.Errorf("Expected new FOROSH value '9999', got '%s'", newVal)
+	}
+	
+	t.Logf("\n✅ Real database change detection test passed")
+	t.Logf("   Successfully detected expected change: Code=%s, FOROSH: %s → %s", 
+		expectedCode, oldVal, newVal)
+	t.Logf("   This validates that field-level change tracking works with production data")
+}
+
+// getModifiedCodes returns a list of codes from the modified map
+func getModifiedCodes(modified map[string]map[string]FieldChange) []string {
+	codes := make([]string, 0, len(modified))
+	for code := range modified {
+		codes = append(codes, code)
+	}
+	return codes
 }
 
 // copyFile copies a file from src to dst
