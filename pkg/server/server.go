@@ -289,9 +289,9 @@ func (s *Server) StartWatching() error {
 	s.watcher = fw
 
 	if err := fw.Watch(s.dbPath, func(path string) {
-		log.Printf("🔄 Database file changed, broadcasting to clients")
+		log.Printf("🔄 File changed: %s", filepath.Base(path))
 		s.broadcastUpdate()
-	}); err != nil {
+	}, 0); err != nil {
 		return fmt.Errorf("failed to watch file: %w", err)
 	}
 
@@ -313,7 +313,7 @@ func (s *Server) convertAndTransformRecords(records []paradox.Record) map[string
 func (s *Server) Start(addr string) error {
 	log.Printf("🚀 Starting server on %s", addr)
 	log.Printf("📊 Serving database: %s", filepath.Base(s.dbPath))
-	
+
 	if _, err := os.Stat(s.dbPath); os.IsNotExist(err) {
 		return fmt.Errorf("database file does not exist: %s", s.dbPath)
 	}

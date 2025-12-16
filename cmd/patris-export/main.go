@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/atomicdeploy/patris-export/pkg/converter"
 	"github.com/atomicdeploy/patris-export/pkg/paradox"
@@ -21,11 +22,11 @@ var (
 	BuildDate = "unknown"
 
 	// Global flags
-	charMapFile string
-	outputDir   string
+	charMapFile  string
+	outputDir    string
 	outputFormat string
-	watchMode   bool
-	verbose     bool
+	watchMode    bool
+	verbose      bool
 
 	// Color definitions
 	successColor = color.New(color.FgGreen, color.Bold)
@@ -106,7 +107,7 @@ func runConvert(cmd *cobra.Command, args []string) {
 	// Load character mapping if provided, otherwise use embedded default
 	var charMap converter.CharMapping
 	var err error
-	
+
 	if charMapFile != "" {
 		charMap, err = converter.LoadCharMapping(charMapFile)
 		if err != nil {
@@ -128,11 +129,11 @@ func runConvert(cmd *cobra.Command, args []string) {
 	if watchMode {
 		infoColor.Printf("👀 Watching file: %s\n", dbFile)
 		infoColor.Println("📝 Press Ctrl+C to stop watching")
-		
+
 		// Initial conversion
 		convertFile(dbFile, charMap)
 
-		// Set up watcher
+		// Set up watcher with 1s debounce for convert command
 		fw, err := watcher.NewFileWatcher()
 		if err != nil {
 			errorColor.Printf("❌ Failed to create file watcher: %v\n", err)
@@ -141,8 +142,9 @@ func runConvert(cmd *cobra.Command, args []string) {
 		defer fw.Close()
 
 		if err := fw.Watch(dbFile, func(path string) {
+			infoColor.Printf("🔄 File changed: %s\n", filepath.Base(path))
 			convertFile(path, charMap)
-		}); err != nil {
+		}, 1*time.Second); err != nil {
 			errorColor.Printf("❌ Failed to watch file: %v\n", err)
 			os.Exit(1)
 		}
@@ -182,17 +184,17 @@ func convertFile(dbFile string, charMap converter.CharMapping) {
 	// Generate output filename
 	baseName := strings.TrimSuffix(filepath.Base(dbFile), filepath.Ext(dbFile))
 	var outputFile string
-	
+
 	if outputFormat == "csv" {
 		outputFile = filepath.Join(outputDir, baseName+".csv")
-		
+
 		// Get fields for CSV header
 		fields, err := db.GetFields()
 		if err != nil {
 			errorColor.Printf("❌ Failed to get fields: %v\n", err)
 			return
 		}
-		
+
 		if err := exp.ExportToCSV(records, fields, outputFile); err != nil {
 			errorColor.Printf("❌ Failed to export to CSV: %v\n", err)
 			return
@@ -250,7 +252,7 @@ func runCompany(cmd *cobra.Command, args []string) {
 	// Load character mapping if provided, otherwise use embedded default
 	var charMap converter.CharMapping
 	var err error
-	
+
 	if charMapFile != "" {
 		charMap, err = converter.LoadCharMapping(charMapFile)
 		if err != nil {
@@ -294,7 +296,7 @@ func runServe(cmd *cobra.Command, args []string) {
 	// Load character mapping if provided, otherwise use embedded default
 	var charMap converter.CharMapping
 	var err error
-	
+
 	if charMapFile != "" {
 		charMap, err = converter.LoadCharMapping(charMapFile)
 		if err != nil {
@@ -326,7 +328,7 @@ func runServe(cmd *cobra.Command, args []string) {
 	// Start server
 	successColor.Printf("🌐 Server running at http://localhost%s\n", addr)
 	infoColor.Println("📝 Press Ctrl+C to stop the server")
-	
+
 	if err := srv.Start(addr); err != nil {
 		errorColor.Printf("❌ Server error: %v\n", err)
 		os.Exit(1)
