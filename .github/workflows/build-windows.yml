@@ -65,28 +65,33 @@ jobs:
         cmake --build . --config Release
         
         # Install for use by Go
-        cmake --install . --prefix C:/pxlib-install || {
-          # Manual install if cmake install fails
-          echo "CMake install failed, performing manual install..."
+        cmake --install . --prefix C:/pxlib-install
+        
+        # Verify installation worked, if not do manual install
+        if [ ! -f "C:/pxlib-install/include/paradox.h" ]; then
+          echo "CMake install did not install files, performing manual install..."
           mkdir -p C:/pxlib-install/include
           mkdir -p C:/pxlib-install/lib
           mkdir -p C:/pxlib-install/bin
           
           # Copy headers
+          echo "Copying headers..."
           cp -v ../include/*.h C:/pxlib-install/include/ || echo "Warning: Failed to copy headers from ../include"
           cp -v include/*.h C:/pxlib-install/include/ 2>/dev/null || echo "Warning: No headers in build/include"
           
           # Copy DLLs - look in common build locations
+          echo "Copying DLLs..."
           cp -v *.dll C:/pxlib-install/bin/ 2>/dev/null || echo "No DLLs in current directory"
           cp -v Release/*.dll C:/pxlib-install/bin/ 2>/dev/null || echo "No DLLs in Release/"
           cp -v libpxlib.dll C:/pxlib-install/bin/ 2>/dev/null || echo "No libpxlib.dll"
           
           # Copy import libraries
+          echo "Copying import libraries..."
           cp -v *.a C:/pxlib-install/lib/ 2>/dev/null || echo "No .a files"
           cp -v *.lib C:/pxlib-install/lib/ 2>/dev/null || echo "No .lib files"
           cp -v Release/*.a C:/pxlib-install/lib/ 2>/dev/null || echo "No .a in Release/"
           cp -v Release/*.lib C:/pxlib-install/lib/ 2>/dev/null || echo "No .lib in Release/"
-        }
+        fi
         
         echo "Installed files:"
         ls -la C:/pxlib-install/include/ || echo "No headers installed"
