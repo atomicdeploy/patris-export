@@ -194,17 +194,33 @@ func TestExportToCSVWriter(t *testing.T) {
 	}
 }
 
-// jsonEqual compares two JSON objects for equality
+// jsonEqual compares two JSON objects for equality by comparing their JSON representations
 func jsonEqual(a, b interface{}) bool {
-	aJSON, _ := json.Marshal(a)
-	bJSON, _ := json.Marshal(b)
+	aJSON, err := json.Marshal(a)
+	if err != nil {
+		return false
+	}
+	bJSON, err := json.Marshal(b)
+	if err != nil {
+		return false
+	}
 
 	var aMap, bMap interface{}
-	json.Unmarshal(aJSON, &aMap)
-	json.Unmarshal(bJSON, &bMap)
+	if err := json.Unmarshal(aJSON, &aMap); err != nil {
+		return false
+	}
+	if err := json.Unmarshal(bJSON, &bMap); err != nil {
+		return false
+	}
 
-	aStr, _ := json.Marshal(aMap)
-	bStr, _ := json.Marshal(bMap)
+	aStr, err := json.Marshal(aMap)
+	if err != nil {
+		return false
+	}
+	bStr, err := json.Marshal(bMap)
+	if err != nil {
+		return false
+	}
 
 	return string(aStr) == string(bStr)
 }
