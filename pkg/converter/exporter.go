@@ -218,14 +218,6 @@ func (e *Exporter) TransformRecords(records []paradox.Record) map[string]interfa
 		
 		// Add ANBAR array if we collected any, in sorted order by field number
 		if len(anbarFields) > 0 {
-			// Find the maximum ANBAR number to determine array size
-			maxAnbarIndex := 0
-			for index := range anbarFields {
-				if index > maxAnbarIndex {
-					maxAnbarIndex = index
-				}
-			}
-			
 			// Build array with correct ordering (1-indexed fields -> 0-indexed array)
 			anbarValues := make([]interface{}, maxAnbarIndex)
 			for i := 1; i <= maxAnbarIndex; i++ {
