@@ -118,25 +118,14 @@ func (s *Server) handleGetRecords(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Convert records
-	convertedRecords := make([]paradox.Record, len(records))
-	for i, record := range records {
-		convertedRecord := make(paradox.Record)
-		for key, value := range record {
-			if strVal, ok := value.(string); ok {
-				convertedRecord[key] = converter.Patris2Fa(strVal)
-			} else {
-				convertedRecord[key] = value
-			}
-		}
-		convertedRecords[i] = convertedRecord
-	}
+	// Convert and transform records to match the format used by the convert command
+	transformed := s.convertAndTransformRecords(records)
 
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"success": true,
-		"count":   len(convertedRecords),
-		"records": convertedRecords,
+		"count":   len(transformed),
+		"records": transformed,
 	})
 }
 
@@ -215,19 +204,8 @@ func (s *Server) sendRecordsToClient(conn *websocket.Conn) {
 		return
 	}
 
-	// Convert records
-	convertedRecords := make([]paradox.Record, len(records))
-	for i, record := range records {
-		convertedRecord := make(paradox.Record)
-		for key, value := range record {
-			if strVal, ok := value.(string); ok {
-				convertedRecord[key] = converter.Patris2Fa(strVal)
-			} else {
-				convertedRecord[key] = value
-			}
-		}
-		convertedRecords[i] = convertedRecord
-	}
+	// Convert and transform records to match the format used by the convert command
+	transformed := s.convertAndTransformRecords(records)
 
 	// Send as initial load (all records are "added")
 	message := ChangeSet{
@@ -366,6 +344,14 @@ func (s *Server) StartWatching() error {
 	log.Printf("👀 Watching database file: %s", filepath.Base(s.dbPath))
 
 	return nil
+}
+
+// convertAndTransformRecords converts record text encoding and transforms them
+// to match the format used by the convert command (combines ANBAR fields, removes Sort fields, etc.)
+func (s *Server) convertAndTransformRecords(records []paradox.Record) map[string]interface{} {
+	// Create exporter with Patris2Fa converter and use it to convert and transform records
+	exp := converter.NewExporter(converter.Patris2Fa)
+	return exp.ConvertAndTransformRecords(records)
 }
 
 // Start starts the HTTP server
