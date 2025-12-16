@@ -41,3 +41,10 @@ Thumbs.db
 !testdata/*.db
 !testdata/*.inf
 !testdata/*.txt
+
+# Web/Node.js
+web/node_modules/
+web/dist/app.js
+
+# Keep the final built HTML for embedding
+!web/dist/index.html

@@ -13,6 +13,7 @@ import (
 	"github.com/atomicdeploy/patris-export/pkg/converter"
 	"github.com/atomicdeploy/patris-export/pkg/paradox"
 	"github.com/atomicdeploy/patris-export/pkg/watcher"
+	"github.com/atomicdeploy/patris-export/web"
 	"github.com/gorilla/mux"
 	"github.com/gorilla/websocket"
 )
@@ -71,80 +72,10 @@ func (s *Server) setupRoutes() {
 	s.router.HandleFunc("/ws", s.handleWebSocket)
 }
 
-// handleIndex serves a simple welcome page
+// handleIndex serves the embedded SPA
 func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	fmt.Fprintf(w, `
-<!DOCTYPE html>
-<html>
-<head>
-    <title>Patris Export API</title>
-    <style>
-        body {
-            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-            max-width: 800px;
-            margin: 50px auto;
-            padding: 20px;
-            background: #f5f5f5;
-        }
-        .container {
-            background: white;
-            padding: 30px;
-            border-radius: 10px;
-            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
-        }
-        h1 { color: #2c3e50; }
-        .endpoint {
-            background: #ecf0f1;
-            padding: 15px;
-            margin: 10px 0;
-            border-radius: 5px;
-            border-left: 4px solid #3498db;
-        }
-        .endpoint code {
-            color: #e74c3c;
-            font-weight: bold;
-        }
-        a {
-            color: #3498db;
-            text-decoration: none;
-        }
-        a:hover {
-            text-decoration: underline;
-        }
-    </style>
-</head>
-<body>
-    <div class="container">
-        <h1>📊 Patris Export API</h1>
-        <p>Welcome to the Paradox database REST API and WebSocket server.</p>
-        
-        <h2>Available Endpoints:</h2>
-        
-        <div class="endpoint">
-            <strong>GET</strong> <code>/api/records</code><br>
-            Get all database records in JSON format<br>
-            <a href="/api/records">Try it →</a>
-        </div>
-        
-        <div class="endpoint">
-            <strong>GET</strong> <code>/api/info</code><br>
-            Get database schema information<br>
-            <a href="/api/info">Try it →</a>
-        </div>
-        
-        <div class="endpoint">
-            <strong>WebSocket</strong> <code>/ws</code><br>
-            Connect via WebSocket for real-time updates
-        </div>
-        
-        <p style="margin-top: 30px; color: #7f8c8d; font-size: 14px;">
-            🔄 The server watches the database file and broadcasts changes via WebSocket.
-        </p>
-    </div>
-</body>
-</html>
-`)
+	w.Write(web.IndexHTML)
 }
 
 // handleGetRecords returns all database records as JSON

@@ -1,4 +1,4 @@
-.PHONY: build build-linux build-windows build-all clean test run install help deps
+.PHONY: build build-linux build-windows build-all clean test run install help deps build-web
 
 # Binary names
 BINARY_NAME=patris-export
@@ -15,19 +15,24 @@ help: ## Show this help message
 	@echo 'Available targets:'
 	@awk 'BEGIN {FS = ":.*?## "} /^[a-zA-Z_-]+:.*?## / {printf "  %-15s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
 
-build: ## Build for current platform
+build-web: ## Build the web frontend
+	@echo "🌐 Building web frontend..."
+	@cd web && npm install --silent && npm run build
+	@echo "✅ Web frontend built"
+
+build: build-web ## Build for current platform
 	@echo "🔨 Building $(BINARY_NAME)..."
 	@mkdir -p $(BUILD_DIR)
 	CGO_ENABLED=1 go build $(LDFLAGS) -o $(BUILD_DIR)/$(BINARY_NAME) ./cmd/patris-export
 	@echo "✅ Build complete: $(BUILD_DIR)/$(BINARY_NAME)"
 
-build-linux: ## Build for Linux
+build-linux: build-web ## Build for Linux
 	@echo "🐧 Building for Linux..."
 	@mkdir -p $(BUILD_DIR)
 	GOOS=linux GOARCH=amd64 CGO_ENABLED=1 go build $(LDFLAGS) -o $(BUILD_DIR)/$(BINARY_NAME)-linux-amd64 ./cmd/patris-export
 	@echo "✅ Build complete: $(BUILD_DIR)/$(BINARY_NAME)-linux-amd64"
 
-build-windows: ## Build for Windows (requires pxlib DLL - see docs/WINDOWS_BUILD.md)
+build-windows: build-web ## Build for Windows (requires pxlib DLL - see docs/WINDOWS_BUILD.md)
 	@echo "🪟 Building for Windows..."
 	@echo "⚠️  Note: Requires pxlib built for Windows from https://github.com/DRSDavidSoft/pxlib"
 	@echo "⚠️  See docs/WINDOWS_BUILD.md for setup instructions"
@@ -38,7 +43,7 @@ build-windows: ## Build for Windows (requires pxlib DLL - see docs/WINDOWS_BUILD
 
 build-all: build-linux build-windows ## Build for all platforms
 
-install: ## Install the binary to GOPATH/bin
+install: build-web ## Install the binary to GOPATH/bin
 	@echo "📦 Installing $(BINARY_NAME)..."
 	CGO_ENABLED=1 go install $(LDFLAGS) ./cmd/patris-export
 	@echo "✅ Installed to $(shell go env GOPATH)/bin/$(BINARY_NAME)"
@@ -50,6 +55,7 @@ test: ## Run tests
 clean: ## Clean build artifacts
 	@echo "🧹 Cleaning..."
 	@rm -rf $(BUILD_DIR)
+	@rm -rf web/dist/app.js
 	@echo "✅ Clean complete"
 
 run: build ## Build and run the application
@@ -59,4 +65,5 @@ deps: ## Download dependencies
 	@echo "📥 Downloading dependencies..."
 	go mod download
 	go mod tidy
+	@cd web && npm install
 	@echo "✅ Dependencies ready"
