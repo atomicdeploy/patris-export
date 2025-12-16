@@ -77,8 +77,8 @@ jobs:
         sed -i 's/#include <Windows\.h>/#include <windows.h>/g' src/paradox.c
         sed -i 's/#include <Winbase\.h>/#include <winbase.h>/g' src/paradox.c
         
-        # Patch CMakeLists.txt to use our custom resource file
-        ${GITHUB_WORKSPACE}/scripts/patch-pxlib-cmake.sh /tmp/pxlib ${GITHUB_WORKSPACE}/resources/pxlib.rc
+        # Patch CMakeLists.txt to fix windres compilation
+        ${GITHUB_WORKSPACE}/scripts/patch-pxlib-cmake.sh /tmp/pxlib
         
         # Create a CMake toolchain file for MinGW cross-compilation
         cat > mingw-toolchain.cmake << 'EOF'

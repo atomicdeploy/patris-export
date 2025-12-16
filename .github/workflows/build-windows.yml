@@ -50,8 +50,8 @@ jobs:
         git clone https://github.com/steinm/pxlib.git
         cd pxlib
         
-        # Patch CMakeLists.txt to use our custom resource file
-        ${GITHUB_WORKSPACE}/scripts/patch-pxlib-cmake.sh /c/pxlib ${GITHUB_WORKSPACE}/resources/pxlib.rc
+        # Patch CMakeLists.txt to fix windres compilation
+        ${GITHUB_WORKSPACE}/scripts/patch-pxlib-cmake.sh /c/pxlib
         
         mkdir build
         cd build
