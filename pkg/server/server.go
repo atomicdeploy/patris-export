@@ -42,6 +42,9 @@ type ChangeSet struct {
 }
 
 // recordKey generates a unique key for a record
+// Note: Uses JSON serialization for simplicity and correctness.
+// For very large datasets (>10k records), consider using a hash-based approach
+// or implementing a proper record ID system for better performance.
 func recordKey(record paradox.Record) string {
 	// Use JSON serialization as a simple key
 	data, _ := json.Marshal(record)
@@ -319,17 +322,15 @@ func (s *Server) computeChanges(newRecords []paradox.Record) ChangeSet {
 		newMap[recordKey(record)] = i
 	}
 
-	// Find added and modified records
+	// Find added records
 	for key, newIdx := range newMap {
-		if oldIdx, exists := oldMap[key]; exists {
-			// Record exists in both - check if modified (by comparing index position)
-			if oldIdx != newIdx {
-				changes.Modified = append(changes.Modified, newRecords[newIdx])
-			}
-		} else {
+		if _, exists := oldMap[key]; !exists {
 			// New record
 			changes.Added = append(changes.Added, newRecords[newIdx])
 		}
+		// Note: Since recordKey is based on record content, if the key exists in both maps,
+		// the record is unchanged. We don't track "modified" separately since modification
+		// would result in a different key (different content).
 	}
 
 	// Find deleted records (by index)

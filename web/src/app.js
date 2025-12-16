@@ -183,15 +183,18 @@ function renderTable(changedIndices = new Set()) {
     
     tbody.innerHTML = '';
     
-    recordsToShow.forEach((record, index) => {
+    recordsToShow.forEach((record, displayIndex) => {
         const row = document.createElement('tr');
         
+        // Find the original index in state.records
+        const originalIndex = state.records.indexOf(record);
+        
         // Add highlight class if changed
-        if (changedIndices.has(index) && state.settings.highlightChanges) {
+        if (changedIndices.has(originalIndex) && state.settings.highlightChanges) {
             row.classList.add('changed');
             
             // Scroll to changed item if setting is enabled
-            if (state.settings.autoScrollToChanged && index === Math.min(...changedIndices)) {
+            if (state.settings.autoScrollToChanged && originalIndex === Math.min(...changedIndices)) {
                 setTimeout(() => {
                     row.scrollIntoView({ behavior: 'smooth', block: 'center' });
                 }, 100);
