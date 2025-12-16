@@ -199,18 +199,18 @@ func (e *Exporter) TransformRecords(records []paradox.Record) map[string]interfa
 				continue
 			}
 			
-      // Collect numbered ANBAR fields into map (ANBAR1, ANBAR2, etc.)
-      if anbarFieldRegex.MatchString(key) {
-        // Extract the number from ANBARn field name (e.g., "ANBAR1" -> 1)
-        var index int
-        if n, _ := fmt. Sscanf(key, "ANBAR%d", &index); n == 1 && index > 0 {
-          anbarFields[index] = value
-          if index > maxAnbarIndex {
-            maxAnbarIndex = index
-          }
-        }
-        continue
-      }
+			// Collect numbered ANBAR fields into map (ANBAR1, ANBAR2, etc.)
+			if anbarFieldRegex.MatchString(key) {
+				// Extract the number from ANBARn field name (e.g., "ANBAR1" -> 1)
+				var index int
+				if n, _ := fmt. Sscanf(key, "ANBAR%d", &index); n == 1 && index > 0 {
+					anbarFields[index] = value
+					if index > maxAnbarIndex {
+						maxAnbarIndex = index
+					}
+				}
+				continue
+			}
 			
 			// Add all other fields
 			optimized[key] = value
