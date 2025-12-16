@@ -113,8 +113,11 @@ function handleWebSocketMessage(data) {
                 const index = state.records.findIndex(r => String(r.Code) === code);
                 if (index !== -1) {
                     // Merge the new values into the existing record
-                    Object.assign(state.records[index], change.newValues);
+                    // Note: The server sends new_values (snake_case) not newValues (camelCase)
+                    const newValues = change.new_values || change.newValues || {};
+                    Object.assign(state.records[index], newValues);
                     changedIndices.add(index);
+                    console.log(`Updated record ${code}:`, newValues);
                 }
             });
         }
