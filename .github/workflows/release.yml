@@ -62,25 +62,28 @@ jobs:
           }
       
     - name: Download Linux artifact
-      uses: actions/download-artifact@v4
+      uses: dawidd6/action-download-artifact@v6
       with:
+        workflow: build.yml
         name: patris-export-linux-amd64
         path: ./artifacts
-        merge-multiple: true
+        commit: ${{ github.sha }}
         
     - name: Download Windows MinGW artifact
-      uses: actions/download-artifact@v4
+      uses: dawidd6/action-download-artifact@v6
       with:
+        workflow: build-windows.yml
         name: patris-export-windows-mingw-amd64
         path: ./artifacts
-        merge-multiple: true
+        commit: ${{ github.sha }}
         
     - name: Download Windows MinGW cross-compile artifact
-      uses: actions/download-artifact@v4
+      uses: dawidd6/action-download-artifact@v6
       with:
+        workflow: build.yml
         name: patris-export-windows-mingw-cross-amd64
         path: ./artifacts-cross
-        merge-multiple: true
+        commit: ${{ github.sha }}
       continue-on-error: true
         
     - name: Create Release

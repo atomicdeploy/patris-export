@@ -43,6 +43,11 @@ jobs:
         choco install mingw -y
         refreshenv
     
+    - name: Generate version resource file
+      shell: bash
+      run: |
+        ${GITHUB_WORKSPACE}/scripts/generate-version-rc.sh cmd/patris-export/patris-export.rc
+        
     - name: Build pxlib for Windows
       shell: bash
       run: |

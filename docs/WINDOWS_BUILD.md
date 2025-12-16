@@ -101,12 +101,20 @@ make build-windows
 
 Windows executables and DLLs include embedded version information via resource (.rc) files:
 
-- `cmd/patris-export/patris-export.rc` - Version info for the main executable
+- `cmd/patris-export/patris-export.rc` - Generated dynamically from repository metadata
+  - Version extracted from git tags
+  - Company name from repository owner
+  - Description from GitHub repository description
+  - Copyright year automatically updated to current year
+  - Run `scripts/generate-version-rc.sh` to regenerate
 - pxlib uses its own upstream version information from `pxlib.rc.in`
 
 These are automatically compiled and embedded during the build process. To manually compile resource files:
 
 ```bash
+# Generate the version resource file
+./scripts/generate-version-rc.sh cmd/patris-export/patris-export.rc
+
 # For MinGW cross-compilation on Linux
 ./scripts/compile-resources.sh
 

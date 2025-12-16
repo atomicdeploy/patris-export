@@ -66,6 +66,10 @@ jobs:
         x86_64-w64-mingw32-gcc --version
         ls -la /usr/share/mingw-w64/include/ 2>/dev/null || echo "MinGW headers not in standard location"
 
+    - name: Generate version resource file
+      run: |
+        ${GITHUB_WORKSPACE}/scripts/generate-version-rc.sh cmd/patris-export/patris-export.rc
+        
     - name: Build pxlib for Windows
       run: |
         cd /tmp
