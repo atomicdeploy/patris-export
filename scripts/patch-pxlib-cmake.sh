@@ -30,7 +30,7 @@ echo "Patching CMakeLists.txt to fix windres compilation..."
 # - Keep -DHAVE_CONFIG_H in add_definitions() (needed for RC preprocessing)
 # - Move warning flags to target_compile_options() with generator expression to exclude RC files
 
-if grep -q "add_definitions.*-Wall" CMakeLists.txt; then
+if grep -q "\-Wall" CMakeLists.txt; then
     echo "  Separating compiler warning flags from preprocessor definitions..."
     
     python3 << 'PYTHON_SCRIPT'
