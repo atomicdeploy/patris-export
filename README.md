@@ -61,6 +61,23 @@ patris-export convert kala.db -f json -o output/
 patris-export convert kala.db -f csv -o output/
 ```
 
+### Output to STDOUT
+
+You can output directly to stdout by using `-` as the output destination, which allows for piping and redirection:
+
+```bash
+# Output JSON to stdout
+patris-export convert kala.db -f json -o -
+
+# Pipe to jq for filtering
+patris-export convert kala.db -f json -o - | jq '.["12345"]'
+
+# Redirect to file
+patris-export convert kala.db -f csv -o - > output.csv
+```
+
+Note: Watch mode (`-w`) cannot be used with stdout output.
+
 ### Watch File for Changes
 
 ```bash
@@ -183,7 +200,7 @@ go test -v ./...
 ### Global Flags
 
 - `-c, --charmap` - Path to character mapping file (farsi_chars.txt)
-- `-o, --output` - Output directory for converted files (default: current directory)
+- `-o, --output` - Output directory for converted files, or `-` for stdout (default: current directory)
 - `-v, --verbose` - Enable verbose logging
 
 ### Commands
