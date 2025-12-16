@@ -50,17 +50,8 @@ jobs:
         git clone https://github.com/steinm/pxlib.git
         cd pxlib
         
-        # Copy our resource file for version information
-        cp ${GITHUB_WORKSPACE}/resources/pxlib.rc .
-        
-        # Patch CMakeLists.txt to use our RC file
-        if grep -q "target_sources(pxlib PRIVATE.*pxlib.rc)" CMakeLists.txt; then
-          sed -i '/target_sources(pxlib PRIVATE.*pxlib.rc)/d' CMakeLists.txt
-          echo "Removed original RC file from CMakeLists.txt"
-        fi
-        
-        # Add our RC file to CMakeLists.txt
-        sed -i '/add_library(pxlib/a \    # Add Windows resource file for version info\n    if(WIN32)\n        target_sources(pxlib PRIVATE ${CMAKE_SOURCE_DIR}/pxlib.rc)\n    endif()' CMakeLists.txt
+        # Patch CMakeLists.txt to use our custom resource file
+        ${GITHUB_WORKSPACE}/scripts/patch-pxlib-cmake.sh /c/pxlib ${GITHUB_WORKSPACE}/resources/pxlib.rc
         
         mkdir build
         cd build
@@ -194,7 +185,7 @@ jobs:
         
         if ([string]::IsNullOrEmpty($versionInfo.FileVersion)) {
           Write-Host "ERROR: No version information found in executable!"
-          exit 1
+          throw "No version information found in executable!"
         } else {
           Write-Host "✅ Version information successfully embedded"
         }

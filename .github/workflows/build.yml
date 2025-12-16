@@ -77,17 +77,8 @@ jobs:
         sed -i 's/#include <Windows\.h>/#include <windows.h>/g' src/paradox.c
         sed -i 's/#include <Winbase\.h>/#include <winbase.h>/g' src/paradox.c
         
-        # Add our custom resource file for version information
-        cp ${GITHUB_WORKSPACE}/resources/pxlib.rc .
-        
-        # Patch CMakeLists.txt to use our RC file properly
-        if grep -q "target_sources(pxlib PRIVATE.*pxlib.rc)" CMakeLists.txt; then
-          sed -i '/target_sources(pxlib PRIVATE.*pxlib.rc)/d' CMakeLists.txt
-          echo "Removed original RC file from CMakeLists.txt"
-        fi
-        
-        # Add our RC file to CMakeLists.txt after the add_library line
-        sed -i '/add_library(pxlib/a \    # Add Windows resource file for version info\n    if(WIN32)\n        target_sources(pxlib PRIVATE ${CMAKE_SOURCE_DIR}/pxlib.rc)\n    endif()' CMakeLists.txt
+        # Patch CMakeLists.txt to use our custom resource file
+        ${GITHUB_WORKSPACE}/scripts/patch-pxlib-cmake.sh /tmp/pxlib ${GITHUB_WORKSPACE}/resources/pxlib.rc
         
         # Create a CMake toolchain file for MinGW cross-compilation
         cat > mingw-toolchain.cmake << 'EOF'

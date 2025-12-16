@@ -18,5 +18,11 @@ x86_64-w64-mingw32-windres \
     -O coff \
     --target=pe-x86-64
 
+# Verify the output file was created
+if [ ! -f cmd/patris-export/patris-export_windows_amd64.syso ]; then
+    echo "❌ Error: Resource file compilation failed - output file not created"
+    exit 1
+fi
+
 echo "✅ Resource file compiled successfully"
 ls -lh cmd/patris-export/patris-export_windows_amd64.syso

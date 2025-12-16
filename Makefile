@@ -36,7 +36,8 @@ build-windows: ## Build for Windows (requires pxlib DLL - see docs/WINDOWS_BUILD
 	@if command -v x86_64-w64-mingw32-windres >/dev/null 2>&1; then \
 		echo "📝 Compiling Windows resource file..."; \
 		x86_64-w64-mingw32-windres -i cmd/patris-export/patris-export.rc \
-			-o cmd/patris-export/patris-export_windows_amd64.syso -O coff --target=pe-x86-64; \
+			-o cmd/patris-export/patris-export_windows_amd64.syso -O coff --target=pe-x86-64 || \
+			{ echo "❌ Resource compilation failed"; exit 1; }; \
 		echo "✅ Resource file compiled"; \
 	else \
 		echo "⚠️  windres not found, skipping resource compilation"; \
