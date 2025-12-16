@@ -425,9 +425,6 @@ func (s *Server) logDetailedChanges(added []map[string]interface{}, deleted []st
 	log.Println(strings.Repeat("━", 80))
 	log.Printf("📁 File: %s", filepath.Base(s.dbPath))
 	if !lastModTime.IsZero() {
-		log.Printf("⏰ Last modified: %s", lastModTime.Format("2006-01-02 15:04:05"))
-	}
-	if !lastModTime.IsZero() {
 		timeDiff := currentModTime.Sub(lastModTime)
 		log.Printf("⏰ Last modified: %s (%s)", lastModTime.Format("2006-01-02 15:04:05"), formatDuration(timeDiff))
 	}
