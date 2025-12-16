@@ -131,12 +131,7 @@ func runConvert(cmd *cobra.Command, args []string) {
 
 	if watchMode {
 		// Parse debounce duration
-		debounceDuration, err := time.ParseDuration(debounceString)
-		if err != nil {
-			errorColor.Printf("❌ Invalid debounce duration '%s': %v\n", debounceString, err)
-			errorColor.Println("💡 Valid examples: 0s, 500ms, 1s, 5s, 1m")
-			os.Exit(1)
-		}
+		debounceDuration := parseDebounceDuration(debounceString)
 
 		infoColor.Printf("👀 Watching file: %s (debounce: %s)\n", dbFile, debounceDuration)
 		infoColor.Println("📝 Press Ctrl+C to stop watching")
@@ -293,6 +288,17 @@ func runCompany(cmd *cobra.Command, args []string) {
 	fmt.Println()
 }
 
+// parseDebounceDuration parses and validates a debounce duration string
+func parseDebounceDuration(durationStr string) time.Duration {
+	duration, err := time.ParseDuration(durationStr)
+	if err != nil {
+		errorColor.Printf("❌ Invalid debounce duration '%s': %v\n", durationStr, err)
+		errorColor.Println("💡 Valid examples: 0s, 500ms, 1s, 5s, 1m")
+		os.Exit(1)
+	}
+	return duration
+}
+
 func init() {
 	// Set up logging
 	log.SetFlags(0)
@@ -332,12 +338,7 @@ func runServe(cmd *cobra.Command, args []string) {
 	// Start file watching if enabled
 	if watchFile {
 		// Parse debounce duration
-		debounceDuration, err := time.ParseDuration(debounceStr)
-		if err != nil {
-			errorColor.Printf("❌ Invalid debounce duration '%s': %v\n", debounceStr, err)
-			errorColor.Println("💡 Valid examples: 0s, 500ms, 1s, 5s, 1m")
-			os.Exit(1)
-		}
+		debounceDuration := parseDebounceDuration(debounceStr)
 
 		if err := srv.StartWatching(debounceDuration); err != nil {
 			errorColor.Printf("❌ Failed to start file watching: %v\n", err)
