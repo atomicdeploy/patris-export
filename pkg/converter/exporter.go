@@ -39,7 +39,7 @@ func (e *Exporter) ExportToJSON(records []paradox.Record, outputPath string) err
 	}
 
 	// Transform records to use Code as key and optimize structure
-	transformed := e.transformRecords(records)
+	transformed := e.TransformRecords(records)
 
 	file, err := os.Create(outputPath)
 	if err != nil {
@@ -136,7 +136,7 @@ func (e *Exporter) ExportRecordsToString(records []paradox.Record) (string, erro
 	}
 
 	// Transform records to use Code as key and optimize structure
-	transformed := e.transformRecords(records)
+	transformed := e.TransformRecords(records)
 
 	data, err := json.MarshalIndent(transformed, "", "  ")
 	if err != nil {
@@ -149,11 +149,12 @@ func (e *Exporter) ExportRecordsToString(records []paradox.Record) (string, erro
 	return output, nil
 }
 
-// transformRecords transforms records for Patris81-specific output format:
+// TransformRecords transforms records for Patris81-specific output format:
 // - Use Code field as the key
 // - Ignore fields starting with "Sort"
 // - Combine ANBAR fields into an array
-func (e *Exporter) transformRecords(records []paradox.Record) map[string]interface{} {
+// This method is used by both the file exporter and the web server to ensure consistent output.
+func (e *Exporter) TransformRecords(records []paradox.Record) map[string]interface{} {
 	result := make(map[string]interface{})
 	
 	for _, record := range records {

@@ -162,7 +162,10 @@ func (s *Server) handleGetRecords(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Convert records
+	// Create exporter with Patris2Fa converter to match convert command behavior
+	exp := converter.NewExporter(converter.Patris2Fa)
+	
+	// Convert string fields and transform records (combine ANBAR fields, skip Sort fields, etc.)
 	convertedRecords := make([]paradox.Record, len(records))
 	for i, record := range records {
 		convertedRecord := make(paradox.Record)
@@ -175,12 +178,15 @@ func (s *Server) handleGetRecords(w http.ResponseWriter, r *http.Request) {
 		}
 		convertedRecords[i] = convertedRecord
 	}
+	
+	// Transform records to match the format used by the convert command
+	transformed := exp.TransformRecords(convertedRecords)
 
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"success": true,
-		"count":   len(convertedRecords),
-		"records": convertedRecords,
+		"count":   len(records),
+		"records": transformed,
 	})
 }
 
@@ -259,7 +265,10 @@ func (s *Server) sendRecordsToClient(conn *websocket.Conn) {
 		return
 	}
 
-	// Convert records
+	// Create exporter with Patris2Fa converter to match convert command behavior
+	exp := converter.NewExporter(converter.Patris2Fa)
+	
+	// Convert string fields
 	convertedRecords := make([]paradox.Record, len(records))
 	for i, record := range records {
 		convertedRecord := make(paradox.Record)
@@ -272,12 +281,15 @@ func (s *Server) sendRecordsToClient(conn *websocket.Conn) {
 		}
 		convertedRecords[i] = convertedRecord
 	}
+	
+	// Transform records to match the format used by the convert command
+	transformed := exp.TransformRecords(convertedRecords)
 
 	message := map[string]interface{}{
 		"type":      "update",
 		"timestamp": time.Now().Format(time.RFC3339),
-		"count":     len(convertedRecords),
-		"records":   convertedRecords,
+		"count":     len(records),
+		"records":   transformed,
 	}
 
 	if err := conn.WriteJSON(message); err != nil {
