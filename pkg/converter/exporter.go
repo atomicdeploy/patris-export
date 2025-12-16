@@ -228,7 +228,7 @@ func (e *Exporter) TransformRecords(records []paradox.Record) map[string]interfa
 			
 			// Build array with correct ordering (1-indexed fields -> 0-indexed array)
 			anbarValues := make([]interface{},  maxAnbarIndex)
-			for i := 1; i <=  maxAnbarIndex; i++ {
+			for i := 1; i <= maxAnbarIndex; i++ {
 				if val, ok := anbarFields[i]; ok {
 					anbarValues[i-1] = val
 				} else {
