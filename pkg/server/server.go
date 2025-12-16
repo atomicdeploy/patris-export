@@ -429,6 +429,12 @@ func (s *Server) logDetailedChanges(added []map[string]interface{}, deleted []st
 	}
 	if !currentModTime.IsZero() {
 		log.Printf("⏰ Current time:  %s", currentModTime.Format("2006-01-02 15:04:05"))
+		
+		// Show relative time difference
+		if !lastModTime.IsZero() {
+			timeDiff := currentModTime.Sub(lastModTime)
+			log.Printf("   ⏱️  Time since last change: %s", formatDuration(timeDiff))
+		}
 	}
 	log.Println(strings.Repeat("━", 80))
 
@@ -568,4 +574,42 @@ func (s *Server) Start(addr string) error {
 	}
 
 	return http.ListenAndServe(addr, s.router)
+}
+
+// formatDuration formats a duration into a human-readable string like "2 seconds ago", "5 minutes ago", etc.
+func formatDuration(d time.Duration) string {
+	if d < 0 {
+		d = -d
+	}
+
+	seconds := int(d.Seconds())
+	minutes := seconds / 60
+	hours := minutes / 60
+	days := hours / 24
+
+	if days > 0 {
+		if days == 1 {
+			return "1 day ago"
+		}
+		return fmt.Sprintf("%d days ago", days)
+	}
+	if hours > 0 {
+		if hours == 1 {
+			return "1 hour ago"
+		}
+		return fmt.Sprintf("%d hours ago", hours)
+	}
+	if minutes > 0 {
+		if minutes == 1 {
+			return "1 minute ago"
+		}
+		return fmt.Sprintf("%d minutes ago", minutes)
+	}
+	if seconds > 0 {
+		if seconds == 1 {
+			return "1 second ago"
+		}
+		return fmt.Sprintf("%d seconds ago", seconds)
+	}
+	return "just now"
 }
