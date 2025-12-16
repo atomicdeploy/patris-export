@@ -172,7 +172,7 @@ func (e *Exporter) ExportToCSVWriter(records []paradox.Record, fields []paradox.
 // convertRecords converts string fields in records using the converter function
 func (e *Exporter) convertRecords(records []paradox.Record) []paradox.Record {
 	converted := make([]paradox.Record, len(records))
-	
+
 	for i, record := range records {
 		convertedRecord := make(paradox.Record)
 		for key, value := range record {
@@ -189,7 +189,7 @@ func (e *Exporter) convertRecords(records []paradox.Record) []paradox.Record {
 		}
 		converted[i] = convertedRecord
 	}
-	
+
 	return converted
 }
 
@@ -221,7 +221,7 @@ func (e *Exporter) ConvertAndTransformRecords(records []paradox.Record) map[stri
 	if e.converter != nil {
 		records = e.convertRecords(records)
 	}
-	
+
 	// Transform records to use Code as key and optimize structure
 	return e.TransformRecords(records)
 }
@@ -233,7 +233,7 @@ func (e *Exporter) ConvertAndTransformRecords(records []paradox.Record) map[stri
 // This method is used by both the file exporter and the web server to ensure consistent output.
 func (e *Exporter) TransformRecords(records []paradox.Record) map[string]interface{} {
 	result := make(map[string]interface{})
-	
+
 	for _, record := range records {
 		// Extract Code as the key
 		codeKey := ""
@@ -243,23 +243,23 @@ func (e *Exporter) TransformRecords(records []paradox.Record) map[string]interfa
 			// Skip records without Code
 			continue
 		}
-		
+
 		// Build optimized record
 		optimized := make(map[string]interface{})
 		anbarFields := make(map[int]interface{})
-		
+
 		for key, value := range record {
 			// Skip Sort fields
 			if strings.HasPrefix(key, "Sort") {
 				continue
 			}
-			
+
 			// Keep ALLANBAR as-is (check first to avoid confusion with ANBAR pattern)
 			if key == "ALLANBAR" {
 				optimized[key] = value
 				continue
 			}
-			
+
 			// Collect numbered ANBAR fields into map (ANBAR1, ANBAR2, etc.)
 			if anbarFieldRegex.MatchString(key) {
 				// Extract the number from ANBAR field name (e.g., "ANBAR1" -> 1)
@@ -269,11 +269,11 @@ func (e *Exporter) TransformRecords(records []paradox.Record) map[string]interfa
 				}
 				continue
 			}
-			
+
 			// Add all other fields
 			optimized[key] = value
 		}
-		
+
 		// Add ANBAR array if we collected any, sorted by field number
 		if len(anbarFields) > 0 {
 			// Find the maximum ANBAR number to determine array size
@@ -283,7 +283,7 @@ func (e *Exporter) TransformRecords(records []paradox.Record) map[string]interfa
 					maxNum = num
 				}
 			}
-			
+
 			// Build array with correct ordering (1-indexed fields -> 0-indexed array)
 			anbarValues := make([]interface{}, maxNum)
 			for i := 1; i <= maxNum; i++ {
@@ -295,10 +295,10 @@ func (e *Exporter) TransformRecords(records []paradox.Record) map[string]interfa
 			}
 			optimized["ANBAR"] = anbarValues
 		}
-		
+
 		result[codeKey] = optimized
 	}
-	
+
 	return result
 }
 
@@ -310,12 +310,12 @@ func makeArraysInline(jsonStr string, fieldNames ...string) string {
 	if fieldPattern == "" {
 		return jsonStr
 	}
-	
+
 	// Pattern to match multi-line arrays with numeric values
 	// Matches: "ANBAR": [\n      1,\n      2,\n    ]
 	pattern := fmt.Sprintf(`("(?:%s)":\s*)\[\s*((?:\d+,?\s*)+)\]`, fieldPattern)
 	re := regexp.MustCompile(pattern)
-	
+
 	return re.ReplaceAllStringFunc(jsonStr, func(match string) string {
 		// Extract field name
 		fieldRe := regexp.MustCompile(`"([^"]+)":`)
@@ -324,20 +324,20 @@ func makeArraysInline(jsonStr string, fieldNames ...string) string {
 			return match
 		}
 		fieldName := fieldMatch[1]
-		
+
 		// Extract the numeric values
 		valueRe := regexp.MustCompile(`\d+`)
 		values := valueRe.FindAllString(match, -1)
-		
+
 		// Check if match ends with comma (not last property)
 		hasComma := strings.HasSuffix(strings.TrimSpace(match), ",")
-		
+
 		// Rebuild as inline with proper spacing
 		result := fmt.Sprintf(`"%s": [%s]`, fieldName, strings.Join(values, ", "))
 		if hasComma {
 			result += ","
 		}
-		
+
 		return result
 	})
 }
