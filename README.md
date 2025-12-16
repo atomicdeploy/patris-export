@@ -67,7 +67,7 @@ patris-export convert kala.db -f csv -o output/
 patris-export convert kala.db -f json -w
 ```
 
-This will automatically re-convert the file whenever it changes.
+This will automatically re-convert the file whenever it changes. The convert command uses a 1-second debounce by default, meaning that rapid successive changes to the file will only trigger one conversion after the changes have settled.
 
 ### Show Database Information
 
@@ -93,6 +93,8 @@ Then access:
 - API info: http://localhost:8080/api/info
 - WebSocket: ws://localhost:8080/ws
 
+The server watches the database file by default and broadcasts updates immediately (no debounce) to all connected WebSocket clients when changes are detected.
+
 ## 🎯 Using Character Mapping
 
 For proper Persian/Farsi text conversion, use the character mapping file:
@@ -116,7 +118,7 @@ ws.onmessage = (event) => {
 };
 ```
 
-The server will automatically broadcast updates to all connected clients when the database file changes.
+The server will automatically broadcast updates to all connected clients immediately when the database file changes (no debounce delay for real-time responsiveness).
 
 ## 🏗️ Architecture
 
