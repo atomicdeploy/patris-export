@@ -41,19 +41,24 @@ async function build() {
   const js = fs.readFileSync('dist/app.js', 'utf8');
   
   // Read the HTML templates
-  const indexHtml = fs.readFileSync('src/index.html', 'utf8');
+  const viewerHtml = fs.readFileSync('src/viewer.html', 'utf8');
   const welcomeHtml = fs.readFileSync('src/welcome.html', 'utf8');
   
-  // Inline everything into index.html (viewer page)
-  const finalIndexHtml = indexHtml
+  // Inline everything into viewer.html
+  const finalViewerHtml = viewerHtml
     .replace('<!-- STYLES -->', `<style>${css}</style>`)
     .replace('<!-- SCRIPTS -->', `<script>${js}</script>`);
   
+  // Ensure dist directory exists
+  if (!fs.existsSync('dist')) {
+    fs.mkdirSync('dist');
+  }
+  
   // Write the final files
-  fs.writeFileSync('dist/index.html', finalIndexHtml);
+  fs.writeFileSync('dist/viewer.html', finalViewerHtml);
   fs.writeFileSync('dist/welcome.html', welcomeHtml);
   
-  console.log('✅ Build complete: dist/index.html, dist/welcome.html');
+  console.log('✅ Build complete: dist/viewer.html, dist/welcome.html');
 }
 
 // Run build
@@ -65,7 +70,7 @@ build().catch(err => {
 if (watch) {
   console.log('👀 Watching for changes...');
   // Simple file watcher
-  const watchFiles = ['src/index.html', 'src/welcome.html', 'src/styles.scss', 'src/app.js'];
+  const watchFiles = ['src/viewer.html', 'src/welcome.html', 'src/styles.scss', 'src/app.js'];
   watchFiles.forEach(file => {
     fs.watch(file, (eventType) => {
       if (eventType === 'change') {

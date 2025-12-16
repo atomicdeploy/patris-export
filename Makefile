@@ -55,7 +55,7 @@ test: ## Run tests
 clean: ## Clean build artifacts
 	@echo "🧹 Cleaning..."
 	@rm -rf $(BUILD_DIR)
-	@rm -rf web/dist/app.js
+	@rm -rf web/dist
 	@echo "✅ Clean complete"
 
 run: build ## Build and run the application

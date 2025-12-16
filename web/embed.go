@@ -4,8 +4,8 @@ import (
 	_ "embed"
 )
 
-//go:embed dist/index.html
-var IndexHTML []byte
+//go:embed dist/viewer.html
+var ViewerHTML []byte
 
 //go:embed dist/welcome.html
 var WelcomeHTML []byte

@@ -107,7 +107,7 @@ func (s *Server) handleWelcome(w http.ResponseWriter, r *http.Request) {
 // handleViewer serves the SPA visualizer
 func (s *Server) handleViewer(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.Write(web.IndexHTML)
+	w.Write(web.ViewerHTML)
 }
 
 // handleGetRecords returns all database records as JSON

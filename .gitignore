@@ -43,9 +43,8 @@ Thumbs.db
 
 # Web/Node.js
 web/node_modules/
-web/dist/app.js
+web/dist/
 
-# Keep package files and built HTML for embedding
+# Keep package files
 !web/package.json
 !web/package-lock.json
-!web/dist/index.html
