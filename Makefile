@@ -32,6 +32,15 @@ build-windows: ## Build for Windows (requires pxlib DLL - see docs/WINDOWS_BUILD
 	@echo "⚠️  Note: Requires pxlib built for Windows from https://github.com/steinm/pxlib"
 	@echo "⚠️  See docs/WINDOWS_BUILD.md for setup instructions"
 	@mkdir -p $(BUILD_DIR)
+	@# Compile Windows resource file if windres is available
+	@if command -v x86_64-w64-mingw32-windres >/dev/null 2>&1; then \
+		echo "📝 Compiling Windows resource file..."; \
+		x86_64-w64-mingw32-windres -i cmd/patris-export/patris-export.rc \
+			-o cmd/patris-export/patris-export_windows_amd64.syso -O coff --target=pe-x86-64; \
+		echo "✅ Resource file compiled"; \
+	else \
+		echo "⚠️  windres not found, skipping resource compilation"; \
+	fi
 	GOOS=windows GOARCH=amd64 CGO_ENABLED=1 CC=x86_64-w64-mingw32-gcc go build $(LDFLAGS) -o $(BUILD_DIR)/$(BINARY_NAME)-windows-amd64.exe ./cmd/patris-export
 	@echo "✅ Build complete: $(BUILD_DIR)/$(BINARY_NAME)-windows-amd64.exe"
 	@echo "⚠️  Remember to include pxlib.dll with the executable"
@@ -50,6 +59,7 @@ test: ## Run tests
 clean: ## Clean build artifacts
 	@echo "🧹 Cleaning..."
 	@rm -rf $(BUILD_DIR)
+	@rm -f cmd/patris-export/*.syso
 	@echo "✅ Clean complete"
 
 run: build ## Build and run the application

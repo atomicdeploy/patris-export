@@ -41,8 +41,8 @@ jobs:
         name: patris-export-linux-amd64
         path: build/patris-export-linux-amd64
 
-  build-windows:
-    name: Build for Windows
+  build-windows-cross:
+    name: Cross-compile for Windows (Linux to Windows)
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -77,12 +77,17 @@ jobs:
         sed -i 's/#include <Windows\.h>/#include <windows.h>/g' src/paradox.c
         sed -i 's/#include <Winbase\.h>/#include <winbase.h>/g' src/paradox.c
         
-        # Patch CMakeLists.txt to skip RC file when cross-compiling
-        # windres doesn't understand GCC compiler flags like -W
+        # Add our custom resource file for version information
+        cp ${GITHUB_WORKSPACE}/resources/pxlib.rc .
+        
+        # Patch CMakeLists.txt to use our RC file properly
         if grep -q "target_sources(pxlib PRIVATE.*pxlib.rc)" CMakeLists.txt; then
           sed -i '/target_sources(pxlib PRIVATE.*pxlib.rc)/d' CMakeLists.txt
-          echo "Removed RC file from CMakeLists.txt for cross-compilation compatibility"
+          echo "Removed original RC file from CMakeLists.txt"
         fi
+        
+        # Add our RC file to CMakeLists.txt after the add_library line
+        sed -i '/add_library(pxlib/a \    # Add Windows resource file for version info\n    if(WIN32)\n        target_sources(pxlib PRIVATE ${CMAKE_SOURCE_DIR}/pxlib.rc)\n    endif()' CMakeLists.txt
         
         # Create a CMake toolchain file for MinGW cross-compilation
         cat > mingw-toolchain.cmake << 'EOF'
@@ -154,6 +159,19 @@ jobs:
         ls -la /usr/x86_64-w64-mingw32/include/paradox* || echo "No paradox headers found"
         echo "Installed libraries:"
         ls -la /usr/x86_64-w64-mingw32/lib/libpx* || echo "No pxlib libraries found"
+    
+    - name: Compile resource file for patris-export
+      run: |
+        # Compile the Windows resource file to .syso for embedding
+        echo "Compiling Windows resource file..."
+        x86_64-w64-mingw32-windres \
+          -i cmd/patris-export/patris-export.rc \
+          -o cmd/patris-export/patris-export_windows_amd64.syso \
+          -O coff \
+          --target=pe-x86-64
+        
+        echo "Resource file compiled successfully:"
+        ls -lh cmd/patris-export/patris-export_windows_amd64.syso
         
     - name: Build Windows executable
       run: |
@@ -207,10 +225,10 @@ jobs:
           echo "✅ Windows build correctly reports 354 records"
         fi
         
-    - name: Upload Windows artifact
+    - name: Upload Windows cross-compiled artifact
       uses: actions/upload-artifact@v4
       with:
-        name: patris-export-windows-amd64
+        name: patris-export-windows-cross-amd64
         path: |
           build/patris-export-windows-amd64.exe
           build/*.dll

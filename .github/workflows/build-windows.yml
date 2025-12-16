@@ -1,0 +1,221 @@
+name: Build Windows Native
+
+on:
+  push:
+    branches: [ main, develop ]
+    tags:
+      - 'v*'
+  pull_request:
+    branches: [ main ]
+
+permissions:
+  contents: read
+
+jobs:
+  build-windows-native:
+    name: Build on Windows Native
+    runs-on: windows-latest
+    permissions:
+      contents: read
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: '1.23'
+    
+    - name: Install vcpkg
+      run: |
+        git clone https://github.com/Microsoft/vcpkg.git C:\vcpkg
+        C:\vcpkg\bootstrap-vcpkg.bat
+        
+    - name: Install dependencies via vcpkg
+      run: |
+        # Try to install pxlib if available in vcpkg, otherwise build from source
+        C:\vcpkg\vcpkg search pxlib || echo "pxlib not in vcpkg, will build from source"
+        
+    - name: Install CMake and build tools
+      run: |
+        choco install cmake --installargs 'ADD_CMAKE_TO_PATH=System' -y
+        choco install mingw -y
+        refreshenv
+    
+    - name: Build pxlib for Windows
+      shell: bash
+      run: |
+        cd /c/
+        git clone https://github.com/steinm/pxlib.git
+        cd pxlib
+        
+        # Copy our resource file for version information
+        cp ${GITHUB_WORKSPACE}/resources/pxlib.rc .
+        
+        # Patch CMakeLists.txt to use our RC file
+        if grep -q "target_sources(pxlib PRIVATE.*pxlib.rc)" CMakeLists.txt; then
+          sed -i '/target_sources(pxlib PRIVATE.*pxlib.rc)/d' CMakeLists.txt
+          echo "Removed original RC file from CMakeLists.txt"
+        fi
+        
+        # Add our RC file to CMakeLists.txt
+        sed -i '/add_library(pxlib/a \    # Add Windows resource file for version info\n    if(WIN32)\n        target_sources(pxlib PRIVATE ${CMAKE_SOURCE_DIR}/pxlib.rc)\n    endif()' CMakeLists.txt
+        
+        mkdir build
+        cd build
+        
+        # Configure with CMake
+        cmake .. -G "MinGW Makefiles" \
+          -DCMAKE_BUILD_TYPE=Release \
+          -DENABLE_GSF=OFF
+        
+        # Build the library
+        cmake --build . --config Release
+        
+        # Install for use by Go
+        cmake --install . --prefix C:/pxlib-install || {
+          # Manual install if cmake install fails
+          mkdir -p C:/pxlib-install/include
+          mkdir -p C:/pxlib-install/lib
+          mkdir -p C:/pxlib-install/bin
+          cp ../include/*.h C:/pxlib-install/include/ 2>/dev/null || true
+          cp include/*.h C:/pxlib-install/include/ 2>/dev/null || true
+          find . -name "*.dll" -exec cp {} C:/pxlib-install/bin/ \; 2>/dev/null || true
+          find . -name "*.a" -exec cp {} C:/pxlib-install/lib/ \; 2>/dev/null || true
+          find . -name "*.lib" -exec cp {} C:/pxlib-install/lib/ \; 2>/dev/null || true
+        }
+        
+        echo "Installed files:"
+        ls -la C:/pxlib-install/include/ || echo "No headers installed"
+        ls -la C:/pxlib-install/lib/ || echo "No libraries installed"
+        ls -la C:/pxlib-install/bin/ || echo "No DLLs installed"
+    
+    - name: Compile resource file for patris-export
+      shell: bash
+      run: |
+        # Use windres to compile the resource file
+        echo "Compiling Windows resource file..."
+        
+        # Find windres (could be in MinGW or MSYS paths)
+        WINDRES=$(which windres || which x86_64-w64-mingw32-windres || echo "C:/ProgramData/chocolatey/lib/mingw/tools/install/mingw64/bin/windres.exe")
+        
+        if [ ! -f "$WINDRES" ]; then
+          echo "Searching for windres..."
+          find /c/ProgramData/chocolatey -name "windres.exe" 2>/dev/null || true
+          find /c/msys64 -name "windres.exe" 2>/dev/null || true
+        fi
+        
+        "$WINDRES" \
+          -i cmd/patris-export/patris-export.rc \
+          -o cmd/patris-export/patris-export_windows_amd64.syso \
+          -O coff
+        
+        echo "Resource file compiled successfully:"
+        ls -lh cmd/patris-export/patris-export_windows_amd64.syso
+    
+    - name: Build Windows executable
+      shell: bash
+      run: |
+        mkdir -p build
+        
+        export CGO_ENABLED=1
+        export CGO_CFLAGS="-IC:/pxlib-install/include"
+        export CGO_LDFLAGS="-LC:/pxlib-install/lib"
+        
+        # Get version info
+        VERSION="1.0.0"
+        BUILD_DATE=$(date -u +'%Y-%m-%dT%H:%M:%SZ')
+        
+        go build \
+          -ldflags "-X main.Version=${VERSION} -X main.BuildDate=${BUILD_DATE}" \
+          -o build/patris-export-windows-amd64.exe \
+          ./cmd/patris-export
+        
+        echo "Build complete:"
+        ls -lh build/patris-export-windows-amd64.exe
+    
+    - name: Copy pxlib DLL
+      shell: bash
+      run: |
+        # Copy DLL files to build directory
+        if [ -d C:/pxlib-install/bin ]; then
+          cp C:/pxlib-install/bin/*.dll build/ 2>/dev/null || true
+        fi
+        
+        # Also check the build directory
+        if [ -d C:/pxlib/build ]; then
+          find C:/pxlib/build -name "*.dll" -exec cp {} build/ \; 2>/dev/null || true
+        fi
+        
+        echo "Build directory contents:"
+        ls -la build/
+    
+    - name: Test Windows executable
+      shell: bash
+      run: |
+        cd build
+        
+        # Test the executable can read the test database
+        echo "Testing Windows executable with kala.db..."
+        ./patris-export-windows-amd64.exe info ../testdata/kala.db || {
+          echo "ERROR: Windows executable failed to read database!"
+          exit 1
+        }
+        
+        # Verify it reports the correct number of records
+        RECORD_COUNT=$(./patris-export-windows-amd64.exe info ../testdata/kala.db 2>/dev/null | grep -oP 'Records:\s+\K\d+' || echo "0")
+        echo "Windows build reports $RECORD_COUNT records"
+        
+        if [ "$RECORD_COUNT" -eq "0" ]; then
+          echo "ERROR: Windows build reports 0 records - CGO/pxlib not working!"
+          exit 1
+        elif [ "$RECORD_COUNT" -ne "354" ]; then
+          echo "WARNING: Expected 354 records but got $RECORD_COUNT"
+          # Don't fail, just warn
+        else
+          echo "✅ Windows build correctly reports 354 records"
+        fi
+    
+    - name: Verify version information
+      shell: pwsh
+      run: |
+        # Use PowerShell to check the version info in the exe
+        Write-Host "Checking version information in executable..."
+        
+        $fileInfo = Get-Item build/patris-export-windows-amd64.exe
+        $versionInfo = $fileInfo.VersionInfo
+        
+        Write-Host "File Version: $($versionInfo.FileVersion)"
+        Write-Host "Product Version: $($versionInfo.ProductVersion)"
+        Write-Host "Product Name: $($versionInfo.ProductName)"
+        Write-Host "File Description: $($versionInfo.FileDescription)"
+        Write-Host "Company Name: $($versionInfo.CompanyName)"
+        
+        if ([string]::IsNullOrEmpty($versionInfo.FileVersion)) {
+          Write-Host "ERROR: No version information found in executable!"
+          exit 1
+        } else {
+          Write-Host "✅ Version information successfully embedded"
+        }
+        
+        # Check DLL version info if it exists
+        $dllFiles = Get-ChildItem build/*.dll -ErrorAction SilentlyContinue
+        foreach ($dll in $dllFiles) {
+          Write-Host "`nChecking version info for $($dll.Name)..."
+          $dllVersionInfo = $dll.VersionInfo
+          Write-Host "  File Version: $($dllVersionInfo.FileVersion)"
+          Write-Host "  Product Version: $($dllVersionInfo.ProductVersion)"
+          
+          if ([string]::IsNullOrEmpty($dllVersionInfo.FileVersion)) {
+            Write-Host "  WARNING: No version information in DLL"
+          }
+        }
+    
+    - name: Upload Windows artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: patris-export-windows-native-amd64
+        path: |
+          build/patris-export-windows-amd64.exe
+          build/*.dll
