@@ -120,6 +120,8 @@ function handleWebSocketMessage(data) {
     // Extract fields from first record if not already set
     if (state.records.length > 0 && state.fields.length === 0) {
         state.fields = Object.keys(state.records[0]);
+        // Ensure Code is always the first column
+        ensureCodeFirst();
         renderTableHeader();
         updateFieldFilter();
     }
@@ -136,6 +138,17 @@ function updateStatus(status, text) {
     
     indicator.className = 'status-indicator ' + status;
     statusText.textContent = text;
+}
+
+// Ensure Code column is always first
+function ensureCodeFirst() {
+    const codeIndex = state.fields.indexOf('Code');
+    if (codeIndex > 0) {
+        // Remove Code from its current position
+        state.fields.splice(codeIndex, 1);
+        // Add Code to the beginning
+        state.fields.unshift('Code');
+    }
 }
 
 // Render table header
@@ -424,6 +437,8 @@ async function fetchInitialData() {
             
             if (state.records.length > 0) {
                 state.fields = Object.keys(state.records[0]);
+                // Ensure Code is always the first column
+                ensureCodeFirst();
                 renderTableHeader();
                 updateFieldFilter();
             }

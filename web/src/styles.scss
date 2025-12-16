@@ -251,7 +251,6 @@ body.dark-mode {
 .data-table td.sticky-column {
     position: sticky;
     left: 0;
-    z-index: 20;
     background: $bg-light-tertiary;
     box-shadow: 2px 0 4px rgba(0, 0, 0, 0.05);
     
@@ -261,9 +260,17 @@ body.dark-mode {
     }
 }
 
+// Sticky header cell needs higher z-index than both regular headers and sticky body cells
+.data-table th.sticky-column {
+    z-index: 15;
+}
+
+// Sticky body cells need lower z-index than headers
 .data-table td.sticky-column {
+    z-index: 5;
     background: $bg-light;
     font-weight: 600;
+    transition: background-color 0.15s ease;
     
     .dark-mode & {
         background: $bg-dark;
@@ -310,6 +317,33 @@ body.dark-mode {
     }
     100% {
         background-color: transparent;
+    }
+}
+
+// Special animation for sticky column in changed rows
+@keyframes highlight-sticky-light {
+    0% {
+        background-color: rgba(99, 102, 241, 0.3);
+    }
+    100% {
+        background-color: $bg-light;
+    }
+}
+
+@keyframes highlight-sticky-dark {
+    0% {
+        background-color: rgba(99, 102, 241, 0.3);
+    }
+    100% {
+        background-color: $bg-dark;
+    }
+}
+
+.data-table tbody tr.changed td.sticky-column {
+    animation: highlight-sticky-light 2s ease-out;
+    
+    .dark-mode & {
+        animation: highlight-sticky-dark 2s ease-out;
     }
 }
 
