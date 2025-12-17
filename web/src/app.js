@@ -9,6 +9,8 @@ const state = {
     sortField: 'Code',
     sortDirection: 'asc',
     fileName: '',  // Track the actual data file name from server
+    columnFilters: {},  // Store active filters per column
+    hiddenColumns: new Set(),  // Track hidden columns
     settings: {
         autoScrollToChanged: false,
         highlightChanges: true,
@@ -30,6 +32,12 @@ function loadSettings() {
         const { field, direction } = JSON.parse(sortPrefs);
         state.sortField = field || 'Code';
         state.sortDirection = direction || 'asc';
+    }
+    
+    // Load hidden columns
+    const hiddenCols = localStorage.getItem('patris-hidden-columns');
+    if (hiddenCols) {
+        state.hiddenColumns = new Set(JSON.parse(hiddenCols));
     }
 }
 
