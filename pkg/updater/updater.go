@@ -21,8 +21,9 @@ const (
 
 // Updater handles auto-update functionality
 type Updater struct {
-	apiToken string
-	client   *http.Client
+	apiToken     string
+	client       *http.Client
+	binaryName   string // Base name of the binary (e.g., "patris-export")
 }
 
 // WorkflowRun represents a GitHub Actions workflow run
@@ -59,12 +60,50 @@ type ArtifactsResponse struct {
 
 // NewUpdater creates a new updater instance
 func NewUpdater() *Updater {
+	// Derive binary name from the current executable
+	binaryName := deriveBinaryName()
+	
 	return &Updater{
-		apiToken: os.Getenv("GITHUB_TOKEN"),
+		apiToken:   os.Getenv("GITHUB_TOKEN"),
+		binaryName: binaryName,
 		client: &http.Client{
 			Timeout: 5 * time.Minute,
 		},
 	}
+}
+
+// deriveBinaryName derives the base binary name from the current executable
+func deriveBinaryName() string {
+	exe, err := os.Executable()
+	if err != nil {
+		// Fallback to repo name if we can't get the executable
+		return repoName
+	}
+	
+	// Get the base name without path
+	baseName := filepath.Base(exe)
+	
+	// Remove platform suffix and extension if present
+	// Examples: "patris-export-linux-amd64" -> "patris-export"
+	//           "patris-export-windows-amd64.exe" -> "patris-export"
+	//           "patris-export.exe" -> "patris-export"
+	//           "patris-export" -> "patris-export"
+	
+	// Remove .exe extension if present
+	baseName = strings.TrimSuffix(baseName, ".exe")
+	
+	// Remove platform suffixes
+	baseName = strings.TrimSuffix(baseName, "-linux-amd64")
+	baseName = strings.TrimSuffix(baseName, "-windows-amd64")
+	baseName = strings.TrimSuffix(baseName, "-darwin-amd64")
+	baseName = strings.TrimSuffix(baseName, "-darwin-arm64")
+	
+	// If we ended up with an empty string, use repo name
+	if baseName == "" {
+		return repoName
+	}
+	
+	return baseName
 }
 
 // doRequest performs an HTTP request with proper headers
@@ -212,25 +251,20 @@ func (u *Updater) ExtractExecutable(zipPath, destDir string) (string, error) {
 	var executablePath string
 	var foundExecutable bool
 
+	// Expected binary name based on platform
+	expectedName := u.GetPlatformBinaryName()
+
 	for _, f := range r.File {
 		// Skip directories
 		if f.FileInfo().IsDir() {
 			continue
 		}
 
-		// Look for the executable (with or without .exe extension)
-		isExecutable := false
 		baseName := filepath.Base(f.Name)
 		
-		if runtime.GOOS == "windows" {
-			// On Windows, look for .exe files
-			isExecutable = strings.HasSuffix(baseName, ".exe") && strings.Contains(baseName, "patris-export")
-		} else {
-			// On Linux, look for the main executable by name (no extension)
-			// The artifact contains "patris-export-linux-amd64" without extension
-			isExecutable = (baseName == "patris-export-linux-amd64" || baseName == "patris-export") && !strings.Contains(baseName, ".")
-		}
-
+		// Check if this file matches our expected executable name
+		isExecutable := baseName == expectedName
+		
 		if isExecutable {
 			rc, err := f.Open()
 			if err != nil {
@@ -257,10 +291,22 @@ func (u *Updater) ExtractExecutable(zipPath, destDir string) (string, error) {
 	}
 
 	if !foundExecutable {
-		return "", fmt.Errorf("no executable found in zip file")
+		return "", fmt.Errorf("no executable found in zip file (expected: %s)", expectedName)
 	}
 
 	return executablePath, nil
+}
+
+// GetPlatformBinaryName returns the expected binary name for the current platform
+func (u *Updater) GetPlatformBinaryName() string {
+	switch runtime.GOOS {
+	case "windows":
+		return fmt.Sprintf("%s-windows-amd64.exe", u.binaryName)
+	case "linux":
+		return fmt.Sprintf("%s-linux-amd64", u.binaryName)
+	default:
+		return u.binaryName
+	}
 }
 
 // ReplaceCurrentExecutable replaces the current executable with a new one
@@ -336,11 +382,14 @@ func copyFile(src, dst string) error {
 
 // GetCurrentPlatformArtifactName returns the artifact name for the current platform
 func GetCurrentPlatformArtifactName() string {
+	// Derive binary name from the current executable
+	binaryName := deriveBinaryName()
+	
 	switch runtime.GOOS {
 	case "windows":
-		return "patris-export-windows-amd64"
+		return fmt.Sprintf("%s-windows-amd64", binaryName)
 	case "linux":
-		return "patris-export-linux-amd64"
+		return fmt.Sprintf("%s-linux-amd64", binaryName)
 	default:
 		// Unsupported platform - return empty string
 		// The caller should handle this appropriately

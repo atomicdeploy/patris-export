@@ -4,6 +4,7 @@ import (
 	"archive/zip"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -25,8 +26,12 @@ func TestExtractExecutable_Linux(t *testing.T) {
 
 	zipWriter := zip.NewWriter(zipFile)
 
-	// Add a Linux executable to the ZIP
-	exeWriter, err := zipWriter.Create("patris-export-linux-amd64")
+	// Test extraction
+	u := NewUpdater()
+	expectedName := u.GetPlatformBinaryName()
+	
+	// Add an executable with the expected name to the ZIP
+	exeWriter, err := zipWriter.Create(expectedName)
 	if err != nil {
 		t.Fatalf("Failed to create file in zip: %v", err)
 	}
@@ -40,8 +45,6 @@ func TestExtractExecutable_Linux(t *testing.T) {
 		t.Fatalf("Failed to close zip: %v", err)
 	}
 
-	// Test extraction
-	u := NewUpdater()
 	extractDir := filepath.Join(tmpDir, "extract")
 	if err := os.MkdirAll(extractDir, 0755); err != nil {
 		t.Fatalf("Failed to create extract dir: %v", err)
@@ -118,9 +121,9 @@ func TestExtractExecutable_NoExecutable(t *testing.T) {
 		t.Error("Expected error when no executable found, got nil")
 	}
 
-	expectedErr := "no executable found in zip file"
-	if err.Error() != expectedErr {
-		t.Errorf("Expected error %q, got %q", expectedErr, err.Error())
+	// Check that error message contains the key phrase about no executable found
+	if !strings.Contains(err.Error(), "no executable found in zip file") {
+		t.Errorf("Expected error to contain 'no executable found in zip file', got %q", err.Error())
 	}
 }
 
