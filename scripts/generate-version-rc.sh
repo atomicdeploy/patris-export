@@ -44,16 +44,25 @@ escape_c_string() {
     echo "$1" | sed 's/\\/\\\\/g' | sed 's/"/\\"/g' | sed 's/$/\\n/' | tr -d '\n' | sed 's/\\n$//'
 }
 
+# Function to URL-encode a string for safe use in URLs
+urlencode() {
+    # Use python3 for URL encoding
+    python3 -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1]))' "$1"
+}
+
 # Try to fetch description via GitHub API (no auth required for public repos)
 DESCRIPTION=""
 if command -v curl &> /dev/null && [ "$REPO_OWNER" != "Unknown" ]; then
+    # URL-encode owner and repo for API URL
+    REPO_OWNER_ENC=$(urlencode "$REPO_OWNER")
+    REPO_NAME_ENC=$(urlencode "$REPO_NAME")
     # Use jq if available for safer JSON parsing, otherwise fallback
     if command -v jq &> /dev/null; then
-        DESCRIPTION=$(curl -s "https://api.github.com/repos/$REPO_OWNER/$REPO_NAME" | jq -r '.description // ""' 2>/dev/null || echo "")
+        DESCRIPTION=$(curl -s "https://api.github.com/repos/$REPO_OWNER_ENC/$REPO_NAME_ENC" | jq -r '.description // ""' 2>/dev/null || echo "")
     else
         # Safer fallback: use python if available
         if command -v python3 &> /dev/null; then
-            DESCRIPTION=$(curl -s "https://api.github.com/repos/$REPO_OWNER/$REPO_NAME" | python3 -c "import sys, json; data = json.load(sys.stdin); print(data.get('description', ''))" 2>/dev/null || echo "")
+            DESCRIPTION=$(curl -s "https://api.github.com/repos/$REPO_OWNER_ENC/$REPO_NAME_ENC" | python3 -c "import sys, json; data = json.load(sys.stdin); print(data.get('description', ''))" 2>/dev/null || echo "")
         fi
     fi
 fi
