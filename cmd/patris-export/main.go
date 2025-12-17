@@ -412,7 +412,7 @@ func runUpdate(cmd *cobra.Command, args []string) {
 	// Show current version
 	infoColor.Printf("📦 Current version: %s (built: %s)\n", Version, BuildDate)
 	infoColor.Printf("🌿 Target branch: %s\n", branch)
-	infoColor.Printf("💻 Platform: %s/%s\n", platformName, "amd64")
+	infoColor.Printf("💻 Platform: %s/%s\n", runtime.GOOS, runtime.GOARCH)
 	fmt.Println()
 
 	// Check for GITHUB_TOKEN
