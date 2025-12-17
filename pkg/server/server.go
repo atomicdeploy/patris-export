@@ -478,31 +478,123 @@ func (s *Server) logDetailedChanges(added []map[string]interface{}, deleted []st
 			break
 		}
 
-		if len(change.ChangedFields) == 1 {
-			// Single field change - show inline
+		if len(change.ChangedFields) == 1 && change.ChangedFields[0] != "ANBAR" {
+			// Single field change (non-ANBAR) - show inline
 			field := change.ChangedFields[0]
 			oldVal := change.OldValues[field]
 			newVal := change.NewValues[field]
 			log.Printf("✏️  Modified: Code=%s, Field=%s, Old=%v, New=%v", 
 				change.Code, field, oldVal, newVal)
 		} else {
-			// Multiple field changes - show as table
-			log.Printf("✏️  Modified: Code=%s (%d field(s) changed)", change.Code, len(change.ChangedFields))
-			log.Println("   ┌─────────────────┬────────────────────┬────────────────────┐")
-			log.Println("   │ Field           │ Old Value          │ New Value          │")
-			log.Println("   ├─────────────────┼────────────────────┼────────────────────┤")
+			// Multiple field changes or ANBAR change - show as table
+			// Check if ANBAR field changed
+			hasANBAR := false
 			for _, field := range change.ChangedFields {
-				oldVal := fmt.Sprintf("%v", change.OldValues[field])
-				newVal := fmt.Sprintf("%v", change.NewValues[field])
-				if len(oldVal) > 18 {
-					oldVal = oldVal[:15] + "..."
+				if field == "ANBAR" {
+					hasANBAR = true
+					break
 				}
-				if len(newVal) > 18 {
-					newVal = newVal[:15] + "..."
-				}
-				log.Printf("   │ %-15s │ %-18s │ %-18s │", field, oldVal, newVal)
 			}
-			log.Println("   └─────────────────┴────────────────────┴────────────────────┘")
+
+			if hasANBAR {
+				// Special handling for ANBAR array changes
+				log.Printf("✏️  Modified: Code=%s (%d field(s) changed)", change.Code, len(change.ChangedFields))
+				
+				// Show ANBAR changes in detail
+				oldANBAR, oldIsArray := change.OldValues["ANBAR"]
+				newANBAR, newIsArray := change.NewValues["ANBAR"]
+				
+				if oldIsArray && newIsArray {
+					// Compare arrays element by element
+					oldArr, oldOk := convertToIntSlice(oldANBAR)
+					newArr, newOk := convertToIntSlice(newANBAR)
+					
+					if oldOk && newOk {
+						// Find which ANBAR indices changed
+						changedIndices := []int{}
+						maxLen := len(oldArr)
+						if len(newArr) > maxLen {
+							maxLen = len(newArr)
+						}
+						
+						for idx := 0; idx < maxLen; idx++ {
+							oldVal := 0
+							newVal := 0
+							if idx < len(oldArr) {
+								oldVal = oldArr[idx]
+							}
+							if idx < len(newArr) {
+								newVal = newArr[idx]
+							}
+							if oldVal != newVal {
+								changedIndices = append(changedIndices, idx)
+							}
+						}
+						
+						if len(changedIndices) > 0 {
+							log.Println("   ┌──────────────┬──────────────┬──────────────┐")
+							log.Println("   │ ANBAR Field  │ Old Value    │ New Value    │")
+							log.Println("   ├──────────────┼──────────────┼──────────────┤")
+							for _, idx := range changedIndices {
+								oldVal := 0
+								newVal := 0
+								if idx < len(oldArr) {
+									oldVal = oldArr[idx]
+								}
+								if idx < len(newArr) {
+									newVal = newArr[idx]
+								}
+								log.Printf("   │ ANBAR%-7d │ %-12d │ %-12d │", idx+1, oldVal, newVal)
+							}
+							log.Println("   └──────────────┴──────────────┴──────────────┘")
+						}
+					}
+				}
+				
+				// Show other non-ANBAR fields if any
+				nonANBARFields := []string{}
+				for _, field := range change.ChangedFields {
+					if field != "ANBAR" {
+						nonANBARFields = append(nonANBARFields, field)
+					}
+				}
+				
+				if len(nonANBARFields) > 0 {
+					log.Println("   ┌─────────────────┬────────────────────┬────────────────────┐")
+					log.Println("   │ Field           │ Old Value          │ New Value          │")
+					log.Println("   ├─────────────────┼────────────────────┼────────────────────┤")
+					for _, field := range nonANBARFields {
+						oldVal := fmt.Sprintf("%v", change.OldValues[field])
+						newVal := fmt.Sprintf("%v", change.NewValues[field])
+						if len(oldVal) > 18 {
+							oldVal = oldVal[:15] + "..."
+						}
+						if len(newVal) > 18 {
+							newVal = newVal[:15] + "..."
+						}
+						log.Printf("   │ %-15s │ %-18s │ %-18s │", field, oldVal, newVal)
+					}
+					log.Println("   └─────────────────┴────────────────────┴────────────────────┘")
+				}
+			} else {
+				// Non-ANBAR multiple field changes - show as table
+				log.Printf("✏️  Modified: Code=%s (%d field(s) changed)", change.Code, len(change.ChangedFields))
+				log.Println("   ┌─────────────────┬────────────────────┬────────────────────┐")
+				log.Println("   │ Field           │ Old Value          │ New Value          │")
+				log.Println("   ├─────────────────┼────────────────────┼────────────────────┤")
+				for _, field := range change.ChangedFields {
+					oldVal := fmt.Sprintf("%v", change.OldValues[field])
+					newVal := fmt.Sprintf("%v", change.NewValues[field])
+					if len(oldVal) > 18 {
+						oldVal = oldVal[:15] + "..."
+					}
+					if len(newVal) > 18 {
+						newVal = newVal[:15] + "..."
+					}
+					log.Printf("   │ %-15s │ %-18s │ %-18s │", field, oldVal, newVal)
+				}
+				log.Println("   └─────────────────┴────────────────────┴────────────────────┘")
+			}
 		}
 		recordsShown++
 	}
@@ -569,6 +661,42 @@ func (s *Server) Start(addr string) error {
 	}
 
 	return http.ListenAndServe(addr, s.router)
+}
+
+// convertToIntSlice converts an interface{} to a slice of integers
+// This handles ANBAR arrays which can be []interface{} or []float64 or []int
+func convertToIntSlice(val interface{}) ([]int, bool) {
+	switch v := val.(type) {
+	case []interface{}:
+		result := make([]int, len(v))
+		for i, item := range v {
+			switch num := item.(type) {
+			case int:
+				result[i] = num
+			case float64:
+				result[i] = int(num)
+			case float32:
+				result[i] = int(num)
+			case int64:
+				result[i] = int(num)
+			case int32:
+				result[i] = int(num)
+			default:
+				return nil, false
+			}
+		}
+		return result, true
+	case []int:
+		return v, true
+	case []float64:
+		result := make([]int, len(v))
+		for i, num := range v {
+			result[i] = int(num)
+		}
+		return result, true
+	default:
+		return nil, false
+	}
 }
 
 // formatDuration formats a duration into a human-readable string like "2 seconds ago", "5 minutes ago", etc.
