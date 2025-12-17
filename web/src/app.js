@@ -88,15 +88,20 @@ function applySettings() {
 // Initialize notification audio
 function initNotificationAudio() {
     try {
-        state.notificationAudio = new Audio('/static/notification.ogg');
-        state.notificationAudio.volume = 0.5; // Set volume to 50%
-        state.notificationAudio.preload = 'auto'; // Preload for faster playback
+        // Pre-create an audio element to test if the browser supports it
+        // and to preload the audio file for faster playback
+        const testAudio = new Audio('/static/notification.ogg');
+        testAudio.volume = 0.5; // Set volume to 50%
+        testAudio.preload = 'auto'; // Preload for faster playback
         
         // Handle loading errors
-        state.notificationAudio.addEventListener('error', (e) => {
+        testAudio.addEventListener('error', (e) => {
             console.warn('Failed to load notification audio:', e);
             state.notificationAudio = null;
         });
+        
+        // Store the URL for creating new instances
+        state.notificationAudio = '/static/notification.ogg';
     } catch (err) {
         console.warn('Audio not supported or failed to initialize:', err);
         state.notificationAudio = null;
@@ -104,13 +109,27 @@ function initNotificationAudio() {
 }
 
 // Play notification sound
+// Creates a new Audio instance for each notification to support overlapping sounds
 function playNotificationSound() {
     if (state.settings.playNotificationSound && state.notificationAudio) {
-        // Reset and play
-        state.notificationAudio.currentTime = 0;
-        state.notificationAudio.play().catch(err => {
-            console.log('Could not play notification sound:', err);
-        });
+        try {
+            // Create a new Audio instance for this notification
+            // This allows multiple notifications to play simultaneously without interruption
+            const audio = new Audio(state.notificationAudio);
+            audio.volume = 0.5; // Set volume to 50%
+            
+            // Remove the audio element after it finishes playing to free memory
+            audio.addEventListener('ended', () => {
+                audio.remove();
+            });
+            
+            // Play immediately without delay
+            audio.play().catch(err => {
+                console.log('Could not play notification sound:', err);
+            });
+        } catch (err) {
+            console.warn('Failed to create notification audio:', err);
+        }
     }
 }
 
