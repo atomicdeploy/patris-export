@@ -237,8 +237,80 @@ jobs:
     
     - name: Upload Windows artifact
       uses: actions/upload-artifact@v4
+      id: upload-windows
       with:
         name: patris-export-windows-mingw-amd64
         path: |
           build/patris-export-windows-amd64.exe
           build/*.dll
+    
+    - name: Generate build summary
+      shell: bash
+      run: |
+        echo "# 🪟 Windows Build Summary (Native MinGW)" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "## 📦 Build Information" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        
+        # Get build details for executable
+        EXE_FILE="build/patris-export-windows-amd64.exe"
+        EXE_SIZE=$(stat -c%s "$EXE_FILE" 2>/dev/null || stat -f%z "$EXE_FILE")
+        EXE_SIZE_MB=$(echo "scale=2; $EXE_SIZE / 1048576" | bc)
+        EXE_SHA256=$(sha256sum "$EXE_FILE" 2>/dev/null | awk '{print $1}' || shasum -a 256 "$EXE_FILE" | awk '{print $1}')
+        BUILD_DATE=$(date -u +'%Y-%m-%d %H:%M:%S UTC')
+        
+        # Calculate artifact expiration (90 days from now by default)
+        EXPIRY_DATE=$(date -u -d "+90 days" +'%Y-%m-%d' 2>/dev/null || date -u -v+90d +'%Y-%m-%d')
+        
+        echo "### 🎯 Main Executable" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "| Property | Value |" >> $GITHUB_STEP_SUMMARY
+        echo "|----------|-------|" >> $GITHUB_STEP_SUMMARY
+        echo "| 📄 Executable | \`patris-export-windows-amd64.exe\` |" >> $GITHUB_STEP_SUMMARY
+        echo "| 🏗️ Build Date | $BUILD_DATE |" >> $GITHUB_STEP_SUMMARY
+        echo "| 🔢 Version | \`1.0.0\` |" >> $GITHUB_STEP_SUMMARY
+        echo "| 📏 File Size | $EXE_SIZE_MB MB ($EXE_SIZE bytes) |" >> $GITHUB_STEP_SUMMARY
+        echo "| 🔐 SHA-256 Hash | \`$EXE_SHA256\` |" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        
+        # List DLL files if any
+        if ls build/*.dll 1> /dev/null 2>&1; then
+          echo "### 📚 Included DLL Files" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| File | Size | SHA-256 Hash |" >> $GITHUB_STEP_SUMMARY
+          echo "|------|------|--------------|" >> $GITHUB_STEP_SUMMARY
+          
+          for dll in build/*.dll; do
+            if [ -f "$dll" ]; then
+              DLL_NAME=$(basename "$dll")
+              DLL_SIZE=$(stat -c%s "$dll" 2>/dev/null || stat -f%z "$dll")
+              DLL_SIZE_KB=$(echo "scale=2; $DLL_SIZE / 1024" | bc)
+              DLL_SHA256=$(sha256sum "$dll" 2>/dev/null | awk '{print $1}' || shasum -a 256 "$dll" | awk '{print $1}')
+              echo "| \`$DLL_NAME\` | ${DLL_SIZE_KB} KB | \`$DLL_SHA256\` |" >> $GITHUB_STEP_SUMMARY
+            fi
+          done
+          echo "" >> $GITHUB_STEP_SUMMARY
+        fi
+        
+        # Calculate total artifact size
+        TOTAL_SIZE=0
+        for file in build/*.exe build/*.dll; do
+          if [ -f "$file" ]; then
+            FILE_SIZE=$(stat -c%s "$file" 2>/dev/null || stat -f%z "$file")
+            TOTAL_SIZE=$((TOTAL_SIZE + FILE_SIZE))
+          fi
+        done
+        TOTAL_SIZE_MB=$(echo "scale=2; $TOTAL_SIZE / 1048576" | bc)
+        
+        echo "### 📦 Artifact Information" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "| Property | Value |" >> $GITHUB_STEP_SUMMARY
+        echo "|----------|-------|" >> $GITHUB_STEP_SUMMARY
+        echo "| 📦 Artifact Name | \`patris-export-windows-mingw-amd64\` |" >> $GITHUB_STEP_SUMMARY
+        echo "| 📏 Total Artifact Size | $TOTAL_SIZE_MB MB ($TOTAL_SIZE bytes) |" >> $GITHUB_STEP_SUMMARY
+        echo "| 📥 Download URL | [GitHub Actions Artifacts](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}) |" >> $GITHUB_STEP_SUMMARY
+        echo "| ⏰ Expires On | $EXPIRY_DATE |" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "---" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "✅ **Build completed successfully!**" >> $GITHUB_STEP_SUMMARY
