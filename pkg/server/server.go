@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -178,36 +179,48 @@ func (s *Server) handleNotificationAudio(w http.ResponseWriter, r *http.Request)
 	rangeHeader := r.Header.Get("Range")
 	if rangeHeader == "" {
 		// No range requested, serve the entire file
-		w.Header().Set("Content-Length", fmt.Sprintf("%d", audioSize))
+		w.Header().Set("Content-Length", strconv.FormatInt(audioSize, 10))
 		w.WriteHeader(http.StatusOK)
 		w.Write(audioData)
 		return
 	}
 
-	// Parse the Range header (format: "bytes=start-end" or "bytes=start-")
+	// Parse the Range header - supports multiple formats per RFC 7233:
+	// - "bytes=start-end" (specific range)
+	// - "bytes=start-" (from start to end)
+	// - "bytes=-suffix" (last N bytes)
 	var start, end int64
 	// Try parsing "bytes=start-end" format first
-	if n, _ := fmt.Sscanf(rangeHeader, "bytes=%d-%d", &start, &end); n != 2 {
-		// Try parsing "bytes=start-" format
-		if n, _ := fmt.Sscanf(rangeHeader, "bytes=%d-", &start); n != 1 {
-			http.Error(w, "Range Not Satisfiable", http.StatusRequestedRangeNotSatisfiable)
-			return
-		}
+	if n, _ := fmt.Sscanf(rangeHeader, "bytes=%d-%d", &start, &end); n == 2 {
+		// Successfully parsed start-end format
+	} else if n, _ := fmt.Sscanf(rangeHeader, "bytes=%d-", &start); n == 1 {
+		// Successfully parsed start- format (to end of file)
 		end = audioSize - 1
+	} else if n, _ := fmt.Sscanf(rangeHeader, "bytes=-%d", &end); n == 1 {
+		// Successfully parsed -suffix format (last N bytes)
+		start = audioSize - end
+		end = audioSize - 1
+		if start < 0 {
+			start = 0
+		}
+	} else {
+		// Invalid format
+		http.Error(w, "Range Not Satisfiable", http.StatusRequestedRangeNotSatisfiable)
+		return
 	}
 
 	// Validate range
 	// Valid byte indices are 0 to audioSize-1
 	if start < 0 || start >= audioSize || end >= audioSize || start > end {
-		w.Header().Set("Content-Range", fmt.Sprintf("bytes */%d", audioSize))
+		w.Header().Set("Content-Range", "bytes */"+strconv.FormatInt(audioSize, 10))
 		http.Error(w, "Range Not Satisfiable", http.StatusRequestedRangeNotSatisfiable)
 		return
 	}
 
 	// Serve the requested range
 	contentLength := end - start + 1
-	w.Header().Set("Content-Length", fmt.Sprintf("%d", contentLength))
-	w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, audioSize))
+	w.Header().Set("Content-Length", strconv.FormatInt(contentLength, 10))
+	w.Header().Set("Content-Range", "bytes "+strconv.FormatInt(start, 10)+"-"+strconv.FormatInt(end, 10)+"/"+strconv.FormatInt(audioSize, 10))
 	w.WriteHeader(http.StatusPartialContent)
 	w.Write(audioData[start : end+1])
 }

@@ -17,31 +17,31 @@ func TestServerJSON(t *testing.T) {
 	// Create a temporary JSON file with test data
 	tmpDir := t.TempDir()
 	jsonFile := filepath.Join(tmpDir, "test.json")
-	
+
 	testData := map[string]interface{}{
 		"101": map[string]interface{}{
-			"Code":      "101",
-			"Name":      "Test Record 1",
-			"ANBAR":     []interface{}{0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
-			"Dates":     "00.01.01",
-			"FOROSH":    0,
-			"Invahed":   1,
+			"Code":    "101",
+			"Name":    "Test Record 1",
+			"ANBAR":   []interface{}{0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+			"Dates":   "00.01.01",
+			"FOROSH":  0,
+			"Invahed": 1,
 		},
 		"102": map[string]interface{}{
-			"Code":      "102",
-			"Name":      "Test Record 2",
-			"ANBAR":     []interface{}{0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
-			"Dates":     "00.01.01",
-			"FOROSH":    0,
-			"Invahed":   1,
+			"Code":    "102",
+			"Name":    "Test Record 2",
+			"ANBAR":   []interface{}{0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+			"Dates":   "00.01.01",
+			"FOROSH":  0,
+			"Invahed": 1,
 		},
 	}
-	
+
 	data, err := json.MarshalIndent(testData, "", "  ")
 	if err != nil {
 		t.Fatalf("Failed to marshal test data: %v", err)
 	}
-	
+
 	if err := os.WriteFile(jsonFile, data, 0644); err != nil {
 		t.Fatalf("Failed to write test JSON file: %v", err)
 	}
@@ -119,16 +119,16 @@ func TestWebSocketUpdates(t *testing.T) {
 	// Create a temporary JSON file
 	tmpDir := t.TempDir()
 	jsonFile := filepath.Join(tmpDir, "test.json")
-	
+
 	testData := map[string]interface{}{
 		"101": map[string]interface{}{
-			"Code":   "101",
-			"Name":   "Original",
-			"ANBAR":  []interface{}{0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
-			"Dates":  "00.01.01",
+			"Code":  "101",
+			"Name":  "Original",
+			"ANBAR": []interface{}{0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+			"Dates": "00.01.01",
 		},
 	}
-	
+
 	writeJSON := func(data map[string]interface{}) {
 		jsonData, err := json.MarshalIndent(data, "", "  ")
 		if err != nil {
@@ -138,7 +138,7 @@ func TestWebSocketUpdates(t *testing.T) {
 			t.Fatalf("Failed to write JSON file: %v", err)
 		}
 	}
-	
+
 	writeJSON(testData)
 
 	// Create server with file watching
@@ -168,7 +168,7 @@ func TestWebSocketUpdates(t *testing.T) {
 	// Read initial message
 	var initialMsg map[string]interface{}
 	ws.SetReadDeadline(time.Now().Add(2 * time.Second))
-	
+
 	if err := ws.ReadJSON(&initialMsg); err != nil {
 		t.Fatalf("Failed to read initial message: %v", err)
 	}
@@ -176,23 +176,23 @@ func TestWebSocketUpdates(t *testing.T) {
 	if initialMsg["type"] != "initial" {
 		t.Errorf("Expected type=initial, got %v", initialMsg["type"])
 	}
-	
+
 	// Verify initial data has 1 record
 	if records, ok := initialMsg["records"].(map[string]interface{}); ok {
 		if len(records) != 1 {
 			t.Errorf("Expected 1 initial record, got %d", len(records))
 		}
 	}
-	
+
 	// Give file watcher time to settle after initial file creation
 	time.Sleep(200 * time.Millisecond)
 
 	// Now modify the JSON file (add a new record)
 	testData["102"] = map[string]interface{}{
-		"Code":   "102",
-		"Name":   "New Record",
-		"ANBAR":  []interface{}{0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
-		"Dates":  "00.01.01",
+		"Code":  "102",
+		"Name":  "New Record",
+		"ANBAR": []interface{}{0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+		"Dates": "00.01.01",
 	}
 	writeJSON(testData)
 
@@ -271,13 +271,13 @@ func TestComputeChanges(t *testing.T) {
 		{"Code": "101", "Name": "Record 1"},
 		{"Code": "102", "Name": "Record 2"},
 	}
-	
+
 	changes := srv.computeChanges(newRecords)
-	
+
 	if changes["type"] != "update" {
 		t.Errorf("Expected type=update, got %v", changes["type"])
 	}
-	
+
 	if added, ok := changes["added"].([]map[string]interface{}); ok {
 		if len(added) != 2 {
 			t.Errorf("Expected 2 added records, got %d", len(added))
@@ -293,9 +293,9 @@ func TestComputeChanges(t *testing.T) {
 		{"Code": "102", "Name": "Record 2"},
 		{"Code": "103", "Name": "Record 3"},
 	}
-	
+
 	changes = srv.computeChanges(newRecords2)
-	
+
 	if added, ok := changes["added"].([]map[string]interface{}); ok {
 		if len(added) != 1 {
 			t.Errorf("Expected 1 added record, got %d", len(added))
@@ -313,9 +313,9 @@ func TestComputeChanges(t *testing.T) {
 		{"Code": "101", "Name": "Record 1"},
 		{"Code": "103", "Name": "Record 3"},
 	}
-	
+
 	changes = srv.computeChanges(newRecords3)
-	
+
 	if deleted, ok := changes["deleted"].([]string); ok {
 		if len(deleted) != 1 {
 			t.Errorf("Expected 1 deleted record, got %d", len(deleted))
@@ -326,4 +326,125 @@ func TestComputeChanges(t *testing.T) {
 	} else {
 		t.Error("Expected deleted field")
 	}
+}
+
+// TestNotificationAudioEndpoint tests the /static/notification.ogg endpoint
+func TestNotificationAudioEndpoint(t *testing.T) {
+	// Create a minimal server for testing the audio endpoint
+	tmpDir := t.TempDir()
+	jsonFile := filepath.Join(tmpDir, "test.json")
+
+	testData := map[string]interface{}{
+		"101": map[string]interface{}{
+			"Code": "101",
+			"Name": "Test",
+		},
+	}
+
+	data, _ := json.MarshalIndent(testData, "", "  ")
+	os.WriteFile(jsonFile, data, 0644)
+
+	srv, err := NewServer(jsonFile, nil)
+	if err != nil {
+		t.Fatalf("Failed to create server: %v", err)
+	}
+	defer srv.Close()
+
+	t.Run("GET /static/notification.ogg - full file", func(t *testing.T) {
+		req := httptest.NewRequest("GET", "/static/notification.ogg", nil)
+		w := httptest.NewRecorder()
+		srv.router.ServeHTTP(w, req)
+
+		if w.Code != http.StatusOK {
+			t.Errorf("Expected status 200, got %d", w.Code)
+		}
+
+		if ct := w.Header().Get("Content-Type"); ct != "audio/ogg" {
+			t.Errorf("Expected Content-Type audio/ogg, got %s", ct)
+		}
+
+		if ar := w.Header().Get("Accept-Ranges"); ar != "bytes" {
+			t.Errorf("Expected Accept-Ranges bytes, got %s", ar)
+		}
+
+		if cc := w.Header().Get("Cache-Control"); cc != "public, max-age=31536000, immutable" {
+			t.Errorf("Expected Cache-Control with max-age=31536000, got %s", cc)
+		}
+
+		if w.Body.Len() == 0 {
+			t.Error("Expected non-empty audio file")
+		}
+	})
+
+	t.Run("GET /static/notification.ogg - Range request (bytes=0-99)", func(t *testing.T) {
+		req := httptest.NewRequest("GET", "/static/notification.ogg", nil)
+		req.Header.Set("Range", "bytes=0-99")
+		w := httptest.NewRecorder()
+		srv.router.ServeHTTP(w, req)
+
+		if w.Code != http.StatusPartialContent {
+			t.Errorf("Expected status 206, got %d", w.Code)
+		}
+
+		if w.Body.Len() != 100 {
+			t.Errorf("Expected 100 bytes, got %d", w.Body.Len())
+		}
+
+		if cr := w.Header().Get("Content-Range"); cr == "" {
+			t.Error("Expected Content-Range header")
+		}
+	})
+
+	t.Run("GET /static/notification.ogg - Range request (bytes=100-)", func(t *testing.T) {
+		req := httptest.NewRequest("GET", "/static/notification.ogg", nil)
+		req.Header.Set("Range", "bytes=100-")
+		w := httptest.NewRecorder()
+		srv.router.ServeHTTP(w, req)
+
+		if w.Code != http.StatusPartialContent {
+			t.Errorf("Expected status 206, got %d", w.Code)
+		}
+
+		if cr := w.Header().Get("Content-Range"); cr == "" {
+			t.Error("Expected Content-Range header")
+		}
+	})
+
+	t.Run("GET /static/notification.ogg - Range request (bytes=-500)", func(t *testing.T) {
+		req := httptest.NewRequest("GET", "/static/notification.ogg", nil)
+		req.Header.Set("Range", "bytes=-500")
+		w := httptest.NewRecorder()
+		srv.router.ServeHTTP(w, req)
+
+		if w.Code != http.StatusPartialContent {
+			t.Errorf("Expected status 206, got %d", w.Code)
+		}
+
+		// Should return last 500 bytes or entire file if smaller
+		if w.Body.Len() == 0 {
+			t.Error("Expected non-empty response")
+		}
+	})
+
+	t.Run("GET /static/notification.ogg - Invalid Range request", func(t *testing.T) {
+		req := httptest.NewRequest("GET", "/static/notification.ogg", nil)
+		req.Header.Set("Range", "bytes=invalid")
+		w := httptest.NewRecorder()
+		srv.router.ServeHTTP(w, req)
+
+		if w.Code != http.StatusRequestedRangeNotSatisfiable {
+			t.Errorf("Expected status 416, got %d", w.Code)
+		}
+	})
+
+	t.Run("GET /static/notification.ogg - Out of bounds Range", func(t *testing.T) {
+		req := httptest.NewRequest("GET", "/static/notification.ogg", nil)
+		req.Header.Set("Range", "bytes=999999999-")
+		w := httptest.NewRecorder()
+		srv.router.ServeHTTP(w, req)
+
+		if w.Code != http.StatusRequestedRangeNotSatisfiable {
+			t.Errorf("Expected status 416, got %d", w.Code)
+		}
+	})
 }

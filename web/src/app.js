@@ -308,6 +308,8 @@ function handleWebSocketMessage(data) {
             playNotificationSound();
             
             // Flash title with change info (use detailed description if available)
+            // Note: Title and favicon flashing always occur regardless of audio settings
+            // This is by design to provide visual feedback even when sound is disabled
             const titleMessage = changeDescription || `${totalChanges} record${totalChanges > 1 ? 's' : ''} updated`;
             flashTitle(titleMessage);
             
