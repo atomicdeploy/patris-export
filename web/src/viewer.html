@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Patris Export - Live Data Viewer</title>
+    <!-- STYLES -->
+</head>
+<body>
+    <div class="app">
+        <header class="header">
+            <div class="header-content">
+                <h1>📊 Patris Export</h1>
+                <div class="header-actions">
+                    <div class="status">
+                        <span class="status-indicator" id="statusIndicator"></span>
+                        <span id="statusText">Connecting...</span>
+                    </div>
+                    <button class="btn btn-icon" id="settingsBtn" title="Settings">⚙️</button>
+                    <button class="btn btn-icon" id="themeToggle" title="Toggle Theme">🌙</button>
+                </div>
+            </div>
+        </header>
+
+        <div class="toolbar">
+            <div class="toolbar-section">
+                <input type="text" id="searchInput" class="search-input" placeholder="🔍 Search records...">
+                <select id="fieldFilter" class="field-select">
+                    <option value="">All Fields</option>
+                </select>
+            </div>
+            <div class="toolbar-section">
+                <div class="export-container">
+                    <button class="btn btn-primary" id="exportBtn" title="Export data">
+                        📥 Export
+                    </button>
+                    <div class="export-dropdown" id="exportDropdown">
+                        <button class="export-option" id="exportJSON">
+                            <span class="export-icon">📄</span>
+                            <div class="export-details">
+                                <div class="export-title">Export as JSON</div>
+                                <div class="export-desc">JavaScript Object Notation</div>
+                            </div>
+                        </button>
+                        <button class="export-option" id="exportCSV">
+                            <span class="export-icon">📊</span>
+                            <div class="export-details">
+                                <div class="export-title">Export as CSV</div>
+                                <div class="export-desc">Comma-Separated Values</div>
+                            </div>
+                        </button>
+                    </div>
+                </div>
+                <button class="btn btn-secondary" id="columnsBtn" title="Manage columns">
+                    👁️ Columns
+                </button>
+                <div class="record-count">
+                    Total: <strong id="totalCount">0</strong> | 
+                    Filtered: <strong id="filteredCount">0</strong>
+                </div>
+            </div>
+        </div>
+
+        <div class="main-content">
+            <div class="table-container">
+                <table class="data-table" id="dataTable">
+                    <thead id="tableHead"></thead>
+                    <tbody id="tableBody"></tbody>
+                </table>
+                <div class="loading" id="loading">
+                    <div class="spinner"></div>
+                    <p>Loading data...</p>
+                </div>
+                <div class="empty-state" id="emptyState" style="display: none;">
+                    <div class="empty-icon">📭</div>
+                    <p>No records found</p>
+                </div>
+            </div>
+        </div>
+
+        <div class="settings-panel" id="settingsPanel">
+            <div class="settings-content">
+                <h2>Settings</h2>
+                <div class="settings-group">
+                    <label class="checkbox-label">
+                        <input type="checkbox" id="autoScrollToChanged">
+                        <span>Auto-scroll to changed items</span>
+                    </label>
+                    <label class="checkbox-label">
+                        <input type="checkbox" id="highlightChanges" checked>
+                        <span>Highlight changed items</span>
+                    </label>
+                    <label class="checkbox-label">
+                        <input type="checkbox" id="enablePagination">
+                        <span>Enable pagination</span>
+                    </label>
+                </div>
+                <div class="settings-group">
+                    <label>
+                        Records per page:
+                        <select id="pageSize" class="select-input">
+                            <option value="25">25</option>
+                            <option value="50">50</option>
+                            <option value="100" selected>100</option>
+                            <option value="500">500</option>
+                        </select>
+                    </label>
+                </div>
+                <button class="btn btn-primary" id="closeSettings">Close</button>
+            </div>
+        </div>
+
+        <div class="settings-panel" id="columnsPanel">
+            <div class="settings-content">
+                <h2>Column Visibility</h2>
+                <div class="settings-group">
+                    <div id="columnCheckboxes"></div>
+                </div>
+                <div class="button-group" style="display: flex; gap: 0.5rem; margin-top: 1rem;">
+                    <button class="btn btn-secondary" id="showAllColumns">Show All</button>
+                    <button class="btn btn-secondary" id="hideAllColumns">Hide All</button>
+                    <button class="btn btn-primary" id="closeColumns">Close</button>
+                </div>
+            </div>
+        </div>
+
+        <div class="inspector-panel" id="inspectorPanel">
+            <div class="inspector-content">
+                <div class="inspector-header">
+                    <h2>Record Inspector</h2>
+                    <button class="btn btn-icon" id="closeInspector">✕</button>
+                </div>
+                <div class="inspector-body" id="inspectorBody">
+                    <p class="text-muted">Select a record to inspect</p>
+                </div>
+            </div>
+        </div>
+
+        <footer class="footer">
+            <div class="footer-content">
+                <div class="footer-section">
+                    <span class="footer-label">File:</span>
+                    <span class="footer-value" id="footerFile">—</span>
+                </div>
+                <div class="footer-section">
+                    <span class="footer-label">Last Update:</span>
+                    <span class="footer-value" id="footerLastUpdate">—</span>
+                </div>
+                <div class="footer-section">
+                    <span class="footer-label">Records:</span>
+                    <span class="footer-value" id="footerRecordCount">0</span>
+                </div>
+                <div class="footer-section">
+                    <span class="footer-label">Connection:</span>
+                    <span class="footer-value" id="footerConnection">Connecting...</span>
+                </div>
+            </div>
+        </footer>
+    </div>
+    <!-- SCRIPTS -->
+</body>
+</html>

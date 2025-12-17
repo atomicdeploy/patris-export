@@ -19,7 +19,6 @@ go.work
 
 # Build output
 bin/
-dist/
 build/
 
 # IDE
@@ -41,3 +40,11 @@ Thumbs.db
 !testdata/*.db
 !testdata/*.inf
 !testdata/*.txt
+
+# Web/Node.js
+web/node_modules/
+web/dist/
+
+# Keep package files
+!web/package.json
+!web/package-lock.json

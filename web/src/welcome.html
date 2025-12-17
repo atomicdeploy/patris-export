@@ -1,0 +1,349 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Patris Export - Home</title>
+    <style>
+        :root {
+            --bg-light: #ffffff;
+            --bg-light-secondary: #f9fafb;
+            --text-light: #111827;
+            --text-light-secondary: #6b7280;
+            --border-light: #e5e7eb;
+            --primary: #6366f1;
+            --primary-hover: #4f46e5;
+            
+            --bg-dark: #1f2937;
+            --bg-dark-secondary: #111827;
+            --text-dark: #f9fafb;
+            --text-dark-secondary: #d1d5db;
+            --border-dark: #374151;
+        }
+        
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+            background: var(--bg-light-secondary);
+            color: var(--text-light);
+            line-height: 1.6;
+            transition: background-color 0.3s ease, color 0.3s ease;
+        }
+        
+        body.dark-mode {
+            background: var(--bg-dark-secondary);
+            color: var(--text-dark);
+        }
+        
+        .container {
+            max-width: 900px;
+            margin: 0 auto;
+            padding: 2rem;
+        }
+        
+        header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 3rem;
+            padding-bottom: 1rem;
+            border-bottom: 2px solid var(--border-light);
+        }
+        
+        body.dark-mode header {
+            border-bottom-color: var(--border-dark);
+        }
+        
+        h1 {
+            font-size: 2.5rem;
+            font-weight: 700;
+            color: var(--text-light);
+        }
+        
+        body.dark-mode h1 {
+            color: var(--text-dark);
+        }
+        
+        .theme-toggle {
+            padding: 0.5rem;
+            background: transparent;
+            border: 1px solid var(--border-light);
+            border-radius: 0.5rem;
+            font-size: 1.5rem;
+            cursor: pointer;
+            transition: all 0.15s ease;
+        }
+        
+        body.dark-mode .theme-toggle {
+            border-color: var(--border-dark);
+        }
+        
+        .theme-toggle:hover {
+            background: var(--primary);
+            border-color: var(--primary);
+        }
+        
+        .hero {
+            background: var(--bg-light);
+            padding: 3rem;
+            border-radius: 1rem;
+            box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+            margin-bottom: 2rem;
+            text-align: center;
+        }
+        
+        body.dark-mode .hero {
+            background: var(--bg-dark);
+        }
+        
+        .hero h2 {
+            font-size: 1.875rem;
+            margin-bottom: 1rem;
+        }
+        
+        .hero p {
+            font-size: 1.125rem;
+            color: var(--text-light-secondary);
+            margin-bottom: 2rem;
+        }
+        
+        body.dark-mode .hero p {
+            color: var(--text-dark-secondary);
+        }
+        
+        .cta-button {
+            display: inline-block;
+            padding: 1rem 2rem;
+            background: var(--primary);
+            color: white;
+            text-decoration: none;
+            border-radius: 0.5rem;
+            font-weight: 600;
+            font-size: 1.125rem;
+            transition: all 0.15s ease;
+            box-shadow: 0 4px 6px rgba(99, 102, 241, 0.2);
+        }
+        
+        .cta-button:hover {
+            background: var(--primary-hover);
+            transform: translateY(-2px);
+            box-shadow: 0 6px 12px rgba(99, 102, 241, 0.3);
+        }
+        
+        .features {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 1.5rem;
+            margin-bottom: 2rem;
+        }
+        
+        .feature-card {
+            background: var(--bg-light);
+            padding: 2rem;
+            border-radius: 0.75rem;
+            box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+        }
+        
+        body.dark-mode .feature-card {
+            background: var(--bg-dark);
+        }
+        
+        .feature-icon {
+            font-size: 2.5rem;
+            margin-bottom: 1rem;
+        }
+        
+        .feature-card h3 {
+            font-size: 1.25rem;
+            margin-bottom: 0.5rem;
+        }
+        
+        .feature-card p {
+            color: var(--text-light-secondary);
+            font-size: 0.938rem;
+        }
+        
+        body.dark-mode .feature-card p {
+            color: var(--text-dark-secondary);
+        }
+        
+        .endpoints {
+            background: var(--bg-light);
+            padding: 2rem;
+            border-radius: 0.75rem;
+            box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+        }
+        
+        body.dark-mode .endpoints {
+            background: var(--bg-dark);
+        }
+        
+        .endpoints h2 {
+            font-size: 1.5rem;
+            margin-bottom: 1.5rem;
+        }
+        
+        .endpoint {
+            background: var(--bg-light-secondary);
+            padding: 1.25rem;
+            margin-bottom: 1rem;
+            border-radius: 0.5rem;
+            border-left: 4px solid var(--primary);
+        }
+        
+        body.dark-mode .endpoint {
+            background: var(--bg-dark-secondary);
+        }
+        
+        .endpoint:last-child {
+            margin-bottom: 0;
+        }
+        
+        .endpoint strong {
+            color: var(--primary);
+            font-size: 0.875rem;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+        
+        .endpoint code {
+            display: inline-block;
+            margin: 0.5rem 0;
+            padding: 0.25rem 0.5rem;
+            background: rgba(99, 102, 241, 0.1);
+            color: var(--primary);
+            border-radius: 0.25rem;
+            font-family: ui-monospace, "SF Mono", SFMono-Regular, Menlo, "Liberation Mono", Monaco, "Cascadia Code", Consolas, monospace;
+            font-size: 0.938rem;
+        }
+        
+        .endpoint a {
+            color: var(--primary);
+            text-decoration: none;
+            font-weight: 500;
+        }
+        
+        .endpoint a:hover {
+            text-decoration: underline;
+        }
+        
+        footer {
+            margin-top: 3rem;
+            text-align: center;
+            color: var(--text-light-secondary);
+            font-size: 0.875rem;
+        }
+        
+        body.dark-mode footer {
+            color: var(--text-dark-secondary);
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>📊 Patris Export</h1>
+            <button class="theme-toggle" id="themeToggle">🌙</button>
+        </header>
+        
+        <div class="hero">
+            <h2>Paradox Database Converter & Viewer</h2>
+            <p>Real-time database visualization with live updates and WebSocket streaming</p>
+            <a href="/viewer" class="cta-button">🚀 Launch Visualizer</a>
+        </div>
+        
+        <div class="features">
+            <div class="feature-card">
+                <div class="feature-icon">🌓</div>
+                <h3>Dark Mode</h3>
+                <p>Beautiful dark theme that follows your system preferences</p>
+            </div>
+            
+            <div class="feature-card">
+                <div class="feature-icon">⚡</div>
+                <h3>Real-Time Updates</h3>
+                <p>Live data streaming via WebSocket with instant change notifications</p>
+            </div>
+            
+            <div class="feature-card">
+                <div class="feature-icon">🔍</div>
+                <h3>Advanced Filtering</h3>
+                <p>Search and filter records across all fields with instant results</p>
+            </div>
+            
+            <div class="feature-card">
+                <div class="feature-icon">📱</div>
+                <h3>Responsive Design</h3>
+                <p>Works perfectly on desktop, tablet, and mobile devices</p>
+            </div>
+        </div>
+        
+        <div class="endpoints">
+            <h2>API Endpoints</h2>
+            
+            <div class="endpoint">
+                <strong>GET</strong>
+                <code>/api/records</code><br>
+                Retrieve all database records in JSON format<br>
+                <a href="/api/records">Try it →</a>
+            </div>
+            
+            <div class="endpoint">
+                <strong>GET</strong>
+                <code>/api/info</code><br>
+                Get database schema information and metadata<br>
+                <a href="/api/info">Try it →</a>
+            </div>
+            
+            <div class="endpoint">
+                <strong>WebSocket</strong>
+                <code>/ws</code><br>
+                Connect for real-time bidirectional updates
+            </div>
+        </div>
+        
+        <footer>
+            <p>🔄 Server automatically watches database file and broadcasts changes</p>
+        </footer>
+    </div>
+    
+    <script>
+        // Theme management
+        function initTheme() {
+            const savedTheme = localStorage.getItem('theme');
+            const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+            const isDark = savedTheme === 'dark' || (!savedTheme && prefersDark);
+            
+            if (isDark) {
+                document.body.classList.add('dark-mode');
+            }
+            updateThemeIcon(isDark);
+        }
+        
+        function toggleTheme() {
+            const isDark = document.body.classList.toggle('dark-mode');
+            localStorage.setItem('theme', isDark ? 'dark' : 'light');
+            updateThemeIcon(isDark);
+        }
+        
+        function updateThemeIcon(isDark) {
+            const btn = document.getElementById('themeToggle');
+            btn.textContent = isDark ? '☀️' : '🌙';
+        }
+        
+        document.getElementById('themeToggle').addEventListener('click', toggleTheme);
+        
+        // Initialize on load
+        if (document.readyState === 'loading') {
+            document.addEventListener('DOMContentLoaded', initTheme);
+        } else {
+            initTheme();
+        }
+    </script>
+</body>
+</html>

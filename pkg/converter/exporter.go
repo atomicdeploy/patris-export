@@ -164,10 +164,39 @@ func (e *Exporter) ConvertAndTransformRecords(records []paradox.Record) map[stri
 	return e.TransformRecords(records)
 }
 
+// TransformRecordsMap transforms an array of map records to Code-keyed map format
+// This is used when records are already in map[string]interface{} format (e.g., from datasource)
+func (e *Exporter) TransformRecordsMap(records []map[string]interface{}) map[string]interface{} {
+	result := make(map[string]interface{})
+	
+	for _, record := range records {
+		// Extract Code as the key
+		codeKey := ""
+		if code, ok := record["Code"]; ok {
+			codeKey = fmt.Sprintf("%v", code)
+		} else {
+			// Skip records without Code
+			continue
+		}
+		
+		// Create a copy of the record without Code field (it becomes the key)
+		transformedRecord := make(map[string]interface{})
+		for key, value := range record {
+			if key != "Code" {
+				transformedRecord[key] = value
+			}
+		}
+		
+		result[codeKey] = transformedRecord
+	}
+	
+	return result
+}
+
 // TransformRecords transforms records for Patris81-specific output format:
 // - Use Code field as the key
 // - Ignore fields starting with "Sort"
-// - Combine ANBAR fields into an array
+// - Combine ANBAR fields into an array (sorted by number)
 // This method is used by both the file exporter and the web server to ensure consistent output.
 func (e *Exporter) TransformRecords(records []paradox.Record) map[string]interface{} {
 	result := make(map[string]interface{})
@@ -185,6 +214,7 @@ func (e *Exporter) TransformRecords(records []paradox.Record) map[string]interfa
 		// Build optimized record
 		optimized := make(map[string]interface{})
 		anbarFields := make(map[int]interface{})
+		maxAnbarIndex := 0
 		
 		for key, value := range record {
 			// Skip Sort fields
@@ -200,10 +230,13 @@ func (e *Exporter) TransformRecords(records []paradox.Record) map[string]interfa
 			
 			// Collect numbered ANBAR fields into map (ANBAR1, ANBAR2, etc.)
 			if anbarFieldRegex.MatchString(key) {
-				// Extract the number from ANBAR field name (e.g., "ANBAR1" -> 1)
-				var num int
-				if n, _ := fmt.Sscanf(key, "ANBAR%d", &num); n == 1 && num > 0 {
-					anbarFields[num] = value
+				// Extract the number from ANBARn field name (e.g., "ANBAR1" -> 1)
+				var index int
+				if n, _ := fmt.Sscanf(key, "ANBAR%d", &index); n == 1 && index > 0 {
+					anbarFields[index] = value
+					if index > maxAnbarIndex {
+						maxAnbarIndex = index
+					}
 				}
 				continue
 			}
@@ -212,23 +245,15 @@ func (e *Exporter) TransformRecords(records []paradox.Record) map[string]interfa
 			optimized[key] = value
 		}
 		
-		// Add ANBAR array if we collected any, sorted by field number
+		// Add ANBAR array if we collected any, in sorted order by field number
 		if len(anbarFields) > 0 {
-			// Find the maximum ANBAR number to determine array size
-			maxNum := 0
-			for num := range anbarFields {
-				if num > maxNum {
-					maxNum = num
-				}
-			}
-			
 			// Build array with correct ordering (1-indexed fields -> 0-indexed array)
-			anbarValues := make([]interface{}, maxNum)
-			for i := 1; i <= maxNum; i++ {
+			anbarValues := make([]interface{}, maxAnbarIndex)
+			for i := 1; i <= maxAnbarIndex; i++ {
 				if val, ok := anbarFields[i]; ok {
 					anbarValues[i-1] = val
 				} else {
-					anbarValues[i-1] = 0
+					anbarValues[i-1] = 0 // Fill missing indices with 0
 				}
 			}
 			optimized["ANBAR"] = anbarValues
