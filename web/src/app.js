@@ -88,7 +88,7 @@ function applySettings() {
 // Initialize notification audio
 function initNotificationAudio() {
     try {
-        state.notificationAudio = new Audio('/api/notification.wav');
+        state.notificationAudio = new Audio('/static/notification.ogg');
         state.notificationAudio.volume = 0.5; // Set volume to 50%
         state.notificationAudio.preload = 'auto'; // Preload for faster playback
         

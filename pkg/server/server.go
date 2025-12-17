@@ -104,7 +104,7 @@ func (s *Server) setupRoutes() {
 	s.router.HandleFunc("/viewer", s.handleViewer).Methods("GET")
 	s.router.HandleFunc("/api/records", s.handleGetRecords).Methods("GET")
 	s.router.HandleFunc("/api/info", s.handleGetInfo).Methods("GET")
-	s.router.HandleFunc("/api/notification.wav", s.handleNotificationAudio).Methods("GET")
+	s.router.HandleFunc("/static/notification.ogg", s.handleNotificationAudio).Methods("GET")
 	s.router.HandleFunc("/ws", s.handleWebSocket)
 }
 
@@ -170,7 +170,7 @@ func (s *Server) handleNotificationAudio(w http.ResponseWriter, r *http.Request)
 	audioSize := int64(len(audioData))
 
 	// Set headers for caching and content type
-	w.Header().Set("Content-Type", "audio/wav")
+	w.Header().Set("Content-Type", "audio/ogg")
 	w.Header().Set("Accept-Ranges", "bytes")
 	w.Header().Set("Cache-Control", "public, max-age=31536000, immutable") // Cache for 1 year
 
