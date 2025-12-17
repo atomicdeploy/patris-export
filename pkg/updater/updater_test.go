@@ -1,6 +1,7 @@
 package updater
 
 import (
+	"fmt"
 	"runtime"
 	"strings"
 	"testing"
@@ -132,3 +133,95 @@ func TestDeriveRepoInfoFromModule(t *testing.T) {
 		t.Error("Expected non-empty repository name")
 	}
 }
+
+func TestFindPlatformArtifact(t *testing.T) {
+	u := NewUpdater("testowner", "testrepo")
+	
+	// Test with artifacts matching the current platform
+	// Use the actual binaryName from the updater
+	currentPlatform := runtime.GOOS
+	currentArch := runtime.GOARCH
+	
+	var platformArtifactName string
+	switch currentPlatform {
+	case "linux":
+		platformArtifactName = fmt.Sprintf("%s-linux-amd64", u.binaryName)
+	case "windows":
+		// Test with mingw variant since that's what we support
+		platformArtifactName = fmt.Sprintf("%s-windows-mingw-amd64", u.binaryName)
+	case "darwin":
+		if currentArch == "arm64" {
+			platformArtifactName = fmt.Sprintf("%s-darwin-arm64", u.binaryName)
+		} else {
+			platformArtifactName = fmt.Sprintf("%s-darwin-amd64", u.binaryName)
+		}
+	}
+	
+	t.Run("Current platform exact match", func(t *testing.T) {
+		artifacts := []Artifact{
+			{Name: platformArtifactName},
+			{Name: "other-platform"},
+		}
+		
+		result := u.FindPlatformArtifact(artifacts)
+		if result == nil {
+			t.Errorf("Expected to find artifact for current platform, but got nil (looking for %s)", platformArtifactName)
+		} else if result.Name != platformArtifactName {
+			t.Errorf("Expected artifact name %s, got %s", platformArtifactName, result.Name)
+		}
+	})
+	
+	t.Run("No matching artifact for current platform", func(t *testing.T) {
+		// Create artifacts that don't match current platform
+		var otherArtifacts []Artifact
+		if currentPlatform != "windows" {
+			otherArtifacts = append(otherArtifacts, Artifact{Name: fmt.Sprintf("%s-windows-mingw-amd64", u.binaryName)})
+		}
+		if currentPlatform != "linux" {
+			otherArtifacts = append(otherArtifacts, Artifact{Name: fmt.Sprintf("%s-linux-amd64", u.binaryName)})
+		}
+		if currentPlatform != "darwin" {
+			otherArtifacts = append(otherArtifacts, Artifact{Name: fmt.Sprintf("%s-darwin-amd64", u.binaryName)})
+		}
+		
+		if len(otherArtifacts) > 0 {
+			result := u.FindPlatformArtifact(otherArtifacts)
+			if result != nil {
+				t.Errorf("Expected no artifact match, but got %s", result.Name)
+			}
+		}
+	})
+	
+	// Test Windows-specific flexible matching (only meaningful on Windows)
+	if currentPlatform == "windows" {
+		t.Run("Windows flexible matching", func(t *testing.T) {
+			testCases := []struct {
+				name         string
+				artifactName string
+			}{
+				{"mingw variant", fmt.Sprintf("%s-windows-mingw-amd64", u.binaryName)},
+				{"mingw-cross variant", fmt.Sprintf("%s-windows-mingw-cross-amd64", u.binaryName)},
+				{"exact match", fmt.Sprintf("%s-windows-amd64", u.binaryName)},
+			}
+			
+			for _, tc := range testCases {
+				t.Run(tc.name, func(t *testing.T) {
+					artifacts := []Artifact{
+						{Name: tc.artifactName},
+						{Name: fmt.Sprintf("%s-linux-amd64", u.binaryName)},
+					}
+					
+					result := u.FindPlatformArtifact(artifacts)
+					if result == nil {
+						t.Errorf("Expected to find Windows artifact, but got nil")
+					} else if result.Name != tc.artifactName {
+						t.Errorf("Expected artifact name %s, got %s", tc.artifactName, result.Name)
+					}
+				})
+			}
+		})
+	} else {
+		t.Logf("Skipping Windows-specific flexible matching tests (not running on Windows)")
+	}
+}
+

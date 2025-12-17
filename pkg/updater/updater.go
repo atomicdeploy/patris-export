@@ -436,6 +436,59 @@ func (u *Updater) GetCurrentPlatformArtifactName() string {
 	}
 }
 
+// FindPlatformArtifact finds the best matching artifact for the current platform
+// from a list of available artifacts. It handles different naming conventions
+// (e.g., windows-mingw, windows-mingw-cross) and returns the best match.
+func (u *Updater) FindPlatformArtifact(artifacts []Artifact) *Artifact {
+	// Get the basic platform identifier
+	var platformIdentifier string
+	switch runtime.GOOS {
+	case "windows":
+		platformIdentifier = fmt.Sprintf("%s-windows", u.binaryName)
+	case "linux":
+		platformIdentifier = fmt.Sprintf("%s-linux", u.binaryName)
+	case "darwin":
+		if runtime.GOARCH == "arm64" {
+			platformIdentifier = fmt.Sprintf("%s-darwin-arm64", u.binaryName)
+		} else {
+			platformIdentifier = fmt.Sprintf("%s-darwin-amd64", u.binaryName)
+		}
+	default:
+		return nil
+	}
+
+	// Try exact match first
+	exactMatch := u.GetCurrentPlatformArtifactName()
+	for i := range artifacts {
+		if artifacts[i].Name == exactMatch {
+			return &artifacts[i]
+		}
+	}
+
+	// For Windows, try flexible matching to handle mingw variants
+	// This allows finding "patris-export-windows-mingw-amd64" or 
+	// "patris-export-windows-mingw-cross-amd64" when looking for
+	// "patris-export-windows-amd64"
+	if runtime.GOOS == "windows" {
+		for i := range artifacts {
+			name := artifacts[i].Name
+			// Match artifacts that start with the platform identifier and contain "amd64"
+			if strings.HasPrefix(name, platformIdentifier) && strings.Contains(name, "amd64") {
+				return &artifacts[i]
+			}
+		}
+	}
+
+	// For other platforms, try prefix matching
+	for i := range artifacts {
+		if strings.HasPrefix(artifacts[i].Name, platformIdentifier) {
+			return &artifacts[i]
+		}
+	}
+
+	return nil
+}
+
 // DeriveRepoInfoFromModule attempts to derive repository owner and name from go.mod.
 // It looks for go.mod starting from the current working directory (os.Getwd()) and then parent directories,
 // i.e., relative to where the process is run, not necessarily the executable's directory.

@@ -448,17 +448,11 @@ func runUpdate(cmd *cobra.Command, args []string) {
 		os.Exit(1)
 	}
 
-	// Find the artifact for current platform
-	var targetArtifact *updater.Artifact
-	for i := range artifacts {
-		if artifacts[i].Name == platformName {
-			targetArtifact = &artifacts[i]
-			break
-		}
-	}
+	// Find the artifact for current platform using flexible matching
+	targetArtifact := u.FindPlatformArtifact(artifacts)
 
 	if targetArtifact == nil {
-		errorColor.Printf("❌ No artifact found for platform: %s\n", platformName)
+		errorColor.Printf("❌ No artifact found for platform: %s/%s\n", runtime.GOOS, runtime.GOARCH)
 		errorColor.Println("💡 Available artifacts:")
 		for _, a := range artifacts {
 			fmt.Printf("   • %s\n", a.Name)
