@@ -5,12 +5,14 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
 	"github.com/atomicdeploy/patris-export/pkg/converter"
 	"github.com/atomicdeploy/patris-export/pkg/paradox"
 	"github.com/atomicdeploy/patris-export/pkg/server"
+	"github.com/atomicdeploy/patris-export/pkg/updater"
 	"github.com/atomicdeploy/patris-export/pkg/watcher"
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
@@ -96,7 +98,25 @@ Supports Persian/Farsi encoding conversion and file watching.
 	serveCmd.Flags().BoolP("watch", "w", true, "Watch file for changes and broadcast updates")
 	serveCmd.Flags().StringP("debounce", "d", "0s", "Debounce duration for watch mode (e.g., 0s, 500ms, 1s, 5s)")
 
-	rootCmd.AddCommand(convertCmd, infoCmd, companyCmd, serveCmd)
+	// Update command
+	updateCmd := &cobra.Command{
+		Use:   "update",
+		Short: "🚀 Update patris-export to the latest version",
+		Long: `🚀 Update patris-export to the latest version from GitHub Actions artifacts.
+
+Downloads the latest build artifact for your platform and replaces the current executable.
+You can optionally specify a branch to download from (default: main).
+
+Examples:
+  patris-export update              # Update from main branch
+  patris-export update --branch develop  # Update from develop branch
+
+Note: Set GITHUB_TOKEN environment variable for higher API rate limits.`,
+		Run: runUpdate,
+	}
+	updateCmd.Flags().StringP("branch", "b", "main", "Branch to download from")
+
+	rootCmd.AddCommand(convertCmd, infoCmd, companyCmd, serveCmd, updateCmd)
 
 	if err := rootCmd.Execute(); err != nil {
 		errorColor.Fprintf(os.Stderr, "❌ Error: %v\n", err)
@@ -354,4 +374,158 @@ func runServe(cmd *cobra.Command, args []string) {
 		errorColor.Printf("❌ Server error: %v\n", err)
 		os.Exit(1)
 	}
+}
+
+func runUpdate(cmd *cobra.Command, args []string) {
+	branch, err := cmd.Flags().GetString("branch")
+	if err != nil {
+		errorColor.Printf("❌ Failed to read 'branch' flag: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Println()
+	successColor.Println("🚀 Patris Export Auto-Update")
+	fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+	fmt.Println()
+
+	// Derive repository information from go.mod or environment variables
+	repoOwner, repoName, err := updater.DeriveRepoInfoFromModule()
+	if err != nil {
+		errorColor.Printf("❌ Failed to determine repository information: %v\n", err)
+		fmt.Println()
+		warningColor.Println("💡 You can set repository information using environment variables:")
+		infoColor.Println("   export PATRIS_REPO_OWNER='atomicdeploy'")
+		infoColor.Println("   export PATRIS_REPO_NAME='patris-export'")
+		infoColor.Println("   patris-export update")
+		fmt.Println()
+		warningColor.Println("   Or run from within the project directory containing go.mod")
+		fmt.Println()
+		os.Exit(1)
+	}
+
+	infoColor.Printf("📦 Repository: %s/%s\n", repoOwner, repoName)
+
+	// Create updater
+	u := updater.NewUpdater(repoOwner, repoName)
+
+	// Check platform support
+	platformName := u.GetCurrentPlatformArtifactName()
+	if platformName == "" {
+		errorColor.Printf("❌ Auto-update is not supported on %s/%s\n", runtime.GOOS, runtime.GOARCH)
+		errorColor.Println("💡 Supported platforms: linux/amd64, windows/amd64, darwin/amd64, darwin/arm64")
+		os.Exit(1)
+	}
+
+	// Show current version
+	infoColor.Printf("📦 Current version: %s (built: %s)\n", Version, BuildDate)
+	infoColor.Printf("🌿 Target branch: %s\n", branch)
+	infoColor.Printf("💻 Platform: %s/%s\n", runtime.GOOS, runtime.GOARCH)
+	fmt.Println()
+
+	// Check for GITHUB_TOKEN
+	if os.Getenv("GITHUB_TOKEN") == "" {
+		warningColor.Println("⚠️  GITHUB_TOKEN not set - using anonymous API access (lower rate limits)")
+		warningColor.Println("💡 Set GITHUB_TOKEN environment variable for higher rate limits")
+		fmt.Println()
+	}
+
+	// Step 1: Find latest successful build
+	infoColor.Println("🔍 Searching for latest successful build...")
+	run, err := u.GetLatestSuccessfulRun(branch)
+	if err != nil {
+		errorColor.Printf("❌ Failed to find latest build: %v\n", err)
+		os.Exit(1)
+	}
+
+	successColor.Printf("✅ Found build #%d from %s\n", run.ID, run.CreatedAt.Format("2006-01-02 15:04:05"))
+	fmt.Println()
+
+	// Step 2: Get artifacts
+	infoColor.Println("📦 Fetching build artifacts...")
+	artifacts, err := u.GetArtifactsForRun(run.ID)
+	if err != nil {
+		errorColor.Printf("❌ Failed to get artifacts: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Find the artifact for current platform using flexible matching
+	targetArtifact := u.FindPlatformArtifact(artifacts)
+
+	if targetArtifact == nil {
+		errorColor.Printf("❌ No artifact found for platform: %s/%s\n", runtime.GOOS, runtime.GOARCH)
+		errorColor.Println("💡 Available artifacts:")
+		for _, a := range artifacts {
+			fmt.Printf("   • %s\n", a.Name)
+		}
+		os.Exit(1)
+	}
+
+	if targetArtifact.Expired {
+		errorColor.Println("❌ Artifact has expired - cannot download")
+		os.Exit(1)
+	}
+
+	successColor.Printf("✅ Found artifact: %s (%.2f MB)\n", targetArtifact.Name, float64(targetArtifact.SizeInBytes)/(1024*1024))
+	fmt.Println()
+
+	// Step 3: Download artifact
+	infoColor.Println("⬇️  Downloading artifact...")
+	
+	// Create temp directory
+	tempDir, err := os.MkdirTemp("", "patris-update-*")
+	if err != nil {
+		errorColor.Printf("❌ Failed to create temp directory: %v\n", err)
+		os.Exit(1)
+	}
+	defer os.RemoveAll(tempDir) // Clean up
+
+	zipPath, err := u.DownloadArtifact(targetArtifact, tempDir)
+	if err != nil {
+		errorColor.Printf("❌ Failed to download artifact: %v\n", err)
+		fmt.Println()
+		warningColor.Println("💡 GitHub Actions artifacts require authentication")
+		warningColor.Println("   Please set the GITHUB_TOKEN environment variable:")
+		fmt.Println()
+		infoColor.Println("   export GITHUB_TOKEN='your_github_token'")
+		infoColor.Println("   patris-export update")
+		fmt.Println()
+		warningColor.Println("   Get your token from: https://github.com/settings/tokens")
+		warningColor.Println("   Required scope: 'actions:read'")
+		fmt.Println()
+		os.Exit(1)
+	}
+
+	successColor.Printf("✅ Downloaded to: %s\n", filepath.Base(zipPath))
+	fmt.Println()
+
+	// Step 4: Extract executable
+	infoColor.Println("📂 Extracting executable...")
+	extractedExe, err := u.ExtractExecutable(zipPath, tempDir)
+	if err != nil {
+		errorColor.Printf("❌ Failed to extract executable: %v\n", err)
+		os.Exit(1)
+	}
+
+	successColor.Printf("✅ Extracted: %s\n", filepath.Base(extractedExe))
+	fmt.Println()
+
+	// Step 5: Replace current executable
+	infoColor.Println("🔄 Replacing current executable...")
+	if err := u.ReplaceCurrentExecutable(extractedExe); err != nil {
+		errorColor.Printf("❌ Failed to replace executable: %v\n", err)
+		errorColor.Println("💡 You may need elevated permissions to update the executable")
+		os.Exit(1)
+	}
+
+	fmt.Println()
+	successColor.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+	successColor.Println("✨ Update completed successfully! ✨")
+	successColor.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+	fmt.Println()
+	infoColor.Println("🎉 Patris Export has been updated to the latest version")
+	infoColor.Printf("🌿 Branch: %s\n", branch)
+	infoColor.Printf("📅 Build date: %s\n", run.CreatedAt.Format("2006-01-02 15:04:05"))
+	fmt.Println()
+	infoColor.Println("💡 Run 'patris-export --version' to verify the update")
+	fmt.Println()
 }
