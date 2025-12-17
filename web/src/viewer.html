@@ -51,6 +51,9 @@
                         </button>
                     </div>
                 </div>
+                <button class="btn btn-secondary" id="columnsBtn" title="Manage columns">
+                    👁️ Columns
+                </button>
                 <div class="record-count">
                     Total: <strong id="totalCount">0</strong> | 
                     Filtered: <strong id="filteredCount">0</strong>
@@ -104,6 +107,20 @@
                     </label>
                 </div>
                 <button class="btn btn-primary" id="closeSettings">Close</button>
+            </div>
+        </div>
+
+        <div class="settings-panel" id="columnsPanel">
+            <div class="settings-content">
+                <h2>Column Visibility</h2>
+                <div class="settings-group">
+                    <div id="columnCheckboxes"></div>
+                </div>
+                <div class="button-group" style="display: flex; gap: 0.5rem; margin-top: 1rem;">
+                    <button class="btn btn-secondary" id="showAllColumns">Show All</button>
+                    <button class="btn btn-secondary" id="hideAllColumns">Hide All</button>
+                    <button class="btn btn-primary" id="closeColumns">Close</button>
+                </div>
             </div>
         </div>
 

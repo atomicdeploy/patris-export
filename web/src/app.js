@@ -54,6 +54,23 @@ function saveSortPreferences() {
     }));
 }
 
+// Save hidden columns to localStorage
+function saveHiddenColumns() {
+    localStorage.setItem('patris-hidden-columns', JSON.stringify([...state.hiddenColumns]));
+}
+
+// Format number with thousand separators (e.g., 1234567 -> 1,234,567)
+function formatNumberWithSeparator(value) {
+    // Don't format if it's not a number or if it's null/undefined
+    if (value === null || value === undefined || value === '' || isNaN(value)) {
+        return value;
+    }
+    
+    // Convert to number and format with thousand separators
+    const num = typeof value === 'string' ? parseFloat(value) : value;
+    return num.toLocaleString('en-US');
+}
+
 // Apply settings to UI
 function applySettings() {
     document.getElementById('autoScrollToChanged').checked = state.settings.autoScrollToChanged;
@@ -301,46 +318,56 @@ function renderTableHeader() {
         let processedAnbar = false;
         
         state.fields.forEach(field => {
+            // Skip hidden columns
+            if (state.hiddenColumns.has(field)) {
+                return;
+            }
+            
             // Handle ANBAR grouped columns
             if (field.startsWith('ANBAR') && field.length > 5 && !processedAnbar) {
-                // Create group header for all ANBAR columns
-                const groupTh = document.createElement('th');
-                groupTh.textContent = 'ANBAR';
-                groupTh.setAttribute('colspan', anbarFields.length);
-                groupTh.className = 'anbar-group-header';
-                groupRow.appendChild(groupTh);
+                // Filter visible ANBAR fields
+                const visibleAnbarFields = anbarFields.filter(f => !state.hiddenColumns.has(f));
                 
-                // Create individual ANBAR column headers
-                anbarFields.forEach(anbarField => {
-                    const anbarNum = anbarField.substring(5); // Extract number
-                    const th = document.createElement('th');
-                    th.className = 'sortable anbar-column';
+                if (visibleAnbarFields.length > 0) {
+                    // Create group header for all visible ANBAR columns
+                    const groupTh = document.createElement('th');
+                    groupTh.textContent = 'ANBAR';
+                    groupTh.setAttribute('colspan', visibleAnbarFields.length);
+                    groupTh.className = 'anbar-group-header';
+                    groupRow.appendChild(groupTh);
                     
-                    const sortContainer = document.createElement('div');
-                    sortContainer.style.display = 'flex';
-                    sortContainer.style.alignItems = 'center';
-                    sortContainer.style.gap = '0.5rem';
-                    sortContainer.style.cursor = 'pointer';
-                    
-                    const fieldName = document.createElement('span');
-                    fieldName.textContent = anbarNum;
-                    sortContainer.appendChild(fieldName);
-                    
-                    const sortIndicator = document.createElement('span');
-                    sortIndicator.className = 'sort-indicator';
-                    if (state.sortField === anbarField) {
-                        sortIndicator.textContent = state.sortDirection === 'asc' ? '▲' : '▼';
-                        sortIndicator.style.opacity = '1';
-                    } else {
-                        sortIndicator.textContent = '▲';
-                        sortIndicator.style.opacity = '0.3';
-                    }
-                    sortContainer.appendChild(sortIndicator);
-                    
-                    th.appendChild(sortContainer);
-                    th.addEventListener('click', () => sortByField(anbarField));
-                    fieldRow.appendChild(th);
-                });
+                    // Create individual ANBAR column headers
+                    visibleAnbarFields.forEach(anbarField => {
+                        const anbarNum = anbarField.substring(5); // Extract number
+                        const th = document.createElement('th');
+                        th.className = 'sortable anbar-column';
+                        
+                        const sortContainer = document.createElement('div');
+                        sortContainer.style.display = 'flex';
+                        sortContainer.style.alignItems = 'center';
+                        sortContainer.style.gap = '0.5rem';
+                        sortContainer.style.cursor = 'pointer';
+                        
+                        const fieldName = document.createElement('span');
+                        fieldName.textContent = anbarNum;
+                        sortContainer.appendChild(fieldName);
+                        
+                        const sortIndicator = document.createElement('span');
+                        sortIndicator.className = 'sort-indicator';
+                        if (state.sortField === anbarField) {
+                            sortIndicator.textContent = state.sortDirection === 'asc' ? '▲' : '▼';
+                            sortIndicator.style.opacity = '1';
+                        } else {
+                            sortIndicator.textContent = '▲';
+                            sortIndicator.style.opacity = '0.3';
+                        }
+                        sortContainer.appendChild(sortIndicator);
+                        
+                        th.appendChild(sortContainer);
+                        th.addEventListener('click', () => sortByField(anbarField));
+                        fieldRow.appendChild(th);
+                    });
+                }
                 
                 processedAnbar = true;
             } else if (!field.startsWith('ANBAR') || field.length <= 5) {
@@ -397,6 +424,11 @@ function renderTableHeader() {
         const headerRow = document.createElement('tr');
         
         state.fields.forEach(field => {
+            // Skip hidden columns
+            if (state.hiddenColumns.has(field)) {
+                return;
+            }
+            
             const th = document.createElement('th');
             th.className = 'sortable';
             
@@ -483,6 +515,11 @@ function renderTable(changedIndices = new Set()) {
         
         // Add data cells
         state.fields.forEach(field => {
+            // Skip hidden columns
+            if (state.hiddenColumns.has(field)) {
+                return;
+            }
+            
             const td = document.createElement('td');
             
             // Handle ANBAR fields (ANBAR1, ANBAR2, etc.)
@@ -490,7 +527,8 @@ function renderTable(changedIndices = new Set()) {
                 const anbarIndex = parseInt(field.substring(5)) - 1;
                 if (record.ANBAR && Array.isArray(record.ANBAR) && anbarIndex < record.ANBAR.length) {
                     const value = record.ANBAR[anbarIndex];
-                    td.textContent = value !== null && value !== undefined ? value : '';
+                    // Apply thousand separator to ANBAR values
+                    td.textContent = value !== null && value !== undefined ? formatNumberWithSeparator(value) : '';
                 } else {
                     td.textContent = '';
                 }
@@ -499,11 +537,14 @@ function renderTable(changedIndices = new Set()) {
                 td.style.textAlign = 'right';
             } else {
                 const value = record[field];
-                td.textContent = value !== null && value !== undefined ? value : '';
                 
-                // Right-align numeric fields (except Code)
-                if (field !== 'Code' && value !== null && value !== undefined && !isNaN(value)) {
+                // Apply thousand separator to numeric fields (except Code and Serial)
+                if (field !== 'Code' && field !== 'Serial' && value !== null && value !== undefined && !isNaN(value)) {
+                    td.textContent = formatNumberWithSeparator(value);
+                    // Right-align numeric fields
                     td.style.textAlign = 'right';
+                } else {
+                    td.textContent = value !== null && value !== undefined ? value : '';
                 }
             }
             
@@ -606,6 +647,41 @@ function exportData(format) {
     
     // Close export dropdown
     document.getElementById('exportDropdown').classList.remove('open');
+}
+
+// Render column manager with checkboxes for each column
+function renderColumnManager() {
+    const container = document.getElementById('columnCheckboxes');
+    container.innerHTML = '';
+    
+    state.fields.forEach(field => {
+        const label = document.createElement('label');
+        label.className = 'checkbox-label';
+        
+        const checkbox = document.createElement('input');
+        checkbox.type = 'checkbox';
+        checkbox.checked = !state.hiddenColumns.has(field);
+        // Disable Code column checkbox (always visible)
+        checkbox.disabled = field === 'Code';
+        
+        checkbox.addEventListener('change', (e) => {
+            if (e.target.checked) {
+                state.hiddenColumns.delete(field);
+            } else {
+                state.hiddenColumns.add(field);
+            }
+            saveHiddenColumns();
+            renderTableHeader();
+            renderTable();
+        });
+        
+        const span = document.createElement('span');
+        span.textContent = field + (field === 'Code' ? ' (always visible)' : '');
+        
+        label.appendChild(checkbox);
+        label.appendChild(span);
+        container.appendChild(label);
+    });
 }
 
 // Transform records to Code-keyed format for export
@@ -860,6 +936,37 @@ function init() {
     
     document.getElementById('closeInspector').addEventListener('click', () => {
         document.getElementById('inspectorPanel').classList.remove('open');
+    });
+    
+    // Column manager
+    document.getElementById('columnsBtn').addEventListener('click', () => {
+        renderColumnManager();
+        document.getElementById('columnsPanel').classList.toggle('open');
+    });
+    
+    document.getElementById('closeColumns').addEventListener('click', () => {
+        document.getElementById('columnsPanel').classList.remove('open');
+    });
+    
+    document.getElementById('showAllColumns').addEventListener('click', () => {
+        state.hiddenColumns.clear();
+        saveHiddenColumns();
+        renderColumnManager();
+        renderTableHeader();
+        renderTable();
+    });
+    
+    document.getElementById('hideAllColumns').addEventListener('click', () => {
+        // Don't allow hiding Code column
+        state.fields.forEach(field => {
+            if (field !== 'Code') {
+                state.hiddenColumns.add(field);
+            }
+        });
+        saveHiddenColumns();
+        renderColumnManager();
+        renderTableHeader();
+        renderTable();
     });
     
     // Settings checkboxes
