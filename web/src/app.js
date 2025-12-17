@@ -20,7 +20,8 @@ const state = {
     },
     notificationAudio: null,
     originalTitle: document.title,
-    originalFavicon: null
+    originalFavicon: null,
+    titleFlashInterval: null
 };
 
 // Load settings from localStorage
@@ -86,9 +87,20 @@ function applySettings() {
 
 // Initialize notification audio
 function initNotificationAudio() {
-    state.notificationAudio = new Audio('/api/notification.wav');
-    state.notificationAudio.volume = 0.5; // Set volume to 50%
-    state.notificationAudio.preload = 'auto'; // Preload for faster playback
+    try {
+        state.notificationAudio = new Audio('/api/notification.wav');
+        state.notificationAudio.volume = 0.5; // Set volume to 50%
+        state.notificationAudio.preload = 'auto'; // Preload for faster playback
+        
+        // Handle loading errors
+        state.notificationAudio.addEventListener('error', (e) => {
+            console.warn('Failed to load notification audio:', e);
+            state.notificationAudio = null;
+        });
+    } catch (err) {
+        console.warn('Audio not supported or failed to initialize:', err);
+        state.notificationAudio = null;
+    }
 }
 
 // Play notification sound
@@ -104,16 +116,23 @@ function playNotificationSound() {
 
 // Flash page title with notification info
 function flashTitle(message) {
+    // Clear any existing flash interval to avoid conflicts
+    if (state.titleFlashInterval) {
+        clearInterval(state.titleFlashInterval);
+        document.title = state.originalTitle;
+    }
+    
     const originalTitle = state.originalTitle;
     let flashCount = 0;
     const maxFlashes = 6; // Flash 3 times (on/off cycle)
     
-    const flashInterval = setInterval(() => {
+    state.titleFlashInterval = setInterval(() => {
         document.title = flashCount % 2 === 0 ? `🔔 ${message}` : originalTitle;
         flashCount++;
         
         if (flashCount >= maxFlashes) {
-            clearInterval(flashInterval);
+            clearInterval(state.titleFlashInterval);
+            state.titleFlashInterval = null;
             document.title = originalTitle;
         }
     }, 500); // Flash every 500ms

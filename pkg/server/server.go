@@ -196,7 +196,7 @@ func (s *Server) handleNotificationAudio(w http.ResponseWriter, r *http.Request)
 	}
 
 	// Validate range
-	if start < 0 || start >= audioSize || end >= audioSize || start > end {
+	if start < 0 || start >= audioSize || end > audioSize || start > end {
 		w.Header().Set("Content-Range", fmt.Sprintf("bytes */%d", audioSize))
 		http.Error(w, "Requested Range Not Satisfiable", http.StatusRequestedRangeNotSatisfiable)
 		return
