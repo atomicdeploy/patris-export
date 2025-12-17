@@ -88,14 +88,9 @@ function applySettings() {
 
 // Initialize notification audio
 function initNotificationAudio() {
-    try {
-        // Simply store the URL for creating new instances
-        // We'll create fresh Audio instances in playNotificationSound()
-        state.notificationAudio = '/static/notification.ogg';
-    } catch (err) {
-        console.warn('Audio not supported or failed to initialize:', err);
-        state.notificationAudio = null;
-    }
+    // Simply store the URL for creating new instances
+    // We'll create fresh Audio instances in playNotificationSound()
+    state.notificationAudio = '/static/notification.ogg';
 }
 
 // Play notification sound
