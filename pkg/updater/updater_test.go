@@ -8,13 +8,18 @@ import (
 func TestGetCurrentPlatformArtifactName(t *testing.T) {
 	name := GetCurrentPlatformArtifactName()
 	
-	if runtime.GOOS == "windows" {
+	switch runtime.GOOS {
+	case "windows":
 		if name != "patris-export-windows-amd64" {
 			t.Errorf("Expected 'patris-export-windows-amd64', got '%s'", name)
 		}
-	} else {
+	case "linux":
 		if name != "patris-export-linux-amd64" {
 			t.Errorf("Expected 'patris-export-linux-amd64', got '%s'", name)
+		}
+	default:
+		if name != "" {
+			t.Errorf("Expected empty string for unsupported platform, got '%s'", name)
 		}
 	}
 }

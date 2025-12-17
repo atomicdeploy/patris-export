@@ -5,6 +5,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -383,10 +384,18 @@ func runUpdate(cmd *cobra.Command, args []string) {
 	fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 	fmt.Println()
 
+	// Check platform support
+	platformName := updater.GetCurrentPlatformArtifactName()
+	if platformName == "" {
+		errorColor.Printf("❌ Auto-update is not supported on %s/%s\n", runtime.GOOS, runtime.GOARCH)
+		errorColor.Println("💡 Supported platforms: linux/amd64, windows/amd64")
+		os.Exit(1)
+	}
+
 	// Show current version
 	infoColor.Printf("📦 Current version: %s (built: %s)\n", Version, BuildDate)
 	infoColor.Printf("🌿 Target branch: %s\n", branch)
-	infoColor.Printf("💻 Platform: %s/%s\n", updater.GetCurrentPlatformArtifactName(), "amd64")
+	infoColor.Printf("💻 Platform: %s/%s\n", platformName, "amd64")
 	fmt.Println()
 
 	// Check for GITHUB_TOKEN
@@ -419,7 +428,6 @@ func runUpdate(cmd *cobra.Command, args []string) {
 	}
 
 	// Find the artifact for current platform
-	platformName := updater.GetCurrentPlatformArtifactName()
 	var targetArtifact *updater.Artifact
 	for i := range artifacts {
 		if artifacts[i].Name == platformName {

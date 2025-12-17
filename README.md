@@ -17,6 +17,7 @@ A fast and performant application for reading, parsing, and converting Paradox/B
 - 🏢 **Company.inf support** - Parse company information files
 - ⚡ **Fast and lightweight** - Written in Go with native performance
 - 🐧🪟 **Cross-platform** - Supports both Linux and Windows
+- 🚀 **Auto-update** - Update to the latest version from GitHub Actions artifacts
 
 ## 🚀 Installation
 
@@ -209,6 +210,24 @@ Start the REST API and WebSocket server.
 - `-a, --addr` - Server address (default: :8080)
 - `-w, --watch` - Watch file for changes and broadcast updates (default: true)
 - `-d, --debounce` - Debounce duration for watch mode (default: 0s, examples: 500ms, 1s, 5s)
+
+#### `update`
+Update patris-export to the latest version from GitHub Actions artifacts.
+
+**Flags:**
+- `-b, --branch` - Branch to download from (default: main)
+
+**Example:**
+```bash
+# Update from main branch
+export GITHUB_TOKEN='your_github_token'
+patris-export update
+
+# Update from develop branch
+patris-export update --branch develop
+```
+
+**Note:** Requires `GITHUB_TOKEN` environment variable with `actions:read` scope. Get your token from [GitHub Settings](https://github.com/settings/tokens).
 
 ## 🔧 API Reference
 

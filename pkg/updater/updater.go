@@ -119,7 +119,8 @@ func (u *Updater) GetLatestSuccessfulRun(branch string) (*WorkflowRun, error) {
 
 	// Find the latest successful build workflow run
 	for _, run := range runsResp.WorkflowRuns {
-		if run.Conclusion == "success" && (run.Name == "Build" || strings.Contains(run.Name, "build")) {
+		runNameLower := strings.ToLower(run.Name)
+		if run.Conclusion == "success" && (runNameLower == "build" || strings.Contains(runNameLower, "build")) {
 			return &run, nil
 		}
 	}
@@ -209,15 +210,25 @@ func (u *Updater) ExtractExecutable(zipPath, destDir string) (string, error) {
 	defer r.Close()
 
 	var executablePath string
+	var foundExecutable bool
 
 	for _, f := range r.File {
+		// Skip directories
+		if f.FileInfo().IsDir() {
+			continue
+		}
+
 		// Look for the executable (with or without .exe extension)
 		isExecutable := false
+		baseName := filepath.Base(f.Name)
+		
 		if runtime.GOOS == "windows" {
-			isExecutable = strings.HasSuffix(f.Name, ".exe")
+			// On Windows, look for .exe files
+			isExecutable = strings.HasSuffix(baseName, ".exe") && strings.Contains(baseName, "patris-export")
 		} else {
-			// On Linux, look for files without extension or the main executable
-			isExecutable = !strings.Contains(f.Name, ".") || strings.Contains(f.Name, "patris-export")
+			// On Linux, look for the main executable by name (no extension)
+			// The artifact contains "patris-export-linux-amd64" without extension
+			isExecutable = (baseName == "patris-export-linux-amd64" || baseName == "patris-export") && !strings.Contains(baseName, ".")
 		}
 
 		if isExecutable {
@@ -227,7 +238,7 @@ func (u *Updater) ExtractExecutable(zipPath, destDir string) (string, error) {
 			}
 			defer rc.Close()
 
-			outPath := filepath.Join(destDir, filepath.Base(f.Name))
+			outPath := filepath.Join(destDir, baseName)
 			out, err := os.OpenFile(outPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0755)
 			if err != nil {
 				return "", fmt.Errorf("failed to create output file: %w", err)
@@ -240,10 +251,12 @@ func (u *Updater) ExtractExecutable(zipPath, destDir string) (string, error) {
 			}
 
 			executablePath = outPath
+			foundExecutable = true
+			break // Use the first match found
 		}
 	}
 
-	if executablePath == "" {
+	if !foundExecutable {
 		return "", fmt.Errorf("no executable found in zip file")
 	}
 
@@ -268,7 +281,10 @@ func (u *Updater) ReplaceCurrentExecutable(newExePath string) error {
 	backupPath := currentExe + ".old"
 	
 	// Remove old backup if it exists
-	_ = os.Remove(backupPath)
+	if err := os.Remove(backupPath); err != nil && !os.IsNotExist(err) {
+		// Log warning but continue - old backup removal is not critical
+		fmt.Fprintf(os.Stderr, "Warning: failed to remove old backup: %v\n", err)
+	}
 
 	// Rename current executable to backup
 	if err := os.Rename(currentExe, backupPath); err != nil {
@@ -288,7 +304,10 @@ func (u *Updater) ReplaceCurrentExecutable(newExePath string) error {
 	}
 
 	// Remove backup
-	_ = os.Remove(backupPath)
+	if err := os.Remove(backupPath); err != nil && !os.IsNotExist(err) {
+		// Log warning but don't fail the update
+		fmt.Fprintf(os.Stderr, "Warning: failed to remove backup file: %v\n", err)
+	}
 
 	return nil
 }
@@ -317,8 +336,14 @@ func copyFile(src, dst string) error {
 
 // GetCurrentPlatformArtifactName returns the artifact name for the current platform
 func GetCurrentPlatformArtifactName() string {
-	if runtime.GOOS == "windows" {
+	switch runtime.GOOS {
+	case "windows":
 		return "patris-export-windows-amd64"
+	case "linux":
+		return "patris-export-linux-amd64"
+	default:
+		// Unsupported platform - return empty string
+		// The caller should handle this appropriately
+		return ""
 	}
-	return "patris-export-linux-amd64"
 }
