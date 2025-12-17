@@ -129,6 +129,7 @@ jobs:
         fi
         
         "$WINDRES" \
+          --target=pe-x86-64 \
           -i cmd/patris-export/patris-export.rc \
           -o cmd/patris-export/patris-export_windows_amd64.syso \
           -O coff
