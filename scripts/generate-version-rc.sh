@@ -14,6 +14,11 @@ fi
 # Get version from git tag or default to 1.0.0
 VERSION=$(git describe --tags --abbrev=0 2>/dev/null || echo "v1.0.0")
 VERSION=$(echo "$VERSION" | sed 's/^v//')
+# Validate VERSION to allow only digits, dots, and optional pre-release (e.g., -rc1)
+if [[ ! "$VERSION" =~ ^[0-9]+(\.[0-9]+)*(-[a-zA-Z0-9._-]+)?$ ]]; then
+    echo "Warning: Invalid version format ('$VERSION'), using default '1.0.0'" >&2
+    VERSION="1.0.0"
+fi
 VERSION_COMMA=$(echo "$VERSION" | sed 's/\./,/g')
 
 # Get current year
