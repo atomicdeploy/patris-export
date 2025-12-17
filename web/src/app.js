@@ -76,6 +76,14 @@ function saveColumnFilters() {
     localStorage.setItem('patris-column-filters', JSON.stringify(state.columnFilters));
 }
 
+// Field detection constants
+const FIELD_DETECTION = {
+    SAMPLE_SIZE: 100,              // Number of records to sample for type detection
+    DATE_CONFIDENCE_THRESHOLD: 0.8, // 80% of values must match date pattern
+    CATEGORICAL_MAX_UNIQUE: 20,     // Max unique values for categorical
+    CATEGORICAL_RATIO: 0.5          // Max ratio of unique/total for categorical
+};
+
 // Jalali date utilities
 const JalaliUtils = {
     // Parse Jalali date string in format YY.mm.dd or YY/mm/dd
@@ -106,8 +114,8 @@ const JalaliUtils = {
     // Check if string looks like a Jalali date
     isJalaliDate(str) {
         if (!str || typeof str !== 'string') return false;
-        // Match YY.mm.dd or YY/mm/dd format
-        return /^\d{2}[.\/]\d{2}[.\/]\d{2}$/.test(str.trim());
+        // Match YY.mm.dd or YY/mm/dd format (2-digit components)
+        return /^\d{2}[.\/]\d{1,2}[.\/]\d{1,2}$/.test(str.trim());
     }
 };
 
@@ -115,8 +123,8 @@ const JalaliUtils = {
 function detectFieldType(field, records) {
     if (records.length === 0) return 'text';
     
-    // Get sample values (up to 100 records for performance)
-    const sampleSize = Math.min(100, records.length);
+    // Get sample values (configurable sample size for performance)
+    const sampleSize = Math.min(FIELD_DETECTION.SAMPLE_SIZE, records.length);
     const values = [];
     
     for (let i = 0; i < sampleSize; i++) {
@@ -143,7 +151,7 @@ function detectFieldType(field, records) {
         typeof v === 'string' && JalaliUtils.isJalaliDate(v)
     ).length;
     
-    if (jalaliDateCount > values.length * 0.8) {
+    if (jalaliDateCount > values.length * FIELD_DETECTION.DATE_CONFIDENCE_THRESHOLD) {
         return 'jalali-date';
     }
     
@@ -159,7 +167,8 @@ function detectFieldType(field, records) {
     
     // Check for categorical (limited unique values)
     const uniqueValues = new Set(values.map(v => String(v)));
-    if (uniqueValues.size <= 20 && uniqueValues.size < values.length * 0.5) {
+    if (uniqueValues.size <= FIELD_DETECTION.CATEGORICAL_MAX_UNIQUE && 
+        uniqueValues.size < values.length * FIELD_DETECTION.CATEGORICAL_RATIO) {
         return 'categorical';
     }
     
