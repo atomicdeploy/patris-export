@@ -15,8 +15,14 @@ const state = {
         autoScrollToChanged: false,
         highlightChanges: true,
         enablePagination: false,
-        pageSize: 100
-    }
+        pageSize: 100,
+        playNotificationSound: false
+    },
+    notificationAudio: null,
+    originalTitle: document.title,
+    originalFavicon: null,
+    titleFlashInterval: null,
+    faviconTimeout: null
 };
 
 // Load settings from localStorage
@@ -77,6 +83,117 @@ function applySettings() {
     document.getElementById('highlightChanges').checked = state.settings.highlightChanges;
     document.getElementById('enablePagination').checked = state.settings.enablePagination;
     document.getElementById('pageSize').value = state.settings.pageSize;
+    document.getElementById('playNotificationSound').checked = state.settings.playNotificationSound;
+}
+
+// Initialize notification audio
+function initNotificationAudio() {
+    // Simply store the URL for creating new instances
+    // We'll create fresh Audio instances in playNotificationSound()
+    state.notificationAudio = '/static/notification.ogg';
+}
+
+// Play notification sound
+// Creates a new Audio instance for each notification to support overlapping sounds
+function playNotificationSound() {
+    if (state.settings.playNotificationSound && state.notificationAudio) {
+        try {
+            // Create a new Audio instance for this notification
+            // This allows multiple notifications to play simultaneously without interruption
+            const audio = new Audio(state.notificationAudio);
+            audio.volume = 0.5; // Set volume to 50%
+            
+            // Play immediately without delay
+            // The audio element will be garbage collected automatically when playback ends
+            audio.play().catch(err => {
+                console.log('Could not play notification sound:', err);
+            });
+        } catch (err) {
+            console.warn('Failed to create notification audio:', err);
+        }
+    }
+}
+
+// Flash page title with notification info
+function flashTitle(message) {
+    // Clear any existing flash interval to avoid conflicts
+    if (state.titleFlashInterval) {
+        clearInterval(state.titleFlashInterval);
+        document.title = state.originalTitle;
+    }
+    
+    const originalTitle = state.originalTitle;
+    let flashCount = 0;
+    const maxFlashes = 6; // Flash 3 times (on/off cycle)
+    
+    state.titleFlashInterval = setInterval(() => {
+        document.title = flashCount % 2 === 0 ? `🔔 ${message}` : originalTitle;
+        flashCount++;
+        
+        if (flashCount >= maxFlashes) {
+            clearInterval(state.titleFlashInterval);
+            state.titleFlashInterval = null;
+            document.title = originalTitle;
+        }
+    }, 500); // Flash every 500ms
+}
+
+// Change favicon temporarily
+function flashFavicon() {
+    // Clear any existing timeout to prevent overlapping flashes
+    if (state.faviconTimeout) {
+        clearTimeout(state.faviconTimeout);
+        state.faviconTimeout = null;
+    }
+    
+    // Store original favicon if not already stored
+    if (!state.originalFavicon) {
+        const existing = document.querySelector('link[rel="icon"]');
+        if (existing) {
+            state.originalFavicon = existing.href;
+        }
+    }
+    
+    // Create notification favicon (red circle with white dot)
+    const canvas = document.createElement('canvas');
+    canvas.width = 32;
+    canvas.height = 32;
+    const ctx = canvas.getContext('2d');
+    
+    // Draw red circle background
+    ctx.fillStyle = '#ff4444';
+    ctx.beginPath();
+    ctx.arc(16, 16, 16, 0, 2 * Math.PI);
+    ctx.fill();
+    
+    // Draw white dot in center
+    ctx.fillStyle = '#ffffff';
+    ctx.beginPath();
+    ctx.arc(16, 16, 6, 0, 2 * Math.PI);
+    ctx.fill();
+    
+    // Set as favicon
+    const notificationFavicon = canvas.toDataURL('image/png');
+    setFavicon(notificationFavicon);
+    
+    // Restore original favicon after 2 seconds
+    state.faviconTimeout = setTimeout(() => {
+        if (state.originalFavicon) {
+            setFavicon(state.originalFavicon);
+        }
+        state.faviconTimeout = null;
+    }, 2000);
+}
+
+// Helper to set favicon
+function setFavicon(href) {
+    let link = document.querySelector('link[rel="icon"]');
+    if (!link) {
+        link = document.createElement('link');
+        link.rel = 'icon';
+        document.head.appendChild(link);
+    }
+    link.href = href;
 }
 
 // Initialize WebSocket connection
@@ -137,6 +254,10 @@ function handleWebSocketMessage(data) {
         // Update footer timestamp
         updateFooterLastUpdate();
         
+        // Track changes for notification
+        let totalChanges = 0;
+        let changeDescription = '';
+        
         // Handle deleted records (by Code)
         if (data.deleted && data.deleted.length > 0) {
             const deletedCodes = new Set(data.deleted.map(String));
@@ -144,6 +265,8 @@ function handleWebSocketMessage(data) {
                 const code = String(record.Code);
                 return !deletedCodes.has(code);
             });
+            totalChanges += data.deleted.length;
+            changeDescription = `${data.deleted.length} deleted`;
         }
         
         // Handle added records
@@ -155,6 +278,9 @@ function handleWebSocketMessage(data) {
             data.added.forEach((_, i) => {
                 changedIndices.add(startIndex + i);
             });
+            totalChanges += data.added.length;
+            if (changeDescription) changeDescription += ', ';
+            changeDescription += `${data.added.length} added`;
         }
         
         // Handle modified records (if any)
@@ -171,6 +297,24 @@ function handleWebSocketMessage(data) {
                     console.log(`Updated record ${code}:`, newValues);
                 }
             });
+            totalChanges += data.modified.length;
+            if (changeDescription) changeDescription += ', ';
+            changeDescription += `${data.modified.length} modified`;
+        }
+        
+        // Trigger notifications if there were changes
+        if (totalChanges > 0) {
+            // Play notification sound
+            playNotificationSound();
+            
+            // Flash title with change info (use detailed description if available)
+            // Note: Title and favicon flashing always occur regardless of audio settings
+            // This is by design to provide visual feedback even when sound is disabled
+            const titleMessage = changeDescription || `${totalChanges} record${totalChanges > 1 ? 's' : ''} updated`;
+            flashTitle(titleMessage);
+            
+            // Flash favicon
+            flashFavicon();
         }
     }
     
@@ -980,6 +1124,11 @@ function init() {
         saveSettings();
     });
     
+    document.getElementById('playNotificationSound').addEventListener('change', (e) => {
+        state.settings.playNotificationSound = e.target.checked;
+        saveSettings();
+    });
+    
     document.getElementById('enablePagination').addEventListener('change', (e) => {
         state.settings.enablePagination = e.target.checked;
         saveSettings();
@@ -993,6 +1142,9 @@ function init() {
             renderTable();
         }
     });
+    
+    // Initialize notification audio
+    initNotificationAudio();
     
     // Initialize WebSocket
     initWebSocket();

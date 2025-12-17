@@ -9,3 +9,6 @@ var ViewerHTML []byte
 
 //go:embed dist/welcome.html
 var WelcomeHTML []byte
+
+//go:embed assets/notification.ogg
+var NotificationAudio []byte
