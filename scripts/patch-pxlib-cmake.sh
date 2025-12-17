@@ -3,7 +3,7 @@
 # Fixes windres compiler flag issues by preventing C compiler flags from being passed to windres
 # This script is shared between cross-compilation and native Windows builds
 
-set -e
+set -euo pipefail
 
 if [ -z "$1" ]; then
     echo "Usage: $0 <path-to-pxlib-directory>"
