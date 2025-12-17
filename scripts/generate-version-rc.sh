@@ -6,6 +6,11 @@ set -e
 
 OUTPUT_FILE="${1:-cmd/patris-export/patris-export.rc}"
 
+# Validate OUTPUT_FILE to prevent directory traversal and absolute paths
+if [[ "$OUTPUT_FILE" == /* ]] || [[ "$OUTPUT_FILE" == *".."* ]]; then
+    echo "Error: Invalid output file path. Absolute paths and directory traversal are not allowed." >&2
+    exit 1
+fi
 # Get version from git tag or default to 1.0.0
 VERSION=$(git describe --tags --abbrev=0 2>/dev/null || echo "v1.0.0")
 VERSION=$(echo "$VERSION" | sed 's/^v//')
