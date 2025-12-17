@@ -61,9 +61,10 @@ func TestExtractExecutable_Linux(t *testing.T) {
 		t.Fatalf("Failed to stat extracted file: %v", err)
 	}
 
-	// Check if file is executable (has execute permission)
-	if info.Mode().Perm()&0111 == 0 {
-		t.Error("Extracted file is not executable")
+	// Check exact permissions (should be 0755)
+	expectedPerms := os.FileMode(0755)
+	if info.Mode().Perm() != expectedPerms {
+		t.Errorf("Extracted file has permissions %o, expected %o", info.Mode().Perm(), expectedPerms)
 	}
 
 	// Verify content

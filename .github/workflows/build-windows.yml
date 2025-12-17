@@ -255,7 +255,7 @@ jobs:
         # Get build details for executable
         EXE_FILE="build/patris-export-windows-amd64.exe"
         EXE_SIZE=$(stat -c%s "$EXE_FILE" 2>/dev/null || stat -f%z "$EXE_FILE")
-        EXE_SIZE_MB=$(echo "scale=2; $EXE_SIZE / 1048576" | bc)
+        EXE_SIZE_MB=$(awk "BEGIN {printf \"%.2f\", $EXE_SIZE / 1048576}")
         EXE_SHA256=$(sha256sum "$EXE_FILE" 2>/dev/null | awk '{print $1}' || shasum -a 256 "$EXE_FILE" | awk '{print $1}')
         BUILD_DATE=$(date -u +'%Y-%m-%d %H:%M:%S UTC')
         
@@ -284,7 +284,7 @@ jobs:
             if [ -f "$dll" ]; then
               DLL_NAME=$(basename "$dll")
               DLL_SIZE=$(stat -c%s "$dll" 2>/dev/null || stat -f%z "$dll")
-              DLL_SIZE_KB=$(echo "scale=2; $DLL_SIZE / 1024" | bc)
+              DLL_SIZE_KB=$(awk "BEGIN {printf \"%.2f\", $DLL_SIZE / 1024}")
               DLL_SHA256=$(sha256sum "$dll" 2>/dev/null | awk '{print $1}' || shasum -a 256 "$dll" | awk '{print $1}')
               echo "| \`$DLL_NAME\` | ${DLL_SIZE_KB} KB | \`$DLL_SHA256\` |" >> $GITHUB_STEP_SUMMARY
             fi
@@ -292,23 +292,38 @@ jobs:
           echo "" >> $GITHUB_STEP_SUMMARY
         fi
         
-        # Calculate total artifact size
-        TOTAL_SIZE=0
+        # Calculate total artifact size (uncompressed)
+        TOTAL_UNCOMPRESSED=0
         for file in build/*.exe build/*.dll; do
           if [ -f "$file" ]; then
             FILE_SIZE=$(stat -c%s "$file" 2>/dev/null || stat -f%z "$file")
-            TOTAL_SIZE=$((TOTAL_SIZE + FILE_SIZE))
+            TOTAL_UNCOMPRESSED=$((TOTAL_UNCOMPRESSED + FILE_SIZE))
           fi
         done
-        TOTAL_SIZE_MB=$(echo "scale=2; $TOTAL_SIZE / 1048576" | bc)
+        TOTAL_UNCOMPRESSED_MB=$(awk "BEGIN {printf \"%.2f\", $TOTAL_UNCOMPRESSED / 1048576}")
+        
+        # Create a temporary ZIP to measure compressed size
+        cd build
+        zip -q ../windows-artifact.zip *.exe *.dll 2>/dev/null || zip -q ../windows-artifact.zip *.exe
+        cd ..
+        ZIP_SIZE=$(stat -c%s "windows-artifact.zip" 2>/dev/null || stat -f%z "windows-artifact.zip")
+        ZIP_SIZE_MB=$(awk "BEGIN {printf \"%.2f\", $ZIP_SIZE / 1048576}")
+        COMPRESSION_RATIO=$(awk "BEGIN {printf \"%.1f\", (1 - $ZIP_SIZE / $TOTAL_UNCOMPRESSED) * 100}")
+        rm -f windows-artifact.zip
+        
+        # Get artifact ID and create direct download URL
+        ARTIFACT_ID="${{ steps.upload-windows.outputs.artifact-id }}"
+        ARTIFACT_URL="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}/artifacts/${ARTIFACT_ID}"
         
         echo "### 📦 Artifact Information" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
         echo "| Property | Value |" >> $GITHUB_STEP_SUMMARY
         echo "|----------|-------|" >> $GITHUB_STEP_SUMMARY
         echo "| 📦 Artifact Name | \`patris-export-windows-mingw-amd64\` |" >> $GITHUB_STEP_SUMMARY
-        echo "| 📏 Total Artifact Size | $TOTAL_SIZE_MB MB ($TOTAL_SIZE bytes) |" >> $GITHUB_STEP_SUMMARY
-        echo "| 📥 Download URL | [GitHub Actions Artifacts](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}) |" >> $GITHUB_STEP_SUMMARY
+        echo "| 📏 Total Uncompressed Size | $TOTAL_UNCOMPRESSED_MB MB ($TOTAL_UNCOMPRESSED bytes) |" >> $GITHUB_STEP_SUMMARY
+        echo "| 📦 Compressed ZIP Size | $ZIP_SIZE_MB MB ($ZIP_SIZE bytes) |" >> $GITHUB_STEP_SUMMARY
+        echo "| 🗜️ Compression Ratio | ${COMPRESSION_RATIO}% |" >> $GITHUB_STEP_SUMMARY
+        echo "| 📥 Direct Download | [Download ZIP Artifact](${ARTIFACT_URL}) |" >> $GITHUB_STEP_SUMMARY
         echo "| ⏰ Expires On | $EXPIRY_DATE |" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
         echo "---" >> $GITHUB_STEP_SUMMARY

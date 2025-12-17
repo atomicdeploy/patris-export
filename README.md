@@ -219,7 +219,7 @@ Update patris-export to the latest version from GitHub Actions artifacts.
 
 **Example:**
 ```bash
-# Update from main branch
+# Update from main branch (GITHUB_TOKEN required)
 export GITHUB_TOKEN='your_github_token'
 patris-export update
 
@@ -227,7 +227,7 @@ patris-export update
 patris-export update --branch develop
 ```
 
-**Note:** Requires `GITHUB_TOKEN` environment variable with `actions:read` scope. Get your token from [GitHub Settings](https://github.com/settings/tokens).
+**Note:** The `GITHUB_TOKEN` environment variable is **required** for downloading artifacts from GitHub Actions. The token needs `actions:read` scope. Get your token from [GitHub Settings](https://github.com/settings/tokens). While the command will attempt to proceed without a token using anonymous API access, artifact downloads will fail with a 401 error.
 
 ## 🔧 API Reference
 

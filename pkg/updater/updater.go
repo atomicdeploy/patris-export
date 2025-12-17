@@ -265,33 +265,21 @@ func (u *Updater) ExtractExecutable(zipPath, destDir string) (string, error) {
 
 		baseName := filepath.Base(f.Name)
 		
+		// Validate against path traversal attacks
+		// Reject paths containing ".." or absolute paths
+		if strings.Contains(f.Name, "..") || filepath.IsAbs(f.Name) {
+			continue // Skip potentially malicious paths
+		}
+		
 		// Check if this file matches our expected executable name
 		isExecutable := baseName == expectedName
 		
 		if isExecutable {
-			rc, err := f.Open()
+			// Extract this specific file
+			executablePath, err = extractSingleFile(f, destDir, baseName)
 			if err != nil {
-				return "", fmt.Errorf("failed to open file in zip: %w", err)
+				return "", err
 			}
-			defer rc.Close()
-
-			outPath := filepath.Join(destDir, baseName)
-			out, err := os.OpenFile(outPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0755)
-			if err != nil {
-				return "", fmt.Errorf("failed to create output file: %w", err)
-			}
-
-			_, err = io.Copy(out, rc)
-			if err != nil {
-				// Attempt to close the file even if the copy failed; prefer the copy error.
-				_ = out.Close()
-				return "", fmt.Errorf("failed to extract file: %w", err)
-			}
-
-			if err := out.Close(); err != nil {
-				return "", fmt.Errorf("failed to close output file: %w", err)
-			}
-			executablePath = outPath
 			foundExecutable = true
 			break // Use the first match found
 		}
@@ -304,6 +292,35 @@ func (u *Updater) ExtractExecutable(zipPath, destDir string) (string, error) {
 	return executablePath, nil
 }
 
+// extractSingleFile extracts a single file from a ZIP archive
+// This is a helper function to ensure proper resource cleanup
+func extractSingleFile(f *zip.File, destDir, baseName string) (string, error) {
+	rc, err := f.Open()
+	if err != nil {
+		return "", fmt.Errorf("failed to open file in zip: %w", err)
+	}
+	defer rc.Close()
+
+	outPath := filepath.Join(destDir, baseName)
+	out, err := os.OpenFile(outPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0755)
+	if err != nil {
+		return "", fmt.Errorf("failed to create output file: %w", err)
+	}
+
+	_, err = io.Copy(out, rc)
+	if err != nil {
+		// Attempt to close the file even if the copy failed; prefer the copy error.
+		_ = out.Close()
+		return "", fmt.Errorf("failed to extract file: %w", err)
+	}
+
+	if err := out.Close(); err != nil {
+		return "", fmt.Errorf("failed to close output file: %w", err)
+	}
+
+	return outPath, nil
+}
+
 // GetPlatformBinaryName returns the expected binary name for the current platform
 func (u *Updater) GetPlatformBinaryName() string {
 	switch runtime.GOOS {
@@ -311,7 +328,15 @@ func (u *Updater) GetPlatformBinaryName() string {
 		return fmt.Sprintf("%s-windows-amd64.exe", u.binaryName)
 	case "linux":
 		return fmt.Sprintf("%s-linux-amd64", u.binaryName)
+	case "darwin":
+		// macOS support - amd64 (Intel) and arm64 (Apple Silicon)
+		if runtime.GOARCH == "arm64" {
+			return fmt.Sprintf("%s-darwin-arm64", u.binaryName)
+		}
+		return fmt.Sprintf("%s-darwin-amd64", u.binaryName)
 	default:
+		// For unsupported platforms, return just the binary name
+		// This will likely fail, but provides a reasonable fallback
 		return u.binaryName
 	}
 }
@@ -347,7 +372,9 @@ func (u *Updater) ReplaceCurrentExecutable(newExePath string) error {
 	// Copy new executable to current location
 	if err := copyFile(newExePath, currentExe); err != nil {
 		// Restore backup on failure
-		_ = os.Rename(backupPath, currentExe)
+		if restoreErr := os.Rename(backupPath, currentExe); restoreErr != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to restore backup after copy failure: %v\n", restoreErr)
+		}
 		return fmt.Errorf("failed to replace executable: %w", err)
 	}
 
@@ -377,14 +404,16 @@ func copyFile(src, dst string) error {
 	if err != nil {
 		return err
 	}
-	defer out.Close()
 
 	_, err = io.Copy(out, in)
+	// Close the output file and check for errors
+	closeErr := out.Close()
+	
+	// Return the first error encountered
 	if err != nil {
 		return err
 	}
-
-	return out.Close()
+	return closeErr
 }
 
 // GetCurrentPlatformArtifactName returns the artifact name for the current platform
@@ -394,6 +423,12 @@ func (u *Updater) GetCurrentPlatformArtifactName() string {
 		return fmt.Sprintf("%s-windows-amd64", u.binaryName)
 	case "linux":
 		return fmt.Sprintf("%s-linux-amd64", u.binaryName)
+	case "darwin":
+		// macOS support - amd64 (Intel) and arm64 (Apple Silicon)
+		if runtime.GOARCH == "arm64" {
+			return fmt.Sprintf("%s-darwin-arm64", u.binaryName)
+		}
+		return fmt.Sprintf("%s-darwin-amd64", u.binaryName)
 	default:
 		// Unsupported platform - return empty string
 		// The caller should handle this appropriately
@@ -405,7 +440,19 @@ func (u *Updater) GetCurrentPlatformArtifactName() string {
 // It looks for go.mod starting from the current working directory (os.Getwd()) and then parent directories,
 // i.e., relative to where the process is run, not necessarily the executable's directory.
 // Returns (owner, name, error)
+//
+// TODO: Once a settings/configuration store (using YAML format) is implemented,
+// repository information should be stored there for easy access and updates.
 func DeriveRepoInfoFromModule() (string, string, error) {
+	// First, try environment variables
+	repoOwner := os.Getenv("PATRIS_REPO_OWNER")
+	repoName := os.Getenv("PATRIS_REPO_NAME")
+	
+	if repoOwner != "" && repoName != "" {
+		return repoOwner, repoName, nil
+	}
+	
+	// Fallback: try to find go.mod file
 	// Start from current directory and walk up
 	dir, err := os.Getwd()
 	if err != nil {
@@ -433,7 +480,7 @@ func DeriveRepoInfoFromModule() (string, string, error) {
 		dir = parent
 	}
 	
-	return "", "", fmt.Errorf("go.mod not found in current or parent directories")
+	return "", "", fmt.Errorf("repository info not found: set PATRIS_REPO_OWNER and PATRIS_REPO_NAME environment variables, or run from within the project directory")
 }
 
 // parseGoMod parses go.mod file and extracts GitHub repository owner and name

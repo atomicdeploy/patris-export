@@ -56,7 +56,8 @@ func TestNewUpdater(t *testing.T) {
 }
 
 func TestDeriveBinaryName(t *testing.T) {
-	name := deriveBinaryName("fallback-name")
+	fallbackName := "test-fallback"
+	name := deriveBinaryName(fallbackName)
 	
 	// Should never be empty
 	if name == "" {
@@ -72,6 +73,13 @@ func TestDeriveBinaryName(t *testing.T) {
 	if strings.HasSuffix(name, ".exe") {
 		t.Errorf("Binary name should not have .exe extension, got '%s'", name)
 	}
+	
+	// Test the fallback behavior specifically
+	// When os.Executable() works, the name should be derived from the test binary
+	// Otherwise, it should use the fallback
+	// We can't predict which path will be taken, so we just ensure
+	// the result is valid (non-empty, no platform suffixes, no .exe)
+	t.Logf("Derived binary name: %s (fallback would be: %s)", name, fallbackName)
 }
 
 func TestGetPlatformBinaryName(t *testing.T) {

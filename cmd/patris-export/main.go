@@ -388,11 +388,18 @@ func runUpdate(cmd *cobra.Command, args []string) {
 	fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 	fmt.Println()
 
-	// Derive repository information from go.mod
+	// Derive repository information from go.mod or environment variables
 	repoOwner, repoName, err := updater.DeriveRepoInfoFromModule()
 	if err != nil {
 		errorColor.Printf("❌ Failed to determine repository information: %v\n", err)
-		errorColor.Println("💡 Make sure you're running this from within the project directory")
+		fmt.Println()
+		warningColor.Println("💡 You can set repository information using environment variables:")
+		infoColor.Println("   export PATRIS_REPO_OWNER='atomicdeploy'")
+		infoColor.Println("   export PATRIS_REPO_NAME='patris-export'")
+		infoColor.Println("   patris-export update")
+		fmt.Println()
+		warningColor.Println("   Or run from within the project directory containing go.mod")
+		fmt.Println()
 		os.Exit(1)
 	}
 
@@ -405,7 +412,7 @@ func runUpdate(cmd *cobra.Command, args []string) {
 	platformName := u.GetCurrentPlatformArtifactName()
 	if platformName == "" {
 		errorColor.Printf("❌ Auto-update is not supported on %s/%s\n", runtime.GOOS, runtime.GOARCH)
-		errorColor.Println("💡 Supported platforms: linux/amd64, windows/amd64")
+		errorColor.Println("💡 Supported platforms: linux/amd64, windows/amd64, darwin/amd64, darwin/arm64")
 		os.Exit(1)
 	}
 
