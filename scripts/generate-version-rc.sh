@@ -1,5 +1,5 @@
 #!/bin/bash
-set -e
+set -euo pipefail
 
 # Script to generate Windows resource file with dynamic metadata from git/GitHub
 # Usage: ./generate-version-rc.sh <output_file>
@@ -56,8 +56,10 @@ fi
 
 # Function to escape strings for C string literals
 escape_c_string() {
-    # Escape backslashes first, then quotes, then newlines
-    echo "$1" | sed 's/\\/\\\\/g' | sed 's/"/\\"/g' | sed 's/$/\\n/' | tr -d '\n' | sed 's/\\n$//'
+    local input="$1"
+    # Use printf for safer escaping - it properly handles special characters
+    # Replace backslash with double backslash, then quotes with escaped quotes
+    printf '%s' "$input" | sed 's/\\/\\\\/g; s/"/\\"/g'
 }
 
 # Function to URL-encode a string for safe use in URLs

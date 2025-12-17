@@ -34,7 +34,7 @@ if grep -q "\-Wall" CMakeLists.txt; then
     echo "  Separating compiler warning flags from preprocessor definitions..."
     
     python3 << 'PYTHON_SCRIPT'
-with open('CMakeLists.txt', 'r') as f:
+with open('CMakeLists.txt', 'r', encoding='utf-8') as f:
     lines = f.readlines()
 
 new_lines = []
@@ -63,10 +63,11 @@ while i < len(lines):
             continue
     
     # Look for add_library(pxlib SHARED and add target_compile_options after it
-    if 'add_library(pxlib SHARED ${SOURCES})' in line and 'target_compile_options(pxlib' not in ''.join(lines[i:i+10]):
+    # Use a marker comment to detect if patch has already been applied
+    if 'add_library(pxlib SHARED ${SOURCES})' in line and '# PATCHED: Apply warning flags only to C/C++ files' not in ''.join(lines[i:i+15]):
         new_lines.append(line)
         new_lines.append('\n')
-        new_lines.append('# Apply warning flags only to C/C++ files, not RC files (windres doesn\'t understand them)\n')
+        new_lines.append('# PATCHED: Apply warning flags only to C/C++ files, not RC files (windres doesn\'t understand them)\n')
         new_lines.append('if(CMAKE_COMPILER_IS_GNUCC)\n')
         new_lines.append('    target_compile_options(pxlib PRIVATE $<$<COMPILE_LANGUAGE:C>:${PXLIB_WARNING_FLAGS}>)\n')
         new_lines.append('endif()\n')
@@ -77,7 +78,7 @@ while i < len(lines):
     i += 1
 
 if patched:
-    with open('CMakeLists.txt', 'w') as f:
+    with open('CMakeLists.txt', 'w', encoding='utf-8') as f:
         f.writelines(new_lines)
     print("Patched successfully")
 else:
