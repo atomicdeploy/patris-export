@@ -1,7 +1,7 @@
 #!/bin/bash
 # Script to compile Windows resource files for embedding in Go binaries
 
-set -e
+set -euo pipefail
 
 # Determine which windres binary to use
 if [ -n "$WINDRES" ]; then
