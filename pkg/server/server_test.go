@@ -341,8 +341,13 @@ func TestNotificationAudioEndpoint(t *testing.T) {
 		},
 	}
 
-	data, _ := json.MarshalIndent(testData, "", "  ")
-	os.WriteFile(jsonFile, data, 0644)
+	data, err := json.MarshalIndent(testData, "", "  ")
+	if err != nil {
+		t.Fatalf("Failed to marshal test JSON data: %v", err)
+	}
+	if err := os.WriteFile(jsonFile, data, 0644); err != nil {
+		t.Fatalf("Failed to write test JSON file: %v", err)
+	}
 
 	srv, err := NewServer(jsonFile, nil)
 	if err != nil {
