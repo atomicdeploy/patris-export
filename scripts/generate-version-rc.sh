@@ -72,6 +72,8 @@ if [ -z "$DESCRIPTION" ]; then
     DESCRIPTION="Paradox/BDE database file converter"
 fi
 
+# Truncate DESCRIPTION to 256 characters to avoid overly long resource strings
+DESCRIPTION="${DESCRIPTION:0:256}"
 # Escape strings for safe C string literal insertion
 DESCRIPTION_ESCAPED=$(escape_c_string "$DESCRIPTION")
 COMPANY_NAME_ESCAPED=$(escape_c_string "$REPO_OWNER")
