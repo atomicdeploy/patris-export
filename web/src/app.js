@@ -300,8 +300,9 @@ function handleWebSocketMessage(data) {
             // Play notification sound
             playNotificationSound();
             
-            // Flash title with change info
-            flashTitle(`${totalChanges} record${totalChanges > 1 ? 's' : ''} updated`);
+            // Flash title with change info (use detailed description if available)
+            const titleMessage = changeDescription || `${totalChanges} record${totalChanges > 1 ? 's' : ''} updated`;
+            flashTitle(titleMessage);
             
             // Flash favicon
             flashFavicon();
