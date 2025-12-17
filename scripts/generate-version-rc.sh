@@ -19,7 +19,7 @@ if [[ ! "$VERSION" =~ ^[0-9]+(\.[0-9]+)*(-[a-zA-Z0-9._-]+)?$ ]]; then
     echo "Warning: Invalid version format ('$VERSION'), using default '1.0.0'" >&2
     VERSION="1.0.0"
 fi
-VERSION_COMMA=$(echo "$VERSION" | sed 's/\./,/g')
+VERSION_COMMA=$(echo "$VERSION" | sed 's/-.*$//' | sed 's/\./,/g')
 
 # Get current year
 CURRENT_YEAR=$(date +%Y)
