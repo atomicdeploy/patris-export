@@ -1,7 +1,7 @@
 package paradox
 
 /*
-#cgo LDFLAGS: -lpx
+#cgo LDFLAGS: -lpxlib
 #include <stdlib.h>
 #include <paradox.h>
 */

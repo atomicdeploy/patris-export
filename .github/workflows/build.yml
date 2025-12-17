@@ -130,19 +130,19 @@ jobs:
         [ -f config.h ] && sudo cp config.h /usr/x86_64-w64-mingw32/include/ || true
         
         # Install library files
-        # Find and copy the static library
+        # Find and copy the static library (keep original name - CGO now uses -lpxlib)
         if [ -f libpxlib.a ]; then
-          sudo cp libpxlib.a /usr/x86_64-w64-mingw32/lib/libpx.a
-          echo "Installed libpxlib.a as libpx.a"
+          sudo cp libpxlib.a /usr/x86_64-w64-mingw32/lib/
+          echo "Installed libpxlib.a"
         elif [ -f libpxlib.dll.a ]; then
-          sudo cp libpxlib.dll.a /usr/x86_64-w64-mingw32/lib/libpx.a
-          echo "Installed libpxlib.dll.a as libpx.a"
+          sudo cp libpxlib.dll.a /usr/x86_64-w64-mingw32/lib/
+          echo "Installed libpxlib.dll.a"
         else
           # Search in subdirectories
           LIBFILE=$(find . -name "libpxlib*.a" -o -name "pxlib*.a" | head -1)
           if [ -n "$LIBFILE" ]; then
-            sudo cp "$LIBFILE" /usr/x86_64-w64-mingw32/lib/libpx.a
-            echo "Installed $LIBFILE as libpx.a"
+            sudo cp "$LIBFILE" /usr/x86_64-w64-mingw32/lib/
+            echo "Installed $LIBFILE"
           else
             echo "ERROR: No pxlib library file found!"
             find . -name "*.a" -o -name "*.dll"
@@ -153,7 +153,7 @@ jobs:
         echo "Installed headers:"
         ls -la /usr/x86_64-w64-mingw32/include/paradox* || echo "No paradox headers found"
         echo "Installed libraries:"
-        ls -la /usr/x86_64-w64-mingw32/lib/libpx* || echo "No pxlib libraries found"
+        ls -la /usr/x86_64-w64-mingw32/lib/libpxlib* || echo "No pxlib libraries found"
     
     - name: Compile resource file for patris-export
       run: |
