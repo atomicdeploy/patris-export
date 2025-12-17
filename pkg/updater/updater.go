@@ -397,8 +397,9 @@ func (u *Updater) GetCurrentPlatformArtifactName() string {
 	}
 }
 
-// DeriveRepoInfoFromModule attempts to derive repository owner and name from go.mod
-// It looks for go.mod in the current directory or parent directories
+// DeriveRepoInfoFromModule attempts to derive repository owner and name from go.mod.
+// It looks for go.mod starting from the current working directory (os.Getwd()) and then parent directories,
+// i.e., relative to where the process is run, not necessarily the executable's directory.
 // Returns (owner, name, error)
 func DeriveRepoInfoFromModule() (string, string, error) {
 	// Start from current directory and walk up
