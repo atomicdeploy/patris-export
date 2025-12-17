@@ -280,13 +280,17 @@ func (u *Updater) ExtractExecutable(zipPath, destDir string) (string, error) {
 			if err != nil {
 				return "", fmt.Errorf("failed to create output file: %w", err)
 			}
-			defer out.Close()
 
 			_, err = io.Copy(out, rc)
 			if err != nil {
+				// Attempt to close the file even if the copy failed; prefer the copy error.
+				_ = out.Close()
 				return "", fmt.Errorf("failed to extract file: %w", err)
 			}
 
+			if err := out.Close(); err != nil {
+				return "", fmt.Errorf("failed to close output file: %w", err)
+			}
 			executablePath = outPath
 			foundExecutable = true
 			break // Use the first match found
