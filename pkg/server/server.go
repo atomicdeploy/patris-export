@@ -184,12 +184,13 @@ func (s *Server) handleNotificationAudio(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	// Parse the Range header (format: "bytes=start-end")
+	// Parse the Range header (format: "bytes=start-end" or "bytes=start-")
 	var start, end int64
-	if _, err := fmt.Sscanf(rangeHeader, "bytes=%d-%d", &start, &end); err != nil {
-		// Try parsing without end (format: "bytes=start-")
-		if _, err := fmt.Sscanf(rangeHeader, "bytes=%d-", &start); err != nil {
-			http.Error(w, "Invalid Range header", http.StatusRequestedRangeNotSatisfiable)
+	// Try parsing "bytes=start-end" format first
+	if n, _ := fmt.Sscanf(rangeHeader, "bytes=%d-%d", &start, &end); n != 2 {
+		// Try parsing "bytes=start-" format
+		if n, _ := fmt.Sscanf(rangeHeader, "bytes=%d-", &start); n != 1 {
+			http.Error(w, "Range Not Satisfiable", http.StatusRequestedRangeNotSatisfiable)
 			return
 		}
 		end = audioSize - 1
@@ -199,7 +200,7 @@ func (s *Server) handleNotificationAudio(w http.ResponseWriter, r *http.Request)
 	// Valid byte indices are 0 to audioSize-1
 	if start < 0 || start >= audioSize || end >= audioSize || start > end {
 		w.Header().Set("Content-Range", fmt.Sprintf("bytes */%d", audioSize))
-		http.Error(w, "Requested Range Not Satisfiable", http.StatusRequestedRangeNotSatisfiable)
+		http.Error(w, "Range Not Satisfiable", http.StatusRequestedRangeNotSatisfiable)
 		return
 	}
 

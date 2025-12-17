@@ -21,7 +21,8 @@ const state = {
     notificationAudio: null,
     originalTitle: document.title,
     originalFavicon: null,
-    titleFlashInterval: null
+    titleFlashInterval: null,
+    faviconTimeout: null
 };
 
 // Load settings from localStorage
@@ -88,19 +89,8 @@ function applySettings() {
 // Initialize notification audio
 function initNotificationAudio() {
     try {
-        // Pre-create an audio element to test if the browser supports it
-        // and to preload the audio file for faster playback
-        const testAudio = new Audio('/static/notification.ogg');
-        testAudio.volume = 0.5; // Set volume to 50%
-        testAudio.preload = 'auto'; // Preload for faster playback
-        
-        // Handle loading errors
-        testAudio.addEventListener('error', (e) => {
-            console.warn('Failed to load notification audio:', e);
-            state.notificationAudio = null;
-        });
-        
-        // Store the URL for creating new instances
+        // Simply store the URL for creating new instances
+        // We'll create fresh Audio instances in playNotificationSound()
         state.notificationAudio = '/static/notification.ogg';
     } catch (err) {
         console.warn('Audio not supported or failed to initialize:', err);
@@ -118,12 +108,8 @@ function playNotificationSound() {
             const audio = new Audio(state.notificationAudio);
             audio.volume = 0.5; // Set volume to 50%
             
-            // Remove the audio element after it finishes playing to free memory
-            audio.addEventListener('ended', () => {
-                audio.remove();
-            });
-            
             // Play immediately without delay
+            // The audio element will be garbage collected automatically when playback ends
             audio.play().catch(err => {
                 console.log('Could not play notification sound:', err);
             });
@@ -159,6 +145,12 @@ function flashTitle(message) {
 
 // Change favicon temporarily
 function flashFavicon() {
+    // Clear any existing timeout to prevent overlapping flashes
+    if (state.faviconTimeout) {
+        clearTimeout(state.faviconTimeout);
+        state.faviconTimeout = null;
+    }
+    
     // Store original favicon if not already stored
     if (!state.originalFavicon) {
         const existing = document.querySelector('link[rel="icon"]');
@@ -190,10 +182,11 @@ function flashFavicon() {
     setFavicon(notificationFavicon);
     
     // Restore original favicon after 2 seconds
-    setTimeout(() => {
+    state.faviconTimeout = setTimeout(() => {
         if (state.originalFavicon) {
             setFavicon(state.originalFavicon);
         }
+        state.faviconTimeout = null;
     }, 2000);
 }
 
