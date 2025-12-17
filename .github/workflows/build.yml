@@ -310,7 +310,13 @@ jobs:
         fi
         
         # Calculate total artifact size
-        TOTAL_SIZE=$(du -sb build/*.exe build/*.dll 2>/dev/null | awk '{sum+=$1} END {print sum}')
+        TOTAL_SIZE=0
+        for file in build/*.exe build/*.dll; do
+          if [ -f "$file" ]; then
+            FILE_SIZE=$(stat -c%s "$file")
+            TOTAL_SIZE=$((TOTAL_SIZE + FILE_SIZE))
+          fi
+        done
         TOTAL_SIZE_MB=$(echo "scale=2; $TOTAL_SIZE / 1048576" | bc)
         
         echo "### 📦 Artifact Information" >> $GITHUB_STEP_SUMMARY
