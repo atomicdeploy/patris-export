@@ -41,8 +41,8 @@ jobs:
         name: patris-export-linux-amd64
         path: build/patris-export-linux-amd64
 
-  build-windows:
-    name: Build for Windows
+  build-windows-mingw-cross:
+    name: Build for Windows (MinGW cross-compile from Linux)
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -66,6 +66,10 @@ jobs:
         x86_64-w64-mingw32-gcc --version
         ls -la /usr/share/mingw-w64/include/ 2>/dev/null || echo "MinGW headers not in standard location"
 
+    - name: Generate version resource file
+      run: |
+        ${GITHUB_WORKSPACE}/scripts/generate-version-rc.sh cmd/patris-export/patris-export.rc
+        
     - name: Build pxlib for Windows
       run: |
         cd /tmp
@@ -77,12 +81,8 @@ jobs:
         sed -i 's/#include <Windows\.h>/#include <windows.h>/g' src/paradox.c
         sed -i 's/#include <Winbase\.h>/#include <winbase.h>/g' src/paradox.c
         
-        # Patch CMakeLists.txt to skip RC file when cross-compiling
-        # windres doesn't understand GCC compiler flags like -W
-        if grep -q "target_sources(pxlib PRIVATE.*pxlib.rc)" CMakeLists.txt; then
-          sed -i '/target_sources(pxlib PRIVATE.*pxlib.rc)/d' CMakeLists.txt
-          echo "Removed RC file from CMakeLists.txt for cross-compilation compatibility"
-        fi
+        # Patch CMakeLists.txt to fix windres compilation
+        ${GITHUB_WORKSPACE}/scripts/patch-pxlib-cmake.sh /tmp/pxlib
         
         # Create a CMake toolchain file for MinGW cross-compilation
         cat > mingw-toolchain.cmake << 'EOF'
@@ -130,19 +130,19 @@ jobs:
         [ -f config.h ] && sudo cp config.h /usr/x86_64-w64-mingw32/include/ || true
         
         # Install library files
-        # Find and copy the static library
+        # Find and copy the static library (keep original name - CGO now uses -lpxlib)
         if [ -f libpxlib.a ]; then
-          sudo cp libpxlib.a /usr/x86_64-w64-mingw32/lib/libpx.a
-          echo "Installed libpxlib.a as libpx.a"
+          sudo cp libpxlib.a /usr/x86_64-w64-mingw32/lib/
+          echo "Installed libpxlib.a"
         elif [ -f libpxlib.dll.a ]; then
-          sudo cp libpxlib.dll.a /usr/x86_64-w64-mingw32/lib/libpx.a
-          echo "Installed libpxlib.dll.a as libpx.a"
+          sudo cp libpxlib.dll.a /usr/x86_64-w64-mingw32/lib/
+          echo "Installed libpxlib.dll.a"
         else
           # Search in subdirectories
           LIBFILE=$(find . -name "libpxlib*.a" -o -name "pxlib*.a" | head -1)
           if [ -n "$LIBFILE" ]; then
-            sudo cp "$LIBFILE" /usr/x86_64-w64-mingw32/lib/libpx.a
-            echo "Installed $LIBFILE as libpx.a"
+            sudo cp "$LIBFILE" /usr/x86_64-w64-mingw32/lib/
+            echo "Installed $LIBFILE"
           else
             echo "ERROR: No pxlib library file found!"
             find . -name "*.a" -o -name "*.dll"
@@ -153,7 +153,20 @@ jobs:
         echo "Installed headers:"
         ls -la /usr/x86_64-w64-mingw32/include/paradox* || echo "No paradox headers found"
         echo "Installed libraries:"
-        ls -la /usr/x86_64-w64-mingw32/lib/libpx* || echo "No pxlib libraries found"
+        ls -la /usr/x86_64-w64-mingw32/lib/libpxlib* || echo "No pxlib libraries found"
+    
+    - name: Compile resource file for patris-export
+      run: |
+        # Compile the Windows resource file to .syso for embedding
+        echo "Compiling Windows resource file..."
+        x86_64-w64-mingw32-windres \
+          -i cmd/patris-export/patris-export.rc \
+          -o cmd/patris-export/patris-export_windows_amd64.syso \
+          -O coff \
+          --target=pe-x86-64
+        
+        echo "Resource file compiled successfully:"
+        ls -lh cmd/patris-export/patris-export_windows_amd64.syso
         
     - name: Build Windows executable
       run: |
@@ -194,8 +207,8 @@ jobs:
           exit 1
         }
         
-        # Verify it reports the correct number of records
-        RECORD_COUNT=$(wine patris-export-windows-amd64.exe info ../testdata/kala.db 2>/dev/null | grep -oP 'Records:\s+\K\d+' || echo "0")
+        # Verify it reports the correct number of records (use sed for portability, avoid grep -P locale issues)
+        RECORD_COUNT=$(wine patris-export-windows-amd64.exe info ../testdata/kala.db 2>/dev/null | grep 'Records:' | sed 's/.*Records:[[:space:]]*\([0-9]*\).*/\1/' || echo "0")
         echo "Windows build reports $RECORD_COUNT records"
         if [ "$RECORD_COUNT" -eq "0" ]; then
           echo "ERROR: Windows build reports 0 records - CGO/pxlib not working!"
@@ -210,7 +223,7 @@ jobs:
     - name: Upload Windows artifact
       uses: actions/upload-artifact@v4
       with:
-        name: patris-export-windows-amd64
+        name: patris-export-windows-mingw-cross-amd64
         path: |
           build/patris-export-windows-amd64.exe
           build/*.dll
