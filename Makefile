@@ -64,6 +64,7 @@ clean: ## Clean build artifacts
 	@echo "🧹 Cleaning..."
 	@rm -rf $(BUILD_DIR)
 	@rm -f cmd/patris-export/*.syso
+	@rm -f cmd/patris-export/*.rc
 	@echo "✅ Clean complete"
 
 run: build ## Build and run the application
