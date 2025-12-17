@@ -377,7 +377,11 @@ func runServe(cmd *cobra.Command, args []string) {
 }
 
 func runUpdate(cmd *cobra.Command, args []string) {
-	branch, _ := cmd.Flags().GetString("branch")
+	branch, err := cmd.Flags().GetString("branch")
+	if err != nil {
+		errorColor.Printf("❌ Failed to read 'branch' flag: %v\n", err)
+		os.Exit(1)
+	}
 
 	fmt.Println()
 	successColor.Println("🚀 Patris Export Auto-Update")
