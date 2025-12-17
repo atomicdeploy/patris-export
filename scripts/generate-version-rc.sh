@@ -14,6 +14,12 @@ VERSION_COMMA=$(echo "$VERSION" | sed 's/\./,/g')
 # Get current year
 CURRENT_YEAR=$(date +%Y)
 
+# Sanity check: ensure CURRENT_YEAR is >= 2024 and <= next year
+NEXT_YEAR=$(date +%Y -d 'next year' 2>/dev/null || date -v+1y +%Y 2>/dev/null || echo $((CURRENT_YEAR + 1)))
+if ! [[ "$CURRENT_YEAR" =~ ^[0-9]{4}$ ]] || [ "$CURRENT_YEAR" -lt 2024 ] || [ "$CURRENT_YEAR" -gt "$NEXT_YEAR" ]; then
+    echo "Warning: System year ($CURRENT_YEAR) is out of expected range (2024-$NEXT_YEAR). Using 2024 instead." >&2
+    CURRENT_YEAR=2024
+fi
 # Parse repository URL to get owner and name
 REPO_URL=$(git config --get remote.origin.url | sed 's/\.git$//')
 # Handle both SSH (git@github.com:owner/repo) and HTTPS (https://github.com/owner/repo)
