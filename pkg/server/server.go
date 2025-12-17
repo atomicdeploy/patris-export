@@ -23,18 +23,18 @@ import (
 
 // Server represents the HTTP/WebSocket server
 type Server struct {
-	router          *mux.Router
-	dbPath          string
-	charMap         converter.CharMapping
-	dataSource      datasource.DataSource
-	watcher         *watcher.FileWatcher
-	wsClients       map[*websocket.Conn]*sync.Mutex
-	wsClientsMu     sync.RWMutex
-	upgrader        websocket.Upgrader
-	lastRecords     []map[string]interface{}
-	lastRecordsMu   sync.RWMutex
-	lastModTime     time.Time
-	lastModTimeMu   sync.RWMutex
+	router        *mux.Router
+	dbPath        string
+	charMap       converter.CharMapping
+	dataSource    datasource.DataSource
+	watcher       *watcher.FileWatcher
+	wsClients     map[*websocket.Conn]*sync.Mutex
+	wsClientsMu   sync.RWMutex
+	upgrader      websocket.Upgrader
+	lastRecords   []map[string]interface{}
+	lastRecordsMu sync.RWMutex
+	lastModTime   time.Time
+	lastModTimeMu sync.RWMutex
 }
 
 // RecordChange represents a change to a specific record
@@ -104,6 +104,7 @@ func (s *Server) setupRoutes() {
 	s.router.HandleFunc("/viewer", s.handleViewer).Methods("GET")
 	s.router.HandleFunc("/api/records", s.handleGetRecords).Methods("GET")
 	s.router.HandleFunc("/api/info", s.handleGetInfo).Methods("GET")
+	s.router.HandleFunc("/api/notification.wav", s.handleNotificationAudio).Methods("GET")
 	s.router.HandleFunc("/ws", s.handleWebSocket)
 }
 
@@ -160,6 +161,53 @@ func (s *Server) handleGetInfo(w http.ResponseWriter, r *http.Request) {
 		"num_fields":  db.GetNumFields(),
 		"fields":      fields,
 	})
+}
+
+// handleNotificationAudio serves the notification audio file with proper headers
+// Supports resumable downloads via HTTP Range requests
+func (s *Server) handleNotificationAudio(w http.ResponseWriter, r *http.Request) {
+	audioData := web.NotificationAudio
+	audioSize := int64(len(audioData))
+
+	// Set headers for caching and content type
+	w.Header().Set("Content-Type", "audio/wav")
+	w.Header().Set("Accept-Ranges", "bytes")
+	w.Header().Set("Cache-Control", "public, max-age=31536000, immutable") // Cache for 1 year
+
+	// Handle Range requests for resumable downloads
+	rangeHeader := r.Header.Get("Range")
+	if rangeHeader == "" {
+		// No range requested, serve the entire file
+		w.Header().Set("Content-Length", fmt.Sprintf("%d", audioSize))
+		w.WriteHeader(http.StatusOK)
+		w.Write(audioData)
+		return
+	}
+
+	// Parse the Range header (format: "bytes=start-end")
+	var start, end int64
+	if _, err := fmt.Sscanf(rangeHeader, "bytes=%d-%d", &start, &end); err != nil {
+		// Try parsing without end (format: "bytes=start-")
+		if _, err := fmt.Sscanf(rangeHeader, "bytes=%d-", &start); err != nil {
+			http.Error(w, "Invalid Range header", http.StatusRequestedRangeNotSatisfiable)
+			return
+		}
+		end = audioSize - 1
+	}
+
+	// Validate range
+	if start < 0 || start >= audioSize || end >= audioSize || start > end {
+		w.Header().Set("Content-Range", fmt.Sprintf("bytes */%d", audioSize))
+		http.Error(w, "Requested Range Not Satisfiable", http.StatusRequestedRangeNotSatisfiable)
+		return
+	}
+
+	// Serve the requested range
+	contentLength := end - start + 1
+	w.Header().Set("Content-Length", fmt.Sprintf("%d", contentLength))
+	w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, audioSize))
+	w.WriteHeader(http.StatusPartialContent)
+	w.Write(audioData[start : end+1])
 }
 
 // handleWebSocket handles WebSocket connections
@@ -352,7 +400,7 @@ func (s *Server) computeChanges(newRecords []map[string]interface{}) map[string]
 					continue // Skip the key field
 				}
 				oldVal, hasOldVal := oldRecord[key]
-				
+
 				// Check if values differ
 				if !hasOldVal || !reflect.DeepEqual(oldVal, newVal) {
 					changedFields = append(changedFields, key)
@@ -434,13 +482,13 @@ func (s *Server) logDetailedChanges(added []map[string]interface{}, deleted []st
 	log.Println(strings.Repeat("━", 80))
 
 	totalChanges := len(added) + len(deleted) + len(modified)
-	
+
 	if totalChanges == 0 {
 		log.Println("ℹ️  No changes detected")
 		return
 	}
 
-	log.Printf("📊 Total changes: %d record(s) (%d added, %d modified, %d deleted)", 
+	log.Printf("📊 Total changes: %d record(s) (%d added, %d modified, %d deleted)",
 		totalChanges, len(added), len(modified), len(deleted))
 	log.Println("")
 
@@ -483,7 +531,7 @@ func (s *Server) logDetailedChanges(added []map[string]interface{}, deleted []st
 			field := change.ChangedFields[0]
 			oldVal := change.OldValues[field]
 			newVal := change.NewValues[field]
-			log.Printf("✏️  Modified: Code=%s, Field=%s, Old=%v, New=%v", 
+			log.Printf("✏️  Modified: Code=%s, Field=%s, Old=%v, New=%v",
 				change.Code, field, oldVal, newVal)
 		} else {
 			// Multiple field changes or ANBAR change - show as table
@@ -499,16 +547,16 @@ func (s *Server) logDetailedChanges(added []map[string]interface{}, deleted []st
 			if hasANBAR {
 				// Special handling for ANBAR array changes
 				log.Printf("✏️  Modified: Code=%s (%d field(s) changed)", change.Code, len(change.ChangedFields))
-				
+
 				// Show ANBAR changes in detail
 				oldANBAR, oldIsArray := change.OldValues["ANBAR"]
 				newANBAR, newIsArray := change.NewValues["ANBAR"]
-				
+
 				if oldIsArray && newIsArray {
 					// Compare arrays element by element
 					oldArr, oldOk := convertToIntSlice(oldANBAR)
 					newArr, newOk := convertToIntSlice(newANBAR)
-					
+
 					if oldOk && newOk {
 						// Find which ANBAR indices changed
 						changedIndices := []int{}
@@ -516,7 +564,7 @@ func (s *Server) logDetailedChanges(added []map[string]interface{}, deleted []st
 						if len(newArr) > maxLen {
 							maxLen = len(newArr)
 						}
-						
+
 						for idx := 0; idx < maxLen; idx++ {
 							oldVal := 0
 							newVal := 0
@@ -530,7 +578,7 @@ func (s *Server) logDetailedChanges(added []map[string]interface{}, deleted []st
 								changedIndices = append(changedIndices, idx)
 							}
 						}
-						
+
 						if len(changedIndices) > 0 {
 							log.Println("   ┌──────────────┬──────────────┬──────────────┐")
 							log.Println("   │ ANBAR Field  │ Old Value    │ New Value    │")
@@ -550,7 +598,7 @@ func (s *Server) logDetailedChanges(added []map[string]interface{}, deleted []st
 						}
 					}
 				}
-				
+
 				// Show other non-ANBAR fields if any
 				nonANBARFields := []string{}
 				for _, field := range change.ChangedFields {
@@ -558,7 +606,7 @@ func (s *Server) logDetailedChanges(added []map[string]interface{}, deleted []st
 						nonANBARFields = append(nonANBARFields, field)
 					}
 				}
-				
+
 				if len(nonANBARFields) > 0 {
 					log.Println("   ┌─────────────────┬────────────────────┬────────────────────┐")
 					log.Println("   │ Field           │ Old Value          │ New Value          │")
