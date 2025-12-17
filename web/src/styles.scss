@@ -281,6 +281,7 @@ body.dark-mode {
 .data-table th.anbar-column,
 .data-table td.anbar-column {
     border-left: 1px dashed rgba(0, 0, 0, 0.1);
+    vertical-align: middle;  // Ensure consistent vertical alignment
     
     .dark-mode & {
         border-left-color: rgba(255, 255, 255, 0.1);
@@ -299,6 +300,11 @@ body.dark-mode {
     font-size: 0.8rem;
     padding: 0.5rem 0.75rem;
     text-align: center;
+}
+
+.data-table td.anbar-column {
+    // Match padding with other cells for consistent row height
+    padding: 0.875rem 1rem;
 }
 
 // Sticky header cell needs higher z-index than both regular headers and sticky body cells
@@ -329,6 +335,8 @@ body.dark-mode {
 .data-table td {
     padding: 0.875rem 1rem;
     border-bottom: 1px solid $border-light;
+    vertical-align: middle;  // Ensure consistent vertical alignment
+    line-height: 1.5;        // Consistent line height
     
     .dark-mode & {
         border-bottom-color: $border-dark;
@@ -338,6 +346,7 @@ body.dark-mode {
 .data-table tbody tr {
     transition: background-color 0.15s ease;
     cursor: pointer;
+    height: auto;  // Let content determine height but ensure consistency
     
     &:hover {
         background: $bg-light-secondary;
@@ -635,6 +644,8 @@ body.dark-mode {
 .action-cell {
     display: flex;
     gap: 0.5rem;
+    align-items: center;  // Center items vertically
+    height: 100%;         // Match parent cell height
 }
 
 .action-btn {
@@ -646,6 +657,7 @@ body.dark-mode {
     cursor: pointer;
     transition: all 0.15s ease;
     color: $text-light;
+    white-space: nowrap;  // Prevent text wrapping
     
     .dark-mode & {
         border-color: $border-dark;

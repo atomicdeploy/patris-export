@@ -8,6 +8,7 @@ const state = {
     selectedField: '',
     sortField: 'Code',
     sortDirection: 'asc',
+    fileName: '',  // Track the actual data file name from server
     settings: {
         autoScrollToChanged: false,
         highlightChanges: true,
@@ -95,6 +96,12 @@ function handleWebSocketMessage(data) {
         // Initial load - records are already transformed with ANBAR as array
         state.records = data.added || [];
         
+        // Store file name if provided
+        if (data.file_name) {
+            state.fileName = data.file_name;
+            updateFooterFileName();
+        }
+        
         // Mark all as changed for initial highlight
         if (state.settings.highlightChanges) {
             state.records.forEach((_, index) => changedIndices.add(index));
@@ -169,10 +176,8 @@ function updateStatus(status, text) {
 
 // Update footer information
 function updateFooter() {
-    // Update file name from URL or window title
-    const footerFile = document.getElementById('footerFile');
-    const fileName = window.location.pathname.split('/').pop() || 'data';
-    footerFile.textContent = fileName;
+    // Update file name
+    updateFooterFileName();
     
     // Update last update time
     updateFooterLastUpdate();
@@ -181,14 +186,36 @@ function updateFooter() {
     updateFooterRecordCount();
 }
 
+function updateFooterFileName() {
+    const footerFile = document.getElementById('footerFile');
+    // Use basename of the file (just the file name, not full path)
+    if (state.fileName) {
+        const baseName = state.fileName.split('/').pop().split('\\').pop();
+        footerFile.textContent = baseName;
+    } else {
+        footerFile.textContent = 'Loading...';
+    }
+}
+
+// Format date as Y/m/d H:i:s (e.g., 2025/12/17 07:45:30)
+function formatDateTime(date) {
+    const year = date.getFullYear();
+    const month = String(date.getMonth() + 1).padStart(2, '0');
+    const day = String(date.getDate()).padStart(2, '0');
+    const hours = String(date.getHours()).padStart(2, '0');
+    const minutes = String(date.getMinutes()).padStart(2, '0');
+    const seconds = String(date.getSeconds()).padStart(2, '0');
+    return `${year}/${month}/${day} ${hours}:${minutes}:${seconds}`;
+}
+
 function updateFooterLastUpdate(timestamp) {
     const footerLastUpdate = document.getElementById('footerLastUpdate');
     if (timestamp) {
         const date = new Date(timestamp);
-        footerLastUpdate.textContent = date.toLocaleString();
+        footerLastUpdate.textContent = formatDateTime(date);
     } else {
         const now = new Date();
-        footerLastUpdate.textContent = now.toLocaleString();
+        footerLastUpdate.textContent = formatDateTime(now);
     }
 }
 
