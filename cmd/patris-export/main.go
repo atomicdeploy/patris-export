@@ -384,8 +384,21 @@ func runUpdate(cmd *cobra.Command, args []string) {
 	fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 	fmt.Println()
 
+	// Derive repository information from go.mod
+	repoOwner, repoName, err := updater.DeriveRepoInfoFromModule()
+	if err != nil {
+		errorColor.Printf("❌ Failed to determine repository information: %v\n", err)
+		errorColor.Println("💡 Make sure you're running this from within the project directory")
+		os.Exit(1)
+	}
+
+	infoColor.Printf("📦 Repository: %s/%s\n", repoOwner, repoName)
+
+	// Create updater
+	u := updater.NewUpdater(repoOwner, repoName)
+
 	// Check platform support
-	platformName := updater.GetCurrentPlatformArtifactName()
+	platformName := u.GetCurrentPlatformArtifactName()
 	if platformName == "" {
 		errorColor.Printf("❌ Auto-update is not supported on %s/%s\n", runtime.GOOS, runtime.GOARCH)
 		errorColor.Println("💡 Supported platforms: linux/amd64, windows/amd64")
@@ -404,9 +417,6 @@ func runUpdate(cmd *cobra.Command, args []string) {
 		warningColor.Println("💡 Set GITHUB_TOKEN environment variable for higher rate limits")
 		fmt.Println()
 	}
-
-	// Create updater
-	u := updater.NewUpdater()
 
 	// Step 1: Find latest successful build
 	infoColor.Println("🔍 Searching for latest successful build...")

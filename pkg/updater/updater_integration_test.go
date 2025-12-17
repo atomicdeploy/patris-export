@@ -27,7 +27,7 @@ func TestExtractExecutable_Linux(t *testing.T) {
 	zipWriter := zip.NewWriter(zipFile)
 
 	// Test extraction
-	u := NewUpdater()
+	u := NewUpdater("testowner", "testrepo")
 	expectedName := u.GetPlatformBinaryName()
 	
 	// Add an executable with the expected name to the ZIP
@@ -110,7 +110,7 @@ func TestExtractExecutable_NoExecutable(t *testing.T) {
 	}
 
 	// Test extraction - should fail
-	u := NewUpdater()
+	u := NewUpdater("testowner", "testrepo")
 	extractDir := filepath.Join(tmpDir, "extract")
 	if err := os.MkdirAll(extractDir, 0755); err != nil {
 		t.Fatalf("Failed to create extract dir: %v", err)

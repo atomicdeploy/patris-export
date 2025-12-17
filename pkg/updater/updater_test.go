@@ -7,7 +7,8 @@ import (
 )
 
 func TestGetCurrentPlatformArtifactName(t *testing.T) {
-	name := GetCurrentPlatformArtifactName()
+	u := NewUpdater("testowner", "testrepo")
+	name := u.GetCurrentPlatformArtifactName()
 	
 	// Should not be empty on supported platforms
 	if name == "" && (runtime.GOOS == "windows" || runtime.GOOS == "linux") {
@@ -32,7 +33,7 @@ func TestGetCurrentPlatformArtifactName(t *testing.T) {
 }
 
 func TestNewUpdater(t *testing.T) {
-	u := NewUpdater()
+	u := NewUpdater("testowner", "testrepo")
 	if u == nil {
 		t.Fatal("Expected updater instance, got nil")
 	}
@@ -44,10 +45,18 @@ func TestNewUpdater(t *testing.T) {
 	if u.binaryName == "" {
 		t.Error("Expected binary name to be initialized")
 	}
+	
+	if u.repoOwner != "testowner" {
+		t.Errorf("Expected repoOwner to be 'testowner', got '%s'", u.repoOwner)
+	}
+	
+	if u.repoName != "testrepo" {
+		t.Errorf("Expected repoName to be 'testrepo', got '%s'", u.repoName)
+	}
 }
 
 func TestDeriveBinaryName(t *testing.T) {
-	name := deriveBinaryName()
+	name := deriveBinaryName("fallback-name")
 	
 	// Should never be empty
 	if name == "" {
@@ -66,7 +75,7 @@ func TestDeriveBinaryName(t *testing.T) {
 }
 
 func TestGetPlatformBinaryName(t *testing.T) {
-	u := NewUpdater()
+	u := NewUpdater("testowner", "testrepo")
 	name := u.GetPlatformBinaryName()
 	
 	// Should not be empty
@@ -95,5 +104,23 @@ func TestGetPlatformBinaryName(t *testing.T) {
 		if !strings.Contains(name, "-linux-amd64") {
 			t.Errorf("Expected Linux binary name to contain '-linux-amd64', got '%s'", name)
 		}
+	}
+}
+
+func TestDeriveRepoInfoFromModule(t *testing.T) {
+	// This test assumes we're running from within the project directory
+	owner, name, err := DeriveRepoInfoFromModule()
+	if err != nil {
+		t.Skipf("Skipping test - not in a Go module directory: %v", err)
+		return
+	}
+	
+	// Should have parsed successfully
+	if owner == "" {
+		t.Error("Expected non-empty repository owner")
+	}
+	
+	if name == "" {
+		t.Error("Expected non-empty repository name")
 	}
 }

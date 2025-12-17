@@ -2,6 +2,7 @@ package updater
 
 import (
 	"archive/zip"
+	"bufio"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -15,15 +16,15 @@ import (
 
 const (
 	githubAPIURL = "https://api.github.com"
-	repoOwner    = "atomicdeploy"
-	repoName     = "patris-export"
 )
 
 // Updater handles auto-update functionality
 type Updater struct {
-	apiToken     string
-	client       *http.Client
-	binaryName   string // Base name of the binary (e.g., "patris-export")
+	apiToken   string
+	client     *http.Client
+	binaryName string // Base name of the binary (e.g., "patris-export")
+	repoOwner  string // GitHub repository owner
+	repoName   string // GitHub repository name
 }
 
 // WorkflowRun represents a GitHub Actions workflow run
@@ -59,13 +60,15 @@ type ArtifactsResponse struct {
 }
 
 // NewUpdater creates a new updater instance
-func NewUpdater() *Updater {
+func NewUpdater(repoOwner, repoName string) *Updater {
 	// Derive binary name from the current executable
-	binaryName := deriveBinaryName()
+	binaryName := deriveBinaryName(repoName)
 	
 	return &Updater{
 		apiToken:   os.Getenv("GITHUB_TOKEN"),
 		binaryName: binaryName,
+		repoOwner:  repoOwner,
+		repoName:   repoName,
 		client: &http.Client{
 			Timeout: 5 * time.Minute,
 		},
@@ -73,11 +76,11 @@ func NewUpdater() *Updater {
 }
 
 // deriveBinaryName derives the base binary name from the current executable
-func deriveBinaryName() string {
+func deriveBinaryName(fallbackName string) string {
 	exe, err := os.Executable()
 	if err != nil {
-		// Fallback to repo name if we can't get the executable
-		return repoName
+		// Fallback to provided name if we can't get the executable
+		return fallbackName
 	}
 	
 	// Get the base name without path
@@ -98,9 +101,9 @@ func deriveBinaryName() string {
 	baseName = strings.TrimSuffix(baseName, "-darwin-amd64")
 	baseName = strings.TrimSuffix(baseName, "-darwin-arm64")
 	
-	// If we ended up with an empty string, use repo name
+	// If we ended up with an empty string, use fallback name
 	if baseName == "" {
-		return repoName
+		return fallbackName
 	}
 	
 	return baseName
@@ -139,7 +142,7 @@ func (u *Updater) doRequest(url string) (*http.Response, error) {
 // GetLatestSuccessfulRun gets the latest successful workflow run for a branch
 func (u *Updater) GetLatestSuccessfulRun(branch string) (*WorkflowRun, error) {
 	url := fmt.Sprintf("%s/repos/%s/%s/actions/runs?branch=%s&status=success&per_page=100",
-		githubAPIURL, repoOwner, repoName, branch)
+		githubAPIURL, u.repoOwner, u.repoName, branch)
 
 	resp, err := u.doRequest(url)
 	if err != nil {
@@ -170,7 +173,7 @@ func (u *Updater) GetLatestSuccessfulRun(branch string) (*WorkflowRun, error) {
 // GetArtifactsForRun gets all artifacts for a workflow run
 func (u *Updater) GetArtifactsForRun(runID int64) ([]Artifact, error) {
 	url := fmt.Sprintf("%s/repos/%s/%s/actions/runs/%d/artifacts",
-		githubAPIURL, repoOwner, repoName, runID)
+		githubAPIURL, u.repoOwner, u.repoName, runID)
 
 	resp, err := u.doRequest(url)
 	if err != nil {
@@ -381,18 +384,84 @@ func copyFile(src, dst string) error {
 }
 
 // GetCurrentPlatformArtifactName returns the artifact name for the current platform
-func GetCurrentPlatformArtifactName() string {
-	// Derive binary name from the current executable
-	binaryName := deriveBinaryName()
-	
+func (u *Updater) GetCurrentPlatformArtifactName() string {
 	switch runtime.GOOS {
 	case "windows":
-		return fmt.Sprintf("%s-windows-amd64", binaryName)
+		return fmt.Sprintf("%s-windows-amd64", u.binaryName)
 	case "linux":
-		return fmt.Sprintf("%s-linux-amd64", binaryName)
+		return fmt.Sprintf("%s-linux-amd64", u.binaryName)
 	default:
 		// Unsupported platform - return empty string
 		// The caller should handle this appropriately
 		return ""
 	}
+}
+
+// DeriveRepoInfoFromModule attempts to derive repository owner and name from go.mod
+// It looks for go.mod in the current directory or parent directories
+// Returns (owner, name, error)
+func DeriveRepoInfoFromModule() (string, string, error) {
+	// Start from current directory and walk up
+	dir, err := os.Getwd()
+	if err != nil {
+		return "", "", fmt.Errorf("failed to get working directory: %w", err)
+	}
+	
+	// Try to find go.mod file
+	for {
+		goModPath := filepath.Join(dir, "go.mod")
+		if _, err := os.Stat(goModPath); err == nil {
+			// Found go.mod, parse it
+			owner, name, err := parseGoMod(goModPath)
+			if err != nil {
+				return "", "", err
+			}
+			return owner, name, nil
+		}
+		
+		// Move to parent directory
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			// Reached root without finding go.mod
+			break
+		}
+		dir = parent
+	}
+	
+	return "", "", fmt.Errorf("go.mod not found in current or parent directories")
+}
+
+// parseGoMod parses go.mod file and extracts GitHub repository owner and name
+func parseGoMod(path string) (string, string, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return "", "", fmt.Errorf("failed to open go.mod: %w", err)
+	}
+	defer file.Close()
+	
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		
+		// Look for module line
+		if strings.HasPrefix(line, "module ") {
+			modulePath := strings.TrimPrefix(line, "module ")
+			modulePath = strings.TrimSpace(modulePath)
+			
+			// Extract owner and repo from module path
+			// Expected format: github.com/owner/repo
+			parts := strings.Split(modulePath, "/")
+			if len(parts) >= 3 && parts[0] == "github.com" {
+				return parts[1], parts[2], nil
+			}
+			
+			return "", "", fmt.Errorf("module path '%s' is not a GitHub module", modulePath)
+		}
+	}
+	
+	if err := scanner.Err(); err != nil {
+		return "", "", fmt.Errorf("error reading go.mod: %w", err)
+	}
+	
+	return "", "", fmt.Errorf("module declaration not found in go.mod")
 }
