@@ -133,7 +133,7 @@ func runConvert(cmd *cobra.Command, args []string) {
 	}
 
 	// Display temp file setting
-	displayTempFileStatus()
+	displayFileStatus(dbFile)
 
 	if watchMode {
 		// Parse debounce duration
@@ -319,12 +319,12 @@ func parseDebounceDuration(durationStr string) time.Duration {
 	return duration
 }
 
-// displayTempFileStatus shows the temp file setting message
-func displayTempFileStatus() {
+// displayFileStatus shows the file access mode status message
+func displayFileStatus(filePath string) {
 	if useTempFile {
-		infoColor.Println("📋 Using temporary file copies to avoid write-lock conflicts")
+		infoColor.Printf("📋 Using temporary file copy for: %s\n", filepath.Base(filePath))
 	} else {
-		warningColor.Println("⚠️  Direct file access mode (may conflict with BDE writes)")
+		warningColor.Printf("⚠️  Direct file access mode for: %s (may conflict with BDE writes)\n", filepath.Base(filePath))
 	}
 }
 
@@ -393,7 +393,7 @@ func runServe(cmd *cobra.Command, args []string) {
 	defer srv.Close()
 
 	// Display temp file setting
-	displayTempFileStatus()
+	displayFileStatus(dbFile)
 
 	// Start file watching if enabled
 	if watchFile {
