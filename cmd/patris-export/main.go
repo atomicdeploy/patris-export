@@ -133,11 +133,7 @@ func runConvert(cmd *cobra.Command, args []string) {
 	}
 
 	// Display temp file setting
-	if useTempFile {
-		infoColor.Println("📋 Using temporary file copies to avoid write-lock conflicts")
-	} else {
-		warningColor.Println("⚠️  Direct file access mode (may conflict with BDE writes)")
-	}
+	displayTempFileStatus()
 
 	if watchMode {
 		// Parse debounce duration
@@ -175,31 +171,12 @@ func runConvert(cmd *cobra.Command, args []string) {
 }
 
 func convertFile(dbFile string, charMap converter.CharMapping) {
-	var fileToOpen string
-	var tempFileInfo *filecopy.FileInfo
-
-	// If using temp file, copy database to temp location first
-	if useTempFile {
-		infoColor.Printf("📋 Copying database to temp location: %s\n", filepath.Base(dbFile))
-
-		var err error
-		tempFileInfo, err = filecopy.CopyToTemp(dbFile)
-		if err != nil {
-			errorColor.Printf("❌ Failed to copy file to temp: %v\n", err)
-			return
-		}
-		defer filecopy.CleanupTemp(tempFileInfo.TempPath)
-
-		successColor.Printf("✅ Source file checksum: %s\n", tempFileInfo.Hash)
-		if verbose {
-			infoColor.Printf("   Size: %d bytes\n", tempFileInfo.Size)
-			infoColor.Printf("   Temp path: %s\n", tempFileInfo.TempPath)
-		}
-
-		fileToOpen = tempFileInfo.TempPath
-	} else {
-		fileToOpen = dbFile
+	fileToOpen, cleanup, err := prepareFileForReading(dbFile)
+	if err != nil {
+		errorColor.Printf("❌ %v\n", err)
+		return
 	}
+	defer cleanup()
 
 	infoColor.Printf("🔍 Opening database: %s\n", filepath.Base(dbFile))
 
@@ -255,31 +232,12 @@ func convertFile(dbFile string, charMap converter.CharMapping) {
 func runInfo(cmd *cobra.Command, args []string) {
 	dbFile := args[0]
 
-	var fileToOpen string
-	var tempFileInfo *filecopy.FileInfo
-
-	// If using temp file, copy database to temp location first
-	if useTempFile {
-		infoColor.Printf("📋 Copying database to temp location: %s\n", filepath.Base(dbFile))
-
-		var err error
-		tempFileInfo, err = filecopy.CopyToTemp(dbFile)
-		if err != nil {
-			errorColor.Printf("❌ Failed to copy file to temp: %v\n", err)
-			os.Exit(1)
-		}
-		defer filecopy.CleanupTemp(tempFileInfo.TempPath)
-
-		successColor.Printf("✅ Source file checksum: %s\n", tempFileInfo.Hash)
-		if verbose {
-			infoColor.Printf("   Size: %d bytes\n", tempFileInfo.Size)
-			infoColor.Printf("   Temp path: %s\n", tempFileInfo.TempPath)
-		}
-
-		fileToOpen = tempFileInfo.TempPath
-	} else {
-		fileToOpen = dbFile
+	fileToOpen, cleanup, err := prepareFileForReading(dbFile)
+	if err != nil {
+		errorColor.Printf("❌ %v\n", err)
+		os.Exit(1)
 	}
+	defer cleanup()
 
 	infoColor.Printf("🔍 Reading database: %s\n", filepath.Base(dbFile))
 
@@ -361,6 +319,43 @@ func parseDebounceDuration(durationStr string) time.Duration {
 	return duration
 }
 
+// displayTempFileStatus shows the temp file setting message
+func displayTempFileStatus() {
+	if useTempFile {
+		infoColor.Println("📋 Using temporary file copies to avoid write-lock conflicts")
+	} else {
+		warningColor.Println("⚠️  Direct file access mode (may conflict with BDE writes)")
+	}
+}
+
+// prepareFileForReading prepares a database file for reading, optionally copying to temp
+// Returns the file path to open and a cleanup function
+func prepareFileForReading(dbFile string) (fileToOpen string, cleanup func(), err error) {
+	if useTempFile {
+		infoColor.Printf("📋 Copying database to temp location: %s\n", filepath.Base(dbFile))
+
+		tempFileInfo, err := filecopy.CopyToTemp(dbFile)
+		if err != nil {
+			return "", nil, fmt.Errorf("failed to copy file to temp: %w", err)
+		}
+
+		successColor.Printf("✅ Source file checksum: %s\n", tempFileInfo.Hash)
+		if verbose {
+			infoColor.Printf("   Size: %d bytes\n", tempFileInfo.Size)
+			infoColor.Printf("   Temp path: %s\n", tempFileInfo.TempPath)
+		}
+
+		cleanup = func() {
+			filecopy.CleanupTemp(tempFileInfo.TempPath)
+		}
+
+		return tempFileInfo.TempPath, cleanup, nil
+	}
+
+	// Direct access mode - no cleanup needed
+	return dbFile, func() {}, nil
+}
+
 func init() {
 	// Set up logging
 	log.SetFlags(0)
@@ -398,11 +393,7 @@ func runServe(cmd *cobra.Command, args []string) {
 	defer srv.Close()
 
 	// Display temp file setting
-	if useTempFile {
-		infoColor.Println("📋 Using temporary file copies to avoid write-lock conflicts")
-	} else {
-		warningColor.Println("⚠️  Direct file access mode (may conflict with BDE writes)")
-	}
+	displayTempFileStatus()
 
 	// Start file watching if enabled
 	if watchFile {

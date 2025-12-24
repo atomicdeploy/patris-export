@@ -11,7 +11,7 @@ func TestPatris2FaReversal(t *testing.T) {
 	// Create a simple mapping for testing
 	mapping := CharMapping{
 		0xd1: "س", // sin
-		0xd3: "ن", // nun  
+		0xd3: "ن", // nun
 		0xd5: "س", // sin
 		0xd6: "و", // waw
 		0xa5: "ب", // beh

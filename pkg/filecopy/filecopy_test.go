@@ -3,6 +3,7 @@ package filecopy
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -234,9 +235,10 @@ func TestCopyToTempBasename(t *testing.T) {
 	}
 	defer CleanupTemp(fileInfo.TempPath)
 
-	// Verify temp file has same basename
-	if filepath.Base(fileInfo.TempPath) != "test-database.db" {
-		t.Errorf("Expected basename 'test-database.db', got '%s'", filepath.Base(fileInfo.TempPath))
+	// Verify temp filename starts with source basename and includes path hash
+	baseName := filepath.Base(fileInfo.TempPath)
+	if !strings.HasPrefix(baseName, "test-database.db.") {
+		t.Errorf("Expected basename to start with 'test-database.db.', got '%s'", baseName)
 	}
 
 	// Verify temp file is in system temp directory under patris-export subdirectory
@@ -244,5 +246,16 @@ func TestCopyToTempBasename(t *testing.T) {
 	actualDir := filepath.Dir(fileInfo.TempPath)
 	if actualDir != expectedDir {
 		t.Errorf("Expected temp dir %s, got %s", expectedDir, actualDir)
+	}
+
+	// Verify the same source file always gets the same temp path (for watch mode)
+	fileInfo2, err := CopyToTemp(srcPath)
+	if err != nil {
+		t.Fatalf("Failed to copy again: %v", err)
+	}
+	defer CleanupTemp(fileInfo2.TempPath)
+
+	if fileInfo.TempPath != fileInfo2.TempPath {
+		t.Errorf("Expected same temp path for same source file, got %s and %s", fileInfo.TempPath, fileInfo2.TempPath)
 	}
 }

@@ -58,7 +58,7 @@ func TestPatris2Fa(t *testing.T) {
 		{
 			name:     "simple conversion",
 			input:    "\xa1\xa5", // Persian bytes in visual order: ا + ب (reversed from reading order)
-			expected: "با",        // After byte reversal and mapping: ب + ا = با
+			expected: "با",       // After byte reversal and mapping: ب + ا = با
 		},
 		{
 			name:     "dash fix",
@@ -119,7 +119,7 @@ func TestLoadCharMapping(t *testing.T) {
 func TestSetDashFix(t *testing.T) {
 	SetDashFix(false)
 	SetDefaultMapping(CharMapping{0x99: "ـ"})
-	
+
 	result := Patris2Fa("test\x99string")
 	if strings.Contains(result, "-") {
 		t.Error("Dash fix should be disabled")

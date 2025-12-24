@@ -63,13 +63,23 @@ func CopyToTemp(sourcePath string) (*FileInfo, error) {
 
 	// Create temp file in system temp directory
 	// Use a subdirectory to avoid conflicts with source files that might be in /tmp
+	// Include a hash of the absolute path to handle multiple files with same name
 	tempDir := filepath.Join(os.TempDir(), "patris-export")
 	if err := os.MkdirAll(tempDir, 0755); err != nil {
 		return nil, fmt.Errorf("failed to create temp directory: %w", err)
 	}
 
+	// Get absolute path for consistent hashing
+	absPath, err := filepath.Abs(sourcePath)
+	if err != nil {
+		absPath = sourcePath // Fallback to original path
+	}
+
+	// Create a unique temp filename using source filename + hash of absolute path
 	baseName := filepath.Base(sourcePath)
-	tempPath := filepath.Join(tempDir, baseName)
+	pathHash := crc32.ChecksumIEEE([]byte(absPath))
+	tempFileName := fmt.Sprintf("%s.%08x", baseName, pathHash)
+	tempPath := filepath.Join(tempDir, tempFileName)
 
 	// Open/create destination file
 	dest, err := os.OpenFile(tempPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644)
