@@ -67,7 +67,7 @@ func CopyToTemp(sourcePath string) (*FileInfo, error) {
 	if err := os.MkdirAll(tempDir, 0755); err != nil {
 		return nil, fmt.Errorf("failed to create temp directory: %w", err)
 	}
-	
+
 	baseName := filepath.Base(sourcePath)
 	tempPath := filepath.Join(tempDir, baseName)
 
@@ -114,10 +114,10 @@ func CleanupTemp(tempPath string) error {
 	if tempPath == "" {
 		return nil
 	}
-	
+
 	if err := os.Remove(tempPath); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("failed to remove temp file: %w", err)
 	}
-	
+
 	return nil
 }

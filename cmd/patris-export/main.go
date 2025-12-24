@@ -131,7 +131,7 @@ func runConvert(cmd *cobra.Command, args []string) {
 		errorColor.Printf("❌ Failed to create output directory: %v\n", err)
 		os.Exit(1)
 	}
-	
+
 	// Display temp file setting
 	if useTempFile {
 		infoColor.Println("📋 Using temporary file copies to avoid write-lock conflicts")
@@ -177,11 +177,11 @@ func runConvert(cmd *cobra.Command, args []string) {
 func convertFile(dbFile string, charMap converter.CharMapping) {
 	var fileToOpen string
 	var tempFileInfo *filecopy.FileInfo
-	
+
 	// If using temp file, copy database to temp location first
 	if useTempFile {
 		infoColor.Printf("📋 Copying database to temp location: %s\n", filepath.Base(dbFile))
-		
+
 		var err error
 		tempFileInfo, err = filecopy.CopyToTemp(dbFile)
 		if err != nil {
@@ -189,18 +189,18 @@ func convertFile(dbFile string, charMap converter.CharMapping) {
 			return
 		}
 		defer filecopy.CleanupTemp(tempFileInfo.TempPath)
-		
+
 		successColor.Printf("✅ Source file checksum: %s\n", tempFileInfo.Hash)
 		if verbose {
 			infoColor.Printf("   Size: %d bytes\n", tempFileInfo.Size)
 			infoColor.Printf("   Temp path: %s\n", tempFileInfo.TempPath)
 		}
-		
+
 		fileToOpen = tempFileInfo.TempPath
 	} else {
 		fileToOpen = dbFile
 	}
-	
+
 	infoColor.Printf("🔍 Opening database: %s\n", filepath.Base(dbFile))
 
 	// Open database
@@ -254,14 +254,14 @@ func convertFile(dbFile string, charMap converter.CharMapping) {
 
 func runInfo(cmd *cobra.Command, args []string) {
 	dbFile := args[0]
-	
+
 	var fileToOpen string
 	var tempFileInfo *filecopy.FileInfo
-	
+
 	// If using temp file, copy database to temp location first
 	if useTempFile {
 		infoColor.Printf("📋 Copying database to temp location: %s\n", filepath.Base(dbFile))
-		
+
 		var err error
 		tempFileInfo, err = filecopy.CopyToTemp(dbFile)
 		if err != nil {
@@ -269,13 +269,13 @@ func runInfo(cmd *cobra.Command, args []string) {
 			os.Exit(1)
 		}
 		defer filecopy.CleanupTemp(tempFileInfo.TempPath)
-		
+
 		successColor.Printf("✅ Source file checksum: %s\n", tempFileInfo.Hash)
 		if verbose {
 			infoColor.Printf("   Size: %d bytes\n", tempFileInfo.Size)
 			infoColor.Printf("   Temp path: %s\n", tempFileInfo.TempPath)
 		}
-		
+
 		fileToOpen = tempFileInfo.TempPath
 	} else {
 		fileToOpen = dbFile
@@ -396,7 +396,7 @@ func runServe(cmd *cobra.Command, args []string) {
 		os.Exit(1)
 	}
 	defer srv.Close()
-	
+
 	// Display temp file setting
 	if useTempFile {
 		infoColor.Println("📋 Using temporary file copies to avoid write-lock conflicts")

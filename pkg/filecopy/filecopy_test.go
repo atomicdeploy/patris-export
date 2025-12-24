@@ -15,7 +15,7 @@ func TestCalculateHash(t *testing.T) {
 		t.Fatalf("Failed to create temp file: %v", err)
 	}
 	defer os.Remove(tmpFile.Name())
-	
+
 	if _, err := tmpFile.Write(content); err != nil {
 		t.Fatalf("Failed to write to temp file: %v", err)
 	}
@@ -56,11 +56,11 @@ func TestCopyToTemp(t *testing.T) {
 	}
 	srcPath := srcFile.Name()
 	defer os.Remove(srcPath)
-	
+
 	if _, err := srcFile.Write(content); err != nil {
 		t.Fatalf("Failed to write to source file: %v", err)
 	}
-	
+
 	// Set a specific modification time
 	modTime := time.Now().Add(-1 * time.Hour)
 	if err := os.Chtimes(srcPath, time.Now(), modTime); err != nil {

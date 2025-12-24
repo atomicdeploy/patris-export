@@ -78,36 +78,36 @@ func (s *Server) setupRoutes() {
 func (s *Server) openDatabase() (*paradox.Database, func(), error) {
 	var fileToOpen string
 	var cleanup func()
-	
+
 	if s.useTempFile {
 		tempFileInfo, err := filecopy.CopyToTemp(s.dbPath)
 		if err != nil {
 			return nil, nil, fmt.Errorf("failed to copy file to temp: %w", err)
 		}
-		
+
 		fileToOpen = tempFileInfo.TempPath
 		cleanup = func() {
 			filecopy.CleanupTemp(tempFileInfo.TempPath)
 		}
-		
+
 		log.Printf("📋 Using temp file copy (checksum: %s)", tempFileInfo.Hash)
 	} else {
 		fileToOpen = s.dbPath
 		cleanup = func() {} // No-op cleanup
 	}
-	
+
 	db, err := paradox.Open(fileToOpen)
 	if err != nil {
 		cleanup()
 		return nil, nil, err
 	}
-	
+
 	// Return a cleanup function that closes the database and removes temp file
 	fullCleanup := func() {
 		db.Close()
 		cleanup()
 	}
-	
+
 	return db, fullCleanup, nil
 }
 

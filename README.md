@@ -11,6 +11,8 @@ A fast and performant application for reading, parsing, and converting Paradox/B
 - 🔄 **Convert Paradox DB files** to JSON or CSV formats
 - 🎯 **Persian/Farsi encoding support** - Automatically converts Patris81 proprietary encoding
 - 👀 **File watching** - Automatically converts files when they change
+- 🔒 **Write-lock prevention** - Copies files to temp location to avoid BDE conflicts
+- 🔐 **File integrity** - CRC32 checksum calculation and verification
 - 🌐 **REST API** - HTTP JSON API for accessing database records
 - 🔌 **WebSocket support** - Real-time updates when database changes
 - 🎨 **Beautiful CLI** - Colorful terminal output with emojis
@@ -80,6 +82,30 @@ patris-export convert kala.db -f json -w --debounce 500ms
 
 # 5 second debounce
 patris-export convert kala.db -f json -w --debounce 5s
+```
+
+### Avoid Write-Lock Conflicts
+
+By default, patris-export copies the database file to a temporary location before reading it. This prevents write-lock conflicts with applications like Borland Database Engine (BDE) that may have the file open for writing.
+
+```bash
+# Default behavior - uses temp file (recommended)
+patris-export convert kala.db -f json
+
+# Disable temp file usage (direct access)
+patris-export convert kala.db -f json --use-temp-file=false
+```
+
+When using the temp file feature:
+- A CRC32 checksum is calculated and displayed for the source file
+- The file is copied to the system temp directory in 10MB chunks
+- The original file is released immediately after copying
+- File modification time is preserved on the copy
+
+Use `--verbose` flag to see detailed information about the temp file operation:
+
+```bash
+patris-export convert kala.db -f json -v
 ```
 
 ### Show Database Information
@@ -185,6 +211,7 @@ go test -v ./...
 - `-c, --charmap` - Path to character mapping file (farsi_chars.txt)
 - `-o, --output` - Output directory for converted files (default: current directory)
 - `-v, --verbose` - Enable verbose logging
+- `-t, --use-temp-file` - Copy database file to temp location before reading to prevent write-lock conflicts (default: true)
 
 ### Commands
 
