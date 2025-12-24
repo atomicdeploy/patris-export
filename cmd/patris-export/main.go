@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/atomicdeploy/patris-export/pkg/converter"
+	"github.com/atomicdeploy/patris-export/pkg/filecopy"
 	"github.com/atomicdeploy/patris-export/pkg/paradox"
 	"github.com/atomicdeploy/patris-export/pkg/server"
 	"github.com/atomicdeploy/patris-export/pkg/watcher"
@@ -28,6 +29,7 @@ var (
 	watchMode      bool
 	verbose        bool
 	debounceString string
+	directAccess   bool
 
 	// Color definitions
 	successColor = color.New(color.FgGreen, color.Bold)
@@ -57,6 +59,7 @@ Supports Persian/Farsi encoding conversion and file watching.
 	rootCmd.PersistentFlags().StringVarP(&charMapFile, "charmap", "c", "", "Path to character mapping file (farsi_chars.txt)")
 	rootCmd.PersistentFlags().StringVarP(&outputDir, "output", "o", ".", "Output directory for converted files")
 	rootCmd.PersistentFlags().BoolVarP(&verbose, "verbose", "v", false, "Enable verbose logging")
+	rootCmd.PersistentFlags().BoolVarP(&directAccess, "direct-access", "d", false, "Access database file directly without temp copy (may conflict with BDE writes)")
 
 	// Convert command
 	convertCmd := &cobra.Command{
@@ -67,7 +70,9 @@ Supports Persian/Farsi encoding conversion and file watching.
 	}
 	convertCmd.Flags().StringVarP(&outputFormat, "format", "f", "json", "Output format (json or csv)")
 	convertCmd.Flags().BoolVarP(&watchMode, "watch", "w", false, "Watch file for changes and auto-convert")
-	convertCmd.Flags().StringVarP(&debounceString, "debounce", "d", "1s", "Debounce duration for watch mode (e.g., 0s, 500ms, 1s, 5s)")
+	convertCmd.Flags().String("debounce", "1s", "Debounce duration for watch mode (e.g., 0s, 500ms, 1s, 5s)")
+	convertCmd.Flags().BoolP("direct-access", "d", true, "Access database file directly without temp copy (default for convert)")
+	convertCmd.Flags().Lookup("direct-access").Hidden = false // Override global default for convert command
 
 	// Info command
 	infoCmd := &cobra.Command{
@@ -94,7 +99,7 @@ Supports Persian/Farsi encoding conversion and file watching.
 	}
 	serveCmd.Flags().StringP("addr", "a", ":8080", "Server address (e.g., :8080)")
 	serveCmd.Flags().BoolP("watch", "w", true, "Watch file for changes and broadcast updates")
-	serveCmd.Flags().StringP("debounce", "d", "0s", "Debounce duration for watch mode (e.g., 0s, 500ms, 1s, 5s)")
+	serveCmd.Flags().String("debounce", "0s", "Debounce duration for watch mode (e.g., 0s, 500ms, 1s, 5s)")
 
 	rootCmd.AddCommand(convertCmd, infoCmd, companyCmd, serveCmd)
 
@@ -106,6 +111,10 @@ Supports Persian/Farsi encoding conversion and file watching.
 
 func runConvert(cmd *cobra.Command, args []string) {
 	dbFile := args[0]
+
+	// Get command-specific direct-access flag (overrides global default for convert)
+	cmdDirectAccess, _ := cmd.Flags().GetBool("direct-access")
+	directAccess = cmdDirectAccess
 
 	// Load character mapping if provided, otherwise use embedded default
 	var charMap converter.CharMapping
@@ -129,9 +138,13 @@ func runConvert(cmd *cobra.Command, args []string) {
 		os.Exit(1)
 	}
 
+	// Display temp file setting
+	displayFileStatus(dbFile)
+
 	if watchMode {
 		// Parse debounce duration
-		debounceDuration := parseDebounceDuration(debounceString)
+		debounceStr, _ := cmd.Flags().GetString("debounce")
+		debounceDuration := parseDebounceDuration(debounceStr)
 
 		infoColor.Printf("👀 Watching file: %s\n", dbFile)
 		infoColor.Println("📝 Press Ctrl+C to stop watching")
@@ -165,10 +178,17 @@ func runConvert(cmd *cobra.Command, args []string) {
 }
 
 func convertFile(dbFile string, charMap converter.CharMapping) {
+	fileToOpen, cleanup, err := prepareFileForReading(dbFile)
+	if err != nil {
+		errorColor.Printf("❌ %v\n", err)
+		return
+	}
+	defer cleanup()
+
 	infoColor.Printf("🔍 Opening database: %s\n", filepath.Base(dbFile))
 
 	// Open database
-	db, err := paradox.Open(dbFile)
+	db, err := paradox.Open(fileToOpen)
 	if err != nil {
 		errorColor.Printf("❌ Failed to open database: %v\n", err)
 		return
@@ -219,9 +239,16 @@ func convertFile(dbFile string, charMap converter.CharMapping) {
 func runInfo(cmd *cobra.Command, args []string) {
 	dbFile := args[0]
 
+	fileToOpen, cleanup, err := prepareFileForReading(dbFile)
+	if err != nil {
+		errorColor.Printf("❌ %v\n", err)
+		os.Exit(1)
+	}
+	defer cleanup()
+
 	infoColor.Printf("🔍 Reading database: %s\n", filepath.Base(dbFile))
 
-	db, err := paradox.Open(dbFile)
+	db, err := paradox.Open(fileToOpen)
 	if err != nil {
 		errorColor.Printf("❌ Failed to open database: %v\n", err)
 		os.Exit(1)
@@ -299,6 +326,43 @@ func parseDebounceDuration(durationStr string) time.Duration {
 	return duration
 }
 
+// displayFileStatus shows the file access mode status message
+func displayFileStatus(filePath string) {
+	if directAccess {
+		warningColor.Printf("⚠️  Direct file access mode for: %s (may conflict with BDE writes)\n", filepath.Base(filePath))
+	} else {
+		infoColor.Printf("📋 Using temporary file copy for: %s\n", filepath.Base(filePath))
+	}
+}
+
+// prepareFileForReading prepares a database file for reading, optionally copying to temp
+// Returns the file path to open and a cleanup function
+func prepareFileForReading(dbFile string) (fileToOpen string, cleanup func(), err error) {
+	if !directAccess {
+		infoColor.Printf("📋 Copying database to temp location: %s\n", filepath.Base(dbFile))
+
+		tempFileInfo, err := filecopy.CopyToTemp(dbFile)
+		if err != nil {
+			return "", nil, fmt.Errorf("failed to copy file to temp: %w", err)
+		}
+
+		successColor.Printf("✅ Source file checksum: %s\n", tempFileInfo.Hash)
+		if verbose {
+			infoColor.Printf("   Size: %d bytes\n", tempFileInfo.Size)
+			infoColor.Printf("   Temp path: %s\n", tempFileInfo.TempPath)
+		}
+
+		cleanup = func() {
+			filecopy.CleanupTemp(tempFileInfo.TempPath)
+		}
+
+		return tempFileInfo.TempPath, cleanup, nil
+	}
+
+	// Direct access mode - no cleanup needed
+	return dbFile, func() {}, nil
+}
+
 func init() {
 	// Set up logging
 	log.SetFlags(0)
@@ -328,12 +392,15 @@ func runServe(cmd *cobra.Command, args []string) {
 	}
 
 	// Create server
-	srv, err := server.NewServer(dbFile, charMap)
+	srv, err := server.NewServer(dbFile, charMap, !directAccess)
 	if err != nil {
 		errorColor.Printf("❌ Failed to create server: %v\n", err)
 		os.Exit(1)
 	}
 	defer srv.Close()
+
+	// Display temp file setting
+	displayFileStatus(dbFile)
 
 	// Start file watching if enabled
 	if watchFile {

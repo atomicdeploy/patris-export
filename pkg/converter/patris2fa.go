@@ -72,7 +72,7 @@ func Patris2Fa(value string) string {
 }
 
 // Patris2FaWithMapping converts Patris81-encoded text to Persian/Farsi
-// 
+//
 // Patris81 Encoding Scheme:
 // - Uses byte values 0x9F-0xE0 for Persian characters
 // - Uses byte values 0xF3-0xFC for Persian digits 0-9
@@ -134,7 +134,7 @@ func Patris2FaWithMapping(value string, mapping CharMapping) string {
 }
 
 // reversePatrisSegments reverses byte segments containing Patris-encoded characters
-// 
+//
 // The Patris81 encoding stores Persian text with segment AND byte reversal:
 // 1. Persian word segments appear in reversed order
 // 2. Bytes within each Persian segment are also reversed
@@ -145,14 +145,14 @@ func Patris2FaWithMapping(value string, mapping CharMapping) string {
 // 3. Rebuilds string with reversed Persian segments
 func reversePatrisSegments(data []byte) []byte {
 	type segment struct {
-		bytes []byte
+		bytes  []byte
 		isPers bool
 	}
-	
+
 	// Step 1: Identify all segments
 	var segments []segment
 	i := 0
-	
+
 	for i < len(data) {
 		if isPatrisByte(data[i]) {
 			start := i
@@ -160,19 +160,19 @@ func reversePatrisSegments(data []byte) []byte {
 				i++
 			}
 			segments = append(segments, segment{
-				bytes: data[start:i],
+				bytes:  data[start:i],
 				isPers: true,
 			})
 		} else {
 			start := i
 			i++
 			segments = append(segments, segment{
-				bytes: data[start:i],
+				bytes:  data[start:i],
 				isPers: false,
 			})
 		}
 	}
-	
+
 	// Step 2: Collect Persian segments and reverse them
 	var persSegments [][]byte
 	for _, seg := range segments {
@@ -185,12 +185,12 @@ func reversePatrisSegments(data []byte) []byte {
 			persSegments = append(persSegments, reversed)
 		}
 	}
-	
+
 	// Reverse order of Persian segments
 	for i, j := 0, len(persSegments)-1; i < j; i, j = i+1, j-1 {
 		persSegments[i], persSegments[j] = persSegments[j], persSegments[i]
 	}
-	
+
 	// Step 3: Rebuild string with reversed Persian segments
 	var result []byte
 	persIdx := 0
@@ -202,7 +202,7 @@ func reversePatrisSegments(data []byte) []byte {
 			result = append(result, seg.bytes...)
 		}
 	}
-	
+
 	return result
 }
 
