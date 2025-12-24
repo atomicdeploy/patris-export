@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/atomicdeploy/patris-export/pkg/converter"
+	"github.com/atomicdeploy/patris-export/pkg/filecopy"
 	"github.com/atomicdeploy/patris-export/pkg/paradox"
 	"github.com/atomicdeploy/patris-export/pkg/watcher"
 	"github.com/gorilla/mux"
@@ -26,15 +27,17 @@ type Server struct {
 	wsClients   map[*websocket.Conn]bool
 	wsClientsMu sync.RWMutex
 	upgrader    websocket.Upgrader
+	useTempFile bool
 }
 
 // NewServer creates a new server instance
-func NewServer(dbPath string, charMap converter.CharMapping) (*Server, error) {
+func NewServer(dbPath string, charMap converter.CharMapping, useTempFile bool) (*Server, error) {
 	s := &Server{
-		router:    mux.NewRouter(),
-		dbPath:    dbPath,
-		charMap:   charMap,
-		wsClients: make(map[*websocket.Conn]bool),
+		router:      mux.NewRouter(),
+		dbPath:      dbPath,
+		charMap:     charMap,
+		wsClients:   make(map[*websocket.Conn]bool),
+		useTempFile: useTempFile,
 		upgrader: websocket.Upgrader{
 			// Security: Configure origin checking for production use
 			// Default allows localhost only
@@ -69,6 +72,43 @@ func (s *Server) setupRoutes() {
 	s.router.HandleFunc("/api/records", s.handleGetRecords).Methods("GET")
 	s.router.HandleFunc("/api/info", s.handleGetInfo).Methods("GET")
 	s.router.HandleFunc("/ws", s.handleWebSocket)
+}
+
+// openDatabase opens the database, optionally using a temporary copy
+func (s *Server) openDatabase() (*paradox.Database, func(), error) {
+	var fileToOpen string
+	var cleanup func()
+	
+	if s.useTempFile {
+		tempFileInfo, err := filecopy.CopyToTemp(s.dbPath)
+		if err != nil {
+			return nil, nil, fmt.Errorf("failed to copy file to temp: %w", err)
+		}
+		
+		fileToOpen = tempFileInfo.TempPath
+		cleanup = func() {
+			filecopy.CleanupTemp(tempFileInfo.TempPath)
+		}
+		
+		log.Printf("📋 Using temp file copy (checksum: %s)", tempFileInfo.Hash)
+	} else {
+		fileToOpen = s.dbPath
+		cleanup = func() {} // No-op cleanup
+	}
+	
+	db, err := paradox.Open(fileToOpen)
+	if err != nil {
+		cleanup()
+		return nil, nil, err
+	}
+	
+	// Return a cleanup function that closes the database and removes temp file
+	fullCleanup := func() {
+		db.Close()
+		cleanup()
+	}
+	
+	return db, fullCleanup, nil
 }
 
 // handleIndex serves a simple welcome page
@@ -149,12 +189,12 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 
 // handleGetRecords returns all database records as JSON
 func (s *Server) handleGetRecords(w http.ResponseWriter, r *http.Request) {
-	db, err := paradox.Open(s.dbPath)
+	db, cleanup, err := s.openDatabase()
 	if err != nil {
 		http.Error(w, fmt.Sprintf("Failed to open database: %v", err), http.StatusInternalServerError)
 		return
 	}
-	defer db.Close()
+	defer cleanup()
 
 	records, err := db.GetRecords()
 	if err != nil {
@@ -175,12 +215,12 @@ func (s *Server) handleGetRecords(w http.ResponseWriter, r *http.Request) {
 
 // handleGetInfo returns database schema information
 func (s *Server) handleGetInfo(w http.ResponseWriter, r *http.Request) {
-	db, err := paradox.Open(s.dbPath)
+	db, cleanup, err := s.openDatabase()
 	if err != nil {
 		http.Error(w, fmt.Sprintf("Failed to open database: %v", err), http.StatusInternalServerError)
 		return
 	}
-	defer db.Close()
+	defer cleanup()
 
 	fields, err := db.GetFields()
 	if err != nil {
@@ -235,12 +275,12 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 
 // sendRecordsToClient sends current database records to a WebSocket client
 func (s *Server) sendRecordsToClient(conn *websocket.Conn) {
-	db, err := paradox.Open(s.dbPath)
+	db, cleanup, err := s.openDatabase()
 	if err != nil {
 		log.Printf("Failed to open database: %v", err)
 		return
 	}
-	defer db.Close()
+	defer cleanup()
 
 	records, err := db.GetRecords()
 	if err != nil {

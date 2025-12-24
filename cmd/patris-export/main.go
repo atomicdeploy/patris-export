@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/atomicdeploy/patris-export/pkg/converter"
+	"github.com/atomicdeploy/patris-export/pkg/filecopy"
 	"github.com/atomicdeploy/patris-export/pkg/paradox"
 	"github.com/atomicdeploy/patris-export/pkg/server"
 	"github.com/atomicdeploy/patris-export/pkg/watcher"
@@ -28,6 +29,7 @@ var (
 	watchMode      bool
 	verbose        bool
 	debounceString string
+	useTempFile    bool
 
 	// Color definitions
 	successColor = color.New(color.FgGreen, color.Bold)
@@ -57,6 +59,7 @@ Supports Persian/Farsi encoding conversion and file watching.
 	rootCmd.PersistentFlags().StringVarP(&charMapFile, "charmap", "c", "", "Path to character mapping file (farsi_chars.txt)")
 	rootCmd.PersistentFlags().StringVarP(&outputDir, "output", "o", ".", "Output directory for converted files")
 	rootCmd.PersistentFlags().BoolVarP(&verbose, "verbose", "v", false, "Enable verbose logging")
+	rootCmd.PersistentFlags().BoolVarP(&useTempFile, "use-temp-file", "t", true, "Copy database file to temp location before reading (prevents write-lock conflicts)")
 
 	// Convert command
 	convertCmd := &cobra.Command{
@@ -128,6 +131,13 @@ func runConvert(cmd *cobra.Command, args []string) {
 		errorColor.Printf("❌ Failed to create output directory: %v\n", err)
 		os.Exit(1)
 	}
+	
+	// Display temp file setting
+	if useTempFile {
+		infoColor.Println("📋 Using temporary file copies to avoid write-lock conflicts")
+	} else {
+		warningColor.Println("⚠️  Direct file access mode (may conflict with BDE writes)")
+	}
 
 	if watchMode {
 		// Parse debounce duration
@@ -165,10 +175,36 @@ func runConvert(cmd *cobra.Command, args []string) {
 }
 
 func convertFile(dbFile string, charMap converter.CharMapping) {
+	var fileToOpen string
+	var tempFileInfo *filecopy.FileInfo
+	
+	// If using temp file, copy database to temp location first
+	if useTempFile {
+		infoColor.Printf("📋 Copying database to temp location: %s\n", filepath.Base(dbFile))
+		
+		var err error
+		tempFileInfo, err = filecopy.CopyToTemp(dbFile)
+		if err != nil {
+			errorColor.Printf("❌ Failed to copy file to temp: %v\n", err)
+			return
+		}
+		defer filecopy.CleanupTemp(tempFileInfo.TempPath)
+		
+		successColor.Printf("✅ Source file checksum: %s\n", tempFileInfo.Hash)
+		if verbose {
+			infoColor.Printf("   Size: %d bytes\n", tempFileInfo.Size)
+			infoColor.Printf("   Temp path: %s\n", tempFileInfo.TempPath)
+		}
+		
+		fileToOpen = tempFileInfo.TempPath
+	} else {
+		fileToOpen = dbFile
+	}
+	
 	infoColor.Printf("🔍 Opening database: %s\n", filepath.Base(dbFile))
 
 	// Open database
-	db, err := paradox.Open(dbFile)
+	db, err := paradox.Open(fileToOpen)
 	if err != nil {
 		errorColor.Printf("❌ Failed to open database: %v\n", err)
 		return
@@ -218,10 +254,36 @@ func convertFile(dbFile string, charMap converter.CharMapping) {
 
 func runInfo(cmd *cobra.Command, args []string) {
 	dbFile := args[0]
+	
+	var fileToOpen string
+	var tempFileInfo *filecopy.FileInfo
+	
+	// If using temp file, copy database to temp location first
+	if useTempFile {
+		infoColor.Printf("📋 Copying database to temp location: %s\n", filepath.Base(dbFile))
+		
+		var err error
+		tempFileInfo, err = filecopy.CopyToTemp(dbFile)
+		if err != nil {
+			errorColor.Printf("❌ Failed to copy file to temp: %v\n", err)
+			os.Exit(1)
+		}
+		defer filecopy.CleanupTemp(tempFileInfo.TempPath)
+		
+		successColor.Printf("✅ Source file checksum: %s\n", tempFileInfo.Hash)
+		if verbose {
+			infoColor.Printf("   Size: %d bytes\n", tempFileInfo.Size)
+			infoColor.Printf("   Temp path: %s\n", tempFileInfo.TempPath)
+		}
+		
+		fileToOpen = tempFileInfo.TempPath
+	} else {
+		fileToOpen = dbFile
+	}
 
 	infoColor.Printf("🔍 Reading database: %s\n", filepath.Base(dbFile))
 
-	db, err := paradox.Open(dbFile)
+	db, err := paradox.Open(fileToOpen)
 	if err != nil {
 		errorColor.Printf("❌ Failed to open database: %v\n", err)
 		os.Exit(1)
@@ -328,12 +390,19 @@ func runServe(cmd *cobra.Command, args []string) {
 	}
 
 	// Create server
-	srv, err := server.NewServer(dbFile, charMap)
+	srv, err := server.NewServer(dbFile, charMap, useTempFile)
 	if err != nil {
 		errorColor.Printf("❌ Failed to create server: %v\n", err)
 		os.Exit(1)
 	}
 	defer srv.Close()
+	
+	// Display temp file setting
+	if useTempFile {
+		infoColor.Println("📋 Using temporary file copies to avoid write-lock conflicts")
+	} else {
+		warningColor.Println("⚠️  Direct file access mode (may conflict with BDE writes)")
+	}
 
 	// Start file watching if enabled
 	if watchFile {
