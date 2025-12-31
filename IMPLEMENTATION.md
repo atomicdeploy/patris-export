@@ -166,6 +166,30 @@ The application is ready for production deployment:
 5. **REST API**: ✅ All endpoints functional
 6. **WebSocket**: ✅ Real-time updates working
 7. **File Watching**: ✅ Auto-conversion on changes
+8. **URL Support**: ✅ Convert from HTTP/HTTPS URLs
+9. **URL Polling**: ✅ Monitor remote URLs for changes
+
+## Recent Updates (2025-12-31)
+
+### URL Support Implementation
+- Added `IsURL()` and `DownloadToTemp()` functions to filecopy package
+- Convert command now accepts URLs as source files
+- Serve command now accepts URLs for remote database monitoring
+- Automatic download to temporary location with checksum verification
+- Direct access mode automatically disabled for URLs
+
+### Polling Mode for Watcher
+- Implemented polling functionality for URLs and network filesystems
+- Configurable polling interval (default: 5 minutes for URLs)
+- ETag and Last-Modified header support for efficient change detection
+- Fallback to content hash when headers unavailable
+- Clean resource management with stop channels
+
+### Documentation Updates
+- Updated README with URL conversion examples
+- Enhanced CLI help text with URL-specific behavior
+- Added polling mode documentation
+- Updated command reference with URL support details
 
 ## Metrics
 
