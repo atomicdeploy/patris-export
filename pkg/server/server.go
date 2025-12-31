@@ -165,6 +165,45 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
         a:hover {
             text-decoration: underline;
         }
+        .refresh-section {
+            margin-top: 30px;
+            padding: 20px;
+            background: #e8f4f8;
+            border-radius: 5px;
+            border-left: 4px solid #2ecc71;
+        }
+        .refresh-button {
+            background: #2ecc71;
+            color: white;
+            border: none;
+            padding: 12px 24px;
+            font-size: 16px;
+            border-radius: 5px;
+            cursor: pointer;
+            font-weight: bold;
+            transition: background 0.3s;
+        }
+        .refresh-button:hover {
+            background: #27ae60;
+        }
+        .refresh-button:active {
+            background: #229954;
+        }
+        .refresh-button:disabled {
+            background: #95a5a6;
+            cursor: not-allowed;
+        }
+        .status {
+            margin-top: 10px;
+            font-size: 14px;
+            color: #7f8c8d;
+        }
+        .status.success {
+            color: #27ae60;
+        }
+        .status.error {
+            color: #e74c3c;
+        }
     </style>
 </head>
 <body>
@@ -191,10 +230,86 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
             Connect via WebSocket for real-time updates
         </div>
         
+        <div class="refresh-section">
+            <h3>🔄 Instant Refresh</h3>
+            <p>Click the button below to instantly reload the database without waiting for the next poll interval.</p>
+            <button id="refreshBtn" class="refresh-button" disabled>Connect to refresh</button>
+            <div id="status" class="status"></div>
+        </div>
+        
         <p style="margin-top: 30px; color: #7f8c8d; font-size: 14px;">
             🔄 The server watches the database file and broadcasts changes via WebSocket.
         </p>
     </div>
+    
+    <script>
+        let ws = null;
+        let isConnected = false;
+        const refreshBtn = document.getElementById('refreshBtn');
+        const statusDiv = document.getElementById('status');
+        
+        function updateStatus(message, type = '') {
+            statusDiv.textContent = message;
+            statusDiv.className = 'status ' + type;
+        }
+        
+        function connectWebSocket() {
+            const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            const wsUrl = protocol + '//' + window.location.host + '/ws';
+            
+            updateStatus('Connecting to WebSocket...', '');
+            
+            ws = new WebSocket(wsUrl);
+            
+            ws.onopen = function() {
+                isConnected = true;
+                refreshBtn.disabled = false;
+                refreshBtn.textContent = '🔄 Refresh Now';
+                updateStatus('✓ Connected - Ready to refresh', 'success');
+            };
+            
+            ws.onmessage = function(event) {
+                const data = JSON.parse(event.data);
+                if (data.type === 'update') {
+                    updateStatus('✓ Data updated: ' + data.count + ' records received at ' + new Date(data.timestamp).toLocaleTimeString(), 'success');
+                }
+            };
+            
+            ws.onclose = function() {
+                isConnected = false;
+                refreshBtn.disabled = true;
+                refreshBtn.textContent = 'Reconnecting...';
+                updateStatus('Connection lost. Reconnecting...', 'error');
+                
+                // Attempt to reconnect after 2 seconds
+                setTimeout(connectWebSocket, 2000);
+            };
+            
+            ws.onerror = function(error) {
+                updateStatus('Connection error. Retrying...', 'error');
+            };
+        }
+        
+        refreshBtn.addEventListener('click', function() {
+            if (isConnected && ws) {
+                refreshBtn.disabled = true;
+                refreshBtn.textContent = 'Refreshing...';
+                updateStatus('Requesting refresh...', '');
+                
+                // Send refresh message to server
+                ws.send(JSON.stringify({ type: 'refresh' }));
+                
+                // Re-enable button after a short delay
+                setTimeout(function() {
+                    refreshBtn.disabled = false;
+                    refreshBtn.textContent = '🔄 Refresh Now';
+                }, 1000);
+            }
+        });
+        
+        // Connect on page load
+        connectWebSocket();
+    </script>
 </body>
 </html>
 `)
@@ -268,7 +383,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	// Send initial data
 	s.sendRecordsToClient(conn)
 
-	// Handle disconnection
+	// Handle messages and disconnection
 	go func() {
 		defer func() {
 			s.wsClientsMu.Lock()
@@ -279,8 +394,16 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		}()
 
 		for {
-			if _, _, err := conn.ReadMessage(); err != nil {
+			var msg map[string]interface{}
+			err := conn.ReadJSON(&msg)
+			if err != nil {
 				break
+			}
+
+			// Handle refresh message
+			if msgType, ok := msg["type"].(string); ok && msgType == "refresh" {
+				log.Printf("🔄 Refresh requested from client")
+				s.broadcastUpdate()
 			}
 		}
 	}()
