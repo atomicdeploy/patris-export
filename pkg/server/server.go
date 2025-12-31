@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync"
 	"time"
 
@@ -81,7 +80,7 @@ func (s *Server) openDatabase() (*paradox.Database, func(), error) {
 	var cleanup func()
 
 	// Check if dbPath is a URL
-	if isURL(s.dbPath) {
+	if filecopy.IsURL(s.dbPath) {
 		tempFileInfo, err := filecopy.DownloadToTemp(s.dbPath)
 		if err != nil {
 			return nil, nil, fmt.Errorf("failed to download file from URL: %w", err)
@@ -344,7 +343,7 @@ func (s *Server) StartWatching(debounceDuration time.Duration) error {
 	s.watcher = fw
 
 	// Check if dbPath is a URL
-	if isURL(s.dbPath) {
+	if filecopy.IsURL(s.dbPath) {
 		// Use polling mode for URLs (default 5 minutes if debounce is 0)
 		pollInterval := debounceDuration
 		if pollInterval == 0 {
@@ -374,12 +373,6 @@ func (s *Server) StartWatching(debounceDuration time.Duration) error {
 	}
 
 	return nil
-}
-
-// isURL checks if a path string is a URL
-func isURL(path string) bool {
-	// Import strings at the top if not already imported
-	return strings.HasPrefix(path, "http://") || strings.HasPrefix(path, "https://")
 }
 
 // convertAndTransformRecords converts record text encoding and transforms them

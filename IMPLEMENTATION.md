@@ -2,7 +2,7 @@
 
 ## Overview
 
-Successfully created a complete, production-ready Paradox/BDE database converter application for Patris81 software. The application is written in Go and provides multiple interfaces for accessing and converting database files.
+Successfully created a complete, production-ready Paradox/BDE database converter application for Patris81 software. The application is written in Go and provides multiple interfaces for accessing and converting database files from both local paths and remote URLs.
 
 ## Completed Features
 
@@ -11,14 +11,16 @@ Successfully created a complete, production-ready Paradox/BDE database converter
 - **Persian/Farsi Encoding**: Complete implementation of Patris81 proprietary encoding conversion
 - **Multiple Export Formats**: JSON and CSV export with proper encoding
 - **File Watching**: Real-time monitoring with hash-based change detection
+- **URL Support**: Download and convert database files from HTTP/HTTPS URLs
+- **Polling Mode**: Monitor remote URLs for changes with configurable intervals
 - **Company.inf Parser**: Support for company information files
 
 ### ✅ User Interfaces
 - **CLI Application**: Beautiful command-line interface with colors and emojis
-  - `convert` - Convert database files to JSON/CSV
+  - `convert` - Convert database files or URLs to JSON/CSV
   - `info` - Display database schema and metadata
   - `company` - Parse company.inf files
-  - `serve` - Start REST API and WebSocket server
+  - `serve` - Start REST API and WebSocket server with local files or URLs
   
 - **REST API**: HTTP JSON API with endpoints:
   - `GET /` - Web interface and documentation
@@ -28,9 +30,10 @@ Successfully created a complete, production-ready Paradox/BDE database converter
 - **WebSocket Server**: Real-time updates when database changes
   - Automatic broadcasting to connected clients
   - Efficient file watching with debouncing
+  - Polling support for remote URLs
 
 ### ✅ Testing & Quality
-- **Unit Tests**: Comprehensive tests for converter and paradox packages
+- **Unit Tests**: Comprehensive tests for converter, paradox, filecopy, and watcher packages
 - **Integration Tests**: End-to-end testing with real sample data
 - **Sample Data**: Included kala.db (354 records) and company.inf for testing
 - **All Tests Passing**: 100% test success rate
@@ -72,7 +75,8 @@ patris-export/
 ├── pkg/
 │   ├── paradox/             # DB reader & company.inf parser
 │   ├── converter/           # Encoding converter & exporters
-│   ├── watcher/             # File watcher with hash detection
+│   ├── filecopy/            # File copying and URL download utilities
+│   ├── watcher/             # File watcher with hash detection & polling
 │   └── server/              # REST API & WebSocket server
 ├── testdata/                # Sample database files
 ├── docs/examples/           # Usage examples & demos
@@ -85,7 +89,9 @@ patris-export/
 2. **Modular Package Structure**: Clean separation of concerns for maintainability
 3. **Hash-based Watching**: Prevents false-positive file change events
 4. **Real-time WebSocket**: Efficient broadcasting for live database monitoring
-5. **Character Mapping File**: External configuration for encoding flexibility
+5. **URL Support**: Download files from remote URLs with automatic temp file management
+6. **Polling Mode**: Alternative to fsnotify for URLs and network-mounted filesystems
+7. **Flexible Watch Intervals**: Configurable debounce for local files and polling intervals for URLs
 
 ## Testing Results
 

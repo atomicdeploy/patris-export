@@ -7,12 +7,11 @@ import (
 	"io"
 	"log"
 	"net/http"
-	"net/url"
 	"os"
-	"strings"
 	"sync"
 	"time"
 
+	"github.com/atomicdeploy/patris-export/pkg/filecopy"
 	"github.com/fsnotify/fsnotify"
 )
 
@@ -192,26 +191,16 @@ func (fw *FileWatcher) Unwatch(path string) error {
 	delete(fw.fileHashes, path)
 	delete(fw.callbacks, path)
 	delete(fw.debounce, path)
+	
+	isPoller := fw.pollers[path]
 	delete(fw.pollers, path)
 
 	// Only try to remove from watcher if it's not a poller
-	if fw.watcher != nil && !fw.pollers[path] {
+	if fw.watcher != nil && !isPoller {
 		return fw.watcher.Remove(path)
 	}
 
 	return nil
-}
-
-// isURL checks if a path string is a URL
-func isURL(path string) bool {
-	if strings.HasPrefix(path, "http://") || strings.HasPrefix(path, "https://") {
-		return true
-	}
-	u, err := url.Parse(path)
-	if err != nil {
-		return false
-	}
-	return u.Scheme != "" && u.Host != ""
 }
 
 // Poll starts polling a URL or local file at the specified interval
@@ -258,7 +247,7 @@ func (fw *FileWatcher) pollLoop(path string, interval time.Duration, stopChan ch
 
 // getHashForPath calculates hash for either a local file or URL
 func (fw *FileWatcher) getHashForPath(path string) (string, error) {
-	if isURL(path) {
+	if filecopy.IsURL(path) {
 		return fw.getURLHash(path)
 	}
 	return fw.getFileHash(path)
@@ -268,8 +257,7 @@ func (fw *FileWatcher) getHashForPath(path string) (string, error) {
 func (fw *FileWatcher) getURLHash(urlStr string) (string, error) {
 	// First try to get ETag from HEAD request
 	resp, err := http.Head(urlStr)
-	if err == nil {
-		defer resp.Body.Close()
+	if err == nil && resp.StatusCode == http.StatusOK {
 		etag := resp.Header.Get("ETag")
 		lastModified := resp.Header.Get("Last-Modified")
 		if etag != "" || lastModified != "" {
