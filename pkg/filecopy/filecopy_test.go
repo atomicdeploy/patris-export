@@ -259,3 +259,29 @@ func TestCopyToTempBasename(t *testing.T) {
 		t.Errorf("Expected same temp path for same source file, got %s and %s", fileInfo.TempPath, fileInfo2.TempPath)
 	}
 }
+
+func TestIsURL(t *testing.T) {
+	tests := []struct {
+		path     string
+		expected bool
+	}{
+		{"http://example.com/file.db", true},
+		{"https://example.com/file.db", true},
+		{"https://example.com:8080/path/to/file.db", true},
+		{"/local/path/file.db", false},
+		{"./relative/path/file.db", false},
+		{"file.db", false},
+		{"ftp://example.com/file.db", true},
+		{"", false},
+		{"not a url", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.path, func(t *testing.T) {
+			result := IsURL(tt.path)
+			if result != tt.expected {
+				t.Errorf("IsURL(%q) = %v, expected %v", tt.path, result, tt.expected)
+			}
+		})
+	}
+}

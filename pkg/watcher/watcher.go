@@ -3,9 +3,13 @@ package watcher
 import (
 	"crypto/sha256"
 	"fmt"
+	"hash/crc32"
 	"io"
 	"log"
+	"net/http"
+	"net/url"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -19,6 +23,8 @@ type FileWatcher struct {
 	mu         sync.RWMutex
 	callbacks  map[string]func(string)
 	debounce   map[string]time.Duration
+	stopChans  map[string]chan struct{}
+	pollers    map[string]bool
 }
 
 // NewFileWatcher creates a new file watcher
@@ -33,6 +39,8 @@ func NewFileWatcher() (*FileWatcher, error) {
 		fileHashes: make(map[string]string),
 		callbacks:  make(map[string]func(string)),
 		debounce:   make(map[string]time.Duration),
+		stopChans:  make(map[string]chan struct{}),
+		pollers:    make(map[string]bool),
 	}, nil
 }
 
@@ -122,7 +130,7 @@ func (fw *FileWatcher) handleFileChange(path string) {
 	}
 
 	// Calculate new hash
-	newHash, err := fw.getFileHash(path)
+	newHash, err := fw.getHashForPath(path)
 	if err != nil {
 		log.Printf("⚠️  Failed to get hash for %s: %v", path, err)
 		return
@@ -156,7 +164,18 @@ func (fw *FileWatcher) getFileHash(path string) (string, error) {
 
 // Close stops the file watcher
 func (fw *FileWatcher) Close() error {
-	return fw.watcher.Close()
+	// Stop all polling goroutines
+	fw.mu.Lock()
+	for _, stopChan := range fw.stopChans {
+		close(stopChan)
+	}
+	fw.stopChans = make(map[string]chan struct{})
+	fw.mu.Unlock()
+
+	if fw.watcher != nil {
+		return fw.watcher.Close()
+	}
+	return nil
 }
 
 // Unwatch stops watching a specific file
@@ -164,9 +183,118 @@ func (fw *FileWatcher) Unwatch(path string) error {
 	fw.mu.Lock()
 	defer fw.mu.Unlock()
 
+	// Stop polling if active
+	if stopChan, exists := fw.stopChans[path]; exists {
+		close(stopChan)
+		delete(fw.stopChans, path)
+	}
+
 	delete(fw.fileHashes, path)
 	delete(fw.callbacks, path)
 	delete(fw.debounce, path)
+	delete(fw.pollers, path)
 
-	return fw.watcher.Remove(path)
+	// Only try to remove from watcher if it's not a poller
+	if fw.watcher != nil && !fw.pollers[path] {
+		return fw.watcher.Remove(path)
+	}
+
+	return nil
+}
+
+// isURL checks if a path string is a URL
+func isURL(path string) bool {
+	if strings.HasPrefix(path, "http://") || strings.HasPrefix(path, "https://") {
+		return true
+	}
+	u, err := url.Parse(path)
+	if err != nil {
+		return false
+	}
+	return u.Scheme != "" && u.Host != ""
+}
+
+// Poll starts polling a URL or local file at the specified interval
+// This is used when fsnotify cannot be used (e.g., for URLs)
+func (fw *FileWatcher) Poll(path string, callback func(string), pollInterval time.Duration) error {
+	fw.mu.Lock()
+	defer fw.mu.Unlock()
+
+	// Get initial hash
+	hash, err := fw.getHashForPath(path)
+	if err != nil {
+		return fmt.Errorf("failed to get initial hash: %w", err)
+	}
+
+	fw.fileHashes[path] = hash
+	fw.callbacks[path] = callback
+	fw.debounce[path] = 0 // No debounce for polling
+	fw.pollers[path] = true
+
+	// Create stop channel
+	stopChan := make(chan struct{})
+	fw.stopChans[path] = stopChan
+
+	// Start polling goroutine
+	go fw.pollLoop(path, pollInterval, stopChan)
+
+	return nil
+}
+
+// pollLoop continuously polls a path for changes
+func (fw *FileWatcher) pollLoop(path string, interval time.Duration, stopChan chan struct{}) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			fw.handleFileChange(path)
+		case <-stopChan:
+			return
+		}
+	}
+}
+
+// getHashForPath calculates hash for either a local file or URL
+func (fw *FileWatcher) getHashForPath(path string) (string, error) {
+	if isURL(path) {
+		return fw.getURLHash(path)
+	}
+	return fw.getFileHash(path)
+}
+
+// getURLHash calculates CRC32 hash of a URL's ETag or content
+func (fw *FileWatcher) getURLHash(urlStr string) (string, error) {
+	// First try to get ETag from HEAD request
+	resp, err := http.Head(urlStr)
+	if err == nil {
+		defer resp.Body.Close()
+		etag := resp.Header.Get("ETag")
+		lastModified := resp.Header.Get("Last-Modified")
+		if etag != "" || lastModified != "" {
+			// Use ETag and Last-Modified as a quick hash
+			combined := etag + lastModified
+			hash := crc32.ChecksumIEEE([]byte(combined))
+			return fmt.Sprintf("%08x", hash), nil
+		}
+	}
+
+	// If HEAD doesn't work or no ETag, fall back to content hash (expensive)
+	resp, err = http.Get(urlStr)
+	if err != nil {
+		return "", fmt.Errorf("failed to fetch URL: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("HTTP error: %d %s", resp.StatusCode, resp.Status)
+	}
+
+	hash := crc32.NewIEEE()
+	if _, err := io.Copy(hash, resp.Body); err != nil {
+		return "", fmt.Errorf("failed to calculate hash: %w", err)
+	}
+
+	return fmt.Sprintf("%08x", hash.Sum32()), nil
 }

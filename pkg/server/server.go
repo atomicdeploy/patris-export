@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -79,7 +80,20 @@ func (s *Server) openDatabase() (*paradox.Database, func(), error) {
 	var fileToOpen string
 	var cleanup func()
 
-	if s.useTempFile {
+	// Check if dbPath is a URL
+	if isURL(s.dbPath) {
+		tempFileInfo, err := filecopy.DownloadToTemp(s.dbPath)
+		if err != nil {
+			return nil, nil, fmt.Errorf("failed to download file from URL: %w", err)
+		}
+
+		fileToOpen = tempFileInfo.TempPath
+		cleanup = func() {
+			filecopy.CleanupTemp(tempFileInfo.TempPath)
+		}
+
+		log.Printf("🌐 Downloaded from URL (checksum: %s)", tempFileInfo.Hash)
+	} else if s.useTempFile {
 		tempFileInfo, err := filecopy.CopyToTemp(s.dbPath)
 		if err != nil {
 			return nil, nil, fmt.Errorf("failed to copy file to temp: %w", err)
@@ -320,6 +334,7 @@ func (s *Server) broadcastUpdate() {
 }
 
 // StartWatching starts watching the database file for changes with the specified debounce duration
+// For URLs, it uses polling mode with the duration as polling interval (default 5 minutes)
 func (s *Server) StartWatching(debounceDuration time.Duration) error {
 	fw, err := watcher.NewFileWatcher()
 	if err != nil {
@@ -328,17 +343,43 @@ func (s *Server) StartWatching(debounceDuration time.Duration) error {
 
 	s.watcher = fw
 
-	if err := fw.Watch(s.dbPath, func(path string) {
-		log.Printf("🔄 File changed: %s", filepath.Base(path))
-		s.broadcastUpdate()
-	}, debounceDuration); err != nil {
-		return fmt.Errorf("failed to watch file: %w", err)
+	// Check if dbPath is a URL
+	if isURL(s.dbPath) {
+		// Use polling mode for URLs (default 5 minutes if debounce is 0)
+		pollInterval := debounceDuration
+		if pollInterval == 0 {
+			pollInterval = 5 * time.Minute
+		}
+		log.Printf("🔄 Using polling mode for URL with interval: %v", pollInterval)
+
+		if err := fw.Poll(s.dbPath, func(path string) {
+			log.Printf("🔄 File changed: %s", path)
+			s.broadcastUpdate()
+		}, pollInterval); err != nil {
+			return fmt.Errorf("failed to poll file: %w", err)
+		}
+
+		log.Printf("👀 Polling URL: %s (interval: %v)", s.dbPath, pollInterval)
+	} else {
+		// Use fsnotify for local files
+		if err := fw.Watch(s.dbPath, func(path string) {
+			log.Printf("🔄 File changed: %s", filepath.Base(path))
+			s.broadcastUpdate()
+		}, debounceDuration); err != nil {
+			return fmt.Errorf("failed to watch file: %w", err)
+		}
+
+		fw.Start()
+		log.Printf("👀 Watching database file: %s", filepath.Base(s.dbPath))
 	}
 
-	fw.Start()
-	log.Printf("👀 Watching database file: %s", filepath.Base(s.dbPath))
-
 	return nil
+}
+
+// isURL checks if a path string is a URL
+func isURL(path string) bool {
+	// Import strings at the top if not already imported
+	return strings.HasPrefix(path, "http://") || strings.HasPrefix(path, "https://")
 }
 
 // convertAndTransformRecords converts record text encoding and transforms them

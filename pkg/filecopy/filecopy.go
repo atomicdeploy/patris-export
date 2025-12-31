@@ -4,8 +4,11 @@ import (
 	"fmt"
 	"hash/crc32"
 	"io"
+	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -147,4 +150,115 @@ func CleanupTemp(tempPath string) error {
 	}
 
 	return nil
+}
+
+// IsURL checks if a path string is a URL
+func IsURL(path string) bool {
+	// Quick check for common URL schemes
+	if strings.HasPrefix(path, "http://") || strings.HasPrefix(path, "https://") {
+		return true
+	}
+
+	// More thorough check using net/url
+	u, err := url.Parse(path)
+	if err != nil {
+		return false
+	}
+
+	// A valid URL should have a scheme and host
+	return u.Scheme != "" && u.Host != ""
+}
+
+// DownloadToTemp downloads a file from a URL to a temporary location
+// The hash is calculated during the download operation in a single pass for efficiency.
+// Returns information about the downloaded file.
+func DownloadToTemp(urlStr string) (*FileInfo, error) {
+	// Parse URL to get filename
+	u, err := url.Parse(urlStr)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse URL: %w", err)
+	}
+
+	// Extract filename from URL path
+	baseName := filepath.Base(u.Path)
+	if baseName == "/" || baseName == "." || baseName == "" {
+		baseName = "download.db"
+	}
+
+	// Create temp directory
+	tempDir := filepath.Join(os.TempDir(), "patris-export")
+	if err := os.MkdirAll(tempDir, 0755); err != nil {
+		return nil, fmt.Errorf("failed to create temp directory: %w", err)
+	}
+
+	// Create a unique temp filename using URL hash
+	urlHash := crc32.ChecksumIEEE([]byte(urlStr))
+	tempFileName := fmt.Sprintf("%s.%08x", baseName, urlHash)
+	tempPath := filepath.Join(tempDir, tempFileName)
+
+	// Download file
+	resp, err := http.Get(urlStr)
+	if err != nil {
+		return nil, fmt.Errorf("failed to download file: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("failed to download file: HTTP %d %s", resp.StatusCode, resp.Status)
+	}
+
+	// Create temp file
+	dest, err := os.OpenFile(tempPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create temp file: %w", err)
+	}
+
+	// Ensure destination is closed properly
+	var closeErr error
+	defer func() {
+		if cerr := dest.Close(); cerr != nil && closeErr == nil {
+			closeErr = cerr
+		}
+	}()
+
+	// Calculate hash while downloading in chunks
+	hash := crc32.NewIEEE()
+	buffer := make([]byte, ChunkSize)
+	var totalSize int64
+
+	for {
+		n, readErr := resp.Body.Read(buffer)
+		if readErr != nil && readErr != io.EOF {
+			return nil, fmt.Errorf("failed to read from URL: %w", readErr)
+		}
+		if n == 0 {
+			break
+		}
+
+		totalSize += int64(n)
+
+		// Update hash
+		if _, err := hash.Write(buffer[:n]); err != nil {
+			return nil, fmt.Errorf("failed to update hash: %w", err)
+		}
+
+		// Write to destination
+		if _, err := dest.Write(buffer[:n]); err != nil {
+			closeErr = err
+			return nil, fmt.Errorf("failed to write to temp file: %w", err)
+		}
+	}
+
+	// Check for deferred close errors
+	if closeErr != nil {
+		return nil, fmt.Errorf("failed to close temp file: %w", closeErr)
+	}
+
+	return &FileInfo{
+		SourcePath: urlStr,
+		TempPath:   tempPath,
+		Hash:       fmt.Sprintf("%08x", hash.Sum32()),
+		Size:       totalSize,
+		ModTime:    time.Now(),
+	}, nil
 }

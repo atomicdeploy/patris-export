@@ -153,15 +153,34 @@ func runConvert(cmd *cobra.Command, args []string) {
 		}
 		defer fw.Close()
 
-		if err := fw.Watch(dbFile, func(path string) {
-			infoColor.Printf("🔄 File changed: %s\n", filepath.Base(path))
-			convertFile(path, charMap)
-		}, debounceDuration); err != nil {
-			errorColor.Printf("❌ Failed to watch file: %v\n", err)
-			os.Exit(1)
-		}
+		// Check if dbFile is a URL
+		if filecopy.IsURL(dbFile) {
+			// Use polling mode for URLs (default 5 minutes)
+			pollInterval := 5 * time.Minute
+			if debounceDuration > 0 {
+				pollInterval = debounceDuration
+			}
+			infoColor.Printf("🔄 Using polling mode with interval: %v\n", pollInterval)
 
-		fw.Start()
+			if err := fw.Poll(dbFile, func(path string) {
+				infoColor.Printf("🔄 File changed: %s\n", path)
+				convertFile(path, charMap)
+			}, pollInterval); err != nil {
+				errorColor.Printf("❌ Failed to poll file: %v\n", err)
+				os.Exit(1)
+			}
+		} else {
+			// Use fsnotify for local files
+			if err := fw.Watch(dbFile, func(path string) {
+				infoColor.Printf("🔄 File changed: %s\n", filepath.Base(path))
+				convertFile(path, charMap)
+			}, debounceDuration); err != nil {
+				errorColor.Printf("❌ Failed to watch file: %v\n", err)
+				os.Exit(1)
+			}
+
+			fw.Start()
+		}
 
 		// Wait forever
 		select {}
@@ -321,7 +340,11 @@ func parseDebounceDuration(durationStr string) time.Duration {
 
 // displayFileStatus shows the file access mode status message
 func displayFileStatus(filePath string) {
-	if directAccess {
+	isURL := filecopy.IsURL(filePath)
+	if isURL {
+		infoColor.Printf("🌐 URL source detected: %s\n", filePath)
+		infoColor.Println("📋 Will download and use temporary file copy")
+	} else if directAccess {
 		warningColor.Printf("⚠️  Direct file access mode for: %s (may conflict with BDE writes)\n", filepath.Base(filePath))
 	} else {
 		infoColor.Printf("📋 Using temporary file copy for: %s\n", filepath.Base(filePath))
@@ -331,6 +354,29 @@ func displayFileStatus(filePath string) {
 // prepareFileForReading prepares a database file for reading, optionally copying to temp
 // Returns the file path to open and a cleanup function
 func prepareFileForReading(dbFile string) (fileToOpen string, cleanup func(), err error) {
+	// Check if the path is a URL
+	if filecopy.IsURL(dbFile) {
+		infoColor.Printf("🌐 Downloading from URL: %s\n", dbFile)
+
+		tempFileInfo, err := filecopy.DownloadToTemp(dbFile)
+		if err != nil {
+			return "", nil, fmt.Errorf("failed to download file from URL: %w", err)
+		}
+
+		successColor.Printf("✅ Downloaded file checksum: %s\n", tempFileInfo.Hash)
+		if verbose {
+			infoColor.Printf("   Size: %d bytes\n", tempFileInfo.Size)
+			infoColor.Printf("   Temp path: %s\n", tempFileInfo.TempPath)
+		}
+
+		cleanup = func() {
+			filecopy.CleanupTemp(tempFileInfo.TempPath)
+		}
+
+		return tempFileInfo.TempPath, cleanup, nil
+	}
+
+	// For local files, check directAccess flag
 	if !directAccess {
 		infoColor.Printf("📋 Copying database to temp location: %s\n", filepath.Base(dbFile))
 
