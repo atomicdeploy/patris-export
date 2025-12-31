@@ -58,10 +58,7 @@ Supports Persian/Farsi encoding conversion and file watching.
 	rootCmd.PersistentFlags().StringVarP(&charMapFile, "charmap", "c", "", "Path to character mapping file (farsi_chars.txt)")
 	rootCmd.PersistentFlags().StringVarP(&outputDir, "output", "o", ".", "Output directory for converted files")
 	rootCmd.PersistentFlags().BoolVarP(&verbose, "verbose", "v", false, "Enable verbose logging")
-
-	// Set platform-specific default for direct access (true on Linux, false on Windows)
-	platformDefault := getDefaultDirectAccess()
-	rootCmd.PersistentFlags().BoolVarP(&directAccess, "direct-access", "d", platformDefault, "Access database file directly without temp copy (may conflict with BDE writes on Windows)")
+	rootCmd.PersistentFlags().BoolVarP(&directAccess, "direct-access", "d", false, "Access database file directly without temp copy (may conflict with BDE writes)")
 
 	// Convert command
 	convertCmd := &cobra.Command{

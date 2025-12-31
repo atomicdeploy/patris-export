@@ -86,21 +86,19 @@ patris-export convert kala.db -f json -w --debounce 5s
 
 ### Avoid Write-Lock Conflicts
 
-On Windows, temporary file copies are used by default to prevent write-lock conflicts with applications like Borland Database Engine (BDE) that may have the file open for writing. On Linux and other Unix systems, direct access is the default for better performance.
+By default, temporary file copies are used to prevent write-lock conflicts with applications like Borland Database Engine (BDE) that may have the file open for writing. This is especially important when accessing files on Windows shares (SMB) or when the original application is still running.
 
 ```bash
-# Default behavior varies by platform:
-# - Linux/Unix: direct access (better performance)
-# - Windows: temp file copy (avoid BDE conflicts)
+# Default behavior - uses temp file copy (recommended)
 patris-export convert kala.db -f json
 patris-export serve kala.db
 
-# Override defaults with --direct-access flag
-patris-export convert kala.db -f json --direct-access=false  # Use temp file
-patris-export serve kala.db --direct-access=true            # Use direct access
+# Override to use direct access for better performance
+patris-export convert kala.db -f json --direct-access=true   # Direct access
+patris-export serve kala.db -d                                # Direct access (short form)
 ```
 
-When using the temp file feature (--direct-access=false):
+When using the temp file feature (--direct-access=false, the default):
 - A CRC32 checksum is calculated and displayed for the source file
 - The file is copied to the system temp directory in 10MB chunks
 - The original file is opened in read-only mode and released immediately after copying
@@ -216,7 +214,7 @@ go test -v ./...
 - `-c, --charmap` - Path to character mapping file (farsi_chars.txt)
 - `-o, --output` - Output directory for converted files (default: current directory)
 - `-v, --verbose` - Enable verbose logging
-- `-d, --direct-access` - Access database file directly without temp copy (default: true on Linux, false on Windows)
+- `-d, --direct-access` - Access database file directly without temp copy (default: false)
 
 ### Commands
 
