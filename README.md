@@ -86,25 +86,26 @@ patris-export convert kala.db -f json -w --debounce 5s
 
 ### Avoid Write-Lock Conflicts
 
-The `serve` command uses temporary file copies by default to prevent write-lock conflicts with applications like Borland Database Engine (BDE) that may have the file open for writing. The `convert` command uses direct access by default for better performance.
+On Windows, temporary file copies are used by default to prevent write-lock conflicts with applications like Borland Database Engine (BDE) that may have the file open for writing. On Linux and other Unix systems, direct access is the default for better performance.
 
 ```bash
-# Convert command - direct access by default
+# Default behavior varies by platform:
+# - Linux/Unix: direct access (better performance)
+# - Windows: temp file copy (avoid BDE conflicts)
 patris-export convert kala.db -f json
-
-# Serve command - temp file by default (recommended for watch mode)
 patris-export serve kala.db
 
 # Override defaults with --direct-access flag
-patris-export convert kala.db -f json --direct-access=false  # Use temp file for convert
-patris-export serve kala.db --direct-access=true            # Use direct access for serve
+patris-export convert kala.db -f json --direct-access=false  # Use temp file
+patris-export serve kala.db --direct-access=true            # Use direct access
 ```
 
-When using the temp file feature (directAccess=false):
+When using the temp file feature (--direct-access=false):
 - A CRC32 checksum is calculated and displayed for the source file
 - The file is copied to the system temp directory in 10MB chunks
-- The original file is released immediately after copying
+- The original file is opened in read-only mode and released immediately after copying
 - File modification time is preserved on the copy
+- Hash is calculated during copy in a single pass for efficiency
 
 Use `--verbose` flag to see detailed information about the temp file operation:
 
@@ -215,7 +216,7 @@ go test -v ./...
 - `-c, --charmap` - Path to character mapping file (farsi_chars.txt)
 - `-o, --output` - Output directory for converted files (default: current directory)
 - `-v, --verbose` - Enable verbose logging
-- `-d, --direct-access` - Access database file directly without temp copy (default: false for serve, true for convert)
+- `-d, --direct-access` - Access database file directly without temp copy (default: true on Linux, false on Windows)
 
 ### Commands
 
@@ -226,7 +227,6 @@ Convert a Paradox database file to JSON or CSV.
 - `-f, --format` - Output format: json or csv (default: json)
 - `-w, --watch` - Watch file for changes and auto-convert
 - `--debounce` - Debounce duration for watch mode (default: 1s, examples: 0s, 500ms, 5s)
-- `-d, --direct-access` - Access database file directly without temp copy (default: true for convert)
 
 #### `info [database-file]`
 Display information about a Paradox database file (fields, record count, etc.)
@@ -241,7 +241,6 @@ Start the REST API and WebSocket server.
 - `-a, --addr` - Server address (default: :8080)
 - `-w, --watch` - Watch file for changes and broadcast updates (default: true)
 - `--debounce` - Debounce duration for watch mode (default: 0s, examples: 500ms, 1s, 5s)
-- `-d, --direct-access` - Access database file directly without temp copy (default: false for serve)
 
 ## 🔧 API Reference
 

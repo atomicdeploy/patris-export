@@ -23,13 +23,12 @@ var (
 	BuildDate = "unknown"
 
 	// Global flags
-	charMapFile    string
-	outputDir      string
-	outputFormat   string
-	watchMode      bool
-	verbose        bool
-	debounceString string
-	directAccess   bool
+	charMapFile  string
+	outputDir    string
+	outputFormat string
+	watchMode    bool
+	verbose      bool
+	directAccess bool
 
 	// Color definitions
 	successColor = color.New(color.FgGreen, color.Bold)
@@ -59,7 +58,10 @@ Supports Persian/Farsi encoding conversion and file watching.
 	rootCmd.PersistentFlags().StringVarP(&charMapFile, "charmap", "c", "", "Path to character mapping file (farsi_chars.txt)")
 	rootCmd.PersistentFlags().StringVarP(&outputDir, "output", "o", ".", "Output directory for converted files")
 	rootCmd.PersistentFlags().BoolVarP(&verbose, "verbose", "v", false, "Enable verbose logging")
-	rootCmd.PersistentFlags().BoolVarP(&directAccess, "direct-access", "d", false, "Access database file directly without temp copy (may conflict with BDE writes)")
+
+	// Set platform-specific default for direct access (true on Linux, false on Windows)
+	platformDefault := getDefaultDirectAccess()
+	rootCmd.PersistentFlags().BoolVarP(&directAccess, "direct-access", "d", platformDefault, "Access database file directly without temp copy (may conflict with BDE writes on Windows)")
 
 	// Convert command
 	convertCmd := &cobra.Command{
@@ -71,8 +73,6 @@ Supports Persian/Farsi encoding conversion and file watching.
 	convertCmd.Flags().StringVarP(&outputFormat, "format", "f", "json", "Output format (json or csv)")
 	convertCmd.Flags().BoolVarP(&watchMode, "watch", "w", false, "Watch file for changes and auto-convert")
 	convertCmd.Flags().String("debounce", "1s", "Debounce duration for watch mode (e.g., 0s, 500ms, 1s, 5s)")
-	convertCmd.Flags().BoolP("direct-access", "d", true, "Access database file directly without temp copy (default for convert)")
-	convertCmd.Flags().Lookup("direct-access").Hidden = false // Override global default for convert command
 
 	// Info command
 	infoCmd := &cobra.Command{
@@ -111,10 +111,6 @@ Supports Persian/Farsi encoding conversion and file watching.
 
 func runConvert(cmd *cobra.Command, args []string) {
 	dbFile := args[0]
-
-	// Get command-specific direct-access flag (overrides global default for convert)
-	cmdDirectAccess, _ := cmd.Flags().GetBool("direct-access")
-	directAccess = cmdDirectAccess
 
 	// Load character mapping if provided, otherwise use embedded default
 	var charMap converter.CharMapping

@@ -23,9 +23,10 @@ type FileInfo struct {
 	ModTime    time.Time
 }
 
-// CalculateHash calculates the CRC32 hash of a file
+// CalculateHash calculates the CRC32 hash of a file.
+// The file is opened in read-only mode (os.Open uses O_RDONLY by default).
 func CalculateHash(filePath string) (string, error) {
-	file, err := os.Open(filePath)
+	file, err := os.Open(filePath) // Opens in read-only mode
 	if err != nil {
 		return "", fmt.Errorf("failed to open file for hashing: %w", err)
 	}
@@ -40,7 +41,9 @@ func CalculateHash(filePath string) (string, error) {
 }
 
 // CopyToTemp copies a database file to a temporary location with chunked reading
-// and preserves the modification time. Returns information about the copied file.
+// and preserves the modification time. The hash is calculated during the copy operation
+// in a single pass for efficiency. Returns information about the copied file.
+// The source file is opened in read-only mode (os.Open uses O_RDONLY by default).
 func CopyToTemp(sourcePath string) (*FileInfo, error) {
 	// Get file info
 	sourceInfo, err := os.Stat(sourcePath)
@@ -48,14 +51,8 @@ func CopyToTemp(sourcePath string) (*FileInfo, error) {
 		return nil, fmt.Errorf("failed to stat source file: %w", err)
 	}
 
-	// Calculate hash of source file
-	hash, err := CalculateHash(sourcePath)
-	if err != nil {
-		return nil, fmt.Errorf("failed to calculate hash: %w", err)
-	}
-
-	// Open source file
-	source, err := os.Open(sourcePath)
+	// Open source file in read-only mode
+	source, err := os.Open(sourcePath) // Opens in read-only mode (O_RDONLY)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open source file: %w", err)
 	}
@@ -86,22 +83,42 @@ func CopyToTemp(sourcePath string) (*FileInfo, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to create temp file: %w", err)
 	}
-	defer dest.Close()
 
-	// Copy file in chunks
+	// Ensure destination is closed properly, handling any write errors
+	var closeErr error
+	defer func() {
+		if cerr := dest.Close(); cerr != nil && closeErr == nil {
+			closeErr = cerr
+		}
+	}()
+
+	// Calculate hash while copying file in chunks (single pass optimization)
+	hash := crc32.NewIEEE()
 	buffer := make([]byte, ChunkSize)
 	for {
-		n, err := source.Read(buffer)
-		if err != nil && err != io.EOF {
-			return nil, fmt.Errorf("failed to read from source: %w", err)
+		n, readErr := source.Read(buffer)
+		if readErr != nil && readErr != io.EOF {
+			return nil, fmt.Errorf("failed to read from source: %w", readErr)
 		}
 		if n == 0 {
 			break
 		}
 
+		// Update hash
+		if _, err := hash.Write(buffer[:n]); err != nil {
+			return nil, fmt.Errorf("failed to update hash: %w", err)
+		}
+
+		// Write to destination
 		if _, err := dest.Write(buffer[:n]); err != nil {
+			closeErr = err
 			return nil, fmt.Errorf("failed to write to temp file: %w", err)
 		}
+	}
+
+	// Check for deferred close errors
+	if closeErr != nil {
+		return nil, fmt.Errorf("failed to close temp file: %w", closeErr)
 	}
 
 	// Preserve modification time
@@ -113,7 +130,7 @@ func CopyToTemp(sourcePath string) (*FileInfo, error) {
 	return &FileInfo{
 		SourcePath: sourcePath,
 		TempPath:   tempPath,
-		Hash:       hash,
+		Hash:       fmt.Sprintf("%08x", hash.Sum32()),
 		Size:       sourceInfo.Size(),
 		ModTime:    modTime,
 	}, nil
