@@ -9,8 +9,10 @@ A fast and performant application for reading, parsing, and converting Paradox/B
 ## ✨ Features
 
 - 🔄 **Convert Paradox DB files** to JSON or CSV formats
+- 🌐 **URL support** - Convert database files directly from HTTP/HTTPS URLs
 - 🎯 **Persian/Farsi encoding support** - Automatically converts Patris81 proprietary encoding
 - 👀 **File watching** - Automatically converts files when they change
+- 🔄 **URL polling** - Monitor remote URLs for changes with configurable intervals
 - 🔒 **Write-lock prevention** - Copies files to temp location to avoid BDE conflicts
 - 🔐 **File integrity** - CRC32 checksum calculation and verification
 - 🌐 **REST API** - HTTP JSON API for accessing database records
@@ -63,6 +65,24 @@ patris-export convert kala.db -f json -o output/
 patris-export convert kala.db -f csv -o output/
 ```
 
+### Convert Database from URL
+
+You can also convert database files directly from URLs:
+
+```bash
+# Download and convert from a URL
+patris-export convert http://example.com/database.db -f json -o output/
+
+# Convert from HTTPS URL
+patris-export convert https://example.com/data/kala.db -f csv -o output/
+```
+
+When converting from a URL:
+- The file is automatically downloaded to a temporary location
+- Direct access mode is disabled (temp file is always used)
+- The downloaded file is cleaned up after conversion
+- Watch mode uses polling instead of filesystem events
+
 ### Watch File for Changes
 
 ```bash
@@ -82,6 +102,21 @@ patris-export convert kala.db -f json -w --debounce 500ms
 
 # 5 second debounce
 patris-export convert kala.db -f json -w --debounce 5s
+```
+
+### Watch URL for Changes
+
+When watching a URL, polling mode is used with a configurable interval (default: 5 minutes):
+
+```bash
+# Watch URL with default 5-minute polling interval
+patris-export convert http://example.com/database.db -f json -w
+
+# Watch URL with custom polling interval (30 seconds)
+patris-export convert http://example.com/database.db -f json -w --debounce 30s
+
+# Watch URL with 10-minute polling interval
+patris-export convert http://example.com/database.db -f json -w --debounce 10m
 ```
 
 ### Avoid Write-Lock Conflicts
@@ -129,6 +164,16 @@ patris-export company company.inf -c testdata/farsi_chars.txt
 patris-export serve kala.db -a :8080
 ```
 
+You can also serve from a URL:
+
+```bash
+# Serve from URL with default 5-minute polling
+patris-export serve http://example.com/database.db -a :8080
+
+# Serve from URL with custom 2-minute polling interval
+patris-export serve http://example.com/database.db -a :8080 --debounce 2m
+```
+
 Then access:
 - Web interface: http://localhost:8080
 - API records: http://localhost:8080/api/records
@@ -140,12 +185,14 @@ The server watches the database file by default and broadcasts updates immediate
 You can customize the debounce duration for the server with the `--debounce` flag:
 
 ```bash
-# 500ms debounce for server updates
+# 500ms debounce for server updates (local files)
 patris-export serve kala.db -a :8080 --debounce 500ms
 
 # 1 second debounce
 patris-export serve kala.db -a :8080 --debounce 1s
 ```
+
+When serving from a URL, the watch mode uses polling instead of filesystem events. If `--debounce` is set to `0s` or not specified, it defaults to 5 minutes for URLs.
 
 ## 🎯 Using Character Mapping
 
@@ -218,13 +265,22 @@ go test -v ./...
 
 ### Commands
 
-#### `convert [database-file]`
-Convert a Paradox database file to JSON or CSV.
+#### `convert [database-file-or-url]`
+Convert a Paradox database file or URL to JSON or CSV.
+
+The source can be:
+- A local file path (e.g., `./kala.db`)
+- An HTTP/HTTPS URL (e.g., `http://example.com/database.db`)
 
 **Flags:**
 - `-f, --format` - Output format: json or csv (default: json)
-- `-w, --watch` - Watch file for changes and auto-convert
-- `--debounce` - Debounce duration for watch mode (default: 1s, examples: 0s, 500ms, 5s)
+- `-w, --watch` - Watch file/URL for changes and auto-convert
+- `--debounce` - Debounce/polling interval for watch mode (default: 1s for local files, 5m for URLs)
+
+**URL-specific behavior:**
+- Files are automatically downloaded to a temporary location
+- Direct access mode is disabled for URLs
+- Watch mode uses polling instead of filesystem events
 
 #### `info [database-file]`
 Display information about a Paradox database file (fields, record count, etc.)
@@ -232,13 +288,21 @@ Display information about a Paradox database file (fields, record count, etc.)
 #### `company [company.inf]`
 Parse and display company information from company.inf file.
 
-#### `serve [database-file]`
+#### `serve [database-file-or-url]`
 Start the REST API and WebSocket server.
+
+The source can be:
+- A local file path (e.g., `./kala.db`)
+- An HTTP/HTTPS URL (e.g., `http://example.com/database.db`)
 
 **Flags:**
 - `-a, --addr` - Server address (default: :8080)
-- `-w, --watch` - Watch file for changes and broadcast updates (default: true)
-- `--debounce` - Debounce duration for watch mode (default: 0s, examples: 500ms, 1s, 5s)
+- `-w, --watch` - Watch file/URL for changes and broadcast updates (default: true)
+- `--debounce` - Debounce/polling interval for watch mode (default: 0s for local files, 5m for URLs)
+
+**URL-specific behavior:**
+- Files are downloaded for each request
+- Watch mode uses polling with configurable interval
 
 ## 🔧 API Reference
 

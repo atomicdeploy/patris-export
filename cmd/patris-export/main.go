@@ -62,14 +62,24 @@ Supports Persian/Farsi encoding conversion and file watching.
 
 	// Convert command
 	convertCmd := &cobra.Command{
-		Use:   "convert [database-file]",
-		Short: "🔄 Convert a Paradox database file to JSON or CSV",
+		Use:   "convert [database-file-or-url]",
+		Short: "🔄 Convert a Paradox database file or URL to JSON or CSV",
+		Long: `Convert a Paradox database file or URL to JSON or CSV format.
+
+The database-file-or-url argument can be:
+  - A local file path (e.g., ./kala.db or /path/to/database.db)
+  - A URL (e.g., http://example.com/database.db or https://example.com/data/file.db)
+
+When a URL is provided:
+  - The file is automatically downloaded to a temporary location
+  - Direct access mode is disabled (temp file is always used)
+  - Watch mode uses polling with configurable interval (default: 5m)`,
 		Args:  cobra.ExactArgs(1),
 		Run:   runConvert,
 	}
 	convertCmd.Flags().StringVarP(&outputFormat, "format", "f", "json", "Output format (json or csv)")
-	convertCmd.Flags().BoolVarP(&watchMode, "watch", "w", false, "Watch file for changes and auto-convert")
-	convertCmd.Flags().String("debounce", "1s", "Debounce duration for watch mode (e.g., 0s, 500ms, 1s, 5s)")
+	convertCmd.Flags().BoolVarP(&watchMode, "watch", "w", false, "Watch file/URL for changes and auto-convert")
+	convertCmd.Flags().String("debounce", "1s", "Debounce/polling interval for watch mode (e.g., 1s, 5s, 5m). For URLs: polling interval (default: 5m)")
 
 	// Info command
 	infoCmd := &cobra.Command{
@@ -89,14 +99,23 @@ Supports Persian/Farsi encoding conversion and file watching.
 
 	// Serve command
 	serveCmd := &cobra.Command{
-		Use:   "serve [database-file]",
+		Use:   "serve [database-file-or-url]",
 		Short: "🌐 Start REST API and WebSocket server",
+		Long: `Start a REST API and WebSocket server for the database.
+
+The database-file-or-url argument can be:
+  - A local file path (e.g., ./kala.db or /path/to/database.db)
+  - A URL (e.g., http://example.com/database.db)
+
+When a URL is provided:
+  - The file is downloaded to a temporary location for each request
+  - Watch mode uses polling with configurable interval (default: 5m)`,
 		Args:  cobra.ExactArgs(1),
 		Run:   runServe,
 	}
 	serveCmd.Flags().StringP("addr", "a", ":8080", "Server address (e.g., :8080)")
-	serveCmd.Flags().BoolP("watch", "w", true, "Watch file for changes and broadcast updates")
-	serveCmd.Flags().String("debounce", "0s", "Debounce duration for watch mode (e.g., 0s, 500ms, 1s, 5s)")
+	serveCmd.Flags().BoolP("watch", "w", true, "Watch file/URL for changes and broadcast updates")
+	serveCmd.Flags().String("debounce", "0s", "Debounce/polling interval for watch mode. For local files: debounce (default: 0s). For URLs: polling interval (default: 5m)")
 
 	rootCmd.AddCommand(convertCmd, infoCmd, companyCmd, serveCmd)
 
