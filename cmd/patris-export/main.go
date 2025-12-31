@@ -11,6 +11,7 @@ import (
 	"github.com/atomicdeploy/patris-export/pkg/converter"
 	"github.com/atomicdeploy/patris-export/pkg/filecopy"
 	"github.com/atomicdeploy/patris-export/pkg/paradox"
+	"github.com/atomicdeploy/patris-export/pkg/processmon"
 	"github.com/atomicdeploy/patris-export/pkg/server"
 	"github.com/atomicdeploy/patris-export/pkg/watcher"
 	"github.com/fatih/color"
@@ -137,6 +138,9 @@ func runConvert(cmd *cobra.Command, args []string) {
 	// Display temp file setting
 	displayFileStatus(dbFile)
 
+	// Check for process conflicts
+	checkProcessConflicts(dbFile)
+
 	if watchMode {
 		// Parse debounce duration
 		debounceStr, _ := cmd.Flags().GetString("debounce")
@@ -235,6 +239,9 @@ func convertFile(dbFile string, charMap converter.CharMapping) {
 func runInfo(cmd *cobra.Command, args []string) {
 	dbFile := args[0]
 
+	// Check for process conflicts
+	checkProcessConflicts(dbFile)
+
 	fileToOpen, cleanup, err := prepareFileForReading(dbFile)
 	if err != nil {
 		errorColor.Printf("❌ %v\n", err)
@@ -331,6 +338,33 @@ func displayFileStatus(filePath string) {
 	}
 }
 
+// checkProcessConflicts checks for potential conflicts with running processes
+func checkProcessConflicts(dbFile string) {
+	// Check for running patris81.exe processes
+	patris81Processes, err := processmon.FindProcessByName("patris81.exe")
+	if err == nil && len(patris81Processes) > 0 {
+		warningColor.Printf("⚠️  Warning: Found %d running patris81.exe process(es)\n", len(patris81Processes))
+		for _, p := range patris81Processes {
+			infoColor.Printf("   - PID %d: %s\n", p.PID, p.Exe)
+		}
+		if directAccess {
+			warningColor.Println("   ⚠️  Direct access mode may cause conflicts. Consider using --direct-access=false")
+		}
+	}
+
+	// Check if the file is currently open by any process
+	if directAccess {
+		fileInfo, err := processmon.FindProcessesWithFile(dbFile)
+		if err == nil && len(fileInfo.Processes) > 0 {
+			warningColor.Printf("⚠️  Warning: File is currently open by %d process(es)\n", len(fileInfo.Processes))
+			for _, p := range fileInfo.Processes {
+				infoColor.Printf("   - PID %d: %s\n", p.PID, p.Name)
+			}
+			warningColor.Println("   ⚠️  This may cause conflicts in direct access mode. Consider using --direct-access=false")
+		}
+	}
+}
+
 // prepareFileForReading prepares a database file for reading, optionally copying to temp
 // Returns the file path to open and a cleanup function
 func prepareFileForReading(dbFile string) (fileToOpen string, cleanup func(), err error) {
@@ -397,6 +431,9 @@ func runServe(cmd *cobra.Command, args []string) {
 
 	// Display temp file setting
 	displayFileStatus(dbFile)
+
+	// Check for process conflicts
+	checkProcessConflicts(dbFile)
 
 	// Start file watching if enabled
 	if watchFile {
