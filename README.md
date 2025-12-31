@@ -15,6 +15,8 @@ A fast and performant application for reading, parsing, and converting Paradox/B
 - 🔐 **File integrity** - CRC32 checksum calculation and verification
 - 🌐 **REST API** - HTTP JSON API for accessing database records
 - 🔌 **WebSocket support** - Real-time updates when database changes
+- 🔍 **Process monitoring** - Detect running Patris81 instances and file locks
+- ⚠️ **Conflict detection** - Warns about potential conflicts in direct access mode
 - 🎨 **Beautiful CLI** - Colorful terminal output with emojis
 - 🏢 **Company.inf support** - Parse company information files
 - ⚡ **Fast and lightweight** - Written in Go with native performance
@@ -275,12 +277,54 @@ Returns database schema information.
 }
 ```
 
+#### `GET /api/processes/patris81`
+Returns information about running patris81.exe processes.
+
+**Response:**
+```json
+{
+  "success": true,
+  "count": 1,
+  "processes": [
+    {
+      "pid": 1234,
+      "name": "patris81.exe",
+      "exe": "C:\\Path\\To\\patris81.exe",
+      "cmdline": "patris81.exe",
+      "create_time": 1672531200000,
+      "memory_usage": 52428800
+    }
+  ]
+}
+```
+
+#### `GET /api/processes/file`
+Returns information about processes that have the database file open.
+
+**Response:**
+```json
+{
+  "success": true,
+  "file": "kala.db",
+  "in_use": true,
+  "count": 1,
+  "processes": [
+    {
+      "pid": 5678,
+      "name": "patris81.exe",
+      "exe": "C:\\Path\\To\\patris81.exe",
+      "cmdline": "patris81.exe"
+    }
+  ]
+}
+```
+
 ### WebSocket
 
 #### `ws://localhost:8080/ws`
-Connect to receive real-time database updates.
+Connect to receive real-time database updates and process monitoring information.
 
-**Message format:**
+**Database update message format:**
 ```json
 {
   "type": "update",
@@ -288,6 +332,90 @@ Connect to receive real-time database updates.
   "count": 100,
   "records": [...]
 }
+```
+
+**Process monitoring message format:**
+```json
+{
+  "type": "process_info",
+  "timestamp": "2025-12-31T12:00:00Z",
+  "patris81": {
+    "count": 1,
+    "processes": [
+      {
+        "pid": 1234,
+        "name": "patris81.exe",
+        "exe": "C:\\Path\\To\\patris81.exe"
+      }
+    ]
+  },
+  "file_access": {
+    "file": "kala.db",
+    "in_use": true,
+    "count": 1,
+    "processes": [
+      {
+        "pid": 5678,
+        "name": "patris81.exe"
+      }
+    ]
+  }
+}
+```
+
+## ⚙️ Process Monitoring
+
+The application can detect and monitor:
+- Running instances of `patris81.exe`
+- Processes that have the database file open
+
+### Using Process Monitoring
+
+When using direct access mode (`--direct-access=true`), the application will:
+- Check for running `patris81.exe` processes
+- Check if the database file is open by another process
+- Display warnings if conflicts are detected
+
+**Example:**
+```bash
+# Direct access mode with conflict detection
+patris-export convert kala.db -f json --direct-access=true
+
+# Output:
+# ⚠️  Warning: Found 1 running patris81.exe process(es)
+#    - PID 1234: C:\Path\To\patris81.exe
+#    ⚠️  Direct access mode may cause conflicts. Consider using --direct-access=false
+```
+
+### Process Monitoring API
+
+Query process information via REST endpoints:
+
+```bash
+# Check for running patris81.exe processes
+curl http://localhost:8080/api/processes/patris81
+
+# Check which processes have the database file open
+curl http://localhost:8080/api/processes/file
+```
+
+### Real-time Process Monitoring via WebSocket
+
+Connect to the WebSocket to receive automatic updates about process states:
+
+```javascript
+const ws = new WebSocket('ws://localhost:8080/ws');
+
+ws.onmessage = (event) => {
+    const data = JSON.parse(event.data);
+    
+    if (data.type === 'process_info') {
+        console.log('Patris81 processes:', data.patris81.count);
+        console.log('File in use:', data.file_access.in_use);
+    } else if (data.type === 'update') {
+        console.log('Database updated:', data.count, 'records');
+    }
+};
 ```
 
 ## 🗺️ TODO
