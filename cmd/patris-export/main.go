@@ -22,13 +22,13 @@ var (
 	BuildDate = "unknown"
 
 	// Global flags
-charMapFile    string
-outputDir      string
-outputFormat   string
-watchMode      bool
-verbose        bool
-rtlMode        bool
-debounceString string
+	charMapFile    string
+	outputDir      string
+	outputFormat   string
+	watchMode      bool
+	verbose        bool
+	rtlMode        bool
+	debounceString string
   
 	// Color definitions
 	successColor = color.New(color.FgGreen, color.Bold)
