@@ -29,7 +29,7 @@ build-linux: ## Build for Linux
 
 build-windows: ## Build for Windows (requires pxlib DLL - see docs/WINDOWS_BUILD.md)
 	@echo "🪟 Building for Windows..."
-	@echo "⚠️  Note: Requires pxlib built for Windows from https://github.com/DRSDavidSoft/pxlib"
+	@echo "⚠️  Note: Requires pxlib built for Windows from https://github.com/steinm/pxlib"
 	@echo "⚠️  See docs/WINDOWS_BUILD.md for setup instructions"
 	@mkdir -p $(BUILD_DIR)
 	GOOS=windows GOARCH=amd64 CGO_ENABLED=1 CC=x86_64-w64-mingw32-gcc go build $(LDFLAGS) -o $(BUILD_DIR)/$(BINARY_NAME)-windows-amd64.exe ./cmd/patris-export

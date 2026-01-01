@@ -69,14 +69,20 @@ jobs:
     - name: Build pxlib for Windows
       run: |
         cd /tmp
-        git clone https://github.com/DRSDavidSoft/pxlib.git
+        git clone https://github.com/steinm/pxlib.git
         cd pxlib
-        git checkout copilot/ensure-windows-build-success
         
         # Fix case-sensitive Windows.h include for case-sensitive filesystems
         # MinGW uses lowercase windows.h
         sed -i 's/#include <Windows\.h>/#include <windows.h>/g' src/paradox.c
         sed -i 's/#include <Winbase\.h>/#include <winbase.h>/g' src/paradox.c
+        
+        # Patch CMakeLists.txt to skip RC file when cross-compiling
+        # windres doesn't understand GCC compiler flags like -W
+        if grep -q "target_sources(pxlib PRIVATE.*pxlib.rc)" CMakeLists.txt; then
+          sed -i '/target_sources(pxlib PRIVATE.*pxlib.rc)/d' CMakeLists.txt
+          echo "Removed RC file from CMakeLists.txt for cross-compilation compatibility"
+        fi
         
         # Create a CMake toolchain file for MinGW cross-compilation
         cat > mingw-toolchain.cmake << 'EOF'

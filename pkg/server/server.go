@@ -162,25 +162,14 @@ func (s *Server) handleGetRecords(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Convert records
-	convertedRecords := make([]paradox.Record, len(records))
-	for i, record := range records {
-		convertedRecord := make(paradox.Record)
-		for key, value := range record {
-			if strVal, ok := value.(string); ok {
-				convertedRecord[key] = converter.Patris2Fa(strVal)
-			} else {
-				convertedRecord[key] = value
-			}
-		}
-		convertedRecords[i] = convertedRecord
-	}
+	// Convert and transform records to match the format used by the convert command
+	transformed := s.convertAndTransformRecords(records)
 
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"success": true,
-		"count":   len(convertedRecords),
-		"records": convertedRecords,
+		"count":   len(transformed),
+		"records": transformed,
 	})
 }
 
@@ -259,25 +248,14 @@ func (s *Server) sendRecordsToClient(conn *websocket.Conn) {
 		return
 	}
 
-	// Convert records
-	convertedRecords := make([]paradox.Record, len(records))
-	for i, record := range records {
-		convertedRecord := make(paradox.Record)
-		for key, value := range record {
-			if strVal, ok := value.(string); ok {
-				convertedRecord[key] = converter.Patris2Fa(strVal)
-			} else {
-				convertedRecord[key] = value
-			}
-		}
-		convertedRecords[i] = convertedRecord
-	}
+	// Convert and transform records to match the format used by the convert command
+	transformed := s.convertAndTransformRecords(records)
 
 	message := map[string]interface{}{
 		"type":      "update",
 		"timestamp": time.Now().Format(time.RFC3339),
-		"count":     len(convertedRecords),
-		"records":   convertedRecords,
+		"count":     len(transformed),
+		"records":   transformed,
 	}
 
 	if err := conn.WriteJSON(message); err != nil {
@@ -301,8 +279,8 @@ func (s *Server) broadcastUpdate() {
 	}
 }
 
-// StartWatching starts watching the database file for changes
-func (s *Server) StartWatching() error {
+// StartWatching starts watching the database file for changes with the specified debounce duration
+func (s *Server) StartWatching(debounceDuration time.Duration) error {
 	fw, err := watcher.NewFileWatcher()
 	if err != nil {
 		return fmt.Errorf("failed to create file watcher: %w", err)
@@ -311,9 +289,9 @@ func (s *Server) StartWatching() error {
 	s.watcher = fw
 
 	if err := fw.Watch(s.dbPath, func(path string) {
-		log.Printf("🔄 Database file changed, broadcasting to clients")
+		log.Printf("🔄 File changed: %s", filepath.Base(path))
 		s.broadcastUpdate()
-	}); err != nil {
+	}, debounceDuration); err != nil {
 		return fmt.Errorf("failed to watch file: %w", err)
 	}
 
@@ -323,11 +301,19 @@ func (s *Server) StartWatching() error {
 	return nil
 }
 
+// convertAndTransformRecords converts record text encoding and transforms them
+// to match the format used by the convert command (combines ANBAR fields, removes Sort fields, etc.)
+func (s *Server) convertAndTransformRecords(records []paradox.Record) map[string]interface{} {
+	// Create exporter with Patris2Fa converter and use it to convert and transform records
+	exp := converter.NewExporter(converter.Patris2Fa)
+	return exp.ConvertAndTransformRecords(records)
+}
+
 // Start starts the HTTP server
 func (s *Server) Start(addr string) error {
 	log.Printf("🚀 Starting server on %s", addr)
 	log.Printf("📊 Serving database: %s", filepath.Base(s.dbPath))
-	
+
 	if _, err := os.Stat(s.dbPath); os.IsNotExist(err) {
 		return fmt.Errorf("database file does not exist: %s", s.dbPath)
 	}

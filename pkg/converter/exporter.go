@@ -19,6 +19,9 @@ const (
 	FormatCSV  ExportFormat = "csv"
 )
 
+// Regular expression to match numbered ANBAR fields (ANBAR1, ANBAR2, etc.)
+var anbarFieldRegex = regexp.MustCompile(`^ANBAR\d+$`)
+
 // Exporter handles exporting Paradox database records
 type Exporter struct {
 	converter func(string) string
@@ -39,7 +42,7 @@ func (e *Exporter) ExportToJSON(records []paradox.Record, outputPath string) err
 	}
 
 	// Transform records to use Code as key and optimize structure
-	transformed := e.transformRecords(records)
+	transformed := e.TransformRecords(records)
 
 	file, err := os.Create(outputPath)
 	if err != nil {
@@ -136,7 +139,7 @@ func (e *Exporter) ExportRecordsToString(records []paradox.Record) (string, erro
 	}
 
 	// Transform records to use Code as key and optimize structure
-	transformed := e.transformRecords(records)
+	transformed := e.TransformRecords(records)
 
 	data, err := json.MarshalIndent(transformed, "", "  ")
 	if err != nil {
@@ -149,11 +152,24 @@ func (e *Exporter) ExportRecordsToString(records []paradox.Record) (string, erro
 	return output, nil
 }
 
-// transformRecords transforms records for Patris81-specific output format:
+// ConvertAndTransformRecords converts string fields and transforms records for Patris81-specific output.
+// This combines the conversion and transformation steps into a single method for use by the web server.
+func (e *Exporter) ConvertAndTransformRecords(records []paradox.Record) map[string]interface{} {
+	// Convert string fields if converter is set
+	if e.converter != nil {
+		records = e.convertRecords(records)
+	}
+	
+	// Transform records to use Code as key and optimize structure
+	return e.TransformRecords(records)
+}
+
+// TransformRecords transforms records for Patris81-specific output format:
 // - Use Code field as the key
 // - Ignore fields starting with "Sort"
 // - Combine ANBAR fields into an array
-func (e *Exporter) transformRecords(records []paradox.Record) map[string]interface{} {
+// This method is used by both the file exporter and the web server to ensure consistent output.
+func (e *Exporter) TransformRecords(records []paradox.Record) map[string]interface{} {
 	result := make(map[string]interface{})
 	
 	for _, record := range records {
@@ -168,7 +184,7 @@ func (e *Exporter) transformRecords(records []paradox.Record) map[string]interfa
 		
 		// Build optimized record
 		optimized := make(map[string]interface{})
-		anbarValues := make([]interface{}, 0)
+		anbarFields := make(map[int]interface{})
 		
 		for key, value := range record {
 			// Skip Sort fields
@@ -176,25 +192,45 @@ func (e *Exporter) transformRecords(records []paradox.Record) map[string]interfa
 				continue
 			}
 			
-			// Collect ANBAR fields into array
-			if strings.HasPrefix(key, "ANBAR") && len(key) > 5 {
-				// Extract ANBAR number (ANBAR1, ANBAR2, etc.)
-				anbarValues = append(anbarValues, value)
-				continue
-			}
-			
-			// Keep ALLANBAR as-is
+			// Keep ALLANBAR as-is (check first to avoid confusion with ANBAR pattern)
 			if key == "ALLANBAR" {
 				optimized[key] = value
 				continue
 			}
 			
-			// Add other fields
+			// Collect numbered ANBAR fields into map (ANBAR1, ANBAR2, etc.)
+			if anbarFieldRegex.MatchString(key) {
+				// Extract the number from ANBAR field name (e.g., "ANBAR1" -> 1)
+				var num int
+				if n, _ := fmt.Sscanf(key, "ANBAR%d", &num); n == 1 && num > 0 {
+					anbarFields[num] = value
+				}
+				continue
+			}
+			
+			// Add all other fields
 			optimized[key] = value
 		}
 		
-		// Add ANBAR array if we collected any
-		if len(anbarValues) > 0 {
+		// Add ANBAR array if we collected any, sorted by field number
+		if len(anbarFields) > 0 {
+			// Find the maximum ANBAR number to determine array size
+			maxNum := 0
+			for num := range anbarFields {
+				if num > maxNum {
+					maxNum = num
+				}
+			}
+			
+			// Build array with correct ordering (1-indexed fields -> 0-indexed array)
+			anbarValues := make([]interface{}, maxNum)
+			for i := 1; i <= maxNum; i++ {
+				if val, ok := anbarFields[i]; ok {
+					anbarValues[i-1] = val
+				} else {
+					anbarValues[i-1] = 0
+				}
+			}
 			optimized["ANBAR"] = anbarValues
 		}
 		

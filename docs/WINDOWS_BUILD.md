@@ -4,9 +4,9 @@ This document explains how to build the pxlib library for Windows, which is requ
 
 ## Using Pre-built DLL (Recommended)
 
-Download the pre-built pxlib DLL from the Windows-compatible fork:
+Download the pre-built pxlib DLL from the official pxlib repository releases:
 
-https://github.com/DRSDavidSoft/pxlib/tree/copilot/ensure-windows-build-success
+https://github.com/steinm/pxlib
 
 The CI/CD builds in that repository produce Windows DLLs that can be used directly.
 
@@ -18,11 +18,10 @@ The CI/CD builds in that repository produce Windows DLLs that can be used direct
 
 ### Build Steps
 
-1. Clone the Windows-compatible pxlib fork:
+1. Clone the pxlib repository:
 ```bash
-git clone https://github.com/DRSDavidSoft/pxlib.git
+git clone https://github.com/steinm/pxlib.git
 cd pxlib
-git checkout copilot/ensure-windows-build-success
 ```
 
 2. Build using CMake:
@@ -49,11 +48,10 @@ For cross-compilation from Linux to Windows, you'll need:
 sudo apt-get install mingw-w64
 ```
 
-2. Build pxlib using the Windows-compatible fork with MinGW:
+2. Build pxlib with MinGW:
 ```bash
-git clone https://github.com/DRSDavidSoft/pxlib.git
+git clone https://github.com/steinm/pxlib.git
 cd pxlib
-git checkout copilot/ensure-windows-build-success
 mkdir build-mingw
 cd build-mingw
 cmake .. -DCMAKE_TOOLCHAIN_FILE=../cmake/mingw-w64-x86_64.cmake -DCMAKE_BUILD_TYPE=Release
