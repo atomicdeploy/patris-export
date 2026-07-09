@@ -57,7 +57,7 @@ Supports Persian/Farsi encoding conversion and file watching.
 
 	// Global flags
 	rootCmd.PersistentFlags().StringVarP(&charMapFile, "charmap", "c", "", "Path to character mapping file (farsi_chars.txt)")
-	rootCmd.PersistentFlags().StringVarP(&outputDir, "output", "o", ".", "Output directory for converted files")
+	rootCmd.PersistentFlags().StringVarP(&outputDir, "output", "o", ".", "Output directory for converted files (use '-' for stdout)")
 	rootCmd.PersistentFlags().BoolVarP(&verbose, "verbose", "v", false, "Enable verbose logging")
 	rootCmd.PersistentFlags().BoolVarP(&directAccess, "direct-access", "d", false, "Access database file directly without temp copy (may conflict with BDE writes)")
 
@@ -110,6 +110,16 @@ Supports Persian/Farsi encoding conversion and file watching.
 func runConvert(cmd *cobra.Command, args []string) {
 	dbFile := args[0]
 
+	// Check if output is stdout
+	useStdout := outputDir == "-"
+
+	// Validate that watch mode is not used with stdout
+	if watchMode && useStdout {
+		errorColor.Println("❌ Watch mode cannot be used with stdout output")
+		errorColor.Println("💡 Remove -w flag or specify a file/directory for output")
+		os.Exit(1)
+	}
+
 	// Load character mapping if provided, otherwise use embedded default
 	var charMap converter.CharMapping
 	var err error
@@ -126,17 +136,21 @@ func runConvert(cmd *cobra.Command, args []string) {
 		infoColor.Println("ℹ️  Using embedded character mapping (Patris81 default)")
 	}
 
-	// Create output directory if it doesn't exist
-	if err := os.MkdirAll(outputDir, 0755); err != nil {
-		errorColor.Printf("❌ Failed to create output directory: %v\n", err)
-		os.Exit(1)
+	// Create output directory if it doesn't exist and we're not using stdout
+	if !useStdout {
+		if err := os.MkdirAll(outputDir, 0755); err != nil {
+			errorColor.Printf("❌ Failed to create output directory: %v\n", err)
+			os.Exit(1)
+		}
 	}
 
-	// Display temp file setting
-	displayFileStatus(dbFile)
+	if !useStdout {
+		// Display temp file setting
+		displayFileStatus(dbFile)
 
-	// Check for process conflicts
-	checkProcessConflicts(dbFile)
+		// Check for process conflicts
+		checkProcessConflicts(dbFile)
+	}
 
 	if watchMode {
 		// Parse debounce duration
@@ -147,7 +161,7 @@ func runConvert(cmd *cobra.Command, args []string) {
 		infoColor.Println("📝 Press Ctrl+C to stop watching")
 
 		// Initial conversion
-		convertFile(dbFile, charMap)
+		convertFile(dbFile, charMap, useStdout)
 
 		// Set up watcher with configured debounce
 		fw, err := watcher.NewFileWatcher()
@@ -159,7 +173,7 @@ func runConvert(cmd *cobra.Command, args []string) {
 
 		if err := fw.Watch(dbFile, func(path string) {
 			infoColor.Printf("🔄 File changed: %s\n", filepath.Base(path))
-			convertFile(path, charMap)
+			convertFile(path, charMap, useStdout)
 		}, debounceDuration); err != nil {
 			errorColor.Printf("❌ Failed to watch file: %v\n", err)
 			os.Exit(1)
@@ -170,19 +184,20 @@ func runConvert(cmd *cobra.Command, args []string) {
 		// Wait forever
 		select {}
 	} else {
-		convertFile(dbFile, charMap)
+		convertFile(dbFile, charMap, useStdout)
 	}
 }
-
-func convertFile(dbFile string, charMap converter.CharMapping) {
-	fileToOpen, cleanup, err := prepareFileForReading(dbFile)
+func convertFile(dbFile string, charMap converter.CharMapping, useStdout bool) {
+	fileToOpen, cleanup, err := prepareFileForReading(dbFile, !useStdout)
 	if err != nil {
-		errorColor.Printf("❌ %v\n", err)
+		errorColor.Printf("failed to prepare database file: %v\n", err)
 		return
 	}
 	defer cleanup()
 
-	infoColor.Printf("🔍 Opening database: %s\n", filepath.Base(dbFile))
+	if !useStdout {
+		infoColor.Printf("Opening database: %s\n", filepath.Base(dbFile))
+	}
 
 	// Open database
 	db, err := paradox.Open(fileToOpen)
@@ -199,38 +214,63 @@ func convertFile(dbFile string, charMap converter.CharMapping) {
 		return
 	}
 
-	infoColor.Printf("📊 Found %d records\n", len(records))
+	if !useStdout {
+		infoColor.Printf("📊 Found %d records\n", len(records))
+	}
 
 	// Create exporter
 	exp := converter.NewExporter(converter.Patris2Fa)
 
-	// Generate output filename
-	baseName := strings.TrimSuffix(filepath.Base(dbFile), filepath.Ext(dbFile))
-	var outputFile string
+	if useStdout {
+		// Export to stdout
+		if outputFormat == "csv" {
+			// Get fields for CSV header
+			fields, err := db.GetFields()
+			if err != nil {
+				errorColor.Printf("❌ Failed to get fields: %v\n", err)
+				return
+			}
 
-	if outputFormat == "csv" {
-		outputFile = filepath.Join(outputDir, baseName+".csv")
-
-		// Get fields for CSV header
-		fields, err := db.GetFields()
-		if err != nil {
-			errorColor.Printf("❌ Failed to get fields: %v\n", err)
-			return
-		}
-
-		if err := exp.ExportToCSV(records, fields, outputFile); err != nil {
-			errorColor.Printf("❌ Failed to export to CSV: %v\n", err)
-			return
+			if err := exp.ExportToCSVWriter(records, fields, os.Stdout); err != nil {
+				errorColor.Printf("❌ Failed to export to CSV: %v\n", err)
+				return
+			}
+		} else {
+			if err := exp.ExportToJSONWriter(records, os.Stdout); err != nil {
+				errorColor.Printf("❌ Failed to export to JSON: %v\n", err)
+				return
+			}
 		}
 	} else {
-		outputFile = filepath.Join(outputDir, baseName+".json")
-		if err := exp.ExportToJSON(records, outputFile); err != nil {
-			errorColor.Printf("❌ Failed to export to JSON: %v\n", err)
-			return
-		}
-	}
+		// Export to file
+		// Generate output filename
+		baseName := strings.TrimSuffix(filepath.Base(dbFile), filepath.Ext(dbFile))
+		var outputFile string
 
-	successColor.Printf("✅ Successfully exported to: %s\n", outputFile)
+		if outputFormat == "csv" {
+			outputFile = filepath.Join(outputDir, baseName+".csv")
+
+			// Get fields for CSV header
+			fields, err := db.GetFields()
+			if err != nil {
+				errorColor.Printf("❌ Failed to get fields: %v\n", err)
+				return
+			}
+
+			if err := exp.ExportToCSV(records, fields, outputFile); err != nil {
+				errorColor.Printf("❌ Failed to export to CSV: %v\n", err)
+				return
+			}
+		} else {
+			outputFile = filepath.Join(outputDir, baseName+".json")
+			if err := exp.ExportToJSON(records, outputFile); err != nil {
+				errorColor.Printf("❌ Failed to export to JSON: %v\n", err)
+				return
+			}
+		}
+
+		successColor.Printf("✅ Successfully exported to: %s\n", outputFile)
+	}
 }
 
 func runInfo(cmd *cobra.Command, args []string) {
@@ -364,17 +404,26 @@ func checkProcessConflicts(dbFile string) {
 
 // prepareFileForReading prepares a database file for reading, optionally copying to temp
 // Returns the file path to open and a cleanup function
-func prepareFileForReading(dbFile string) (fileToOpen string, cleanup func(), err error) {
+func prepareFileForReading(dbFile string, logStatus ...bool) (fileToOpen string, cleanup func(), err error) {
+	shouldLog := true
+	if len(logStatus) > 0 {
+		shouldLog = logStatus[0]
+	}
+
 	if !directAccess {
-		infoColor.Printf("📋 Copying database to temp location: %s\n", filepath.Base(dbFile))
+		if shouldLog {
+			infoColor.Printf("📋 Copying database to temp location: %s\n", filepath.Base(dbFile))
+		}
 
 		tempFileInfo, err := filecopy.CopyToTemp(dbFile)
 		if err != nil {
 			return "", nil, fmt.Errorf("failed to copy file to temp: %w", err)
 		}
 
-		successColor.Printf("✅ Source file checksum: %s\n", tempFileInfo.Hash)
-		if verbose {
+		if shouldLog {
+			successColor.Printf("✅ Source file checksum: %s\n", tempFileInfo.Hash)
+		}
+		if shouldLog && verbose {
 			infoColor.Printf("   Size: %d bytes\n", tempFileInfo.Size)
 			infoColor.Printf("   Temp path: %s\n", tempFileInfo.TempPath)
 		}
