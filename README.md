@@ -13,6 +13,11 @@ A fast and performant application for reading, parsing, and converting Paradox/B
 - 👀 **File watching** - Automatically converts files when they change
 - 🌐 **REST API** - HTTP JSON API for accessing database records
 - 🔌 **WebSocket support** - Real-time updates when database changes
+- 🔔 **Smart notifications** - Audio alerts, title flashing, and favicon changes on data updates
+- 🔒 **Write-lock prevention** - Copies files to temp location to avoid BDE conflicts
+- 🔐 **File integrity** - CRC32 checksum calculation and verification
+- 🔍 **Process monitoring** - Detect running Patris81 instances and file locks
+- ⚠️ **Conflict detection** - Warns about potential conflicts in direct access mode
 - 🎨 **Beautiful CLI** - Colorful terminal output with emojis
 - 🏢 **Company.inf support** - Parse company information files
 - ⚡ **Fast and lightweight** - Written in Go with native performance
@@ -124,6 +129,17 @@ Then access:
 - WebSocket: ws://localhost:8080/ws
 
 The server watches the database file by default and broadcasts updates immediately (no debounce) to all connected WebSocket clients when changes are detected.
+
+#### 🔔 Notification Features
+
+The web viewer includes smart notification features that can be enabled in the Settings panel:
+
+- **🔊 Audio Notifications** - Play a subtle sound when data changes
+- **📋 Title Flashing** - Page title briefly flashes with change count (e.g., "🔔 3 records updated")
+- **🔴 Favicon Alert** - Favicon changes to a red dot indicator during updates
+- **💾 Settings Persistence** - All notification preferences are saved to browser localStorage
+
+These features help you stay aware of database changes even when the browser tab is in the background.
 
 You can customize the debounce duration for the server with the `--debounce` flag:
 

@@ -9,7 +9,9 @@ import (
 	"time"
 
 	"github.com/atomicdeploy/patris-export/pkg/converter"
+	"github.com/atomicdeploy/patris-export/pkg/filecopy"
 	"github.com/atomicdeploy/patris-export/pkg/paradox"
+	"github.com/atomicdeploy/patris-export/pkg/processmon"
 	"github.com/atomicdeploy/patris-export/pkg/server"
 	"github.com/atomicdeploy/patris-export/pkg/watcher"
 	"github.com/fatih/color"
@@ -22,12 +24,12 @@ var (
 	BuildDate = "unknown"
 
 	// Global flags
-	charMapFile    string
-	outputDir      string
-	outputFormat   string
-	watchMode      bool
-	verbose        bool
-	debounceString string
+	charMapFile  string
+	outputDir    string
+	outputFormat string
+	watchMode    bool
+	verbose      bool
+	directAccess bool
 
 	// Color definitions
 	successColor = color.New(color.FgGreen, color.Bold)
@@ -57,6 +59,7 @@ Supports Persian/Farsi encoding conversion and file watching.
 	rootCmd.PersistentFlags().StringVarP(&charMapFile, "charmap", "c", "", "Path to character mapping file (farsi_chars.txt)")
 	rootCmd.PersistentFlags().StringVarP(&outputDir, "output", "o", ".", "Output directory for converted files (use '-' for stdout)")
 	rootCmd.PersistentFlags().BoolVarP(&verbose, "verbose", "v", false, "Enable verbose logging")
+	rootCmd.PersistentFlags().BoolVarP(&directAccess, "direct-access", "d", false, "Access database file directly without temp copy (may conflict with BDE writes)")
 
 	// Convert command
 	convertCmd := &cobra.Command{
@@ -67,7 +70,7 @@ Supports Persian/Farsi encoding conversion and file watching.
 	}
 	convertCmd.Flags().StringVarP(&outputFormat, "format", "f", "json", "Output format (json or csv)")
 	convertCmd.Flags().BoolVarP(&watchMode, "watch", "w", false, "Watch file for changes and auto-convert")
-	convertCmd.Flags().StringVarP(&debounceString, "debounce", "d", "1s", "Debounce duration for watch mode (e.g., 0s, 500ms, 1s, 5s)")
+	convertCmd.Flags().String("debounce", "1s", "Debounce duration for watch mode (e.g., 0s, 500ms, 1s, 5s)")
 
 	// Info command
 	infoCmd := &cobra.Command{
@@ -94,7 +97,7 @@ Supports Persian/Farsi encoding conversion and file watching.
 	}
 	serveCmd.Flags().StringP("addr", "a", ":8080", "Server address (e.g., :8080)")
 	serveCmd.Flags().BoolP("watch", "w", true, "Watch file for changes and broadcast updates")
-	serveCmd.Flags().StringP("debounce", "d", "0s", "Debounce duration for watch mode (e.g., 0s, 500ms, 1s, 5s)")
+	serveCmd.Flags().String("debounce", "0s", "Debounce duration for watch mode (e.g., 0s, 500ms, 1s, 5s)")
 
 	rootCmd.AddCommand(convertCmd, infoCmd, companyCmd, serveCmd)
 
@@ -141,9 +144,18 @@ func runConvert(cmd *cobra.Command, args []string) {
 		}
 	}
 
+	if !useStdout {
+		// Display temp file setting
+		displayFileStatus(dbFile)
+
+		// Check for process conflicts
+		checkProcessConflicts(dbFile)
+	}
+
 	if watchMode {
 		// Parse debounce duration
-		debounceDuration := parseDebounceDuration(debounceString)
+		debounceStr, _ := cmd.Flags().GetString("debounce")
+		debounceDuration := parseDebounceDuration(debounceStr)
 
 		infoColor.Printf("👀 Watching file: %s\n", dbFile)
 		infoColor.Println("📝 Press Ctrl+C to stop watching")
@@ -175,15 +187,20 @@ func runConvert(cmd *cobra.Command, args []string) {
 		convertFile(dbFile, charMap, useStdout)
 	}
 }
-
 func convertFile(dbFile string, charMap converter.CharMapping, useStdout bool) {
-	// Only show info messages when not using stdout
+	fileToOpen, cleanup, err := prepareFileForReading(dbFile, !useStdout)
+	if err != nil {
+		errorColor.Printf("failed to prepare database file: %v\n", err)
+		return
+	}
+	defer cleanup()
+
 	if !useStdout {
-		infoColor.Printf("🔍 Opening database: %s\n", filepath.Base(dbFile))
+		infoColor.Printf("Opening database: %s\n", filepath.Base(dbFile))
 	}
 
 	// Open database
-	db, err := paradox.Open(dbFile)
+	db, err := paradox.Open(fileToOpen)
 	if err != nil {
 		errorColor.Printf("❌ Failed to open database: %v\n", err)
 		return
@@ -259,9 +276,19 @@ func convertFile(dbFile string, charMap converter.CharMapping, useStdout bool) {
 func runInfo(cmd *cobra.Command, args []string) {
 	dbFile := args[0]
 
+	// Check for process conflicts
+	checkProcessConflicts(dbFile)
+
+	fileToOpen, cleanup, err := prepareFileForReading(dbFile)
+	if err != nil {
+		errorColor.Printf("❌ %v\n", err)
+		os.Exit(1)
+	}
+	defer cleanup()
+
 	infoColor.Printf("🔍 Reading database: %s\n", filepath.Base(dbFile))
 
-	db, err := paradox.Open(dbFile)
+	db, err := paradox.Open(fileToOpen)
 	if err != nil {
 		errorColor.Printf("❌ Failed to open database: %v\n", err)
 		os.Exit(1)
@@ -339,6 +366,79 @@ func parseDebounceDuration(durationStr string) time.Duration {
 	return duration
 }
 
+// displayFileStatus shows the file access mode status message
+func displayFileStatus(filePath string) {
+	if directAccess {
+		warningColor.Printf("⚠️  Direct file access mode for: %s (may conflict with BDE writes)\n", filepath.Base(filePath))
+	} else {
+		infoColor.Printf("📋 Using temporary file copy for: %s\n", filepath.Base(filePath))
+	}
+}
+
+// checkProcessConflicts checks for potential conflicts with running processes
+func checkProcessConflicts(dbFile string) {
+	// Check for running patris81.exe processes
+	patris81Processes, err := processmon.FindProcessByName("patris81.exe")
+	if err == nil && len(patris81Processes) > 0 {
+		warningColor.Printf("⚠️  Warning: Found %d running patris81.exe process(es)\n", len(patris81Processes))
+		for _, p := range patris81Processes {
+			infoColor.Printf("   - PID %d: %s\n", p.PID, p.Exe)
+		}
+		if directAccess {
+			warningColor.Println("   ⚠️  Direct access mode may cause conflicts. Consider using --direct-access=false")
+		}
+	}
+
+	// Check if the file is currently open by any process
+	if directAccess {
+		fileInfo, err := processmon.FindProcessesWithFile(dbFile)
+		if err == nil && len(fileInfo.Processes) > 0 {
+			warningColor.Printf("⚠️  Warning: File is currently open by %d process(es)\n", len(fileInfo.Processes))
+			for _, p := range fileInfo.Processes {
+				infoColor.Printf("   - PID %d: %s\n", p.PID, p.Name)
+			}
+			warningColor.Println("   ⚠️  This may cause conflicts in direct access mode. Consider using --direct-access=false")
+		}
+	}
+}
+
+// prepareFileForReading prepares a database file for reading, optionally copying to temp
+// Returns the file path to open and a cleanup function
+func prepareFileForReading(dbFile string, logStatus ...bool) (fileToOpen string, cleanup func(), err error) {
+	shouldLog := true
+	if len(logStatus) > 0 {
+		shouldLog = logStatus[0]
+	}
+
+	if !directAccess {
+		if shouldLog {
+			infoColor.Printf("📋 Copying database to temp location: %s\n", filepath.Base(dbFile))
+		}
+
+		tempFileInfo, err := filecopy.CopyToTemp(dbFile)
+		if err != nil {
+			return "", nil, fmt.Errorf("failed to copy file to temp: %w", err)
+		}
+
+		if shouldLog {
+			successColor.Printf("✅ Source file checksum: %s\n", tempFileInfo.Hash)
+		}
+		if shouldLog && verbose {
+			infoColor.Printf("   Size: %d bytes\n", tempFileInfo.Size)
+			infoColor.Printf("   Temp path: %s\n", tempFileInfo.TempPath)
+		}
+
+		cleanup = func() {
+			filecopy.CleanupTemp(tempFileInfo.TempPath)
+		}
+
+		return tempFileInfo.TempPath, cleanup, nil
+	}
+
+	// Direct access mode - no cleanup needed
+	return dbFile, func() {}, nil
+}
+
 func init() {
 	// Set up logging
 	log.SetFlags(0)
@@ -368,12 +468,18 @@ func runServe(cmd *cobra.Command, args []string) {
 	}
 
 	// Create server
-	srv, err := server.NewServer(dbFile, charMap)
+	srv, err := server.NewServer(dbFile, charMap, !directAccess)
 	if err != nil {
 		errorColor.Printf("❌ Failed to create server: %v\n", err)
 		os.Exit(1)
 	}
 	defer srv.Close()
+
+	// Display temp file setting
+	displayFileStatus(dbFile)
+
+	// Check for process conflicts
+	checkProcessConflicts(dbFile)
 
 	// Start file watching if enabled
 	if watchFile {
