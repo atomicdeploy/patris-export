@@ -32,10 +32,18 @@ jobs:
       with:
         node-version: '20'
         
-    - name: Install dependencies
+    - name: Install dependencies and source pxlib
       run: |
         sudo apt-get update
-        sudo apt-get install -y pxlib-dev pxlib1
+        sudo apt-get install -y build-essential cmake git
+        if bash scripts/build-pxlib-linux.sh "$GITHUB_WORKSPACE/.deps/pxlib-linux"; then
+          echo "CGO_CFLAGS=-I$GITHUB_WORKSPACE/.deps/pxlib-linux/include" >> "$GITHUB_ENV"
+          echo "CGO_LDFLAGS=-L$GITHUB_WORKSPACE/.deps/pxlib-linux/lib" >> "$GITHUB_ENV"
+          echo "LD_LIBRARY_PATH=$GITHUB_WORKSPACE/.deps/pxlib-linux/lib" >> "$GITHUB_ENV"
+        else
+          echo "Source pxlib build failed; falling back to distro pxlib packages"
+          sudo apt-get install -y pxlib-dev pxlib1
+        fi
     
     - name: Build web frontend
       run: |
@@ -75,7 +83,7 @@ jobs:
     - name: Install cross-compilation tools
       run: |
         sudo apt-get update
-        sudo apt-get install -y mingw-w64 mingw-w64-tools gcc-mingw-w64-x86-64 g++-mingw-w64-x86-64 cmake
+        sudo apt-get install -y mingw-w64 mingw-w64-tools gcc-mingw-w64-x86-64 g++-mingw-w64-x86-64 cmake git
         
         # Verify MinGW installation
         echo "Checking MinGW installation..."
@@ -92,90 +100,12 @@ jobs:
       run: |
         ${GITHUB_WORKSPACE}/scripts/generate-version-rc.sh cmd/patris-export/patris-export.rc
         
-    - name: Build pxlib for Windows
+    - name: Build upstream pxlib for Windows
       run: |
-        cd /tmp
-        git clone https://github.com/steinm/pxlib.git
-        cd pxlib
-        
-        # Fix case-sensitive Windows.h include for case-sensitive filesystems
-        # MinGW uses lowercase windows.h
-        sed -i 's/#include <Windows\.h>/#include <windows.h>/g' src/paradox.c
-        sed -i 's/#include <Winbase\.h>/#include <winbase.h>/g' src/paradox.c
-        
-        # Patch CMakeLists.txt to fix windres compilation
-        ${GITHUB_WORKSPACE}/scripts/patch-pxlib-cmake.sh /tmp/pxlib
-        
-        # Create a CMake toolchain file for MinGW cross-compilation
-        cat > mingw-toolchain.cmake << 'EOF'
-        set(CMAKE_SYSTEM_NAME Windows)
-        set(CMAKE_SYSTEM_PROCESSOR x86_64)
-        
-        set(CMAKE_C_COMPILER x86_64-w64-mingw32-gcc)
-        set(CMAKE_CXX_COMPILER x86_64-w64-mingw32-g++)
-        set(CMAKE_RC_COMPILER x86_64-w64-mingw32-windres)
-        
-        set(CMAKE_FIND_ROOT_PATH /usr/x86_64-w64-mingw32)
-        set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)
-        set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)
-        set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)
-        EOF
-        
-        mkdir build
-        cd build
-        
-        # Configure with CMake using the toolchain file
-        cmake .. \
-          -DCMAKE_TOOLCHAIN_FILE=../mingw-toolchain.cmake \
-          -DCMAKE_BUILD_TYPE=Release \
-          -DENABLE_GSF=OFF
-        
-        # Build the library
-        cmake --build . --config Release -- -j$(nproc) || {
-          echo "Build failed, trying with verbose output..."
-          cmake --build . --config Release --verbose
-        }
-        
-        # Install headers
-        sudo mkdir -p /usr/x86_64-w64-mingw32/include
-        # Use the generated paradox.h from the build directory
-        if [ -f include/paradox.h ]; then
-          sudo cp include/paradox.h /usr/x86_64-w64-mingw32/include/
-        elif [ -f ../include/paradox.h.in ]; then
-          # If not generated, manually configure it
-          sed 's/@PX_HAVE_ICONV@/1/g; s/@PX_HAVE_RECODE@/0/g; s/@PX_HAVE_GSF@/0/g' \
-            ../include/paradox.h.in | sudo tee /usr/x86_64-w64-mingw32/include/paradox.h > /dev/null
-        fi
-        
-        # Copy additional headers
-        [ -f ../include/paradox-mp.h ] && sudo cp ../include/paradox-mp.h /usr/x86_64-w64-mingw32/include/ || true
-        [ -f config.h ] && sudo cp config.h /usr/x86_64-w64-mingw32/include/ || true
-        
-        # Install library files
-        # Find and copy the static library (keep original name - CGO now uses -lpxlib)
-        if [ -f libpxlib.a ]; then
-          sudo cp libpxlib.a /usr/x86_64-w64-mingw32/lib/
-          echo "Installed libpxlib.a"
-        elif [ -f libpxlib.dll.a ]; then
-          sudo cp libpxlib.dll.a /usr/x86_64-w64-mingw32/lib/
-          echo "Installed libpxlib.dll.a"
-        else
-          # Search in subdirectories
-          LIBFILE=$(find . -name "libpxlib*.a" -o -name "pxlib*.a" | head -1)
-          if [ -n "$LIBFILE" ]; then
-            sudo cp "$LIBFILE" /usr/x86_64-w64-mingw32/lib/
-            echo "Installed $LIBFILE"
-          else
-            echo "ERROR: No pxlib library file found!"
-            find . -name "*.a" -o -name "*.dll"
-            exit 1
-          fi
-        fi
-        
-        echo "Installed headers:"
-        ls -la /usr/x86_64-w64-mingw32/include/paradox* || echo "No paradox headers found"
-        echo "Installed libraries:"
-        ls -la /usr/x86_64-w64-mingw32/lib/libpxlib* || echo "No pxlib libraries found"
+        export PXLIB_MINGW_CROSS=1
+        bash scripts/build-pxlib-mingw.sh "$GITHUB_WORKSPACE/.deps/pxlib-windows"
+        echo "CGO_CFLAGS=-I$GITHUB_WORKSPACE/.deps/pxlib-windows/include" >> "$GITHUB_ENV"
+        echo "CGO_LDFLAGS=-L$GITHUB_WORKSPACE/.deps/pxlib-windows/lib" >> "$GITHUB_ENV"
     
     - name: Compile resource file for patris-export
       run: |
@@ -194,8 +124,6 @@ jobs:
       run: |
         mkdir -p build
         CGO_ENABLED=1 GOOS=windows GOARCH=amd64 CC=x86_64-w64-mingw32-gcc \
-          CGO_LDFLAGS="-L/usr/x86_64-w64-mingw32/lib" \
-          CGO_CFLAGS="-I/usr/x86_64-w64-mingw32/include" \
           go build -ldflags "-X main.Version=1.0.0 -X main.BuildDate=$(date -u +'%Y-%m-%dT%H:%M:%SZ')" \
           -o build/patris-export-windows-amd64.exe ./cmd/patris-export
       
@@ -203,8 +131,8 @@ jobs:
       run: |
         # Find and copy DLL files
         mkdir -p build
-        if find /tmp/pxlib/build -name "*.dll" -type f 2>/dev/null | grep -q .; then
-          find /tmp/pxlib/build -name "*.dll" -type f -exec cp {} build/ \;
+        if find "$GITHUB_WORKSPACE/.deps/pxlib-windows/bin" -name "*.dll" -type f 2>/dev/null | grep -q .; then
+          find "$GITHUB_WORKSPACE/.deps/pxlib-windows/bin" -name "*.dll" -type f -exec cp {} build/ \;
           echo "DLL files copied:"
           ls -la build/*.dll
         else

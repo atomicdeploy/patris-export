@@ -18,7 +18,8 @@ const state = {
         highlightChanges: true,
         enablePagination: false,
         pageSize: 100,
-        playNotificationSound: false
+        playNotificationSound: false,
+        notificationSoundSource: 'external'
     },
     notificationAudio: null,
     originalTitle: document.title,
@@ -262,6 +263,7 @@ function applySettings() {
     document.getElementById('enablePagination').checked = state.settings.enablePagination;
     document.getElementById('pageSize').value = state.settings.pageSize;
     document.getElementById('playNotificationSound').checked = state.settings.playNotificationSound;
+    document.getElementById('notificationSoundSource').value = state.settings.notificationSoundSource || 'external';
 }
 
 // Initialize notification audio
@@ -272,24 +274,72 @@ function initNotificationAudio() {
 }
 
 // Play notification sound
-// Creates a new Audio instance for each notification to support overlapping sounds
+// Creates a new Audio instance for each notification to support overlapping sounds.
 function playNotificationSound() {
-    if (state.settings.playNotificationSound && state.notificationAudio) {
-        try {
-            // Create a new Audio instance for this notification
-            // This allows multiple notifications to play simultaneously without interruption
-            const audio = new Audio(state.notificationAudio);
-            audio.volume = 0.5; // Set volume to 50%
-            
-            // Play immediately without delay
-            // The audio element will be garbage collected automatically when playback ends
-            audio.play().catch(err => {
-                console.log('Could not play notification sound:', err);
-            });
-        } catch (err) {
-            console.warn('Failed to create notification audio:', err);
-        }
+    if (!state.settings.playNotificationSound) {
+        return;
     }
+
+    if (state.settings.notificationSoundSource === 'generated' || !state.notificationAudio) {
+        playGeneratedNotificationSound();
+        return;
+    }
+
+    try {
+        const audio = new Audio(state.notificationAudio);
+        audio.volume = 0.5;
+
+        audio.play().catch(err => {
+            console.log('Could not play notification sound, using generated melody:', err);
+            playGeneratedNotificationSound();
+        });
+    } catch (err) {
+        console.warn('Failed to create notification audio, using generated melody:', err);
+        playGeneratedNotificationSound();
+    }
+}
+
+function playGeneratedNotificationSound() {
+    const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+    if (!AudioContextClass) {
+        return;
+    }
+
+    const audioContext = new AudioContextClass();
+    const masterGain = audioContext.createGain();
+    masterGain.gain.setValueAtTime(0.0001, audioContext.currentTime);
+    masterGain.gain.exponentialRampToValueAtTime(0.18, audioContext.currentTime + 0.015);
+    masterGain.gain.exponentialRampToValueAtTime(0.0001, audioContext.currentTime + 0.62);
+    masterGain.connect(audioContext.destination);
+
+    const notes = [
+        { frequency: 659.25, start: 0.00, duration: 0.13 },
+        { frequency: 783.99, start: 0.12, duration: 0.13 },
+        { frequency: 987.77, start: 0.24, duration: 0.16 },
+        { frequency: 1318.51, start: 0.40, duration: 0.18 }
+    ];
+
+    notes.forEach(note => {
+        const oscillator = audioContext.createOscillator();
+        const noteGain = audioContext.createGain();
+        const startTime = audioContext.currentTime + note.start;
+        const endTime = startTime + note.duration;
+
+        oscillator.type = 'triangle';
+        oscillator.frequency.setValueAtTime(note.frequency, startTime);
+        noteGain.gain.setValueAtTime(0.0001, startTime);
+        noteGain.gain.exponentialRampToValueAtTime(0.5, startTime + 0.015);
+        noteGain.gain.exponentialRampToValueAtTime(0.0001, endTime);
+
+        oscillator.connect(noteGain);
+        noteGain.connect(masterGain);
+        oscillator.start(startTime);
+        oscillator.stop(endTime + 0.02);
+    });
+
+    setTimeout(() => {
+        audioContext.close().catch(() => {});
+    }, 800);
 }
 
 // Flash page title with notification info
@@ -1505,6 +1555,11 @@ function init() {
     
     document.getElementById('playNotificationSound').addEventListener('change', (e) => {
         state.settings.playNotificationSound = e.target.checked;
+        saveSettings();
+    });
+
+    document.getElementById('notificationSoundSource').addEventListener('change', (e) => {
+        state.settings.notificationSoundSource = e.target.value;
         saveSettings();
     });
     

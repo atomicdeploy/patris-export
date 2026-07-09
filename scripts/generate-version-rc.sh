@@ -5,6 +5,7 @@ set -euo pipefail
 # Usage: ./generate-version-rc.sh <output_file>
 
 OUTPUT_FILE="${1:-cmd/patris-export/patris-export.rc}"
+ICON_FILE="${PATRIS_ICON_FILE:-assets/windows/patris-api.ico}"
 
 # Validate OUTPUT_FILE to prevent directory traversal and absolute paths
 if [[ "$OUTPUT_FILE" == /* ]] || [[ "$OUTPUT_FILE" == *".."* ]]; then
@@ -64,8 +65,12 @@ escape_c_string() {
 
 # Function to URL-encode a string for safe use in URLs
 urlencode() {
-    # Use python3 for URL encoding
-    python3 -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1]))' "$1"
+    if command -v python3 &> /dev/null; then
+        python3 -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1]))' "$1"
+    else
+        # Repository owner/name are validated to URL-safe characters below.
+        printf '%s' "$1"
+    fi
 }
 
 # Try to fetch description via GitHub API (no auth required for public repos)
@@ -99,6 +104,9 @@ COMPANY_NAME_ESCAPED=$(escape_c_string "$REPO_OWNER")
 # Generate the resource file
 cat > "$OUTPUT_FILE" << EOF
 #include <windows.h>
+
+#define IDI_PATRIS_API_ICON 101
+IDI_PATRIS_API_ICON ICON "$ICON_FILE"
 
 #define VER_FILEVERSION             $VERSION_COMMA,0
 #define VER_FILEVERSION_STR         "$VERSION.0"

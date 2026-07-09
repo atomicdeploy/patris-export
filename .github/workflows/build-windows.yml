@@ -26,92 +26,47 @@ jobs:
       uses: actions/setup-go@v5
       with:
         go-version: '1.23'
-    
-    - name: Install vcpkg
+
+    - name: Set up Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '20'
+
+    - name: Install MSYS2 MinGW tools
+      uses: msys2/setup-msys2@v2
+      with:
+        msystem: MINGW64
+        update: true
+        install: >-
+          git
+          base-devel
+          mingw-w64-x86_64-gcc
+          mingw-w64-x86_64-cmake
+          mingw-w64-x86_64-make
+          mingw-w64-x86_64-pkgconf
+          mingw-w64-x86_64-python
+
+    - name: Add MSYS2 MinGW to PATH
+      shell: pwsh
       run: |
-        git clone https://github.com/Microsoft/vcpkg.git C:\vcpkg
-        C:\vcpkg\bootstrap-vcpkg.bat
-        
-    - name: Install dependencies via vcpkg
+        "C:\msys64\mingw64\bin" | Out-File -FilePath $env:GITHUB_PATH -Append
+
+    - name: Build web frontend
       run: |
-        # Try to install pxlib if available in vcpkg, otherwise build from source
-        C:\vcpkg\vcpkg search pxlib || echo "pxlib not in vcpkg, will build from source"
-        
-    - name: Install CMake and build tools
-      run: |
-        choco install cmake --installargs 'ADD_CMAKE_TO_PATH=System' -y
-        choco install mingw -y
-        refreshenv
+        cd web
+        npm install
+        npm run build
     
     - name: Generate version resource file
       shell: bash
       run: |
         ${GITHUB_WORKSPACE}/scripts/generate-version-rc.sh cmd/patris-export/patris-export.rc
         
-    - name: Build pxlib for Windows
+    - name: Build upstream pxlib for Windows
       shell: bash
       run: |
-        cd /c/
-        git clone https://github.com/steinm/pxlib.git
-        cd pxlib
-        
-        # Patch CMakeLists.txt to fix windres compilation
-        ${GITHUB_WORKSPACE}/scripts/patch-pxlib-cmake.sh /c/pxlib
-        
-        mkdir build
-        cd build
-        
-        # Configure with CMake
-        cmake .. -G "MinGW Makefiles" \
-          -DCMAKE_BUILD_TYPE=Release \
-          -DENABLE_GSF=OFF
-        
-        # Build the library
-        cmake --build . --config Release
-        
-        # Install for use by Go
-        cmake --install . --prefix C:/pxlib-install
-        
-        # Verify installation worked, if not do manual install
-        if [ ! -f "C:/pxlib-install/include/paradox.h" ]; then
-          echo "CMake install did not install files, performing manual install..."
-          mkdir -p C:/pxlib-install/include
-          mkdir -p C:/pxlib-install/lib
-          mkdir -p C:/pxlib-install/bin
-          
-          # Copy headers
-          echo "Copying headers..."
-          cp -v ../include/*.h C:/pxlib-install/include/ || echo "Warning: Failed to copy headers from ../include"
-          cp -v include/*.h C:/pxlib-install/include/ 2>/dev/null || echo "Warning: No headers in build/include"
-          
-          # Copy DLLs - look in common build locations
-          echo "Copying DLLs..."
-          cp -v *.dll C:/pxlib-install/bin/ 2>/dev/null || echo "No DLLs in current directory"
-          cp -v Release/*.dll C:/pxlib-install/bin/ 2>/dev/null || echo "No DLLs in Release/"
-          cp -v libpxlib.dll C:/pxlib-install/bin/ 2>/dev/null || echo "No libpxlib.dll"
-          
-          # Copy import libraries
-          echo "Copying import libraries..."
-          cp -v *.a C:/pxlib-install/lib/ 2>/dev/null || echo "No .a files"
-          cp -v *.lib C:/pxlib-install/lib/ 2>/dev/null || echo "No .lib files"
-          cp -v Release/*.a C:/pxlib-install/lib/ 2>/dev/null || echo "No .a in Release/"
-          cp -v Release/*.lib C:/pxlib-install/lib/ 2>/dev/null || echo "No .lib in Release/"
-        fi
-        
-        echo "Installed files:"
-        ls -la C:/pxlib-install/include/ || echo "No headers installed"
-        ls -la C:/pxlib-install/lib/ || echo "No libraries installed"
-        ls -la C:/pxlib-install/bin/ || echo "No DLLs installed"
-        
-        # Verify critical files exist
-        if [ ! -f "C:/pxlib-install/include/paradox.h" ]; then
-          echo "ERROR: paradox.h not found! Listing build directory contents:"
-          find . -name "paradox.h" || echo "paradox.h not found anywhere in build directory"
-          find ../include -name "*.h" || echo "No headers in ../include"
-          exit 1
-        fi
-        
-        echo "pxlib installation verified successfully"
+        export PATH="/c/msys64/mingw64/bin:$PATH"
+        bash scripts/build-pxlib-mingw.sh /c/pxlib-install
     
     - name: Compile resource file for patris-export
       shell: bash
@@ -119,15 +74,8 @@ jobs:
         # Use windres to compile the resource file
         echo "Compiling Windows resource file..."
         
-        # Find windres (could be in MinGW or MSYS paths)
-        WINDRES=$(which windres || which x86_64-w64-mingw32-windres || echo "C:/ProgramData/chocolatey/lib/mingw/tools/install/mingw64/bin/windres.exe")
-        
-        if [ ! -f "$WINDRES" ]; then
-          echo "Searching for windres..."
-          find /c/ProgramData/chocolatey -name "windres.exe" 2>/dev/null || true
-          find /c/msys64 -name "windres.exe" 2>/dev/null || true
-        fi
-        
+        export PATH="/c/msys64/mingw64/bin:$PATH"
+        WINDRES=$(which windres || which x86_64-w64-mingw32-windres)
         "$WINDRES" \
           --target=pe-x86-64 \
           -i cmd/patris-export/patris-export.rc \
@@ -142,7 +90,9 @@ jobs:
       run: |
         mkdir -p build
         
+        export PATH="/c/msys64/mingw64/bin:$PATH"
         export CGO_ENABLED=1
+        export CC=gcc
         export CGO_CFLAGS="-IC:/pxlib-install/include"
         export CGO_LDFLAGS="-LC:/pxlib-install/lib"
         
@@ -164,11 +114,6 @@ jobs:
         # Copy DLL files to build directory
         if [ -d C:/pxlib-install/bin ]; then
           cp C:/pxlib-install/bin/*.dll build/ 2>/dev/null || true
-        fi
-        
-        # Also check the build directory
-        if [ -d C:/pxlib/build ]; then
-          find C:/pxlib/build -name "*.dll" -exec cp {} build/ \; 2>/dev/null || true
         fi
         
         echo "Build directory contents:"
