@@ -110,7 +110,7 @@ func (e *Exporter) ExportToCSV(records []paradox.Record, fields []paradox.Field,
 // convertRecords converts string fields in records using the converter function
 func (e *Exporter) convertRecords(records []paradox.Record) []paradox.Record {
 	converted := make([]paradox.Record, len(records))
-	
+
 	for i, record := range records {
 		convertedRecord := make(paradox.Record)
 		for key, value := range record {
@@ -127,7 +127,7 @@ func (e *Exporter) convertRecords(records []paradox.Record) []paradox.Record {
 		}
 		converted[i] = convertedRecord
 	}
-	
+
 	return converted
 }
 
@@ -159,19 +159,16 @@ func (e *Exporter) ConvertAndTransformRecords(records []paradox.Record) map[stri
 	if e.converter != nil {
 		records = e.convertRecords(records)
 	}
-	
+
 	// Transform records to use Code as key and optimize structure
 	return e.TransformRecords(records)
 }
 
-// TransformRecords transforms records for Patris81-specific output format:
-// - Use Code field as the key
-// - Ignore fields starting with "Sort"
-// - Combine ANBAR fields into an array
-// This method is used by both the file exporter and the web server to ensure consistent output.
-func (e *Exporter) TransformRecords(records []paradox.Record) map[string]interface{} {
+// TransformRecordsMap transforms an array of map records to Code-keyed map format
+// This is used when records are already in map[string]interface{} format (e.g., from datasource)
+func (e *Exporter) TransformRecordsMap(records []map[string]interface{}) map[string]interface{} {
 	result := make(map[string]interface{})
-	
+
 	for _, record := range records {
 		// Extract Code as the key
 		codeKey := ""
@@ -181,62 +178,90 @@ func (e *Exporter) TransformRecords(records []paradox.Record) map[string]interfa
 			// Skip records without Code
 			continue
 		}
-		
+
+		// Create a copy of the record without Code field (it becomes the key)
+		transformedRecord := make(map[string]interface{})
+		for key, value := range record {
+			if key != "Code" {
+				transformedRecord[key] = value
+			}
+		}
+
+		result[codeKey] = transformedRecord
+	}
+
+	return result
+}
+
+// TransformRecords transforms records for Patris81-specific output format:
+// - Use Code field as the key
+// - Ignore fields starting with "Sort"
+// - Combine ANBAR fields into an array (sorted by number)
+// This method is used by both the file exporter and the web server to ensure consistent output.
+func (e *Exporter) TransformRecords(records []paradox.Record) map[string]interface{} {
+	result := make(map[string]interface{})
+
+	for _, record := range records {
+		// Extract Code as the key
+		codeKey := ""
+		if code, ok := record["Code"]; ok {
+			codeKey = fmt.Sprintf("%v", code)
+		} else {
+			// Skip records without Code
+			continue
+		}
+
 		// Build optimized record
 		optimized := make(map[string]interface{})
 		anbarFields := make(map[int]interface{})
-		
+		maxAnbarIndex := 0
+
 		for key, value := range record {
 			// Skip Sort fields
 			if strings.HasPrefix(key, "Sort") {
 				continue
 			}
-			
+
 			// Keep ALLANBAR as-is (check first to avoid confusion with ANBAR pattern)
 			if key == "ALLANBAR" {
 				optimized[key] = value
 				continue
 			}
-			
+
 			// Collect numbered ANBAR fields into map (ANBAR1, ANBAR2, etc.)
 			if anbarFieldRegex.MatchString(key) {
-				// Extract the number from ANBAR field name (e.g., "ANBAR1" -> 1)
-				var num int
-				if n, _ := fmt.Sscanf(key, "ANBAR%d", &num); n == 1 && num > 0 {
-					anbarFields[num] = value
+				// Extract the number from ANBARn field name (e.g., "ANBAR1" -> 1)
+				var index int
+				if n, _ := fmt.Sscanf(key, "ANBAR%d", &index); n == 1 && index > 0 {
+					anbarFields[index] = value
+					if index > maxAnbarIndex {
+						maxAnbarIndex = index
+					}
 				}
 				continue
 			}
-			
+
 			// Add all other fields
 			optimized[key] = value
 		}
-		
-		// Add ANBAR array if we collected any, sorted by field number
+
+		// Add ANBAR array if we collected any, in sorted order by field number
 		if len(anbarFields) > 0 {
-			// Find the maximum ANBAR number to determine array size
-			maxNum := 0
-			for num := range anbarFields {
-				if num > maxNum {
-					maxNum = num
-				}
-			}
-			
 			// Build array with correct ordering (1-indexed fields -> 0-indexed array)
-			anbarValues := make([]interface{}, maxNum)
-			for i := 1; i <= maxNum; i++ {
+			anbarValues := make([]interface{}, maxAnbarIndex)
+			for i := 1; i <= maxAnbarIndex; i++ {
 				if val, ok := anbarFields[i]; ok {
 					anbarValues[i-1] = val
 				} else {
-					anbarValues[i-1] = 0
+					anbarValues[i-1] = 0 // Fill missing indices with 0
 				}
 			}
 			optimized["ANBAR"] = anbarValues
 		}
-		
+
 		result[codeKey] = optimized
 	}
-	
+
 	return result
 }
 
@@ -248,12 +273,12 @@ func makeArraysInline(jsonStr string, fieldNames ...string) string {
 	if fieldPattern == "" {
 		return jsonStr
 	}
-	
+
 	// Pattern to match multi-line arrays with numeric values
 	// Matches: "ANBAR": [\n      1,\n      2,\n    ]
 	pattern := fmt.Sprintf(`("(?:%s)":\s*)\[\s*((?:\d+,?\s*)+)\]`, fieldPattern)
 	re := regexp.MustCompile(pattern)
-	
+
 	return re.ReplaceAllStringFunc(jsonStr, func(match string) string {
 		// Extract field name
 		fieldRe := regexp.MustCompile(`"([^"]+)":`)
@@ -262,20 +287,20 @@ func makeArraysInline(jsonStr string, fieldNames ...string) string {
 			return match
 		}
 		fieldName := fieldMatch[1]
-		
+
 		// Extract the numeric values
 		valueRe := regexp.MustCompile(`\d+`)
 		values := valueRe.FindAllString(match, -1)
-		
+
 		// Check if match ends with comma (not last property)
 		hasComma := strings.HasSuffix(strings.TrimSpace(match), ",")
-		
+
 		// Rebuild as inline with proper spacing
 		result := fmt.Sprintf(`"%s": [%s]`, fieldName, strings.Join(values, ", "))
 		if hasComma {
 			result += ","
 		}
-		
+
 		return result
 	})
 }
