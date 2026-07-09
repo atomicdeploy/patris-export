@@ -11,10 +11,11 @@ A fast and performant application for reading, parsing, and converting Paradox/B
 - 🔄 **Convert Paradox DB files** to JSON or CSV formats
 - 🎯 **Persian/Farsi encoding support** - Automatically converts Patris81 proprietary encoding
 - 👀 **File watching** - Automatically converts files when they change
-- 🔒 **Write-lock prevention** - Copies files to temp location to avoid BDE conflicts
-- 🔐 **File integrity** - CRC32 checksum calculation and verification
 - 🌐 **REST API** - HTTP JSON API for accessing database records
 - 🔌 **WebSocket support** - Real-time updates when database changes
+- 🔔 **Smart notifications** - Audio alerts, title flashing, and favicon changes on data updates
+- 🔒 **Write-lock prevention** - Copies files to temp location to avoid BDE conflicts
+- 🔐 **File integrity** - CRC32 checksum calculation and verification
 - 🔍 **Process monitoring** - Detect running Patris81 instances and file locks
 - ⚠️ **Conflict detection** - Warns about potential conflicts in direct access mode
 - 🎨 **Beautiful CLI** - Colorful terminal output with emojis
@@ -86,33 +87,6 @@ patris-export convert kala.db -f json -w --debounce 500ms
 patris-export convert kala.db -f json -w --debounce 5s
 ```
 
-### Avoid Write-Lock Conflicts
-
-By default, temporary file copies are used to prevent write-lock conflicts with applications like Borland Database Engine (BDE) that may have the file open for writing. This is especially important when accessing files on Windows shares (SMB) or when the original application is still running.
-
-```bash
-# Default behavior - uses temp file copy (recommended)
-patris-export convert kala.db -f json
-patris-export serve kala.db
-
-# Override to use direct access for better performance
-patris-export convert kala.db -f json --direct-access=true   # Direct access
-patris-export serve kala.db -d                                # Direct access (short form)
-```
-
-When using the temp file feature (--direct-access=false, the default):
-- A CRC32 checksum is calculated and displayed for the source file
-- The file is copied to the system temp directory in 10MB chunks
-- The original file is opened in read-only mode and released immediately after copying
-- File modification time is preserved on the copy
-- Hash is calculated during copy in a single pass for efficiency
-
-Use `--verbose` flag to see detailed information about the temp file operation:
-
-```bash
-patris-export convert kala.db -f json -v
-```
-
 ### Show Database Information
 
 ```bash
@@ -138,6 +112,17 @@ Then access:
 - WebSocket: ws://localhost:8080/ws
 
 The server watches the database file by default and broadcasts updates immediately (no debounce) to all connected WebSocket clients when changes are detected.
+
+#### 🔔 Notification Features
+
+The web viewer includes smart notification features that can be enabled in the Settings panel:
+
+- **🔊 Audio Notifications** - Play a subtle sound when data changes
+- **📋 Title Flashing** - Page title briefly flashes with change count (e.g., "🔔 3 records updated")
+- **🔴 Favicon Alert** - Favicon changes to a red dot indicator during updates
+- **💾 Settings Persistence** - All notification preferences are saved to browser localStorage
+
+These features help you stay aware of database changes even when the browser tab is in the background.
 
 You can customize the debounce duration for the server with the `--debounce` flag:
 
@@ -216,7 +201,6 @@ go test -v ./...
 - `-c, --charmap` - Path to character mapping file (farsi_chars.txt)
 - `-o, --output` - Output directory for converted files (default: current directory)
 - `-v, --verbose` - Enable verbose logging
-- `-d, --direct-access` - Access database file directly without temp copy (default: false)
 
 ### Commands
 
@@ -226,7 +210,7 @@ Convert a Paradox database file to JSON or CSV.
 **Flags:**
 - `-f, --format` - Output format: json or csv (default: json)
 - `-w, --watch` - Watch file for changes and auto-convert
-- `--debounce` - Debounce duration for watch mode (default: 1s, examples: 0s, 500ms, 5s)
+- `-d, --debounce` - Debounce duration for watch mode (default: 1s, examples: 0s, 500ms, 5s)
 
 #### `info [database-file]`
 Display information about a Paradox database file (fields, record count, etc.)
@@ -240,7 +224,7 @@ Start the REST API and WebSocket server.
 **Flags:**
 - `-a, --addr` - Server address (default: :8080)
 - `-w, --watch` - Watch file for changes and broadcast updates (default: true)
-- `--debounce` - Debounce duration for watch mode (default: 0s, examples: 500ms, 1s, 5s)
+- `-d, --debounce` - Debounce duration for watch mode (default: 0s, examples: 500ms, 1s, 5s)
 
 ## 🔧 API Reference
 
@@ -275,54 +259,12 @@ Returns database schema information.
 }
 ```
 
-#### `GET /api/processes/patris81`
-Returns information about running patris81.exe processes.
-
-**Response:**
-```json
-{
-  "success": true,
-  "count": 1,
-  "processes": [
-    {
-      "pid": 1234,
-      "name": "patris81.exe",
-      "exe": "C:\\Path\\To\\patris81.exe",
-      "cmdline": "patris81.exe",
-      "create_time": 1672531200000,
-      "memory_usage": 52428800
-    }
-  ]
-}
-```
-
-#### `GET /api/processes/file`
-Returns information about processes that have the database file open.
-
-**Response:**
-```json
-{
-  "success": true,
-  "file": "kala.db",
-  "in_use": true,
-  "count": 1,
-  "processes": [
-    {
-      "pid": 5678,
-      "name": "patris81.exe",
-      "exe": "C:\\Path\\To\\patris81.exe",
-      "cmdline": "patris81.exe"
-    }
-  ]
-}
-```
-
 ### WebSocket
 
 #### `ws://localhost:8080/ws`
-Connect to receive real-time database updates and process monitoring information.
+Connect to receive real-time database updates.
 
-**Database update message format:**
+**Message format:**
 ```json
 {
   "type": "update",
@@ -330,90 +272,6 @@ Connect to receive real-time database updates and process monitoring information
   "count": 100,
   "records": [...]
 }
-```
-
-**Process monitoring message format:**
-```json
-{
-  "type": "process_info",
-  "timestamp": "2025-12-31T12:00:00Z",
-  "patris81": {
-    "count": 1,
-    "processes": [
-      {
-        "pid": 1234,
-        "name": "patris81.exe",
-        "exe": "C:\\Path\\To\\patris81.exe"
-      }
-    ]
-  },
-  "file_access": {
-    "file": "kala.db",
-    "in_use": true,
-    "count": 1,
-    "processes": [
-      {
-        "pid": 5678,
-        "name": "patris81.exe"
-      }
-    ]
-  }
-}
-```
-
-## ⚙️ Process Monitoring
-
-The application can detect and monitor:
-- Running instances of `patris81.exe`
-- Processes that have the database file open
-
-### Using Process Monitoring
-
-When using direct access mode (`--direct-access=true`), the application will:
-- Check for running `patris81.exe` processes
-- Check if the database file is open by another process
-- Display warnings if conflicts are detected
-
-**Example:**
-```bash
-# Direct access mode with conflict detection
-patris-export convert kala.db -f json --direct-access=true
-
-# Output:
-# ⚠️  Warning: Found 1 running patris81.exe process(es)
-#    - PID 1234: C:\Path\To\patris81.exe
-#    ⚠️  Direct access mode may cause conflicts. Consider using --direct-access=false
-```
-
-### Process Monitoring API
-
-Query process information via REST endpoints:
-
-```bash
-# Check for running patris81.exe processes
-curl http://localhost:8080/api/processes/patris81
-
-# Check which processes have the database file open
-curl http://localhost:8080/api/processes/file
-```
-
-### Real-time Process Monitoring via WebSocket
-
-Connect to the WebSocket to receive automatic updates about process states:
-
-```javascript
-const ws = new WebSocket('ws://localhost:8080/ws');
-
-ws.onmessage = (event) => {
-    const data = JSON.parse(event.data);
-    
-    if (data.type === 'process_info') {
-        console.log('Patris81 processes:', data.patris81.count);
-        console.log('File in use:', data.file_access.in_use);
-    } else if (data.type === 'update') {
-        console.log('Database updated:', data.count, 'records');
-    }
-};
 ```
 
 ## 🗺️ TODO
