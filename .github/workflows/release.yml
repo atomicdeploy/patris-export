@@ -17,32 +17,74 @@ jobs:
     - name: Checkout code
       uses: actions/checkout@v4
       
-    - name: Trigger build workflow and wait
+    - name: Wait for build workflows
       uses: actions/github-script@v7
       with:
         script: |
-          // Trigger the build workflow
-          const result = await github.rest.actions.createWorkflowDispatch({
-            owner: context.repo.owner,
-            repo: context.repo.repo,
-            workflow_id: 'build-new.yml',
-            ref: context.ref
-          });
+          // Wait for the build workflows to complete
+          const workflows = ['build.yml', 'build-windows.yml'];
+          const sha = context.sha;
           
-          // Wait for artifacts to be available
-          await new Promise(resolve => setTimeout(resolve, 60000));
+          for (const workflow of workflows) {
+            console.log(`Checking workflow: ${workflow}`);
+            
+            // Poll for workflow runs
+            let completed = false;
+            for (let i = 0; i < 30; i++) {
+              const runs = await github.rest.actions.listWorkflowRuns({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                workflow_id: workflow,
+                head_sha: sha
+              });
+              
+              if (runs.data.workflow_runs.length > 0) {
+                const run = runs.data.workflow_runs[0];
+                console.log(`Run status: ${run.status}, conclusion: ${run.conclusion}`);
+                
+                if (run.status === 'completed') {
+                  if (run.conclusion === 'success') {
+                    completed = true;
+                    break;
+                  } else {
+                    throw new Error(`Workflow ${workflow} failed with conclusion: ${run.conclusion}`);
+                  }
+                }
+              }
+              
+              // Wait 10 seconds before checking again
+              await new Promise(resolve => setTimeout(resolve, 10000));
+            }
+            
+            if (!completed) {
+              throw new Error(`Workflow ${workflow} did not complete in time`);
+            }
+          }
       
     - name: Download Linux artifact
-      uses: actions/download-artifact@v4
+      uses: dawidd6/action-download-artifact@v6
       with:
+        workflow: build.yml
         name: patris-export-linux-amd64
         path: ./artifacts
+        commit: ${{ github.sha }}
         
-    - name: Download Windows artifact
-      uses: actions/download-artifact@v4
+    - name: Download Windows MinGW artifact
+      uses: dawidd6/action-download-artifact@v6
       with:
-        name: patris-export-windows-amd64
+        workflow: build-windows.yml
+        name: patris-export-windows-mingw-amd64
         path: ./artifacts
+        commit: ${{ github.sha }}
+        
+    - name: Download Windows MinGW cross-compile artifact
+      uses: dawidd6/action-download-artifact@v6
+      with:
+        workflow: build.yml
+        name: patris-export-windows-mingw-cross-amd64
+        path: ./artifacts-cross
+        commit: ${{ github.sha }}
+      continue-on-error: true
         
     - name: Create Release
       uses: softprops/action-gh-release@v2
@@ -51,6 +93,8 @@ jobs:
           artifacts/patris-export-linux-amd64
           artifacts/patris-export-windows-amd64.exe
           artifacts/*.dll
+          artifacts-cross/patris-export-windows-amd64.exe
+          artifacts-cross/*.dll
         generate_release_notes: true
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -2,6 +2,15 @@
 
 This document explains how to build the pxlib library for Windows, which is required for the Windows build of patris-export.
 
+## CI/CD Builds
+
+The project includes two automated Windows build workflows, both using MinGW:
+
+1. **Windows MinGW Build** (`.github/workflows/build-windows.yml`) - Builds on Windows runners using MinGW installed via chocolatey
+2. **Windows MinGW Cross-compile Build** (`.github/workflows/build.yml`) - Cross-compiles from Linux to Windows using MinGW cross-compiler
+
+Both workflows automatically include Windows resource files with version information for both the executable and the pxlib DLL.
+
 ## Using Pre-built DLL (Recommended)
 
 Download the pre-built pxlib DLL from the official pxlib repository releases:
@@ -15,6 +24,7 @@ The CI/CD builds in that repository produce Windows DLLs that can be used direct
 ### Prerequisites
 - CMake 3.12 or later
 - Visual Studio 2019 or later (or MinGW-w64)
+- Go 1.23 or later
 
 ### Build Steps
 
@@ -34,9 +44,17 @@ cmake --build . --config Release
 
 3. The resulting DLL will be in `build/Release/pxlib.dll`
 
-## Cross-Compilation from Linux
+4. Build patris-export with version information:
+```bash
+cd /path/to/patris-export
 
-For cross-compilation from Linux to Windows, you'll need:
+# The resource file will be automatically included if windres is available
+go build -o patris-export.exe ./cmd/patris-export
+```
+
+## MinGW Cross-Compilation from Linux
+
+For cross-compiling from Linux to Windows using MinGW, you'll need:
 
 1. MinGW-w64 cross-compiler
 2. pxlib built for Windows (DLL and headers)
@@ -45,13 +63,16 @@ For cross-compilation from Linux to Windows, you'll need:
 
 1. Install MinGW-w64:
 ```bash
-sudo apt-get install mingw-w64
+sudo apt-get install mingw-w64 mingw-w64-tools
 ```
 
-2. Build pxlib with MinGW:
+2. Build pxlib with MinGW (automated by the build workflow):
 ```bash
 git clone https://github.com/steinm/pxlib.git
 cd pxlib
+
+# pxlib includes its own version information resource file (pxlib.rc.in)
+
 mkdir build-mingw
 cd build-mingw
 cmake .. -DCMAKE_TOOLCHAIN_FILE=../cmake/mingw-w64-x86_64.cmake -DCMAKE_BUILD_TYPE=Release
@@ -68,11 +89,41 @@ sudo cp libpx.dll.a /usr/x86_64-w64-mingw32/lib/
 sudo cp px.dll /usr/x86_64-w64-mingw32/bin/
 ```
 
-4. Now you can cross-compile patris-export for Windows:
+4. Build patris-export with version information:
 ```bash
 cd /path/to/patris-export
-CGO_ENABLED=1 GOOS=windows GOARCH=amd64 CC=x86_64-w64-mingw32-gcc go build -o patris-export.exe ./cmd/patris-export
+
+# Use the Makefile which automatically compiles resource files
+make build-windows
 ```
+
+## Windows Version Information
+
+Windows executables and DLLs include embedded version information via resource (.rc) files:
+
+- `cmd/patris-export/patris-export.rc` - Generated dynamically from repository metadata
+  - Version extracted from git tags
+  - Company name from repository owner
+  - Description from GitHub repository description
+  - Copyright year automatically updated to current year
+  - Run `scripts/generate-version-rc.sh` to regenerate
+- pxlib uses its own upstream version information from `pxlib.rc.in`
+
+These are automatically compiled and embedded during the build process. To manually compile resource files:
+
+```bash
+# Generate the version resource file
+./scripts/generate-version-rc.sh cmd/patris-export/patris-export.rc
+
+# For MinGW cross-compilation on Linux
+./scripts/compile-resources.sh
+
+# Or manually with windres
+x86_64-w64-mingw32-windres -i cmd/patris-export/patris-export.rc \
+  -o cmd/patris-export/patris-export_windows_amd64.syso -O coff --target=pe-x86-64
+```
+
+The version information will appear in the Windows file properties dialog.
 
 ## Using in patris-export
 

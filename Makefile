@@ -16,26 +16,39 @@ help: ## Show this help message
 	@awk 'BEGIN {FS = ":.*?## "} /^[a-zA-Z_-]+:.*?## / {printf "  %-15s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
 
 build-web: ## Build the web frontend
-	@echo "🌐 Building web frontend..."
+	@echo "ðŸŒ Building web frontend..."
 	@cd web && npm install --silent && npm run build
-	@echo "✅ Web frontend built"
+	@echo "âœ… Web frontend built"
 
 build: build-web ## Build for current platform
-	@echo "🔨 Building $(BINARY_NAME)..."
+	@echo "ðŸ”¨ Building $(BINARY_NAME)..."
 	@mkdir -p $(BUILD_DIR)
 	CGO_ENABLED=1 go build $(LDFLAGS) -o $(BUILD_DIR)/$(BINARY_NAME) ./cmd/patris-export
-	@echo "✅ Build complete: $(BUILD_DIR)/$(BINARY_NAME)"
+	@echo "âœ… Build complete: $(BUILD_DIR)/$(BINARY_NAME)"
 
 build-linux: build-web ## Build for Linux
-	@echo "🐧 Building for Linux..."
+	@echo "ðŸ§ Building for Linux..."
 	@mkdir -p $(BUILD_DIR)
 	GOOS=linux GOARCH=amd64 CGO_ENABLED=1 go build $(LDFLAGS) -o $(BUILD_DIR)/$(BINARY_NAME)-linux-amd64 ./cmd/patris-export
-	@echo "✅ Build complete: $(BUILD_DIR)/$(BINARY_NAME)-linux-amd64"
+	@echo "âœ… Build complete: $(BUILD_DIR)/$(BINARY_NAME)-linux-amd64"
 
 build-windows: build-web ## Build for Windows with CGO (builds pxlib from source)
-	@echo "🪟 Building for Windows with full Paradox support..."
+	@echo "ðŸªŸ Building for Windows with full Paradox support..."
 	@mkdir -p $(BUILD_DIR)
-	@echo "📦 Building pxlib for Windows..."
+	@# Generate and compile Windows resource file if windres is available
+	@if command -v x86_64-w64-mingw32-windres >/dev/null 2>&1; then \
+		echo "ðŸ“ Generating Windows resource file..."; \
+		./scripts/generate-version-rc.sh cmd/patris-export/patris-export.rc || \
+			{ echo "âŒ Resource generation failed"; exit 1; }; \
+		echo "ðŸ“ Compiling Windows resource file..."; \
+		x86_64-w64-mingw32-windres -i cmd/patris-export/patris-export.rc \
+			-o cmd/patris-export/patris-export_windows_amd64.syso -O coff --target=pe-x86-64 || \
+			{ echo "âŒ Resource compilation failed"; exit 1; }; \
+		echo "âœ… Resource file generated and compiled"; \
+	else \
+		echo "âš ï¸  windres not found, skipping resource compilation"; \
+	fi
+	@echo "ðŸ“¦ Building pxlib for Windows..."
 	@bash -c 'cd /tmp && \
 		rm -rf pxlib && \
 		git clone --quiet https://github.com/steinm/pxlib.git && \
@@ -60,7 +73,7 @@ build-windows: build-web ## Build for Windows with CGO (builds pxlib from source
 		if [ -n "$$LIBFILE" ]; then \
 			sudo cp "$$LIBFILE" /usr/x86_64-w64-mingw32/lib/libpx.a; \
 		fi'
-	@echo "🔨 Building Windows executable..."
+	@echo "ðŸ”¨ Building Windows executable..."
 	CGO_ENABLED=1 GOOS=windows GOARCH=amd64 CC=x86_64-w64-mingw32-gcc \
 		CGO_LDFLAGS="-L/usr/x86_64-w64-mingw32/lib" \
 		CGO_CFLAGS="-I/usr/x86_64-w64-mingw32/include" \
@@ -68,31 +81,33 @@ build-windows: build-web ## Build for Windows with CGO (builds pxlib from source
 	@if find /tmp/pxlib/build -name "*.dll" -type f 2>/dev/null | grep -q .; then \
 		find /tmp/pxlib/build -name "*.dll" -type f -exec cp {} $(BUILD_DIR)/ \; ; \
 	fi
-	@echo "✅ Build complete: $(BUILD_DIR)/$(BINARY_NAME)-windows-amd64.exe"
+	@echo "âœ… Build complete: $(BUILD_DIR)/$(BINARY_NAME)-windows-amd64.exe"
 
 build-all: build-linux build-windows ## Build for all platforms
 
 install: build-web ## Install the binary to GOPATH/bin
-	@echo "📦 Installing $(BINARY_NAME)..."
+	@echo "ðŸ“¦ Installing $(BINARY_NAME)..."
 	CGO_ENABLED=1 go install $(LDFLAGS) ./cmd/patris-export
-	@echo "✅ Installed to $(shell go env GOPATH)/bin/$(BINARY_NAME)"
+	@echo "âœ… Installed to $(shell go env GOPATH)/bin/$(BINARY_NAME)"
 
 test: ## Run tests
-	@echo "🧪 Running tests..."
+	@echo "ðŸ§ª Running tests..."
 	go test -v ./...
 
 clean: ## Clean build artifacts
-	@echo "🧹 Cleaning..."
+	@echo "ðŸ§¹ Cleaning..."
 	@rm -rf $(BUILD_DIR)
+	@rm -f cmd/patris-export/*.syso
+	@rm -f cmd/patris-export/*.rc
 	@rm -rf web/dist
-	@echo "✅ Clean complete"
+	@echo "âœ… Clean complete"
 
 run: build ## Build and run the application
 	@./$(BUILD_DIR)/$(BINARY_NAME)
 
 deps: ## Download dependencies
-	@echo "📥 Downloading dependencies..."
+	@echo "ðŸ“¥ Downloading dependencies..."
 	go mod download
 	go mod tidy
 	@cd web && npm install
-	@echo "✅ Dependencies ready"
+	@echo "âœ… Dependencies ready"
