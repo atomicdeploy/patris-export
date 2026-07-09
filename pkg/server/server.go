@@ -13,6 +13,7 @@ import (
 	"github.com/atomicdeploy/patris-export/pkg/converter"
 	"github.com/atomicdeploy/patris-export/pkg/filecopy"
 	"github.com/atomicdeploy/patris-export/pkg/paradox"
+	"github.com/atomicdeploy/patris-export/pkg/processmon"
 	"github.com/atomicdeploy/patris-export/pkg/watcher"
 	"github.com/gorilla/mux"
 	"github.com/gorilla/websocket"
@@ -71,6 +72,8 @@ func (s *Server) setupRoutes() {
 	s.router.HandleFunc("/", s.handleIndex).Methods("GET")
 	s.router.HandleFunc("/api/records", s.handleGetRecords).Methods("GET")
 	s.router.HandleFunc("/api/info", s.handleGetInfo).Methods("GET")
+	s.router.HandleFunc("/api/processes/patris81", s.handleGetPatris81Processes).Methods("GET")
+	s.router.HandleFunc("/api/processes/file", s.handleGetFileProcesses).Methods("GET")
 	s.router.HandleFunc("/ws", s.handleWebSocket)
 }
 
@@ -174,6 +177,18 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
         </div>
         
         <div class="endpoint">
+            <strong>GET</strong> <code>/api/processes/patris81</code><br>
+            Get information about running patris81.exe processes<br>
+            <a href="/api/processes/patris81">Try it →</a>
+        </div>
+        
+        <div class="endpoint">
+            <strong>GET</strong> <code>/api/processes/file</code><br>
+            Check which processes have the database file open<br>
+            <a href="/api/processes/file">Try it →</a>
+        </div>
+        
+        <div class="endpoint">
             <strong>WebSocket</strong> <code>/ws</code><br>
             Connect via WebSocket for real-time updates
         </div>
@@ -235,6 +250,40 @@ func (s *Server) handleGetInfo(w http.ResponseWriter, r *http.Request) {
 		"num_records": db.GetNumRecords(),
 		"num_fields":  db.GetNumFields(),
 		"fields":      fields,
+	})
+}
+
+// handleGetPatris81Processes returns information about running patris81.exe processes
+func (s *Server) handleGetPatris81Processes(w http.ResponseWriter, r *http.Request) {
+	processes, err := processmon.FindProcessByName("patris81.exe")
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Failed to find processes: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success":   true,
+		"count":     len(processes),
+		"processes": processes,
+	})
+}
+
+// handleGetFileProcesses returns information about processes accessing the database file
+func (s *Server) handleGetFileProcesses(w http.ResponseWriter, r *http.Request) {
+	fileInfo, err := processmon.FindProcessesWithFile(s.dbPath)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Failed to find processes with file: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success":  true,
+		"file":     filepath.Base(s.dbPath),
+		"count":    len(fileInfo.Processes),
+		"in_use":   len(fileInfo.Processes) > 0,
+		"processes": fileInfo.Processes,
 	})
 }
 
@@ -316,6 +365,56 @@ func (s *Server) broadcastUpdate() {
 
 	for conn := range s.wsClients {
 		go s.sendRecordsToClient(conn)
+	}
+
+	// Also send process monitoring information
+	go s.broadcastProcessInfo()
+}
+
+// broadcastProcessInfo broadcasts process monitoring information to all WebSocket clients
+func (s *Server) broadcastProcessInfo() {
+	s.wsClientsMu.RLock()
+	defer s.wsClientsMu.RUnlock()
+
+	if len(s.wsClients) == 0 {
+		return
+	}
+
+	// Check for patris81 processes
+	patris81Processes, err := processmon.FindProcessByName("patris81.exe")
+	if err != nil {
+		log.Printf("Failed to find patris81 processes: %v", err)
+		return
+	}
+
+	// Check for processes with the database file open
+	fileInfo, err := processmon.FindProcessesWithFile(s.dbPath)
+	if err != nil {
+		log.Printf("Failed to find processes with file: %v", err)
+		return
+	}
+
+	message := map[string]interface{}{
+		"type":       "process_info",
+		"timestamp":  time.Now().Format(time.RFC3339),
+		"patris81": map[string]interface{}{
+			"count":     len(patris81Processes),
+			"processes": patris81Processes,
+		},
+		"file_access": map[string]interface{}{
+			"file":      filepath.Base(s.dbPath),
+			"in_use":    len(fileInfo.Processes) > 0,
+			"count":     len(fileInfo.Processes),
+			"processes": fileInfo.Processes,
+		},
+	}
+
+	for conn := range s.wsClients {
+		go func(c *websocket.Conn) {
+			if err := c.WriteJSON(message); err != nil {
+				log.Printf("Failed to send process info to WebSocket: %v", err)
+			}
+		}(conn)
 	}
 }
 
