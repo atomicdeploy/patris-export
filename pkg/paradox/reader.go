@@ -136,7 +136,7 @@ func (db *Database) GetRecords() ([]Record, error) {
 		}
 
 		record := make(Record)
-		
+
 		for j := 0; j < numFields; j++ {
 			field := C.PX_get_field(db.pxdoc, C.int(j))
 			if field == nil {
@@ -144,17 +144,17 @@ func (db *Database) GetRecords() ([]Record, error) {
 			}
 
 			fieldName := C.GoString(field.px_fname)
-			
+
 			// Get the pxval_t pointer for this field
 			pxvalPtr := (**C.pxval_t)(unsafe.Pointer(uintptr(unsafe.Pointer(pxvals)) + uintptr(j)*unsafe.Sizeof(*pxvals)))
 			pxval := *pxvalPtr
-			
+
 			if pxval == nil {
 				continue
 			}
-			
+
 			value := db.getFieldValue(pxval, field.px_ftype)
-			
+
 			if value != nil {
 				record[fieldName] = value
 			}

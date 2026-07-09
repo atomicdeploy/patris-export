@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/atomicdeploy/patris-export/pkg/converter"
+	"github.com/atomicdeploy/patris-export/pkg/filecopy"
 	"github.com/atomicdeploy/patris-export/pkg/paradox"
 )
 
@@ -23,8 +24,9 @@ type DataSource interface {
 
 // ParadoxDataSource represents a Paradox database file
 type ParadoxDataSource struct {
-	path      string
-	converter converter.CharMapping
+	path        string
+	converter   converter.CharMapping
+	useTempFile bool
 }
 
 // JSONDataSource represents a transformed JSON file
@@ -33,14 +35,18 @@ type JSONDataSource struct {
 }
 
 // NewDataSource creates a new data source based on the file extension
-func NewDataSource(path string, charMap converter.CharMapping) (DataSource, error) {
+func NewDataSource(path string, charMap converter.CharMapping, useTempFile ...bool) (DataSource, error) {
 	ext := strings.ToLower(filepath.Ext(path))
-	
+	copyBeforeRead := true
+	if len(useTempFile) > 0 {
+		copyBeforeRead = useTempFile[0]
+	}
+
 	switch ext {
 	case ".json":
 		return &JSONDataSource{path: path}, nil
 	case ".db":
-		return &ParadoxDataSource{path: path, converter: charMap}, nil
+		return &ParadoxDataSource{path: path, converter: charMap, useTempFile: copyBeforeRead}, nil
 	default:
 		return nil, fmt.Errorf("unsupported file type: %s (expected .db or .json)", ext)
 	}
@@ -48,7 +54,21 @@ func NewDataSource(path string, charMap converter.CharMapping) (DataSource, erro
 
 // GetRecords implements DataSource for ParadoxDataSource
 func (p *ParadoxDataSource) GetRecords() ([]map[string]interface{}, error) {
-	db, err := paradox.Open(p.path)
+	pathToOpen := p.path
+	cleanup := func() {}
+	if p.useTempFile {
+		tempFileInfo, err := filecopy.CopyToTemp(p.path)
+		if err != nil {
+			return nil, fmt.Errorf("failed to copy database to temp: %w", err)
+		}
+		pathToOpen = tempFileInfo.TempPath
+		cleanup = func() {
+			filecopy.CleanupTemp(tempFileInfo.TempPath)
+		}
+	}
+	defer cleanup()
+
+	db, err := paradox.Open(pathToOpen)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open database: %w", err)
 	}

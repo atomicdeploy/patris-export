@@ -109,4 +109,3 @@ func TestMakeArraysInlineNested(t *testing.T) {
 
 	t.Logf("Compacted output:\n%s", result)
 }
-

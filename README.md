@@ -14,6 +14,10 @@ A fast and performant application for reading, parsing, and converting Paradox/B
 - 🌐 **REST API** - HTTP JSON API for accessing database records
 - 🔌 **WebSocket support** - Real-time updates when database changes
 - 🔔 **Smart notifications** - Audio alerts, title flashing, and favicon changes on data updates
+- 🔒 **Write-lock prevention** - Copies files to temp location to avoid BDE conflicts
+- 🔐 **File integrity** - CRC32 checksum calculation and verification
+- 🔍 **Process monitoring** - Detect running Patris81 instances and file locks
+- ⚠️ **Conflict detection** - Warns about potential conflicts in direct access mode
 - 🎨 **Beautiful CLI** - Colorful terminal output with emojis
 - 🏢 **Company.inf support** - Parse company information files
 - ⚡ **Fast and lightweight** - Written in Go with native performance

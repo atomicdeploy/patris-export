@@ -15,7 +15,9 @@ import (
 
 	"github.com/atomicdeploy/patris-export/pkg/converter"
 	"github.com/atomicdeploy/patris-export/pkg/datasource"
+	"github.com/atomicdeploy/patris-export/pkg/filecopy"
 	"github.com/atomicdeploy/patris-export/pkg/paradox"
+	"github.com/atomicdeploy/patris-export/pkg/processmon"
 	"github.com/atomicdeploy/patris-export/pkg/watcher"
 	"github.com/atomicdeploy/patris-export/web"
 	"github.com/gorilla/mux"
@@ -36,6 +38,7 @@ type Server struct {
 	lastRecordsMu sync.RWMutex
 	lastModTime   time.Time
 	lastModTimeMu sync.RWMutex
+	useTempFile   bool
 }
 
 // RecordChange represents a change to a specific record
@@ -58,19 +61,25 @@ type ChangeSet struct {
 }
 
 // NewServer creates a new server instance
-func NewServer(dbPath string, charMap converter.CharMapping) (*Server, error) {
+func NewServer(dbPath string, charMap converter.CharMapping, useTempFile ...bool) (*Server, error) {
+	copyBeforeRead := true
+	if len(useTempFile) > 0 {
+		copyBeforeRead = useTempFile[0]
+	}
+
 	// Create data source (supports both .db and .json files)
-	ds, err := datasource.NewDataSource(dbPath, charMap)
+	ds, err := datasource.NewDataSource(dbPath, charMap, copyBeforeRead)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create data source: %w", err)
 	}
 
 	s := &Server{
-		router:     mux.NewRouter(),
-		dbPath:     dbPath,
-		charMap:    charMap,
-		dataSource: ds,
-		wsClients:  make(map[*websocket.Conn]*sync.Mutex),
+		router:      mux.NewRouter(),
+		dbPath:      dbPath,
+		charMap:     charMap,
+		dataSource:  ds,
+		wsClients:   make(map[*websocket.Conn]*sync.Mutex),
+		useTempFile: copyBeforeRead,
 		upgrader: websocket.Upgrader{
 			// Security: Configure origin checking for production use
 			// Default allows localhost only
@@ -105,8 +114,36 @@ func (s *Server) setupRoutes() {
 	s.router.HandleFunc("/viewer", s.handleViewer).Methods("GET")
 	s.router.HandleFunc("/api/records", s.handleGetRecords).Methods("GET")
 	s.router.HandleFunc("/api/info", s.handleGetInfo).Methods("GET")
+	s.router.HandleFunc("/api/processes/patris81", s.handleGetPatris81Processes).Methods("GET")
+	s.router.HandleFunc("/api/processes/file", s.handleGetFileProcesses).Methods("GET")
 	s.router.HandleFunc("/static/notification.ogg", s.handleNotificationAudio).Methods("GET")
 	s.router.HandleFunc("/ws", s.handleWebSocket)
+}
+
+func (s *Server) openDatabase() (*paradox.Database, func(), error) {
+	pathToOpen := s.dbPath
+	cleanup := func() {}
+	if s.useTempFile && strings.EqualFold(filepath.Ext(s.dbPath), ".db") {
+		tempFileInfo, err := filecopy.CopyToTemp(s.dbPath)
+		if err != nil {
+			return nil, nil, fmt.Errorf("failed to copy database to temp: %w", err)
+		}
+		pathToOpen = tempFileInfo.TempPath
+		cleanup = func() {
+			filecopy.CleanupTemp(tempFileInfo.TempPath)
+		}
+	}
+
+	db, err := paradox.Open(pathToOpen)
+	if err != nil {
+		cleanup()
+		return nil, nil, err
+	}
+
+	return db, func() {
+		db.Close()
+		cleanup()
+	}, nil
 }
 
 // handleWelcome serves the welcome page
@@ -141,12 +178,12 @@ func (s *Server) handleGetRecords(w http.ResponseWriter, r *http.Request) {
 
 // handleGetInfo returns database schema information
 func (s *Server) handleGetInfo(w http.ResponseWriter, r *http.Request) {
-	db, err := paradox.Open(s.dbPath)
+	db, cleanup, err := s.openDatabase()
 	if err != nil {
 		http.Error(w, fmt.Sprintf("Failed to open database: %v", err), http.StatusInternalServerError)
 		return
 	}
-	defer db.Close()
+	defer cleanup()
 
 	fields, err := db.GetFields()
 	if err != nil {
@@ -161,6 +198,40 @@ func (s *Server) handleGetInfo(w http.ResponseWriter, r *http.Request) {
 		"num_records": db.GetNumRecords(),
 		"num_fields":  db.GetNumFields(),
 		"fields":      fields,
+	})
+}
+
+// handleGetPatris81Processes returns information about running patris81.exe processes.
+func (s *Server) handleGetPatris81Processes(w http.ResponseWriter, r *http.Request) {
+	processes, err := processmon.FindProcessByName("patris81.exe")
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Failed to find processes: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success":   true,
+		"count":     len(processes),
+		"processes": processes,
+	})
+}
+
+// handleGetFileProcesses returns information about processes accessing the database file.
+func (s *Server) handleGetFileProcesses(w http.ResponseWriter, r *http.Request) {
+	fileInfo, err := processmon.FindProcessesWithFile(s.dbPath)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Failed to find processes with file: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success":   true,
+		"file":      filepath.Base(s.dbPath),
+		"count":     len(fileInfo.Processes),
+		"in_use":    len(fileInfo.Processes) > 0,
+		"processes": fileInfo.Processes,
 	})
 }
 
@@ -190,23 +261,45 @@ func (s *Server) handleNotificationAudio(w http.ResponseWriter, r *http.Request)
 	// - "bytes=start-" (from start to end)
 	// - "bytes=-suffix" (last N bytes)
 	var start, end int64
-	// Try parsing "bytes=start-end" format first
-	if n, _ := fmt.Sscanf(rangeHeader, "bytes=%d-%d", &start, &end); n == 2 {
-		// Successfully parsed start-end format
-	} else if n, _ := fmt.Sscanf(rangeHeader, "bytes=%d-", &start); n == 1 {
-		// Successfully parsed start- format (to end of file)
-		end = audioSize - 1
-	} else if n, _ := fmt.Sscanf(rangeHeader, "bytes=-%d", &end); n == 1 {
-		// Successfully parsed -suffix format (last N bytes)
-		start = audioSize - end
+	rangeSpec := strings.TrimPrefix(rangeHeader, "bytes=")
+	if rangeSpec == rangeHeader || strings.Contains(rangeSpec, ",") {
+		http.Error(w, "Range Not Satisfiable", http.StatusRequestedRangeNotSatisfiable)
+		return
+	}
+
+	if strings.HasPrefix(rangeSpec, "-") {
+		suffixLength, err := strconv.ParseInt(strings.TrimPrefix(rangeSpec, "-"), 10, 64)
+		if err != nil || suffixLength <= 0 {
+			http.Error(w, "Range Not Satisfiable", http.StatusRequestedRangeNotSatisfiable)
+			return
+		}
+		start = audioSize - suffixLength
 		end = audioSize - 1
 		if start < 0 {
 			start = 0
 		}
 	} else {
-		// Invalid format
-		http.Error(w, "Range Not Satisfiable", http.StatusRequestedRangeNotSatisfiable)
-		return
+		parts := strings.SplitN(rangeSpec, "-", 2)
+		if len(parts) != 2 || parts[0] == "" {
+			http.Error(w, "Range Not Satisfiable", http.StatusRequestedRangeNotSatisfiable)
+			return
+		}
+		parsedStart, err := strconv.ParseInt(parts[0], 10, 64)
+		if err != nil {
+			http.Error(w, "Range Not Satisfiable", http.StatusRequestedRangeNotSatisfiable)
+			return
+		}
+		start = parsedStart
+		if parts[1] == "" {
+			end = audioSize - 1
+		} else {
+			parsedEnd, err := strconv.ParseInt(parts[1], 10, 64)
+			if err != nil {
+				http.Error(w, "Range Not Satisfiable", http.StatusRequestedRangeNotSatisfiable)
+				return
+			}
+			end = parsedEnd
+		}
 	}
 
 	// Validate range
@@ -350,6 +443,49 @@ func (s *Server) broadcastUpdate() {
 	s.wsClientsMu.RUnlock()
 
 	log.Printf("✅ Broadcast complete")
+	go s.broadcastProcessInfo()
+}
+
+func (s *Server) broadcastProcessInfo() {
+	patris81Processes, err := processmon.FindProcessByName("patris81.exe")
+	if err != nil {
+		log.Printf("Failed to find patris81 processes: %v", err)
+		return
+	}
+
+	fileInfo, err := processmon.FindProcessesWithFile(s.dbPath)
+	if err != nil {
+		log.Printf("Failed to find processes with file: %v", err)
+		return
+	}
+
+	message := map[string]interface{}{
+		"type":      "process_info",
+		"timestamp": time.Now().Format(time.RFC3339),
+		"patris81": map[string]interface{}{
+			"count":     len(patris81Processes),
+			"processes": patris81Processes,
+		},
+		"file_access": map[string]interface{}{
+			"file":      filepath.Base(s.dbPath),
+			"in_use":    len(fileInfo.Processes) > 0,
+			"count":     len(fileInfo.Processes),
+			"processes": fileInfo.Processes,
+		},
+	}
+
+	s.wsClientsMu.RLock()
+	defer s.wsClientsMu.RUnlock()
+	for conn, connMu := range s.wsClients {
+		go func(c *websocket.Conn, mu *sync.Mutex) {
+			mu.Lock()
+			err := c.WriteJSON(message)
+			mu.Unlock()
+			if err != nil {
+				log.Printf("Failed to send process info to WebSocket: %v", err)
+			}
+		}(conn, connMu)
+	}
 }
 
 // computeChanges computes the difference between old and new records
