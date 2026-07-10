@@ -123,6 +123,7 @@ patris-export serve kala.db -a :8080
 ```
 
 Terminal WebSocket inspection with WebSocat is documented in [docs/examples/websocat.md](docs/examples/websocat.md).
+Embedding, loadable-library builds, and local IPC are documented in [docs/EMBEDDING.md](docs/EMBEDDING.md).
 
 Experimental RTL logical text conversion is available as an opt-in backend flag
 and web display setting. See [docs/RTL_CONVERSION.md](docs/RTL_CONVERSION.md).

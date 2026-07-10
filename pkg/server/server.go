@@ -52,6 +52,8 @@ type Server struct {
 	processStatusAt    time.Time
 	lastSourceHash     string
 	lastSourceHashMu   sync.Mutex
+	eventSubscribers   map[chan map[string]interface{}]struct{}
+	eventSubscribersMu sync.RWMutex
 }
 
 type Options struct {
@@ -110,14 +112,15 @@ func NewServerWithOptions(dbPath string, charMap converter.CharMapping, options 
 	}
 
 	s := &Server{
-		router:      mux.NewRouter(),
-		dbPath:      dbPath,
-		charMap:     charMap,
-		dataSource:  ds,
-		wsClients:   make(map[*websocket.Conn]*sync.Mutex),
-		useTempFile: copyBeforeRead,
-		config:      options.Config,
-		version:     options.Version,
+		router:           mux.NewRouter(),
+		dbPath:           dbPath,
+		charMap:          charMap,
+		dataSource:       ds,
+		wsClients:        make(map[*websocket.Conn]*sync.Mutex),
+		eventSubscribers: make(map[chan map[string]interface{}]struct{}),
+		useTempFile:      copyBeforeRead,
+		config:           options.Config,
+		version:          options.Version,
 		upgrader: websocket.Upgrader{
 			// Security: Configure origin checking for production use
 			// Default allows localhost only
@@ -181,6 +184,114 @@ func (s *Server) setupRoutes() {
 	s.router.HandleFunc("/ws", s.handleWebSocket)
 }
 
+// Router returns the HTTP router used by the standalone server. Embedded hosts
+// can mount it in their own HTTP stack instead of opening a patris-export port.
+func (s *Server) Router() http.Handler {
+	return s.router
+}
+
+// Records returns the current records using the same transformed shape served
+// by GET /api/records.
+func (s *Server) Records() (map[string]interface{}, error) {
+	records, err := s.dataSource.GetRecords()
+	if err != nil {
+		return nil, fmt.Errorf("failed to read records: %w", err)
+	}
+	exporter := converter.NewExporter(nil)
+	return exporter.TransformRecordsMap(records), nil
+}
+
+// Info returns database schema and metadata using the same shape served by
+// GET /api/info.
+func (s *Server) Info() (map[string]interface{}, error) {
+	db, cleanup, err := s.openDatabase()
+	if err != nil {
+		return nil, fmt.Errorf("failed to open database: %w", err)
+	}
+	defer cleanup()
+
+	fields, err := db.GetFields()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get fields: %w", err)
+	}
+
+	return map[string]interface{}{
+		"success":     true,
+		"file":        sourceBaseName(s.dbPath),
+		"path":        s.dbPath,
+		"version":     s.version,
+		"num_records": db.GetNumRecords(),
+		"num_fields":  db.GetNumFields(),
+		"fields":      fields,
+	}, nil
+}
+
+// AppMetadata returns version/resource/config metadata for embedded and IPC
+// clients.
+func (s *Server) AppMetadata() map[string]interface{} {
+	return s.appMetadata()
+}
+
+// Config returns the active configuration snapshot.
+func (s *Server) Config() appconfig.Config {
+	if s.config == nil {
+		return appconfig.Default()
+	}
+	return s.config.Get()
+}
+
+// ReplaceConfig persists and broadcasts a new configuration snapshot.
+func (s *Server) ReplaceConfig(cfg appconfig.Config) (appconfig.Config, error) {
+	if s.config == nil {
+		return appconfig.Default(), fmt.Errorf("configuration storage is not enabled")
+	}
+	if err := s.config.Replace(cfg); err != nil {
+		return appconfig.Config{}, err
+	}
+	cfg = s.config.Get()
+	s.broadcastConfig(cfg)
+	return cfg, nil
+}
+
+// Status returns process and database lock status using the same shape served
+// by GET /api/status.
+func (s *Server) Status() map[string]interface{} {
+	return s.processStatus()
+}
+
+// ShowToast displays a native notification and/or broadcasts it to connected
+// browser, IPC, and embedded subscribers.
+func (s *Server) ShowToast(req ToastRequest) error {
+	return s.processToastRequest(req)
+}
+
+// Refresh forces a data refresh broadcast to browser, IPC, and embedded
+// subscribers.
+func (s *Server) Refresh() {
+	s.broadcastUpdate()
+}
+
+// SubscribeEvents subscribes to the same event stream used by the WebSocket
+// broadcaster. The returned unsubscribe function must be called by the host.
+func (s *Server) SubscribeEvents(buffer int) (<-chan map[string]interface{}, func()) {
+	if buffer < 1 {
+		buffer = 1
+	}
+	ch := make(chan map[string]interface{}, buffer)
+	s.eventSubscribersMu.Lock()
+	s.eventSubscribers[ch] = struct{}{}
+	s.eventSubscribersMu.Unlock()
+	unsubscribe := func() {
+		s.eventSubscribersMu.Lock()
+		if _, ok := s.eventSubscribers[ch]; ok {
+			delete(s.eventSubscribers, ch)
+			close(ch)
+		}
+		s.eventSubscribersMu.Unlock()
+	}
+	return ch, unsubscribe
+}
+
 func (s *Server) openDatabase() (*paradox.Database, func(), error) {
 	pathToOpen := s.dbPath
 	cleanup := func() {}
@@ -232,15 +343,11 @@ func (s *Server) handleViewer(w http.ResponseWriter, r *http.Request) {
 
 // handleGetRecords returns all database records as JSON
 func (s *Server) handleGetRecords(w http.ResponseWriter, r *http.Request) {
-	records, err := s.dataSource.GetRecords()
+	transformed, err := s.Records()
 	if err != nil {
 		http.Error(w, fmt.Sprintf("Failed to read records: %v", err), http.StatusInternalServerError)
 		return
 	}
-
-	// Transform records to use Code as key (same format as convert command)
-	exporter := converter.NewExporter(nil)
-	transformed := exporter.TransformRecordsMap(records)
 
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	if err := json.NewEncoder(w).Encode(transformed); err != nil {
@@ -250,29 +357,14 @@ func (s *Server) handleGetRecords(w http.ResponseWriter, r *http.Request) {
 
 // handleGetInfo returns database schema information
 func (s *Server) handleGetInfo(w http.ResponseWriter, r *http.Request) {
-	db, cleanup, err := s.openDatabase()
+	info, err := s.Info()
 	if err != nil {
-		http.Error(w, fmt.Sprintf("Failed to open database: %v", err), http.StatusInternalServerError)
-		return
-	}
-	defer cleanup()
-
-	fields, err := db.GetFields()
-	if err != nil {
-		http.Error(w, fmt.Sprintf("Failed to get fields: %v", err), http.StatusInternalServerError)
+		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"success":     true,
-		"file":        sourceBaseName(s.dbPath),
-		"path":        s.dbPath,
-		"version":     s.version,
-		"num_records": db.GetNumRecords(),
-		"num_fields":  db.GetNumFields(),
-		"fields":      fields,
-	})
+	json.NewEncoder(w).Encode(info)
 }
 
 func (s *Server) handleGetApp(w http.ResponseWriter, r *http.Request) {
@@ -312,19 +404,19 @@ func (s *Server) handlePutConfig(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf("Failed to decode config: %v", err), http.StatusBadRequest)
 		return
 	}
-	if err := s.config.Replace(cfg); err != nil {
+	cfg, err := s.ReplaceConfig(cfg)
+	if err != nil {
 		http.Error(w, fmt.Sprintf("Failed to save config: %v", err), http.StatusInternalServerError)
 		return
 	}
-	s.broadcastConfig(s.config.Get())
 	writeJSON(w, map[string]interface{}{
 		"success": true,
-		"config":  s.config.Get(),
+		"config":  cfg,
 	})
 }
 
 func (s *Server) handleGetStatus(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, s.processStatus())
+	writeJSON(w, s.Status())
 }
 
 // handlePostToast displays a native notification and broadcasts it to web clients.
@@ -336,7 +428,7 @@ func (s *Server) handlePostToast(w http.ResponseWriter, r *http.Request) {
 	}
 
 	req.Source = "api"
-	nativeErr := s.processToastRequest(req)
+	nativeErr := s.ShowToast(req)
 
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	json.NewEncoder(w).Encode(map[string]interface{}{
@@ -779,11 +871,11 @@ func writeJSON(w http.ResponseWriter, payload interface{}) {
 }
 
 func (s *Server) processStatus() map[string]interface{} {
-	patris81Processes, patrisErr := processmon.FindProcessByName("patris81.exe")
+	patris81Processes, patrisErr := findPatrisProcessesWithTimeout(1500 * time.Millisecond)
 	var fileInfo *processmon.FileAccessInfo
 	var fileErr error
 	if !filecopy.IsURL(s.dbPath) {
-		fileInfo, fileErr = processmon.FindProcessesWithFile(s.dbPath)
+		fileInfo, fileErr = findFileProcessesWithTimeout(s.dbPath, 1500*time.Millisecond)
 	}
 
 	status := map[string]interface{}{
@@ -815,6 +907,45 @@ func (s *Server) processStatus() map[string]interface{} {
 	return status
 }
 
+func findPatrisProcessesWithTimeout(timeout time.Duration) ([]processmon.ProcessInfo, error) {
+	type result struct {
+		processes []processmon.ProcessInfo
+		err       error
+	}
+	ch := make(chan result, 1)
+	go func() {
+		processes, err := processmon.FindProcessByName("patris81.exe")
+		ch <- result{processes: processes, err: err}
+	}()
+	select {
+	case res := <-ch:
+		return res.processes, res.err
+	case <-time.After(timeout):
+		return nil, fmt.Errorf("timed out inspecting patris81.exe processes")
+	}
+}
+
+func findFileProcessesWithTimeout(path string, timeout time.Duration) (*processmon.FileAccessInfo, error) {
+	type result struct {
+		info *processmon.FileAccessInfo
+		err  error
+	}
+	ch := make(chan result, 1)
+	go func() {
+		info, err := processmon.FindProcessesWithFile(path)
+		ch <- result{info: info, err: err}
+	}()
+	select {
+	case res := <-ch:
+		return res.info, res.err
+	case <-time.After(timeout):
+		return &processmon.FileAccessInfo{
+			FilePath:  path,
+			Processes: []processmon.ProcessInfo{},
+		}, fmt.Errorf("timed out inspecting file access")
+	}
+}
+
 func (s *Server) broadcastConfig(cfg appconfig.Config) {
 	message := map[string]interface{}{
 		"type":      "config_update",
@@ -825,6 +956,15 @@ func (s *Server) broadcastConfig(cfg appconfig.Config) {
 }
 
 func (s *Server) broadcastMessage(message map[string]interface{}) {
+	s.eventSubscribersMu.RLock()
+	for ch := range s.eventSubscribers {
+		select {
+		case ch <- cloneMap(message):
+		default:
+		}
+	}
+	s.eventSubscribersMu.RUnlock()
+
 	s.wsClientsMu.RLock()
 	defer s.wsClientsMu.RUnlock()
 	for conn, connMu := range s.wsClients {
@@ -837,6 +977,14 @@ func (s *Server) broadcastMessage(message map[string]interface{}) {
 			}
 		}(conn, connMu)
 	}
+}
+
+func cloneMap(in map[string]interface{}) map[string]interface{} {
+	out := make(map[string]interface{}, len(in))
+	for key, value := range in {
+		out[key] = value
+	}
+	return out
 }
 
 func (s *Server) broadcastProcessInfo() {
