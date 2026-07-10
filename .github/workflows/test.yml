@@ -43,4 +43,14 @@ jobs:
         npm run build
         
     - name: Run tests
-      run: go test -v ./...
+      shell: bash
+      run: |
+        set -o pipefail
+        go test -v ./... 2>&1 | tee test-results.log
+
+    - name: Generate test summary
+      if: always()
+      shell: bash
+      env:
+        JOB_STATUS: ${{ job.status }}
+      run: bash .github/scripts/ci-summary.sh test test-results.log

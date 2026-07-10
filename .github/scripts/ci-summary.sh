@@ -1,0 +1,337 @@
+#!/usr/bin/env bash
+
+set -u
+
+summary_file="${GITHUB_STEP_SUMMARY:-}"
+if [[ -z "$summary_file" ]]; then
+  summary_file="$(mktemp)"
+  echo "GITHUB_STEP_SUMMARY is not set; writing summary preview to $summary_file" >&2
+fi
+
+repo="${GITHUB_REPOSITORY:-atomicdeploy/patris-export}"
+server_url="${GITHUB_SERVER_URL:-https://github.com}"
+run_id="${GITHUB_RUN_ID:-local}"
+run_attempt="${GITHUB_RUN_ATTEMPT:-1}"
+workflow="${GITHUB_WORKFLOW:-local workflow}"
+job_status="${JOB_STATUS:-unknown}"
+event_name="${GITHUB_EVENT_NAME:-local}"
+ref_name="${GITHUB_HEAD_REF:-${GITHUB_REF_NAME:-$(git branch --show-current 2>/dev/null || echo local)}}"
+sha="${GITHUB_SHA:-$(git rev-parse HEAD 2>/dev/null || echo local)}"
+short_sha="${sha:0:12}"
+actor="${GITHUB_ACTOR:-local}"
+run_url="${server_url}/${repo}/actions/runs/${run_id}"
+commit_url="${server_url}/${repo}/commit/${sha}"
+repo_url="${server_url}/${repo}"
+branch_url="${server_url}/${repo}/tree/${ref_name}"
+artifact_url="${run_url}#artifacts"
+
+status_icon() {
+  case "$job_status" in
+    success) printf "✅" ;;
+    failure) printf "❌" ;;
+    cancelled) printf "🚫" ;;
+    skipped) printf "⏭️" ;;
+    *) printf "🧭" ;;
+  esac
+}
+
+human_size() {
+  local bytes="${1:-0}"
+  awk -v b="$bytes" 'BEGIN {
+    split("B KiB MiB GiB TiB", u, " ");
+    i = 1;
+    while (b >= 1024 && i < 5) { b = b / 1024; i++ }
+    if (i == 1) printf "%d %s", b, u[i];
+    else printf "%.2f %s", b, u[i];
+  }'
+}
+
+file_size() {
+  local path="$1"
+  stat -c '%s' "$path" 2>/dev/null || wc -c < "$path" | tr -d ' '
+}
+
+file_modified() {
+  local path="$1"
+  date -u -r "$path" '+%Y-%m-%d %H:%M:%SZ' 2>/dev/null || printf "unknown"
+}
+
+file_hash() {
+  local path="$1"
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$path" | awk '{print $1}'
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$path" | awk '{print $1}'
+  elif command -v openssl >/dev/null 2>&1; then
+    openssl dgst -sha256 "$path" | awk '{print $NF}'
+  else
+    printf "unavailable"
+  fi
+}
+
+classify_file() {
+  local path="$1"
+  local base="${path##*/}"
+  case "$base" in
+    *.exe) printf "🪟 Windows executable" ;;
+    *.dll) printf "🧩 Windows DLL" ;;
+    *.so) printf "🐧 Linux shared object" ;;
+    *.h) printf "📜 C header" ;;
+    *.zip|*.7z|*.tar.gz) printf "📦 Archive" ;;
+    patris-export-linux-*|patris-export) printf "🐧 Linux executable" ;;
+    *) printf "📄 File" ;;
+  esac
+}
+
+append_context() {
+  cat >> "$summary_file" <<EOF
+
+### 🧭 Run Context
+
+| Property | Value |
+| --- | --- |
+| Repository | [\`${repo}\`](${repo_url}) |
+| Branch / Ref | [\`${ref_name}\`](${branch_url}) |
+| Commit | [\`${short_sha}\`](${commit_url}) |
+| Actor | [@${actor}](${server_url}/${actor}) |
+| Workflow | \`${workflow}\` |
+| Run | [\`${run_id}\` attempt \`${run_attempt}\`](${run_url}) |
+| Event | \`${event_name}\` |
+| Job status | $(status_icon) \`${job_status}\` |
+
+EOF
+}
+
+append_toolchain() {
+  local go_version node_version npm_version os_line
+  go_version="$(go version 2>/dev/null || printf 'go unavailable')"
+  node_version="$(node --version 2>/dev/null || printf 'node unavailable')"
+  npm_version="$(npm --version 2>/dev/null || printf 'npm unavailable')"
+  os_line="$(uname -a 2>/dev/null || printf 'unknown runner')"
+
+  cat >> "$summary_file" <<EOF
+### 🧰 Toolchain Snapshot
+
+| Tool | Version |
+| --- | --- |
+| Go | \`${go_version}\` |
+| Node.js | \`${node_version}\` |
+| npm | \`${npm_version}\` |
+| Runner | \`${os_line}\` |
+
+EOF
+}
+
+append_artifact_table() {
+  local artifact_name="$1"
+  shift
+  local existing=0 missing=0
+  declare -A seen_paths=()
+
+  cat >> "$summary_file" <<EOF
+### 📦 Artifact Manifest
+
+Artifact bundle: [\`${artifact_name}\`](${artifact_url})
+
+| Type | File | Size | Bytes | SHA-256 | Modified UTC |
+| --- | --- | ---: | ---: | --- | --- |
+EOF
+
+  for path in "$@"; do
+    if [[ -n "${seen_paths[$path]+x}" ]]; then
+      continue
+    fi
+    seen_paths[$path]=1
+
+    if [[ -f "$path" ]]; then
+      local bytes hash modified kind
+      bytes="$(file_size "$path")"
+      hash="$(file_hash "$path")"
+      modified="$(file_modified "$path")"
+      kind="$(classify_file "$path")"
+      printf '| %s | `%s` | %s | %s | `%s` | `%s` |\n' "$kind" "$path" "$(human_size "$bytes")" "$bytes" "$hash" "$modified" >> "$summary_file"
+      existing=$((existing + 1))
+    else
+      printf '| ⚠️ Missing | `%s` | - | - | - | - |\n' "$path" >> "$summary_file"
+      missing=$((missing + 1))
+    fi
+  done
+
+  cat >> "$summary_file" <<EOF
+
+EOF
+
+  if [[ "$existing" -eq 0 ]]; then
+    cat >> "$summary_file" <<EOF
+> ❌ No expected output files were found. Check the build log above this summary for the failing command.
+
+EOF
+  elif [[ "$missing" -gt 0 ]]; then
+    cat >> "$summary_file" <<EOF
+> ⚠️ ${existing} expected file(s) were produced, but ${missing} expected path(s) were missing.
+
+EOF
+  else
+    cat >> "$summary_file" <<EOF
+> ✅ All expected output files were produced and fingerprinted.
+
+EOF
+  fi
+}
+
+append_integrity_commands() {
+  local files=("$@")
+  cat >> "$summary_file" <<EOF
+<details>
+<summary>🔐 Reproduce integrity checks locally</summary>
+
+\`\`\`bash
+EOF
+
+  for path in "${files[@]}"; do
+    [[ -f "$path" ]] || continue
+    printf 'sha256sum %q\n' "$path" >> "$summary_file"
+  done
+
+  cat >> "$summary_file" <<EOF
+\`\`\`
+
+</details>
+
+EOF
+}
+
+append_footer() {
+  cat >> "$summary_file" <<EOF
+---
+
+_Generated by Patris Export CI summaries for [\`${repo}\`](${repo_url})._
+
+EOF
+}
+
+mode="${1:-}"
+shift || true
+
+case "$mode" in
+  build)
+    title="${1:-Build summary}"
+    description="${2:-Build completed.}"
+    artifact_name="${3:-artifact}"
+    build_kind="${4:-Build}"
+    shift 4 || true
+    files=("$@")
+
+    cat >> "$summary_file" <<EOF
+# $(status_icon) ${title}
+
+${description}
+
+### ✨ What Happened
+
+| Item | Detail |
+| --- | --- |
+| Build kind | **${build_kind}** |
+| Artifact set | \`${artifact_name}\` |
+| pxlib strategy | Upstream source build when available; package/system fallback where configured |
+| Frontend assets | HTML5 SPA bundle generated before native compilation |
+| Native layer | CGO-enabled Patris/pxlib integration |
+
+EOF
+    append_context
+    append_toolchain
+    append_artifact_table "$artifact_name" "${files[@]}"
+    append_integrity_commands "${files[@]}"
+    append_footer
+    ;;
+
+  test)
+    log_file="${1:-test-results.log}"
+    package_total=0
+    package_ok=0
+    package_fail=0
+    if [[ -f "$log_file" ]]; then
+      package_ok="$(grep -c '^ok[[:space:]]' "$log_file" 2>/dev/null || true)"
+      package_fail="$(grep -c '^FAIL[[:space:]]' "$log_file" 2>/dev/null || true)"
+      package_total=$((package_ok + package_fail))
+    fi
+
+    cat >> "$summary_file" <<EOF
+# $(status_icon) Test Summary
+
+The Go test suite and web asset build ran with the same dependency shape used by the build jobs.
+
+### 🧪 Test Results
+
+| Metric | Value |
+| --- | ---: |
+| Passing packages | ${package_ok} |
+| Failing packages | ${package_fail} |
+| Packages observed | ${package_total} |
+| Test log | \`${log_file}\` |
+
+EOF
+    append_context
+    append_toolchain
+    if [[ -f "$log_file" ]]; then
+      cat >> "$summary_file" <<EOF
+<details>
+<summary>🧾 Final test log lines</summary>
+
+\`\`\`text
+EOF
+      tail -n 80 "$log_file" >> "$summary_file" 2>/dev/null || true
+      cat >> "$summary_file" <<EOF
+\`\`\`
+
+</details>
+
+EOF
+    else
+      cat >> "$summary_file" <<EOF
+> ⚠️ The test log file was not produced, which usually means an earlier setup step failed.
+
+EOF
+    fi
+    append_footer
+    ;;
+
+  release)
+    title="${1:-Release summary}"
+    description="${2:-Release was prepared.}"
+    shift 2 || true
+    files=("$@")
+    tag="${GITHUB_REF_NAME:-${GITHUB_REF:-local}}"
+    tag="${tag##*/}"
+    release_url="${server_url}/${repo}/releases/tag/${tag}"
+
+    cat >> "$summary_file" <<EOF
+# $(status_icon) ${title}
+
+${description}
+
+### 🚀 Release Package
+
+| Property | Value |
+| --- | --- |
+| Tag | [\`${tag}\`](${release_url}) |
+| Release notes | Generated by GitHub Releases |
+| Download source | Build workflow artifacts for the same commit |
+
+EOF
+    append_context
+    append_artifact_table "release-${tag}" "${files[@]}"
+    append_integrity_commands "${files[@]}"
+    append_footer
+    ;;
+
+  *)
+    cat >&2 <<EOF
+Usage:
+  $0 build "Title" "Description" "artifact-name" "build-kind" <files...>
+  $0 test <test-log>
+  $0 release "Title" "Description" <files...>
+EOF
+    exit 2
+    ;;
+esac

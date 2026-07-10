@@ -91,10 +91,31 @@ jobs:
       with:
         files: |
           artifacts/patris-export-linux-amd64
+          artifacts/libpatris-export.so
+          artifacts/libpatris-export.h
           artifacts/patris-export-windows-amd64.exe
           artifacts/*.dll
           artifacts-cross/patris-export-windows-amd64.exe
+          artifacts-cross/patris-export.h
           artifacts-cross/*.dll
         generate_release_notes: true
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Generate release summary
+      if: always()
+      shell: bash
+      env:
+        JOB_STATUS: ${{ job.status }}
+      run: |
+        bash .github/scripts/ci-summary.sh release \
+          "🚀 Release Summary" \
+          "Collected same-commit build artifacts, published the release payload, and fingerprinted the files that should be attached to the GitHub Release." \
+          artifacts/patris-export-linux-amd64 \
+          artifacts/libpatris-export.so \
+          artifacts/libpatris-export.h \
+          artifacts/patris-export-windows-amd64.exe \
+          artifacts/*.dll \
+          artifacts-cross/patris-export-windows-amd64.exe \
+          artifacts-cross/patris-export.h \
+          artifacts-cross/*.dll
