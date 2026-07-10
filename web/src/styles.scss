@@ -308,16 +308,32 @@ body.is-loading .data-table {
 }
 
 // ANBAR grouped header styles
+.data-table .anbar-group-row th {
+    vertical-align: middle;
+}
+
 .data-table th.anbar-group-header {
     text-align: center;
+    padding: 0.45rem 0.75rem;
+    color: $warning-color;
+    background: linear-gradient(180deg, rgba($warning-color, 0.14), rgba($warning-color, 0.06));
     border-left: 1px dashed rgba(0, 0, 0, 0.15);
     border-right: 1px dashed rgba(0, 0, 0, 0.15);
+    border-bottom: 1px solid rgba($warning-color, 0.28);
     font-weight: 700;
+    letter-spacing: 0.08em;
     
     .dark-mode & {
+        color: #fbbf24;
+        background: linear-gradient(180deg, rgba($warning-color, 0.2), rgba($warning-color, 0.08));
         border-left-color: rgba(255, 255, 255, 0.15);
         border-right-color: rgba(255, 255, 255, 0.15);
+        border-bottom-color: rgba($warning-color, 0.35);
     }
+}
+
+.data-table .column-header-row.has-anbar-group th.anbar-column {
+    border-top: 0;
 }
 
 // ANBAR column styles

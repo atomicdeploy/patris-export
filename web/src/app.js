@@ -960,57 +960,36 @@ function ensureCodeFirst() {
 function renderTableHeader() {
     const thead = document.getElementById('tableHead');
     thead.innerHTML = '';
-    
-    // Check if we have ANBAR fields to create grouped headers
-    const anbarFields = state.fields.filter(f => f.startsWith('ANBAR') && f.length > 5);
-    const hasAnbarFields = anbarFields.length > 0;
-    
-    const headerRow = document.createElement('tr');
+
+    const visibleFields = state.fields.filter(field => !state.hiddenColumns.has(field));
+    const visibleAnbarFields = visibleFields.filter(field => isAnbarField(field));
+    const hasAnbarFields = visibleAnbarFields.length > 0;
+
+    const groupRow = document.createElement('tr');
+    groupRow.className = 'anbar-group-row';
+    const columnRow = document.createElement('tr');
+    columnRow.className = hasAnbarFields ? 'column-header-row has-anbar-group' : 'column-header-row';
     const filterRow = document.createElement('tr');
     filterRow.className = 'filter-row';
-    
-    // Track which fields we've processed for ANBAR grouping
+
     let processedAnbar = false;
-    
-    state.fields.forEach(field => {
-        // Skip hidden columns
-        if (state.hiddenColumns.has(field)) {
-            return;
-        }
-        
+
+    visibleFields.forEach(field => {
         // Handle ANBAR grouped columns
-        if (field.startsWith('ANBAR') && field.length > 5 && !processedAnbar) {
-            // Filter visible ANBAR fields
-            const visibleAnbarFields = anbarFields.filter(f => !state.hiddenColumns.has(f));
-            
+        if (isAnbarField(field) && !processedAnbar) {
             if (visibleAnbarFields.length > 0 && hasAnbarFields) {
+                const groupTh = document.createElement('th');
+                groupTh.textContent = 'ANBAR';
+                groupTh.setAttribute('colspan', visibleAnbarFields.length);
+                groupTh.className = 'anbar-group-header';
+                groupRow.appendChild(groupTh);
+
                 // Create individual ANBAR column headers and filters
                 visibleAnbarFields.forEach(anbarField => {
                     const anbarNum = anbarField.substring(5); // Extract number
-                    const th = document.createElement('th');
-                    th.className = 'sortable anbar-column';
-                    
-                    const sortContainer = document.createElement('div');
-                    sortContainer.className = 'header-content';
-                    
-                    const fieldName = document.createElement('span');
-                    fieldName.textContent = displayFieldName(anbarField) === anbarField ? anbarNum : displayFieldName(anbarField);
-                    sortContainer.appendChild(fieldName);
-                    
-                    const sortIndicator = document.createElement('span');
-                    sortIndicator.className = 'sort-indicator';
-                    if (state.sortField === anbarField) {
-                        sortIndicator.textContent = state.sortDirection === 'asc' ? '▲' : '▼';
-                        sortIndicator.style.opacity = '1';
-                    } else {
-                        sortIndicator.textContent = '▲';
-                        sortIndicator.style.opacity = '0.3';
-                    }
-                    sortContainer.appendChild(sortIndicator);
-                    
-                    th.appendChild(sortContainer);
-                    th.addEventListener('click', () => sortByField(anbarField));
-                    headerRow.appendChild(th);
+                    const label = displayFieldName(anbarField) === anbarField ? anbarNum : displayFieldName(anbarField);
+                    const th = createHeaderCell(anbarField, { label, className: 'anbar-column' });
+                    columnRow.appendChild(th);
                     
                     // Create filter cell for this ANBAR field
                     const filterTh = document.createElement('th');
@@ -1020,37 +999,14 @@ function renderTableHeader() {
             }
             
             processedAnbar = true;
-        } else if (!field.startsWith('ANBAR') || field.length <= 5) {
+        } else if (!isAnbarField(field)) {
             // Regular field header
-            const th = document.createElement('th');
-            th.className = 'sortable';
-            
-            const sortContainer = document.createElement('div');
-            sortContainer.className = 'header-content';
-            
-            const fieldName = document.createElement('span');
-            fieldName.textContent = displayFieldName(field);
-            sortContainer.appendChild(fieldName);
-            
-            const sortIndicator = document.createElement('span');
-            sortIndicator.className = 'sort-indicator';
-            if (state.sortField === field) {
-                sortIndicator.textContent = state.sortDirection === 'asc' ? '▲' : '▼';
-                sortIndicator.style.opacity = '1';
-            } else {
-                sortIndicator.textContent = '▲';
-                sortIndicator.style.opacity = '0.3';
-            }
-            sortContainer.appendChild(sortIndicator);
-            
-            th.appendChild(sortContainer);
-            
-            if (field === 'Code') {
-                th.classList.add('sticky-column');
-            }
-            
-            th.addEventListener('click', () => sortByField(field));
-            headerRow.appendChild(th);
+            const th = createHeaderCell(field, {
+                label: displayFieldName(field),
+                rowSpan: hasAnbarFields ? 2 : 1,
+                className: field === 'Code' ? 'sticky-column' : ''
+            });
+            groupRow.appendChild(th);
             
             // Create filter cell for this field
             const filterTh = document.createElement('th');
@@ -1066,7 +1022,10 @@ function renderTableHeader() {
     const actionsHeader = document.createElement('th');
     actionsHeader.textContent = 'Actions';
     actionsHeader.style.width = '100px';
-    headerRow.appendChild(actionsHeader);
+    if (hasAnbarFields) {
+        actionsHeader.setAttribute('rowspan', '2');
+    }
+    groupRow.appendChild(actionsHeader);
     
     const actionsFilter = document.createElement('th');
     actionsFilter.style.width = '100px';
@@ -1078,9 +1037,46 @@ function renderTableHeader() {
     clearBtn.addEventListener('click', clearAllFilters);
     actionsFilter.appendChild(clearBtn);
     filterRow.appendChild(actionsFilter);
-    
-    thead.appendChild(headerRow);
+
+    thead.appendChild(groupRow);
+    if (hasAnbarFields) {
+        thead.appendChild(columnRow);
+    }
     thead.appendChild(filterRow);
+}
+
+function isAnbarField(field) {
+    return field.startsWith('ANBAR') && field.length > 5;
+}
+
+function createHeaderCell(field, { label, rowSpan = 1, className = '' } = {}) {
+    const th = document.createElement('th');
+    th.className = ['sortable', className].filter(Boolean).join(' ');
+    if (rowSpan > 1) {
+        th.setAttribute('rowspan', String(rowSpan));
+    }
+
+    const sortContainer = document.createElement('div');
+    sortContainer.className = 'header-content';
+
+    const fieldName = document.createElement('span');
+    fieldName.textContent = label || displayFieldName(field);
+    sortContainer.appendChild(fieldName);
+
+    const sortIndicator = document.createElement('span');
+    sortIndicator.className = 'sort-indicator';
+    if (state.sortField === field) {
+        sortIndicator.textContent = state.sortDirection === 'asc' ? '▲' : '▼';
+        sortIndicator.style.opacity = '1';
+    } else {
+        sortIndicator.textContent = '▲';
+        sortIndicator.style.opacity = '0.3';
+    }
+    sortContainer.appendChild(sortIndicator);
+
+    th.appendChild(sortContainer);
+    th.addEventListener('click', () => sortByField(field));
+    return th;
 }
 
 // Create filter control based on field type

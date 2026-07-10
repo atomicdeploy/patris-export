@@ -44,7 +44,7 @@ func FindProcessByName(name string) ([]ProcessInfo, error) {
 		return nil, fmt.Errorf("failed to get process list: %w", err)
 	}
 
-	var found []ProcessInfo
+	found := make([]ProcessInfo, 0)
 	for _, p := range processes {
 		pName, err := p.Name()
 		if err != nil {
