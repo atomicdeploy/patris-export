@@ -23,6 +23,7 @@ const state = {
     settings: {
         autoScrollToChanged: false,
         highlightChanges: true,
+        rtlTextDirection: false,
         enablePagination: false,
         pageSize: 100,
         playNotificationSound: false,
@@ -222,6 +223,7 @@ function applyConfig(config, source = 'server') {
             ...state.settings,
             autoScrollToChanged: !!config.ui.auto_scroll_to_changed,
             highlightChanges: config.ui.highlight_changes !== false,
+            rtlTextDirection: !!config.ui.rtl_text_direction,
             enablePagination: !!config.ui.enable_pagination,
             pageSize: config.ui.page_size || state.settings.pageSize,
             playNotificationSound: !!config.ui.play_notification_sound,
@@ -262,6 +264,7 @@ function syncSettingsToConfig() {
         theme: localStorage.getItem('theme') || 'system',
         auto_scroll_to_changed: state.settings.autoScrollToChanged,
         highlight_changes: state.settings.highlightChanges,
+        rtl_text_direction: state.settings.rtlTextDirection,
         enable_pagination: state.settings.enablePagination,
         page_size: state.settings.pageSize,
         play_notification_sound: state.settings.playNotificationSound,
@@ -612,10 +615,12 @@ function anbarTotal(record) {
 function applySettings() {
     document.getElementById('autoScrollToChanged').checked = state.settings.autoScrollToChanged;
     document.getElementById('highlightChanges').checked = state.settings.highlightChanges;
+    document.getElementById('rtlTextDirection').checked = state.settings.rtlTextDirection;
     document.getElementById('enablePagination').checked = state.settings.enablePagination;
     document.getElementById('pageSize').value = state.settings.pageSize;
     document.getElementById('playNotificationSound').checked = state.settings.playNotificationSound;
     document.getElementById('notificationSoundSource').value = state.settings.notificationSoundSource || 'external';
+    document.body.classList.toggle('rtl-text-mode', !!state.settings.rtlTextDirection);
 }
 
 // Initialize notification audio
@@ -2300,6 +2305,12 @@ function init() {
     
     document.getElementById('highlightChanges').addEventListener('change', (e) => {
         state.settings.highlightChanges = e.target.checked;
+        saveSettings();
+    });
+
+    document.getElementById('rtlTextDirection').addEventListener('change', (e) => {
+        state.settings.rtlTextDirection = e.target.checked;
+        applySettings();
         saveSettings();
     });
     

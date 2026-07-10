@@ -35,6 +35,7 @@ var (
 	watchMode    bool
 	verbose      bool
 	directAccess bool
+	rtlMode      bool
 
 	// Color definitions
 	successColor = color.New(color.FgGreen, color.Bold)
@@ -74,6 +75,7 @@ Supports Persian/Farsi encoding conversion and file watching.
 	rootCmd.PersistentFlags().StringVarP(&outputDir, "output", "o", ".", "Output directory for converted files (use '-' for stdout)")
 	rootCmd.PersistentFlags().BoolVarP(&verbose, "verbose", "v", false, "Enable verbose logging")
 	rootCmd.PersistentFlags().BoolVarP(&directAccess, "direct-access", "d", false, "Access database file directly without temp copy (may conflict with BDE writes)")
+	rootCmd.PersistentFlags().BoolVarP(&rtlMode, "rtl", "r", false, "Opt in to RTL logical text conversion for mixed Persian/Latin output")
 
 	// Convert command
 	convertCmd := &cobra.Command{
@@ -305,6 +307,10 @@ func effectiveConfig(cmd *cobra.Command) (*appconfig.Manager, appconfig.Config) 
 	if !rootFlags.Changed("direct-access") {
 		directAccess = cfg.Database.DirectAccess
 	}
+	if !rootFlags.Changed("rtl") {
+		rtlMode = cfg.Database.RTLConversion
+	}
+	converter.SetRTLConversion(rtlMode)
 	return mgr, cfg
 }
 

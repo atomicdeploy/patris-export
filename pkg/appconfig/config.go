@@ -34,15 +34,17 @@ type ServerConfig struct {
 }
 
 type DatabaseConfig struct {
-	Path         string `json:"path"`
-	Charmap      string `json:"charmap"`
-	DirectAccess bool   `json:"direct_access"`
+	Path          string `json:"path"`
+	Charmap       string `json:"charmap"`
+	DirectAccess  bool   `json:"direct_access"`
+	RTLConversion bool   `json:"rtl_conversion"`
 }
 
 type UIConfig struct {
 	Theme                   string `json:"theme"`
 	AutoScrollToChanged     bool   `json:"auto_scroll_to_changed"`
 	HighlightChanges        bool   `json:"highlight_changes"`
+	RTLTextDirection        bool   `json:"rtl_text_direction"`
 	EnablePagination        bool   `json:"enable_pagination"`
 	PageSize                int    `json:"page_size"`
 	PlayNotificationSound   bool   `json:"play_notification_sound"`
@@ -252,6 +254,9 @@ func ApplyEnv(cfg *Config) {
 	}
 	if value := os.Getenv("PATRIS_DIRECT_ACCESS"); strings.TrimSpace(value) != "" {
 		cfg.Database.DirectAccess = parseBool(value, cfg.Database.DirectAccess)
+	}
+	if value := os.Getenv("PATRIS_RTL"); strings.TrimSpace(value) != "" {
+		cfg.Database.RTLConversion = parseBool(value, cfg.Database.RTLConversion)
 	}
 	normalize(cfg)
 }

@@ -124,6 +124,9 @@ patris-export serve kala.db -a :8080
 
 Terminal WebSocket inspection with WebSocat is documented in [docs/examples/websocat.md](docs/examples/websocat.md).
 
+Experimental RTL logical text conversion is available as an opt-in backend flag
+and web display setting. See [docs/RTL_CONVERSION.md](docs/RTL_CONVERSION.md).
+
 Then access:
 - Web interface: http://localhost:8080
 - API records: http://localhost:8080/api/records
@@ -224,6 +227,7 @@ go test -v ./...
 - `-c, --charmap` - Optional path to a custom character mapping file. If omitted, the embedded Patris81 mapping is used.
 - `-o, --output` - Output directory for converted files, or `-` for stdout (default: current directory)
 - `-v, --verbose` - Enable verbose logging
+- `-r, --rtl` - Opt in to experimental RTL logical text conversion for mixed Persian/Latin output
 
 ### Commands
 

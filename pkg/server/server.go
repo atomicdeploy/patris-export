@@ -145,8 +145,10 @@ func NewServerWithOptions(dbPath string, charMap converter.CharMapping, options 
 	s.setupRoutes()
 
 	if s.config != nil {
+		converter.SetRTLConversion(s.config.Get().Database.RTLConversion)
 		w, err := s.config.Watch(func(cfg appconfig.Config) {
 			log.Printf("⚙️ Config reloaded: %s", s.config.Path())
+			converter.SetRTLConversion(cfg.Database.RTLConversion)
 			s.broadcastConfig(cfg)
 		})
 		if err != nil {

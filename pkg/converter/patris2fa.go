@@ -8,14 +8,16 @@ import (
 	"os"
 	"regexp"
 	"strings"
+	"unicode"
 )
 
 // CharMapping holds the Patris to Farsi character mappings
 type CharMapping map[byte]string
 
 var (
-	defaultMapping CharMapping
-	dashFixEnabled = true
+	defaultMapping       CharMapping
+	dashFixEnabled       = true
+	rtlConversionEnabled = false
 )
 
 // LoadCharMapping loads the character mapping from a file
@@ -143,6 +145,10 @@ func Patris2FaWithMapping(value string, mapping CharMapping) string {
 	result = regexp.MustCompile(`\s+`).ReplaceAllString(result, " ")
 	result = strings.TrimSpace(result)
 
+	if rtlConversionEnabled {
+		result = ConvertLTRVisualToRTL(result)
+	}
+
 	return result
 }
 
@@ -239,4 +245,136 @@ func reverseString(s string) string {
 // SetDashFix enables or disables dash fix
 func SetDashFix(enabled bool) {
 	dashFixEnabled = enabled
+}
+
+// SetRTLConversion enables or disables optional conversion from LTR visual order
+// into RTL logical order for mixed Persian/Latin display contexts.
+func SetRTLConversion(enabled bool) {
+	rtlConversionEnabled = enabled
+}
+
+// RTLConversionEnabled reports whether optional RTL logical conversion is enabled.
+func RTLConversionEnabled() bool {
+	return rtlConversionEnabled
+}
+
+// ConvertLTRVisualToRTL converts already-decoded text from Patris-style LTR
+// visual order into RTL logical order. It is intentionally opt-in because some
+// current UIs still expect the legacy visual ordering.
+func ConvertLTRVisualToRTL(text string) string {
+	if text == "" {
+		return text
+	}
+
+	words := splitWords(text)
+	hasPersian := false
+	hasLatin := false
+	for _, word := range words {
+		if isSpaceWord(word) {
+			continue
+		}
+		if isPersianOrArabic(word[0]) {
+			hasPersian = true
+		} else if !isNumericWord(word) {
+			hasLatin = true
+		}
+	}
+
+	if hasPersian && hasLatin {
+		return reverseScriptGroups(words)
+	}
+	return text
+}
+
+func splitWords(text string) [][]rune {
+	var words [][]rune
+	var current []rune
+	for _, r := range []rune(text) {
+		if unicode.IsSpace(r) {
+			if len(current) > 0 {
+				words = append(words, current)
+				current = nil
+			}
+			words = append(words, []rune{r})
+			continue
+		}
+		current = append(current, r)
+	}
+	if len(current) > 0 {
+		words = append(words, current)
+	}
+	return words
+}
+
+func reverseScriptGroups(words [][]rune) string {
+	type wordGroup struct {
+		words [][]rune
+		isRTL bool
+	}
+
+	var groups []wordGroup
+	var current wordGroup
+	inGroup := false
+
+	for _, word := range words {
+		if isSpaceWord(word) {
+			continue
+		}
+
+		wordIsRTL := isPersianOrArabic(word[0])
+		wordIsNumeric := isNumericWord(word)
+		if !inGroup {
+			current = wordGroup{words: [][]rune{word}, isRTL: wordIsRTL || wordIsNumeric}
+			inGroup = true
+			continue
+		}
+		if wordIsNumeric || current.isRTL == wordIsRTL {
+			current.words = append(current.words, word)
+			continue
+		}
+		groups = append(groups, current)
+		current = wordGroup{words: [][]rune{word}, isRTL: wordIsRTL}
+	}
+	if inGroup {
+		groups = append(groups, current)
+	}
+
+	var result [][]rune
+	for i := len(groups) - 1; i >= 0; i-- {
+		result = append(result, groups[i].words...)
+	}
+	return joinWords(result)
+}
+
+func joinWords(words [][]rune) string {
+	var output []rune
+	for i, word := range words {
+		if i > 0 {
+			output = append(output, ' ')
+		}
+		output = append(output, word...)
+	}
+	return string(output)
+}
+
+func isSpaceWord(word []rune) bool {
+	return len(word) > 0 && unicode.IsSpace(word[0])
+}
+
+func isNumericWord(word []rune) bool {
+	if len(word) == 0 {
+		return false
+	}
+	for _, r := range word {
+		if !unicode.IsDigit(r) {
+			return false
+		}
+	}
+	return true
+}
+
+func isPersianOrArabic(r rune) bool {
+	return (r >= 0x0600 && r <= 0x06FF) ||
+		(r >= 0xFB50 && r <= 0xFDFF) ||
+		(r >= 0xFE70 && r <= 0xFEFF)
 }

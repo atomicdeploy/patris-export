@@ -402,6 +402,19 @@ body.is-loading .data-table {
     }
 }
 
+.rtl-text-mode .data-table td {
+    direction: rtl;
+    unicode-bidi: plaintext;
+    text-align: right;
+}
+
+.rtl-text-mode .data-table td.sticky-column,
+.rtl-text-mode .data-table td.anbar-column {
+    direction: ltr;
+    unicode-bidi: isolate;
+    text-align: left;
+}
+
 .data-table tbody tr {
     transition: background-color 0.15s ease;
     cursor: pointer;
