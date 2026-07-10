@@ -2,8 +2,10 @@ package server
 
 import (
 	"bytes"
+	"crypto/subtle"
 	"encoding/json"
 	"fmt"
+	"hash/crc32"
 	"io"
 	"log"
 	"mime"
@@ -12,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -38,6 +41,7 @@ type Server struct {
 	dbPath             string
 	charMap            converter.CharMapping
 	dataSource         datasource.DataSource
+	dataSourceMu       sync.RWMutex
 	watcher            *watcher.FileWatcher
 	wsClients          map[*websocket.Conn]*sync.Mutex
 	wsClientsMu        sync.RWMutex
@@ -97,6 +101,17 @@ type ToastRequest struct {
 type charmapPreviewRequest struct {
 	Content string `json:"content"`
 	Path    string `json:"path"`
+}
+
+type edgeUploadResponse struct {
+	Success  bool   `json:"success"`
+	File     string `json:"file,omitempty"`
+	Path     string `json:"path,omitempty"`
+	SourceID string `json:"source_id,omitempty"`
+	Hash     string `json:"hash,omitempty"`
+	Size     int64  `json:"size,omitempty"`
+	Records  int    `json:"records,omitempty"`
+	Message  string `json:"message,omitempty"`
 }
 
 // NewServer creates a new server instance
@@ -187,6 +202,7 @@ func (s *Server) setupRoutes() {
 	s.router.HandleFunc("/api/config", s.handlePutConfig).Methods("PUT")
 	s.router.HandleFunc("/api/status", s.handleGetStatus).Methods("GET")
 	s.router.HandleFunc("/api/toast", s.handlePostToast).Methods("POST")
+	s.router.HandleFunc("/api/edge/upload", s.handlePostEdgeUpload).Methods("POST")
 	s.router.HandleFunc("/api/update/manifest", s.handleGetUpdateManifest).Methods("GET")
 	s.router.HandleFunc("/api/update/executable", s.handleGetExecutable).Methods("GET", "HEAD")
 	s.router.HandleFunc("/api/processes/patris81", s.handleGetPatris81Processes).Methods("GET")
@@ -206,7 +222,7 @@ func (s *Server) Router() http.Handler {
 // Records returns the current records using the same transformed shape served
 // by GET /api/records.
 func (s *Server) Records() (map[string]interface{}, error) {
-	records, err := s.dataSource.GetRecords()
+	records, err := s.recordsRaw()
 	if err != nil {
 		return nil, fmt.Errorf("failed to read records: %w", err)
 	}
@@ -230,8 +246,8 @@ func (s *Server) Info() (map[string]interface{}, error) {
 
 	return map[string]interface{}{
 		"success":     true,
-		"file":        sourceBaseName(s.dbPath),
-		"path":        s.dbPath,
+		"file":        sourceBaseName(s.currentDBPath()),
+		"path":        s.currentDBPath(),
 		"version":     s.version,
 		"num_records": db.GetNumRecords(),
 		"num_fields":  db.GetNumFields(),
@@ -251,6 +267,50 @@ func (s *Server) Config() appconfig.Config {
 		return appconfig.Default()
 	}
 	return s.config.Get()
+}
+
+func (s *Server) currentDBPath() string {
+	s.dataSourceMu.RLock()
+	defer s.dataSourceMu.RUnlock()
+	return s.dbPath
+}
+
+func (s *Server) recordsRaw() ([]map[string]interface{}, error) {
+	s.dataSourceMu.RLock()
+	defer s.dataSourceMu.RUnlock()
+	if s.dataSource == nil {
+		return nil, fmt.Errorf("data source is not initialized")
+	}
+	return s.dataSource.GetRecords()
+}
+
+func (s *Server) replaceDataSource(path string, records []map[string]interface{}) error {
+	ds, err := datasource.NewDataSource(path, s.charMap, false)
+	if err != nil {
+		return err
+	}
+	if records == nil {
+		records, err = ds.GetRecords()
+		if err != nil {
+			ds.Close()
+			return err
+		}
+	}
+
+	s.dataSourceMu.Lock()
+	old := s.dataSource
+	s.dataSource = ds
+	s.dbPath = path
+	s.useTempFile = false
+	s.dataSourceMu.Unlock()
+
+	if old != nil {
+		_ = old.Close()
+	}
+	s.lastSourceHashMu.Lock()
+	s.lastSourceHash = ""
+	s.lastSourceHashMu.Unlock()
+	return nil
 }
 
 // ReplaceConfig persists and broadcasts a new configuration snapshot.
@@ -306,10 +366,15 @@ func (s *Server) SubscribeEvents(buffer int) (<-chan map[string]interface{}, fun
 }
 
 func (s *Server) openDatabase() (*paradox.Database, func(), error) {
-	pathToOpen := s.dbPath
+	s.dataSourceMu.RLock()
+	dbPath := s.dbPath
+	useTempFile := s.useTempFile
+	s.dataSourceMu.RUnlock()
+
+	pathToOpen := dbPath
 	cleanup := func() {}
-	if filecopy.IsURL(s.dbPath) {
-		tempFileInfo, err := filecopy.DownloadToTemp(s.dbPath)
+	if filecopy.IsURL(dbPath) {
+		tempFileInfo, err := filecopy.DownloadToTemp(dbPath)
 		if err != nil {
 			return nil, nil, fmt.Errorf("failed to download database to temp: %w", err)
 		}
@@ -317,8 +382,8 @@ func (s *Server) openDatabase() (*paradox.Database, func(), error) {
 		cleanup = func() {
 			filecopy.CleanupTemp(tempFileInfo.TempPath)
 		}
-	} else if s.useTempFile && strings.EqualFold(filepath.Ext(s.dbPath), ".db") {
-		tempFileInfo, err := filecopy.CopyToTemp(s.dbPath)
+	} else if useTempFile && strings.EqualFold(filepath.Ext(dbPath), ".db") {
+		tempFileInfo, err := filecopy.CopyToTemp(dbPath)
 		if err != nil {
 			return nil, nil, fmt.Errorf("failed to copy database to temp: %w", err)
 		}
@@ -589,6 +654,129 @@ func (s *Server) handlePostToast(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func (s *Server) handlePostEdgeUpload(w http.ResponseWriter, r *http.Request) {
+	if !s.edgeUploadAuthorized(r) {
+		w.Header().Set("WWW-Authenticate", `Bearer realm="patris-export-edge"`)
+		writeJSONStatus(w, http.StatusUnauthorized, edgeUploadResponse{Success: false, Message: "edge upload token is required or invalid"})
+		return
+	}
+
+	cfg := s.Config()
+	maxBytes := cfg.Edge.MaxUploadMB * 1024 * 1024
+	if maxBytes <= 0 {
+		maxBytes = 512 * 1024 * 1024
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, maxBytes+1024*1024)
+	if err := r.ParseMultipartForm(32 * 1024 * 1024); err != nil {
+		writeJSONStatus(w, http.StatusBadRequest, edgeUploadResponse{Success: false, Message: fmt.Sprintf("failed to parse upload: %v", err)})
+		return
+	}
+
+	file, header, err := r.FormFile("file")
+	if err != nil {
+		writeJSONStatus(w, http.StatusBadRequest, edgeUploadResponse{Success: false, Message: "multipart field 'file' is required"})
+		return
+	}
+	defer file.Close()
+
+	originalName := firstNonEmpty(r.FormValue("file_name"), header.Filename, "edge-upload.db")
+	ext := strings.ToLower(filepath.Ext(originalName))
+	if ext != ".db" && ext != ".json" {
+		writeJSONStatus(w, http.StatusBadRequest, edgeUploadResponse{Success: false, Message: "uploaded file must be .db or .json"})
+		return
+	}
+
+	uploadDir := appconfig.ResolveTempDir(cfg.Edge.UploadDir)
+	if strings.TrimSpace(cfg.Edge.UploadDir) == "" || strings.EqualFold(cfg.Edge.UploadDir, "edge-uploads") {
+		uploadDir = filepath.Join(filecopy.TempRootForSize(header.Size), "edge-uploads")
+	}
+	if err := os.MkdirAll(uploadDir, 0755); err != nil {
+		writeJSONStatus(w, http.StatusInternalServerError, edgeUploadResponse{Success: false, Message: fmt.Sprintf("failed to create upload directory: %v", err)})
+		return
+	}
+
+	sourceID := firstNonEmpty(r.FormValue("source_id"), r.Header.Get("X-Patris-Source-ID"), "edge")
+	filename := fmt.Sprintf("%s-%s-%d%s", sanitizeFilename(sourceID), sanitizeFilename(strings.TrimSuffix(filepath.Base(originalName), ext)), time.Now().UTC().UnixNano(), ext)
+	destPath := filepath.Join(uploadDir, filename)
+	dest, err := os.OpenFile(destPath, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0644)
+	if err != nil {
+		writeJSONStatus(w, http.StatusInternalServerError, edgeUploadResponse{Success: false, Message: fmt.Sprintf("failed to create upload file: %v", err)})
+		return
+	}
+
+	hash := crc32.NewIEEE()
+	written, copyErr := io.CopyBuffer(io.MultiWriter(dest, hash), file, make([]byte, filecopy.ChunkSize))
+	closeErr := dest.Close()
+	if copyErr != nil {
+		_ = os.Remove(destPath)
+		writeJSONStatus(w, http.StatusInternalServerError, edgeUploadResponse{Success: false, Message: fmt.Sprintf("failed to save upload: %v", copyErr)})
+		return
+	}
+	if closeErr != nil {
+		_ = os.Remove(destPath)
+		writeJSONStatus(w, http.StatusInternalServerError, edgeUploadResponse{Success: false, Message: fmt.Sprintf("failed to close upload file: %v", closeErr)})
+		return
+	}
+	if written > maxBytes {
+		_ = os.Remove(destPath)
+		writeJSONStatus(w, http.StatusRequestEntityTooLarge, edgeUploadResponse{Success: false, Message: "uploaded file exceeds configured edge.max_upload_mb"})
+		return
+	}
+	if expectedSize := firstNonEmpty(r.FormValue("size"), r.Header.Get("X-Patris-File-Size")); expectedSize != "" {
+		if parsed, err := strconv.ParseInt(expectedSize, 10, 64); err == nil && parsed != written {
+			_ = os.Remove(destPath)
+			writeJSONStatus(w, http.StatusBadRequest, edgeUploadResponse{Success: false, Message: fmt.Sprintf("upload size mismatch: expected %d got %d", parsed, written)})
+			return
+		}
+	}
+
+	gotHash := fmt.Sprintf("%08x", hash.Sum32())
+	expectedHash := firstNonEmpty(r.FormValue("crc32"), r.Header.Get("X-Patris-File-CRC32"))
+	if expectedHash != "" && !strings.EqualFold(expectedHash, gotHash) {
+		_ = os.Remove(destPath)
+		writeJSONStatus(w, http.StatusBadRequest, edgeUploadResponse{Success: false, Message: fmt.Sprintf("upload checksum mismatch: expected %s got %s", expectedHash, gotHash)})
+		return
+	}
+	if modTime, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(r.FormValue("mod_time"))); err == nil {
+		_ = os.Chtimes(destPath, time.Now(), modTime)
+	}
+
+	ds, err := datasource.NewDataSource(destPath, s.charMap, false)
+	if err != nil {
+		_ = os.Remove(destPath)
+		writeJSONStatus(w, http.StatusBadRequest, edgeUploadResponse{Success: false, Message: fmt.Sprintf("failed to open uploaded source: %v", err)})
+		return
+	}
+	records, err := ds.GetRecords()
+	if err != nil {
+		_ = ds.Close()
+		_ = os.Remove(destPath)
+		writeJSONStatus(w, http.StatusBadRequest, edgeUploadResponse{Success: false, Message: fmt.Sprintf("failed to read uploaded source: %v", err)})
+		return
+	}
+	_ = ds.Close()
+	if err := s.replaceDataSource(destPath, records); err != nil {
+		_ = os.Remove(destPath)
+		writeJSONStatus(w, http.StatusInternalServerError, edgeUploadResponse{Success: false, Message: fmt.Sprintf("failed to activate uploaded source: %v", err)})
+		return
+	}
+
+	log.Printf("📥 Edge upload accepted from %s: %s (%d bytes, %d records, crc32=%s)", sourceID, filepath.Base(destPath), written, len(records), gotHash)
+	s.notifyConfigured("file_updated", "Patris edge upload received", fmt.Sprintf("%s uploaded %s (%d records)", sourceID, filepath.Base(originalName), len(records)))
+	s.broadcastUpdate()
+
+	writeJSON(w, edgeUploadResponse{
+		Success:  true,
+		File:     filepath.Base(originalName),
+		Path:     destPath,
+		SourceID: sourceID,
+		Hash:     gotHash,
+		Size:     written,
+		Records:  len(records),
+		Message:  "edge upload accepted",
+	})
+}
+
 // handleGetPatris81Processes returns information about running patris81.exe processes.
 func (s *Server) handleGetPatris81Processes(w http.ResponseWriter, r *http.Request) {
 	processes, err := processmon.FindProcessByName("patris81.exe")
@@ -607,12 +795,13 @@ func (s *Server) handleGetPatris81Processes(w http.ResponseWriter, r *http.Reque
 
 // handleGetFileProcesses returns information about processes accessing the database file.
 func (s *Server) handleGetFileProcesses(w http.ResponseWriter, r *http.Request) {
-	if filecopy.IsURL(s.dbPath) {
+	dbPath := s.currentDBPath()
+	if filecopy.IsURL(dbPath) {
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"success":   true,
-			"file":      sourceBaseName(s.dbPath),
-			"path":      s.dbPath,
+			"file":      sourceBaseName(dbPath),
+			"path":      dbPath,
 			"remote":    true,
 			"count":     0,
 			"in_use":    false,
@@ -621,7 +810,7 @@ func (s *Server) handleGetFileProcesses(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	fileInfo, err := processmon.FindProcessesWithFile(s.dbPath)
+	fileInfo, err := processmon.FindProcessesWithFile(dbPath)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("Failed to find processes with file: %v", err), http.StatusInternalServerError)
 		return
@@ -630,7 +819,7 @@ func (s *Server) handleGetFileProcesses(w http.ResponseWriter, r *http.Request) 
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"success":   true,
-		"file":      sourceBaseName(s.dbPath),
+		"file":      sourceBaseName(dbPath),
 		"path":      fileInfo.FilePath,
 		"count":     len(fileInfo.Processes),
 		"in_use":    len(fileInfo.Processes) > 0,
@@ -715,11 +904,12 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 
 // sendRecordsToClient sends current database records to a WebSocket client
 func (s *Server) sendRecordsToClient(conn *websocket.Conn, connMu *sync.Mutex) {
-	records, err := s.dataSource.GetRecords()
+	records, err := s.recordsRaw()
 	if err != nil {
 		log.Printf("Failed to read records: %v", err)
 		return
 	}
+	dbPath := s.currentDBPath()
 
 	// Send as initial load (all records are "added")
 	message := map[string]interface{}{
@@ -727,8 +917,8 @@ func (s *Server) sendRecordsToClient(conn *websocket.Conn, connMu *sync.Mutex) {
 		"timestamp":   time.Now().Format(time.RFC3339),
 		"added":       records,
 		"total_count": len(records),
-		"file_name":   sourceBaseName(s.dbPath),
-		"file_path":   s.dbPath,
+		"file_name":   sourceBaseName(dbPath),
+		"file_path":   dbPath,
 		"version":     s.version,
 		"resources":   web.Resources(),
 	}
@@ -768,7 +958,7 @@ func (s *Server) broadcastUpdate() {
 	log.Printf("📡 Broadcasting update to %d clients", clientCount)
 
 	// Get current records
-	records, err := s.dataSource.GetRecords()
+	records, err := s.recordsRaw()
 	if err != nil {
 		log.Printf("Failed to read records: %v", err)
 		return
@@ -1006,10 +1196,11 @@ func boolPtr(value bool) *bool {
 }
 
 func (s *Server) updateSourceHash() (oldHash, newHash string) {
-	if filecopy.IsURL(s.dbPath) {
+	dbPath := s.currentDBPath()
+	if filecopy.IsURL(dbPath) {
 		return "", ""
 	}
-	hash, err := filecopy.CalculateHash(s.dbPath)
+	hash, err := filecopy.CalculateHash(dbPath)
 	if err != nil {
 		log.Printf("Failed to calculate source hash: %v", err)
 		return "", ""
@@ -1083,12 +1274,79 @@ func writeJSON(w http.ResponseWriter, payload interface{}) {
 	}
 }
 
+func writeJSONStatus(w http.ResponseWriter, status int, payload interface{}) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(payload)
+}
+
+func (s *Server) edgeUploadAuthorized(r *http.Request) bool {
+	token := ""
+	if s.config != nil {
+		token = s.config.Get().Edge.Token
+	}
+	if token == "" {
+		token = strings.TrimSpace(os.Getenv("PATRIS_EDGE_TOKEN"))
+	}
+	if token == "" {
+		return true
+	}
+	got := strings.TrimSpace(r.Header.Get("X-Patris-Edge-Token"))
+	if got == "" {
+		auth := strings.TrimSpace(r.Header.Get("Authorization"))
+		if strings.HasPrefix(strings.ToLower(auth), "bearer ") {
+			got = strings.TrimSpace(auth[len("Bearer "):])
+		}
+	}
+	return subtle.ConstantTimeCompare([]byte(got), []byte(token)) == 1
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
+}
+
+func sanitizeFilename(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "edge"
+	}
+	var b strings.Builder
+	for _, r := range value {
+		switch {
+		case r >= 'a' && r <= 'z':
+			b.WriteRune(r)
+		case r >= 'A' && r <= 'Z':
+			b.WriteRune(r)
+		case r >= '0' && r <= '9':
+			b.WriteRune(r)
+		case r == '-' || r == '_' || r == '.':
+			b.WriteRune(r)
+		default:
+			b.WriteByte('-')
+		}
+	}
+	cleaned := strings.Trim(b.String(), ".-")
+	if cleaned == "" {
+		return "edge"
+	}
+	if len(cleaned) > 80 {
+		cleaned = cleaned[:80]
+	}
+	return cleaned
+}
+
 func (s *Server) processStatus() map[string]interface{} {
 	patris81Processes, patrisErr := findPatrisProcessesWithTimeout(1500 * time.Millisecond)
 	var fileInfo *processmon.FileAccessInfo
 	var fileErr error
-	if !filecopy.IsURL(s.dbPath) {
-		fileInfo, fileErr = findFileProcessesWithTimeout(s.dbPath, 1500*time.Millisecond)
+	dbPath := s.currentDBPath()
+	if !filecopy.IsURL(dbPath) {
+		fileInfo, fileErr = findFileProcessesWithTimeout(dbPath, 1500*time.Millisecond)
 	}
 
 	status := map[string]interface{}{
@@ -1099,9 +1357,9 @@ func (s *Server) processStatus() map[string]interface{} {
 			"processes": patris81Processes,
 		},
 		"file_access": map[string]interface{}{
-			"file":      sourceBaseName(s.dbPath),
-			"path":      s.dbPath,
-			"remote":    filecopy.IsURL(s.dbPath),
+			"file":      sourceBaseName(dbPath),
+			"path":      dbPath,
+			"remote":    filecopy.IsURL(dbPath),
 			"in_use":    fileInfo != nil && len(fileInfo.Processes) > 0,
 			"count":     0,
 			"processes": []processmon.ProcessInfo{},
@@ -1346,7 +1604,8 @@ func (s *Server) logDetailedChanges(added []map[string]interface{}, deleted []st
 	lastModTime := s.lastModTime
 	s.lastModTimeMu.Unlock()
 
-	fileInfo, err := os.Stat(s.dbPath)
+	dbPath := s.currentDBPath()
+	fileInfo, err := os.Stat(dbPath)
 	var currentModTime time.Time
 	if err == nil {
 		currentModTime = fileInfo.ModTime()
@@ -1357,7 +1616,7 @@ func (s *Server) logDetailedChanges(added []map[string]interface{}, deleted []st
 
 	// Log file timestamps
 	log.Println(strings.Repeat("━", 80))
-	log.Printf("📁 File: %s", filepath.Base(s.dbPath))
+	log.Printf("📁 File: %s", filepath.Base(dbPath))
 	if !lastModTime.IsZero() {
 		timeDiff := currentModTime.Sub(lastModTime)
 		log.Printf("⏰ Last modified: %s (%s)", lastModTime.Format("2006-01-02 15:04:05"), formatDuration(timeDiff))
@@ -1556,24 +1815,25 @@ func (s *Server) StartWatching(debounceDuration time.Duration) error {
 
 	s.watcher = fw
 	s.updateSourceHash()
+	dbPath := s.currentDBPath()
 
-	if filecopy.IsURL(s.dbPath) {
+	if filecopy.IsURL(dbPath) {
 		pollInterval := debounceDuration
 		if pollInterval <= 0 {
 			pollInterval = 5 * time.Minute
 		}
-		if err := fw.Poll(s.dbPath, func(path string) {
+		if err := fw.Poll(dbPath, func(path string) {
 			log.Printf("🔄 Remote source changed: %s", path)
 			s.notifyFileUpdated(path)
 			s.broadcastUpdate()
 		}, pollInterval); err != nil {
 			return fmt.Errorf("failed to poll URL: %w", err)
 		}
-		log.Printf("👀 Polling remote source: %s (interval: %v)", s.dbPath, pollInterval)
+		log.Printf("👀 Polling remote source: %s (interval: %v)", dbPath, pollInterval)
 		return nil
 	}
 
-	if err := fw.Watch(s.dbPath, func(path string) {
+	if err := fw.Watch(dbPath, func(path string) {
 		log.Printf("🔄 File changed: %s", filepath.Base(path))
 		s.notifyFileUpdated(path)
 		s.broadcastUpdate()
@@ -1582,12 +1842,12 @@ func (s *Server) StartWatching(debounceDuration time.Duration) error {
 	}
 
 	fw.Start()
-	ext := filepath.Ext(s.dbPath)
+	ext := filepath.Ext(dbPath)
 	fileType := "database"
 	if ext == ".json" {
 		fileType = "JSON"
 	}
-	log.Printf("👀 Watching %s file: %s", fileType, filepath.Base(s.dbPath))
+	log.Printf("👀 Watching %s file: %s", fileType, filepath.Base(dbPath))
 
 	return nil
 }
@@ -1605,8 +1865,12 @@ func (s *Server) Close() error {
 			firstErr = err
 		}
 	}
-	if s.dataSource != nil {
-		if err := s.dataSource.Close(); err != nil && firstErr == nil {
+	s.dataSourceMu.Lock()
+	ds := s.dataSource
+	s.dataSource = nil
+	s.dataSourceMu.Unlock()
+	if ds != nil {
+		if err := ds.Close(); err != nil && firstErr == nil {
 			firstErr = err
 		}
 	}
@@ -1616,11 +1880,12 @@ func (s *Server) Close() error {
 // Start starts the HTTP server
 func (s *Server) Start(addr string) error {
 	log.Printf("🚀 Starting server on %s", addr)
-	log.Printf("📊 Serving file: %s", filepath.Base(s.dbPath))
+	dbPath := s.currentDBPath()
+	log.Printf("📊 Serving file: %s", filepath.Base(dbPath))
 
-	if !filecopy.IsURL(s.dbPath) {
-		if _, err := os.Stat(s.dbPath); os.IsNotExist(err) {
-			return fmt.Errorf("file does not exist: %s", s.dbPath)
+	if !filecopy.IsURL(dbPath) {
+		if _, err := os.Stat(dbPath); os.IsNotExist(err) {
+			return fmt.Errorf("file does not exist: %s", dbPath)
 		}
 	}
 

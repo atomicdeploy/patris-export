@@ -128,6 +128,47 @@ Embedding, loadable-library builds, and local IPC are documented in [docs/EMBEDD
 Experimental RTL logical text conversion is available as an opt-in backend flag
 and web display setting. See [docs/RTL_CONVERSION.md](docs/RTL_CONVERSION.md).
 
+### Edge Stub Upload Mode
+
+Run the full server on a central machine and let lightweight edge machines push
+raw `.db` snapshots whenever Patris updates the file:
+
+```bash
+# Central receiver
+PATRIS_EDGE_TOKEN=change-me patris-export serve received.db --addr 0.0.0.0:18080
+
+# Edge machine beside Patris81
+patris-export stub C:\Patris\data4\kala.db ^
+  --target-url http://central-server:18080 ^
+  --token change-me ^
+  --source-id branch-a ^
+  --debounce 750ms
+```
+
+The stub streams multipart uploads to `/api/edge/upload`; the receiver stores the
+snapshot, switches its active data source, transforms rows normally, and
+broadcasts updates through the existing WebSocket/API/UI paths.
+
+Config and environment equivalents:
+
+```yaml
+edge:
+  target_url: http://central-server:18080
+  token: change-me
+  source_id: branch-a
+  debounce: 750ms
+  max_upload_mb: 512
+  upload_dir: edge-uploads
+```
+
+```bash
+PATRIS_EDGE_TARGET_URL=http://central-server:18080
+PATRIS_EDGE_TOKEN=change-me
+PATRIS_EDGE_SOURCE_ID=branch-a
+PATRIS_EDGE_DEBOUNCE=750ms
+PATRIS_EDGE_MAX_UPLOAD_MB=512
+```
+
 ### One-shot Native Viewer
 
 Open a local snapshot viewer directly from a database file:
