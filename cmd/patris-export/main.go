@@ -1259,7 +1259,7 @@ func runServe(cmd *cobra.Command, args []string) {
 	}
 
 	if !httpEnabled {
-		infoColor.Printf("âš™ï¸ Config: %s\n", configManager.Path())
+		infoColor.Printf("⚙️ Config: %s\n", configManager.Path())
 		infoColor.Println("Press Ctrl+C to stop the IPC server")
 		<-ctx.Done()
 		return
