@@ -32,6 +32,7 @@ type Config struct {
 	Database      DatabaseConfig         `json:"database" yaml:"database" toml:"database"`
 	Runtime       RuntimeConfig          `json:"runtime" yaml:"runtime" toml:"runtime"`
 	Convert       ConvertConfig          `json:"convert" yaml:"convert" toml:"convert"`
+	Notifications NotificationsConfig    `json:"notifications" yaml:"notifications" toml:"notifications"`
 	UI            UIConfig               `json:"ui" yaml:"ui" toml:"ui"`
 	ColumnLabels  map[string]string      `json:"column_labels" yaml:"column_labels" toml:"column_labels"`
 	Extra         map[string]interface{} `json:"extra,omitempty" yaml:"extra,omitempty" toml:"extra,omitempty"`
@@ -60,6 +61,18 @@ type ConvertConfig struct {
 	Format   string `json:"format" yaml:"format" toml:"format"`
 	Watch    bool   `json:"watch" yaml:"watch" toml:"watch"`
 	Debounce string `json:"debounce" yaml:"debounce" toml:"debounce"`
+}
+
+type NotificationsConfig struct {
+	Enabled            bool `json:"enabled" yaml:"enabled" toml:"enabled"`
+	Native             bool `json:"native" yaml:"native" toml:"native"`
+	InApp              bool `json:"in_app" yaml:"in_app" toml:"in_app"`
+	ClientConnected    bool `json:"client_connected" yaml:"client_connected" toml:"client_connected"`
+	ClientDisconnected bool `json:"client_disconnected" yaml:"client_disconnected" toml:"client_disconnected"`
+	FileUpdated        bool `json:"file_updated" yaml:"file_updated" toml:"file_updated"`
+	RowUpdated         bool `json:"row_updated" yaml:"row_updated" toml:"row_updated"`
+	IncludeRowValues   bool `json:"include_row_values" yaml:"include_row_values" toml:"include_row_values"`
+	MaxRows            int  `json:"max_rows" yaml:"max_rows" toml:"max_rows"`
 }
 
 type UIConfig struct {
@@ -99,6 +112,11 @@ func Default() Config {
 			Output:   ".",
 			Format:   "json",
 			Debounce: "1s",
+		},
+		Notifications: NotificationsConfig{
+			Native:  true,
+			InApp:   true,
+			MaxRows: 3,
 		},
 		UI: UIConfig{
 			Theme:                   "system",
@@ -480,6 +498,24 @@ func ApplyEnv(cfg *Config) {
 	if value := os.Getenv("PATRIS_CONVERT_DEBOUNCE"); strings.TrimSpace(value) != "" {
 		cfg.Convert.Debounce = strings.TrimSpace(value)
 	}
+	applyBoolEnv := func(key string, dst *bool) {
+		if value := os.Getenv(key); strings.TrimSpace(value) != "" {
+			*dst = parseBool(value, *dst)
+		}
+	}
+	applyBoolEnv("PATRIS_NOTIFICATIONS", &cfg.Notifications.Enabled)
+	applyBoolEnv("PATRIS_NOTIFY_NATIVE", &cfg.Notifications.Native)
+	applyBoolEnv("PATRIS_NOTIFY_IN_APP", &cfg.Notifications.InApp)
+	applyBoolEnv("PATRIS_NOTIFY_CLIENT_CONNECTED", &cfg.Notifications.ClientConnected)
+	applyBoolEnv("PATRIS_NOTIFY_CLIENT_DISCONNECTED", &cfg.Notifications.ClientDisconnected)
+	applyBoolEnv("PATRIS_NOTIFY_FILE_UPDATED", &cfg.Notifications.FileUpdated)
+	applyBoolEnv("PATRIS_NOTIFY_ROW_UPDATED", &cfg.Notifications.RowUpdated)
+	applyBoolEnv("PATRIS_NOTIFY_INCLUDE_ROW_VALUES", &cfg.Notifications.IncludeRowValues)
+	if value := os.Getenv("PATRIS_NOTIFY_MAX_ROWS"); strings.TrimSpace(value) != "" {
+		if maxRows, err := strconv.Atoi(value); err == nil {
+			cfg.Notifications.MaxRows = maxRows
+		}
+	}
 	normalize(cfg)
 }
 
@@ -516,6 +552,13 @@ func normalize(cfg *Config) {
 	}
 	if cfg.Convert.Debounce == "" {
 		cfg.Convert.Debounce = "1s"
+	}
+	if !cfg.Notifications.Native && !cfg.Notifications.InApp {
+		cfg.Notifications.Native = true
+		cfg.Notifications.InApp = true
+	}
+	if cfg.Notifications.MaxRows <= 0 {
+		cfg.Notifications.MaxRows = 3
 	}
 	if cfg.UI.PageSize <= 0 {
 		cfg.UI.PageSize = 100

@@ -50,6 +50,8 @@ type Server struct {
 	processMu          sync.Mutex
 	processStatusCache map[string]interface{}
 	processStatusAt    time.Time
+	lastSourceHash     string
+	lastSourceHashMu   sync.Mutex
 }
 
 type Options struct {
@@ -427,8 +429,11 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	s.wsClientsMu.Lock()
 	s.wsClients[conn] = connMu
 	s.wsClientsMu.Unlock()
+	clientAddr := r.RemoteAddr
 
 	log.Printf("🔌 New WebSocket connection (total: %d)", len(s.wsClients))
+
+	s.notifyConfigured("client_connected", "Patris client connected", fmt.Sprintf("%s connected to the live viewer", clientAddr))
 
 	// Send initial data
 	s.sendRecordsToClient(conn, connMu)
@@ -440,6 +445,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 			delete(s.wsClients, conn)
 			s.wsClientsMu.Unlock()
 			conn.Close()
+			s.notifyConfigured("client_disconnected", "Patris client disconnected", fmt.Sprintf("%s disconnected from the live viewer", clientAddr))
 			log.Printf("🔌 WebSocket disconnected (remaining: %d)", len(s.wsClients))
 		}()
 
@@ -510,7 +516,7 @@ func (s *Server) broadcastUpdate() {
 	clientCount := len(s.wsClients)
 	s.wsClientsMu.RUnlock()
 
-	if clientCount == 0 {
+	if clientCount < 0 {
 		log.Printf("⚠️  No clients connected, skipping broadcast")
 		return
 	}
@@ -560,11 +566,8 @@ func (s *Server) broadcastUpdate() {
 	s.wsClientsMu.RUnlock()
 
 	log.Printf("✅ Broadcast complete")
-	if nativeToastsOnChanges() && added+modified+deleted > 0 {
-		message := fmt.Sprintf("%d added, %d modified, %d deleted", added, modified, deleted)
-		if err := notifier.Show(notifier.Toast{Title: "Patris data changed", Message: message}, web.AppIconPNG); err != nil {
-			log.Printf("Native toast failed: %v", err)
-		}
+	if added+modified+deleted > 0 {
+		s.notifyConfigured("row_updated", "Patris rows changed", s.rowChangeMessage(added, modified, deleted, changes))
 	}
 	go s.broadcastProcessInfo()
 }
@@ -589,6 +592,147 @@ func (s *Server) processToastRequest(req ToastRequest) error {
 		return err
 	}
 	return nil
+}
+
+func (s *Server) notifyConfigured(event, title, message string) {
+	if s.config == nil {
+		return
+	}
+	cfg := s.config.Get().Notifications
+	if !cfg.Enabled || !notificationEventEnabled(cfg, event) {
+		return
+	}
+
+	req := ToastRequest{
+		Type:    "toast",
+		Title:   title,
+		Message: message,
+		Source:  event,
+		Native:  &cfg.Native,
+	}
+	if cfg.InApp {
+		req.Broadcast = boolPtr(true)
+	} else {
+		req.Broadcast = boolPtr(false)
+	}
+	if err := s.processToastRequest(req); err != nil {
+		log.Printf("Configured notification failed: %v", err)
+	}
+}
+
+func notificationEventEnabled(cfg appconfig.NotificationsConfig, event string) bool {
+	switch event {
+	case "client_connected":
+		return cfg.ClientConnected
+	case "client_disconnected":
+		return cfg.ClientDisconnected
+	case "file_updated":
+		return cfg.FileUpdated
+	case "row_updated":
+		return cfg.RowUpdated
+	default:
+		return false
+	}
+}
+
+func (s *Server) rowChangeMessage(added, modified, deleted int, changes map[string]interface{}) string {
+	summary := fmt.Sprintf("%d added, %d modified, %d deleted", added, modified, deleted)
+	if s.config == nil {
+		return summary
+	}
+	cfg := s.config.Get().Notifications
+	if !cfg.IncludeRowValues {
+		return summary
+	}
+	maxRows := cfg.MaxRows
+	if maxRows <= 0 {
+		maxRows = 3
+	}
+	details := []string{}
+	if rows, ok := changes["modified"].([]RecordChange); ok {
+		for i, row := range rows {
+			if i >= maxRows {
+				details = append(details, fmt.Sprintf("and %d more modified", len(rows)-i))
+				break
+			}
+			fieldDetails := []string{}
+			for _, field := range row.ChangedFields {
+				fieldDetails = append(fieldDetails, fmt.Sprintf("%s: %v -> %v", field, row.OldValues[field], row.NewValues[field]))
+				if len(fieldDetails) >= 3 {
+					break
+				}
+			}
+			if len(row.ChangedFields) > len(fieldDetails) {
+				fieldDetails = append(fieldDetails, fmt.Sprintf("%d more field(s)", len(row.ChangedFields)-len(fieldDetails)))
+			}
+			if len(fieldDetails) == 0 {
+				fieldDetails = append(fieldDetails, "fields changed")
+			}
+			details = append(details, fmt.Sprintf("Code %s: %s", row.Code, strings.Join(fieldDetails, ", ")))
+		}
+	}
+	if rows, ok := changes["added"].([]map[string]interface{}); ok && len(details) < maxRows {
+		for i, row := range rows {
+			if len(details) >= maxRows {
+				break
+			}
+			details = append(details, fmt.Sprintf("Added Code %v", row["Code"]))
+			if i == len(rows)-1 {
+				break
+			}
+		}
+	}
+	if rows, ok := changes["deleted"].([]string); ok && len(details) < maxRows {
+		for _, code := range rows {
+			if len(details) >= maxRows {
+				break
+			}
+			details = append(details, fmt.Sprintf("Deleted Code %s", code))
+		}
+	}
+	if len(details) == 0 {
+		return summary
+	}
+	return summary + " | " + strings.Join(details, "; ")
+}
+
+func boolPtr(value bool) *bool {
+	return &value
+}
+
+func (s *Server) updateSourceHash() (oldHash, newHash string) {
+	if filecopy.IsURL(s.dbPath) {
+		return "", ""
+	}
+	hash, err := filecopy.CalculateHash(s.dbPath)
+	if err != nil {
+		log.Printf("Failed to calculate source hash: %v", err)
+		return "", ""
+	}
+	s.lastSourceHashMu.Lock()
+	defer s.lastSourceHashMu.Unlock()
+	oldHash = s.lastSourceHash
+	s.lastSourceHash = hash
+	return oldHash, hash
+}
+
+func (s *Server) notifyFileUpdated(path string) {
+	oldHash, newHash := s.updateSourceHash()
+	message := fmt.Sprintf("%s changed", sourceBaseName(path))
+	if oldHash != "" || newHash != "" {
+		message = fmt.Sprintf("%s changed (%s -> %s)", sourceBaseName(path), shortHash(oldHash), shortHash(newHash))
+	}
+	s.notifyConfigured("file_updated", "Patris source file updated", message)
+}
+
+func shortHash(hash string) string {
+	if hash == "" {
+		return "unknown"
+	}
+	if len(hash) <= 8 {
+		return hash
+	}
+	return hash[:8]
 }
 
 func (s *Server) broadcastToast(req ToastRequest, nativeError string) {
@@ -617,16 +761,6 @@ func (s *Server) broadcastToast(req ToastRequest, nativeError string) {
 				log.Printf("Failed to send toast to WebSocket: %v", err)
 			}
 		}(conn, connMu)
-	}
-}
-
-func nativeToastsOnChanges() bool {
-	value := strings.ToLower(strings.TrimSpace(os.Getenv("PATRIS_NATIVE_TOASTS")))
-	switch value {
-	case "1", "true", "yes", "on", "changes", "all":
-		return true
-	default:
-		return false
 	}
 }
 
@@ -1060,6 +1194,7 @@ func (s *Server) StartWatching(debounceDuration time.Duration) error {
 	}
 
 	s.watcher = fw
+	s.updateSourceHash()
 
 	if filecopy.IsURL(s.dbPath) {
 		pollInterval := debounceDuration
@@ -1068,6 +1203,7 @@ func (s *Server) StartWatching(debounceDuration time.Duration) error {
 		}
 		if err := fw.Poll(s.dbPath, func(path string) {
 			log.Printf("🔄 Remote source changed: %s", path)
+			s.notifyFileUpdated(path)
 			s.broadcastUpdate()
 		}, pollInterval); err != nil {
 			return fmt.Errorf("failed to poll URL: %w", err)
@@ -1078,6 +1214,7 @@ func (s *Server) StartWatching(debounceDuration time.Duration) error {
 
 	if err := fw.Watch(s.dbPath, func(path string) {
 		log.Printf("🔄 File changed: %s", filepath.Base(path))
+		s.notifyFileUpdated(path)
 		s.broadcastUpdate()
 	}, debounceDuration); err != nil {
 		return fmt.Errorf("failed to watch file: %w", err)
