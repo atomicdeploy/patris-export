@@ -10,6 +10,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestGetCurrentPlatformArtifactName(t *testing.T) {
@@ -66,6 +67,16 @@ func TestNewUpdater(t *testing.T) {
 
 	if u.repoName != "testrepo" {
 		t.Errorf("Expected repoName to be 'testrepo', got '%s'", u.repoName)
+	}
+}
+
+func TestNewAPIUpdaterUsesSeparateToken(t *testing.T) {
+	t.Setenv("GITHUB_TOKEN", "github-secret")
+	t.Setenv("PATRIS_UPDATE_TOKEN", "update-secret")
+
+	u := NewAPIUpdater()
+	if u.apiToken != "update-secret" {
+		t.Fatalf("API updater token = %q", u.apiToken)
 	}
 }
 
@@ -361,6 +372,83 @@ func TestDownloadArtifactRejectsDigestMismatch(t *testing.T) {
 
 	if _, err := u.DownloadArtifact(artifact, t.TempDir()); err == nil || !strings.Contains(err.Error(), "digest mismatch") {
 		t.Fatalf("expected digest mismatch error, got %v", err)
+	}
+}
+
+func TestManifestURLFromAPIBase(t *testing.T) {
+	got, err := ManifestURLFromAPIBase("http://127.0.0.1:18080/")
+	if err != nil {
+		t.Fatalf("ManifestURLFromAPIBase returned error: %v", err)
+	}
+	if got != "http://127.0.0.1:18080/api/update/manifest" {
+		t.Fatalf("manifest URL = %q", got)
+	}
+}
+
+func TestFetchAndDownloadExecutableFromManifest(t *testing.T) {
+	payload := []byte("new executable bytes")
+	sum := sha256.Sum256(payload)
+	modTime := time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/update/manifest":
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprintf(w, `{"name":"Patris Export","filename":"patris-export-test","version":{"version":"9.9.9","commit":"abcdef123456","build_date":"2026-07-10T12:00:00Z","go_version":"go1.test","platform":%q},"platform":%q,"size":%d,"sha256":"%x","last_modified":%q,"download_url":"/api/update/executable","generated_at":%q}`,
+				CurrentPlatform(), CurrentPlatform(), len(payload), sum, modTime.Format(time.RFC3339), modTime.Format(time.RFC3339))
+		case "/api/update/executable":
+			w.Header().Set("Content-Type", "application/octet-stream")
+			w.Header().Set("Content-Length", fmt.Sprintf("%d", len(payload)))
+			w.Header().Set("X-Checksum-SHA256", fmt.Sprintf("%x", sum))
+			w.Write(payload)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	u := NewUpdater("testowner", "testrepo")
+	u.client = server.Client()
+	manifest, err := u.FetchExecutableManifest(server.URL + "/api/update/manifest")
+	if err != nil {
+		t.Fatalf("FetchExecutableManifest returned error: %v", err)
+	}
+	if manifest.DownloadURL != server.URL+"/api/update/executable" {
+		t.Fatalf("download URL = %q", manifest.DownloadURL)
+	}
+
+	exePath, err := u.DownloadExecutableFromManifest(manifest, t.TempDir())
+	if err != nil {
+		t.Fatalf("DownloadExecutableFromManifest returned error: %v", err)
+	}
+	got, err := os.ReadFile(exePath)
+	if err != nil {
+		t.Fatalf("failed to read downloaded executable: %v", err)
+	}
+	if string(got) != string(payload) {
+		t.Fatalf("downloaded payload = %q", got)
+	}
+}
+
+func TestDownloadExecutableFromManifestRejectsHashMismatch(t *testing.T) {
+	payload := []byte("different executable bytes")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", fmt.Sprintf("%d", len(payload)))
+		w.Write(payload)
+	}))
+	defer server.Close()
+
+	u := NewUpdater("testowner", "testrepo")
+	u.client = server.Client()
+	manifest := &ExecutableManifest{
+		Filename:    "patris-export-test",
+		Platform:    CurrentPlatform(),
+		Size:        int64(len(payload)),
+		SHA256:      strings.Repeat("0", 64),
+		DownloadURL: server.URL,
+	}
+	if _, err := u.DownloadExecutableFromManifest(manifest, t.TempDir()); err == nil || !strings.Contains(err.Error(), "sha256 mismatch") {
+		t.Fatalf("expected sha256 mismatch, got %v", err)
 	}
 }
 

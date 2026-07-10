@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path"
@@ -67,6 +68,30 @@ type ArtifactsResponse struct {
 	Artifacts  []Artifact `json:"artifacts"`
 }
 
+// ExecutableManifest describes a directly downloadable patris-export binary.
+// It is served by the app itself and consumed by API-based self-updates.
+type ExecutableManifest struct {
+	Name         string       `json:"name"`
+	Filename     string       `json:"filename"`
+	Version      VersionShape `json:"version"`
+	Platform     string       `json:"platform"`
+	Size         int64        `json:"size"`
+	SHA256       string       `json:"sha256"`
+	LastModified time.Time    `json:"last_modified"`
+	DownloadURL  string       `json:"download_url"`
+	GeneratedAt  time.Time    `json:"generated_at"`
+}
+
+// VersionShape mirrors pkg/version.Info without making update metadata depend
+// on that package.
+type VersionShape struct {
+	Version   string `json:"version"`
+	BuildDate string `json:"build_date"`
+	Commit    string `json:"commit"`
+	GoVersion string `json:"go_version"`
+	Platform  string `json:"platform"`
+}
+
 // NewUpdater creates a new updater instance
 func NewUpdater(repoOwner, repoName string) *Updater {
 	// Derive binary name from the current executable
@@ -82,6 +107,36 @@ func NewUpdater(repoOwner, repoName string) *Updater {
 			Timeout: defaultHTTPTimeout,
 		},
 	}
+}
+
+// NewAPIUpdater creates an updater for manifest-based HTTP APIs. It
+// intentionally does not reuse GITHUB_TOKEN so repository credentials are not
+// sent to arbitrary update servers. Set PATRIS_UPDATE_TOKEN when the remote
+// manifest/executable endpoints require bearer authentication.
+func NewAPIUpdater() *Updater {
+	u := NewUpdater("", "patris-export")
+	u.apiToken = strings.TrimSpace(os.Getenv("PATRIS_UPDATE_TOKEN"))
+	return u
+}
+
+// CurrentPlatform returns the runtime platform string used in manifests.
+func CurrentPlatform() string {
+	return runtime.GOOS + "/" + runtime.GOARCH
+}
+
+// FileSHA256 calculates a hex-encoded SHA-256 digest for path.
+func FileSHA256(path string) (string, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return "", fmt.Errorf("failed to open file for sha256: %w", err)
+	}
+	defer file.Close()
+
+	hash := sha256.New()
+	if _, err := io.Copy(hash, file); err != nil {
+		return "", fmt.Errorf("failed to calculate sha256: %w", err)
+	}
+	return hex.EncodeToString(hash.Sum(nil)), nil
 }
 
 // deriveBinaryName derives the base binary name from the current executable
@@ -297,6 +352,182 @@ func verifyArtifactDigest(expected string, actual []byte) error {
 	}
 
 	return nil
+}
+
+// ManifestURLFromAPIBase returns the standard manifest endpoint for a Patris
+// Export API base URL.
+func ManifestURLFromAPIBase(apiBase string) (string, error) {
+	base, err := url.Parse(strings.TrimSpace(apiBase))
+	if err != nil {
+		return "", fmt.Errorf("failed to parse API URL: %w", err)
+	}
+	if base.Scheme == "" || base.Host == "" {
+		return "", fmt.Errorf("API URL must include scheme and host")
+	}
+	return base.JoinPath("api", "update", "manifest").String(), nil
+}
+
+// FetchExecutableManifest downloads and validates a remote executable manifest.
+func (u *Updater) FetchExecutableManifest(manifestURL string) (*ExecutableManifest, error) {
+	manifestURL = strings.TrimSpace(manifestURL)
+	if manifestURL == "" {
+		return nil, fmt.Errorf("manifest URL is required")
+	}
+	req, err := http.NewRequest(http.MethodGet, manifestURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create manifest request: %w", err)
+	}
+	req.Header.Set("Accept", "application/json")
+	if u.apiToken != "" {
+		req.Header.Set("Authorization", "Bearer "+u.apiToken)
+	}
+
+	resp, err := u.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("manifest request failed: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return nil, fmt.Errorf("manifest request failed with status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+
+	var manifest ExecutableManifest
+	if err := json.NewDecoder(resp.Body).Decode(&manifest); err != nil {
+		return nil, fmt.Errorf("failed to decode manifest: %w", err)
+	}
+	if err := validateManifest(&manifest); err != nil {
+		return nil, err
+	}
+
+	downloadURL, err := resolveManifestURL(manifestURL, manifest.DownloadURL)
+	if err != nil {
+		return nil, err
+	}
+	manifest.DownloadURL = downloadURL
+	return &manifest, nil
+}
+
+func validateManifest(manifest *ExecutableManifest) error {
+	if manifest == nil {
+		return fmt.Errorf("manifest is nil")
+	}
+	if strings.TrimSpace(manifest.Filename) == "" {
+		return fmt.Errorf("manifest filename is required")
+	}
+	if strings.TrimSpace(manifest.Platform) == "" {
+		return fmt.Errorf("manifest platform is required")
+	}
+	if manifest.Platform != CurrentPlatform() {
+		return fmt.Errorf("manifest platform %q does not match current platform %q", manifest.Platform, CurrentPlatform())
+	}
+	if manifest.Size <= 0 {
+		return fmt.Errorf("manifest size must be positive")
+	}
+	if _, err := decodeSHA256(manifest.SHA256); err != nil {
+		return fmt.Errorf("manifest sha256 is invalid: %w", err)
+	}
+	if strings.TrimSpace(manifest.DownloadURL) == "" {
+		return fmt.Errorf("manifest download_url is required")
+	}
+	return nil
+}
+
+func decodeSHA256(value string) ([]byte, error) {
+	value = strings.TrimSpace(value)
+	value = strings.TrimPrefix(value, "sha256:")
+	decoded, err := hex.DecodeString(value)
+	if err != nil {
+		return nil, err
+	}
+	if len(decoded) != sha256.Size {
+		return nil, fmt.Errorf("expected %d bytes, got %d", sha256.Size, len(decoded))
+	}
+	return decoded, nil
+}
+
+func resolveManifestURL(manifestURL, rawDownloadURL string) (string, error) {
+	base, err := url.Parse(manifestURL)
+	if err != nil {
+		return "", fmt.Errorf("failed to parse manifest URL: %w", err)
+	}
+	ref, err := url.Parse(strings.TrimSpace(rawDownloadURL))
+	if err != nil {
+		return "", fmt.Errorf("failed to parse download URL: %w", err)
+	}
+	return base.ResolveReference(ref).String(), nil
+}
+
+// DownloadExecutableFromManifest streams the manifest executable to destDir and
+// verifies the downloaded size and SHA-256 digest before returning the path.
+func (u *Updater) DownloadExecutableFromManifest(manifest *ExecutableManifest, destDir string) (destPath string, err error) {
+	if err := validateManifest(manifest); err != nil {
+		return "", err
+	}
+	if err := os.MkdirAll(destDir, 0755); err != nil {
+		return "", fmt.Errorf("failed to create destination directory: %w", err)
+	}
+
+	destPath = filepath.Join(destDir, filepath.Base(manifest.Filename))
+	tmpPath := destPath + ".download"
+	out, err := os.OpenFile(tmpPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0755)
+	if err != nil {
+		return "", fmt.Errorf("failed to create downloaded executable: %w", err)
+	}
+	defer func() {
+		if err != nil {
+			_ = out.Close()
+			_ = os.Remove(tmpPath)
+		}
+	}()
+
+	req, err := http.NewRequest(http.MethodGet, manifest.DownloadURL, nil)
+	if err != nil {
+		return "", fmt.Errorf("failed to create executable request: %w", err)
+	}
+	req.Header.Set("Accept", "application/octet-stream")
+	if u.apiToken != "" {
+		req.Header.Set("Authorization", "Bearer "+u.apiToken)
+	}
+
+	resp, err := u.client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("executable download failed: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return "", fmt.Errorf("executable download failed with status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	if resp.ContentLength >= 0 && resp.ContentLength != manifest.Size {
+		return "", fmt.Errorf("download content length mismatch: manifest=%d response=%d", manifest.Size, resp.ContentLength)
+	}
+	if headerHash := strings.TrimSpace(resp.Header.Get("X-Checksum-SHA256")); headerHash != "" && !strings.EqualFold(strings.TrimPrefix(headerHash, "sha256:"), strings.TrimPrefix(manifest.SHA256, "sha256:")) {
+		return "", fmt.Errorf("download checksum header mismatch: manifest=%s response=%s", manifest.SHA256, headerHash)
+	}
+
+	hash := sha256.New()
+	written, err := io.CopyBuffer(io.MultiWriter(out, hash), resp.Body, make([]byte, 1024*1024))
+	if err != nil {
+		return "", fmt.Errorf("failed to write downloaded executable: %w", err)
+	}
+	if err := out.Close(); err != nil {
+		return "", fmt.Errorf("failed to close downloaded executable: %w", err)
+	}
+	if written != manifest.Size {
+		return "", fmt.Errorf("download size mismatch: manifest=%d downloaded=%d", manifest.Size, written)
+	}
+	actualHex := hex.EncodeToString(hash.Sum(nil))
+	if !strings.EqualFold(strings.TrimPrefix(manifest.SHA256, "sha256:"), actualHex) {
+		return "", fmt.Errorf("download sha256 mismatch: manifest=%s downloaded=sha256:%s", manifest.SHA256, actualHex)
+	}
+	if !manifest.LastModified.IsZero() {
+		_ = os.Chtimes(tmpPath, time.Now(), manifest.LastModified)
+	}
+	if err := os.Rename(tmpPath, destPath); err != nil {
+		return "", fmt.Errorf("failed to finalize downloaded executable: %w", err)
+	}
+	return destPath, nil
 }
 
 // ExtractExecutable extracts the executable from a ZIP file
