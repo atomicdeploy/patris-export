@@ -394,6 +394,21 @@ The executable endpoint uses the real file on disk and supports byte ranges, con
 
 If the remote update API is protected, set `PATRIS_UPDATE_TOKEN`; this is separate from `GITHUB_TOKEN` so GitHub credentials are not sent to arbitrary update hosts.
 
+### Source Database File API
+
+When the server is watching a local `.db` or has accepted an edge-uploaded
+snapshot, it can also publish that exact active source file:
+
+- `GET /api/source/manifest` returns file name, full active path, size, SHA-256, last modified timestamp, and `download_url`.
+- `GET /api/source/file` streams the active source file.
+- `HEAD /api/source/file` reports static headers without a body.
+
+The source-file endpoint supports byte ranges, conditional requests,
+`Content-Length`, `Last-Modified`, `ETag`, `X-Checksum-SHA256`, and
+`X-Source-*` metadata headers. Remote URL-backed sources cannot be re-served as
+a local static file until they have been materialized as an edge upload or local
+watched file.
+
 ## 🔧 API Reference
 
 ### REST Endpoints
@@ -426,6 +441,12 @@ Returns database schema information.
   "fields": [...]
 }
 ```
+
+#### `GET /api/source/manifest`
+Returns metadata for the currently active source file.
+
+#### `GET /api/source/file`
+Downloads the currently active source file with HEAD and range support.
 
 ### WebSocket
 
