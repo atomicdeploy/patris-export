@@ -62,7 +62,7 @@ Supports Persian/Farsi encoding conversion and file watching.
 
 	// Global flags
 	rootCmd.PersistentFlags().StringVar(&configFile, "config", "", "Path to patris-export JSON config file")
-	rootCmd.PersistentFlags().StringVarP(&charMapFile, "charmap", "c", "", "Path to character mapping file (farsi_chars.txt)")
+	rootCmd.PersistentFlags().StringVarP(&charMapFile, "charmap", "c", "", "Optional custom character mapping file; embedded Patris81 mapping is used by default")
 	rootCmd.PersistentFlags().StringVarP(&outputDir, "output", "o", ".", "Output directory for converted files (use '-' for stdout)")
 	rootCmd.PersistentFlags().BoolVarP(&verbose, "verbose", "v", false, "Enable verbose logging")
 	rootCmd.PersistentFlags().BoolVarP(&directAccess, "direct-access", "d", false, "Access database file directly without temp copy (may conflict with BDE writes)")

@@ -113,7 +113,7 @@ patris-export info kala.db
 ### Parse Company Information
 
 ```bash
-patris-export company company.inf -c testdata/farsi_chars.txt
+patris-export company company.inf
 ```
 
 ### Start REST API Server
@@ -155,10 +155,14 @@ patris-export serve kala.db -a :8080 --debounce 1s
 
 ## 🎯 Using Character Mapping
 
-For proper Persian/Farsi text conversion, use the character mapping file:
+Patris Export embeds the default Patris81 legacy encoding map, so Persian/Farsi text conversion works without passing an external file. Use `-c/--charmap` only when you want to override the built-in map for custom conversion or debugging.
 
 ```bash
-patris-export convert kala.db -c testdata/farsi_chars.txt -f json
+# Uses the embedded Patris81 character map
+patris-export convert kala.db -f json
+
+# Optional override for custom/debug mapping
+patris-export convert kala.db -c custom-farsi-chars.txt -f json
 ```
 
 ## 🔌 WebSocket Example
@@ -217,7 +221,7 @@ go test -v ./...
 
 ### Global Flags
 
-- `-c, --charmap` - Path to character mapping file (farsi_chars.txt)
+- `-c, --charmap` - Optional path to a custom character mapping file. If omitted, the embedded Patris81 mapping is used.
 - `-o, --output` - Output directory for converted files, or `-` for stdout (default: current directory)
 - `-v, --verbose` - Enable verbose logging
 

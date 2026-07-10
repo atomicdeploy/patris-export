@@ -8,7 +8,7 @@ import (
 
 func TestPatris2FaDebug(t *testing.T) {
 	// Load mapping
-	mapping, err := LoadCharMapping("../../testdata/farsi_chars.txt")
+	mapping, err := LoadCharMapping("farsi_chars.txt")
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"encoding/hex"
 	"fmt"
+	"io"
 	"os"
 	"regexp"
 	"strings"
@@ -25,9 +26,12 @@ func LoadCharMapping(filename string) (CharMapping, error) {
 	}
 	defer file.Close()
 
-	mapping := make(CharMapping)
-	scanner := bufio.NewScanner(file)
+	return parseCharMapping(file)
+}
 
+func parseCharMapping(reader io.Reader) (CharMapping, error) {
+	mapping := make(CharMapping)
+	scanner := bufio.NewScanner(reader)
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
 		if line == "" {
@@ -59,6 +63,15 @@ func LoadCharMapping(filename string) (CharMapping, error) {
 	}
 
 	return mapping, nil
+}
+
+// DefaultCharMapping returns a copy of the embedded default Patris81 character mapping.
+func DefaultCharMapping() CharMapping {
+	copied := make(CharMapping, len(defaultMapping))
+	for key, value := range defaultMapping {
+		copied[key] = value
+	}
+	return copied
 }
 
 // SetDefaultMapping sets the default character mapping

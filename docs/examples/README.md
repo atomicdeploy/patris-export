@@ -12,11 +12,11 @@ This directory contains examples and usage demonstrations for Patris Export.
 # Simple conversion
 patris-export convert database.db -f json
 
-# With character mapping for Persian/Farsi text
-patris-export convert database.db -c farsi_chars.txt -f json
+# With a custom/debug character map override
+patris-export convert database.db -c custom-farsi-chars.txt -f json
 
 # Specify output directory
-patris-export convert database.db -c farsi_chars.txt -f json -o output/
+patris-export convert database.db -f json -o output/
 ```
 
 ### 2. Converting to CSV
@@ -25,8 +25,8 @@ patris-export convert database.db -c farsi_chars.txt -f json -o output/
 # Convert to CSV format
 patris-export convert database.db -f csv
 
-# With character mapping
-patris-export convert database.db -c farsi_chars.txt -f csv -o output/
+# Convert to CSV with embedded Patris81 mapping
+patris-export convert database.db -f csv -o output/
 ```
 
 ### 3. File Watching
@@ -35,10 +35,10 @@ Watch a database file and automatically convert it when it changes:
 
 ```bash
 # Watch and auto-convert to JSON
-patris-export convert database.db -c farsi_chars.txt -f json -w
+patris-export convert database.db -f json -w
 
 # Watch and auto-convert to CSV
-patris-export convert database.db -c farsi_chars.txt -f csv -w
+patris-export convert database.db -f csv -w
 ```
 
 ### 4. Database Information
@@ -69,7 +69,7 @@ Output:
 Parse and display company.inf file:
 
 ```bash
-patris-export company company.inf -c farsi_chars.txt
+patris-export company company.inf
 ```
 
 Output:
@@ -87,13 +87,13 @@ Output:
 
 ```bash
 # Start on default port (8080)
-patris-export serve database.db -c farsi_chars.txt
+patris-export serve database.db
 
 # Start on custom port
-patris-export serve database.db -c farsi_chars.txt -a :3000
+patris-export serve database.db -a :3000
 
 # Disable file watching
-patris-export serve database.db -c farsi_chars.txt -w=false
+patris-export serve database.db -w=false
 ```
 
 ### Using the REST API
@@ -256,7 +256,6 @@ Process multiple database files:
 for db_file in /path/to/databases/*.db; do
     echo "Converting $db_file..."
     patris-export convert "$db_file" \
-        -c farsi_chars.txt \
         -f json \
         -o output/
 done
@@ -289,11 +288,11 @@ docker run --rm -p 8080:8080 \
 #!/bin/bash
 
 # Convert database and upload to S3
-patris-export convert database.db -c farsi_chars.txt -f json -o /tmp
+patris-export convert database.db -f json -o /tmp
 aws s3 cp /tmp/database.json s3://my-bucket/data/
 
 # Convert and send to API
-patris-export convert database.db -c farsi_chars.txt -f json -o /tmp
+patris-export convert database.db -f json -o /tmp
 curl -X POST https://api.example.com/data \
     -H "Content-Type: application/json" \
     -d @/tmp/database.json
@@ -303,10 +302,10 @@ curl -X POST https://api.example.com/data \
 
 ```cron
 # Run conversion every hour
-0 * * * * /usr/local/bin/patris-export convert /data/database.db -c /data/farsi_chars.txt -f json -o /var/www/data/
+0 * * * * /usr/local/bin/patris-export convert /data/database.db -f json -o /var/www/data/
 
 # Run at 2 AM daily
-0 2 * * * /usr/local/bin/patris-export convert /data/database.db -c /data/farsi_chars.txt -f csv -o /backups/
+0 2 * * * /usr/local/bin/patris-export convert /data/database.db -f csv -o /backups/
 ```
 
 ## Advanced Usage
@@ -315,11 +314,11 @@ curl -X POST https://api.example.com/data \
 
 ```bash
 # Convert to JSON and pipe through jq for filtering
-patris-export convert database.db -c farsi_chars.txt -f json -o - | \
+patris-export convert database.db -f json -o - | \
     jq '[.[] | select(.Code > 100)]' > filtered.json
 
 # Convert and gzip
-patris-export convert database.db -c farsi_chars.txt -f json -o /tmp/
+patris-export convert database.db -f json -o /tmp/
 gzip /tmp/database.json
 ```
 
@@ -329,14 +328,13 @@ gzip /tmp/database.json
 #!/bin/bash
 
 DB_FILE="database.db"
-CHARMAP="farsi_chars.txt"
 OUTPUT_DIR="export_$(date +%Y%m%d)"
 
 mkdir -p "$OUTPUT_DIR"
 
 # Export to multiple formats
-patris-export convert "$DB_FILE" -c "$CHARMAP" -f json -o "$OUTPUT_DIR"
-patris-export convert "$DB_FILE" -c "$CHARMAP" -f csv -o "$OUTPUT_DIR"
+patris-export convert "$DB_FILE" -f json -o "$OUTPUT_DIR"
+patris-export convert "$DB_FILE" -f csv -o "$OUTPUT_DIR"
 
 # Create archive
 tar czf "$OUTPUT_DIR.tar.gz" "$OUTPUT_DIR"

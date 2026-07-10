@@ -6,6 +6,9 @@ import (
 )
 
 func TestPatris2Fa(t *testing.T) {
+	originalMapping := DefaultCharMapping()
+	defer SetDefaultMapping(originalMapping)
+
 	// Create a simple mapping - using [zwnj] markers like the embedded map
 	mapping := CharMapping{
 		0xa1: "ا",
@@ -98,25 +101,38 @@ func TestPatris2Fa(t *testing.T) {
 }
 
 func TestLoadCharMapping(t *testing.T) {
-	// Create a temporary mapping file
-	tempFile := "../../testdata/farsi_chars.txt"
-
-	mapping, err := LoadCharMapping(tempFile)
+	mapping, err := LoadCharMapping("farsi_chars.txt")
 	if err != nil {
 		t.Fatalf("LoadCharMapping failed: %v", err)
 	}
 
-	if len(mapping) == 0 {
-		t.Error("Expected non-empty mapping")
+	assertPatrisMapping(t, mapping)
+}
+
+func TestDefaultCharMappingUsesEmbeddedFile(t *testing.T) {
+	assertPatrisMapping(t, DefaultCharMapping())
+}
+
+func assertPatrisMapping(t *testing.T, mapping CharMapping) {
+	t.Helper()
+
+	if len(mapping) < 60 {
+		t.Fatalf("Expected full Patris81 mapping, got %d entries", len(mapping))
 	}
 
-	// Check for a known mapping
-	if val, ok := mapping[0xa1]; !ok || val != "ا" {
-		t.Errorf("Expected mapping[0xa1] = 'ا', got %q", val)
+	if _, ok := mapping[0xa1]; !ok {
+		t.Error("Expected mapping for Patris byte 0xa1")
+	}
+	if _, ok := mapping[0xfc]; !ok {
+		t.Error("Expected mapping for Patris digit byte 0xfc")
 	}
 }
 
 func TestSetDashFix(t *testing.T) {
+	originalMapping := DefaultCharMapping()
+	defer SetDefaultMapping(originalMapping)
+	defer SetDashFix(true)
+
 	SetDashFix(false)
 	SetDefaultMapping(CharMapping{0x99: "ـ"})
 
