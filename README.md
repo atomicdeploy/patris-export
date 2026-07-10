@@ -122,6 +122,23 @@ patris-export company company.inf
 patris-export serve kala.db -a :8080
 ```
 
+### Terminal Dashboard
+
+Run the Bubble Tea terminal dashboard when you want a keyboard-first view of the
+same operational state exposed by the web UI and API:
+
+```bash
+patris-export tui kala.db
+```
+
+The dashboard refreshes live and includes data/source status, field discovery,
+Patris81 process and file-lock visibility, the embedded/default character map,
+API shortcuts, and a WebSocat launcher. Use `tab` or the arrow keys to switch
+views, `1` through `7` to jump to a tab, `r` to refresh, `o` to open the web
+viewer, and `w` to inspect WebSocket updates through WebSocat.
+
+![Patris Export TUI dashboard](docs/screenshots/issue-3-tui-dashboard.svg)
+
 Terminal WebSocket inspection with WebSocat is documented in [docs/examples/websocat.md](docs/examples/websocat.md).
 Embedding, loadable-library builds, and local IPC are documented in [docs/EMBEDDING.md](docs/EMBEDDING.md).
 
