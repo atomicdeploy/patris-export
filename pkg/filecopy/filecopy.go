@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -17,7 +18,29 @@ const (
 	ChunkSize = 10 * 1024 * 1024
 )
 
-var httpClient = &http.Client{Timeout: 2 * time.Minute}
+var (
+	httpClient      = &http.Client{Timeout: 2 * time.Minute}
+	tempDirOverride string
+	tempDirMu       sync.RWMutex
+)
+
+// SetTempDir configures the base temp directory used by copy/download helpers.
+// An empty value resets the helpers to the system temp directory.
+func SetTempDir(path string) {
+	tempDirMu.Lock()
+	tempDirOverride = strings.TrimSpace(path)
+	tempDirMu.Unlock()
+}
+
+func tempRoot() string {
+	tempDirMu.RLock()
+	override := tempDirOverride
+	tempDirMu.RUnlock()
+	if override != "" {
+		return override
+	}
+	return filepath.Join(os.TempDir(), "patris-export")
+}
 
 // FileInfo contains information about a file copy operation
 type FileInfo struct {
@@ -66,7 +89,7 @@ func CopyToTemp(sourcePath string) (*FileInfo, error) {
 	// Create temp file in system temp directory
 	// Use a subdirectory to avoid conflicts with source files that might be in /tmp
 	// Include a hash of the absolute path to handle multiple files with same name
-	tempDir := filepath.Join(os.TempDir(), "patris-export")
+	tempDir := tempRoot()
 	if err := os.MkdirAll(tempDir, 0755); err != nil {
 		return nil, fmt.Errorf("failed to create temp directory: %w", err)
 	}
@@ -180,7 +203,7 @@ func DownloadToTemp(sourceURL string) (*FileInfo, error) {
 		baseName = "download.db"
 	}
 
-	tempDir := filepath.Join(os.TempDir(), "patris-export")
+	tempDir := tempRoot()
 	if err := os.MkdirAll(tempDir, 0755); err != nil {
 		return nil, fmt.Errorf("failed to create temp directory: %w", err)
 	}

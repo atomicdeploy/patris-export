@@ -29,7 +29,8 @@ import (
 var (
 	// Global flags
 	charMapFile  string
-	configFile   string
+	configFiles  []string
+	tempDir      string
 	outputDir    string
 	outputFormat string
 	watchMode    bool
@@ -70,9 +71,10 @@ Supports Persian/Farsi encoding conversion and file watching.
 	rootCmd.SetVersionTemplate(version.Detailed() + "\n")
 
 	// Global flags
-	rootCmd.PersistentFlags().StringVar(&configFile, "config", "", "Path to patris-export JSON config file")
+	rootCmd.PersistentFlags().StringArrayVar(&configFiles, "config", nil, "Path to patris-export config file; repeat to layer JSON/YAML/TOML files")
 	rootCmd.PersistentFlags().StringVarP(&charMapFile, "charmap", "c", "", "Optional custom character mapping file; embedded Patris81 mapping is used by default")
 	rootCmd.PersistentFlags().StringVarP(&outputDir, "output", "o", ".", "Output directory for converted files (use '-' for stdout)")
+	rootCmd.PersistentFlags().StringVar(&tempDir, "temp-dir", "", "Temp directory for copied/downloaded database files (default: system temp)")
 	rootCmd.PersistentFlags().BoolVarP(&verbose, "verbose", "v", false, "Enable verbose logging")
 	rootCmd.PersistentFlags().BoolVarP(&directAccess, "direct-access", "d", false, "Access database file directly without temp copy (may conflict with BDE writes)")
 	rootCmd.PersistentFlags().BoolVarP(&rtlMode, "rtl", "r", false, "Opt in to RTL logical text conversion for mixed Persian/Latin output")
@@ -292,7 +294,7 @@ func cliIntro() string {
 }
 
 func effectiveConfig(cmd *cobra.Command) (*appconfig.Manager, appconfig.Config) {
-	mgr, err := appconfig.Load(configFile)
+	mgr, err := appconfig.LoadFiles(configFiles)
 	if err != nil {
 		errorColor.Printf("❌ Failed to load config: %v\n", err)
 		os.Exit(1)
@@ -310,6 +312,13 @@ func effectiveConfig(cmd *cobra.Command) (*appconfig.Manager, appconfig.Config) 
 	if !rootFlags.Changed("rtl") {
 		rtlMode = cfg.Database.RTLConversion
 	}
+	if !rootFlags.Changed("output") {
+		outputDir = cfg.Convert.Output
+	}
+	if !rootFlags.Changed("temp-dir") {
+		tempDir = cfg.Runtime.TempDir
+	}
+	filecopy.SetTempDir(appconfig.ResolveTempDir(tempDir))
 	converter.SetRTLConversion(rtlMode)
 	return mgr, cfg
 }
@@ -326,8 +335,14 @@ func runTUI(cmd *cobra.Command, args []string) {
 }
 
 func runConvert(cmd *cobra.Command, args []string) {
-	effectiveConfig(cmd)
+	_, cfg := effectiveConfig(cmd)
 	dbFile := args[0]
+	if !cmd.Flags().Changed("format") {
+		outputFormat = cfg.Convert.Format
+	}
+	if !cmd.Flags().Changed("watch") {
+		watchMode = cfg.Convert.Watch
+	}
 
 	// Check if output is stdout
 	useStdout := outputDir == "-"
@@ -374,6 +389,9 @@ func runConvert(cmd *cobra.Command, args []string) {
 	if watchMode {
 		// Parse debounce duration
 		debounceStr, _ := cmd.Flags().GetString("debounce")
+		if !cmd.Flags().Changed("debounce") {
+			debounceStr = cfg.Convert.Debounce
+		}
 		debounceDuration := parseDebounceDuration(debounceStr)
 
 		infoColor.Printf("👀 Watching file: %s\n", dbFile)

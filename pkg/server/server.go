@@ -287,6 +287,7 @@ func (s *Server) appMetadata() map[string]interface{} {
 	}
 	if s.config != nil {
 		payload["config_path"] = s.config.Path()
+		payload["config_paths"] = s.config.Paths()
 	}
 	return payload
 }
