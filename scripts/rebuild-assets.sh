@@ -34,8 +34,13 @@ if [ -z "$GEOMETRY" ]; then
     echo "Could not determine non-transparent logo bounds." >&2
     exit 1
 fi
-"${MAGICK[@]}" "$LOGO_SOURCE" -alpha set -crop "$GEOMETRY" +repage -background none \
-    -gravity center -extent '%[fx:max(w,h)]x%[fx:max(w,h)]' "$ICON_PNG"
+"${MAGICK[@]}" "$LOGO_SOURCE" -alpha set -crop "$GEOMETRY" +repage -background none -strip "$ICON_PNG"
+CROPPED_GEOMETRY="$("${MAGICK[@]}" "$ICON_PNG" -alpha extract -threshold 0 -format "%@" info:)"
+CROPPED_EXPECTED="$("${MAGICK[@]}" identify -format "%wx%h+0+0" "$ICON_PNG")"
+if [ "$CROPPED_GEOMETRY" != "$CROPPED_EXPECTED" ]; then
+    echo "Generated icon PNG still has transparent edge padding: bounds $CROPPED_GEOMETRY, expected $CROPPED_EXPECTED." >&2
+    exit 1
+fi
 "${MAGICK[@]}" "$ICON_PNG" -define icon:auto-resize="$ICON_SIZES" "$ICON_ICO"
 mkdir -p "$(dirname "$WEB_ICON_PNG")" "$(dirname "$WEB_FAVICON_ICO")"
 cp "$ICON_PNG" "$WEB_ICON_PNG"

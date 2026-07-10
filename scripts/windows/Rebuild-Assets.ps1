@@ -51,8 +51,14 @@ $geometry = (& $magick.Source $LogoSource -alpha extract -threshold 0 -format "%
 if (-not $geometry) {
     throw "Could not determine non-transparent logo bounds."
 }
-& $magick.Source $LogoSource -alpha set -crop $geometry +repage -background none -gravity center -extent "%[fx:max(w,h)]x%[fx:max(w,h)]" $IconPng
+& $magick.Source $LogoSource -alpha set -crop $geometry +repage -background none -strip $IconPng
 if ($LASTEXITCODE -ne 0) { throw "Failed to create $IconPng" }
+
+$croppedGeometry = (& $magick.Source $IconPng -alpha extract -threshold 0 -format "%@" "info:").Trim()
+$croppedExpected = (& $magick.Source identify -format "%wx%h+0+0" $IconPng).Trim()
+if ($croppedGeometry -ne $croppedExpected) {
+    throw "Generated icon PNG still has transparent edge padding: bounds $croppedGeometry, expected $croppedExpected."
+}
 
 & $magick.Source $IconPng -define "icon:auto-resize=$IconSizes" $IconIco
 if ($LASTEXITCODE -ne 0) { throw "Failed to create $IconIco" }
