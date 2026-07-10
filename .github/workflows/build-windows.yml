@@ -190,3 +190,17 @@ jobs:
         path: |
           build/patris-export-windows-amd64.exe
           build/*.dll
+
+    - name: Generate Windows native build summary
+      if: always()
+      shell: bash
+      env:
+        JOB_STATUS: ${{ job.status }}
+      run: |
+        bash .github/scripts/ci-summary.sh build \
+          "🪟 Native Windows Build Summary" \
+          "Built and smoke-tested the Windows executable on a Windows runner with MSYS2 MinGW, upstream pxlib, embedded icon, and Win32 version resources." \
+          "patris-export-windows-mingw-amd64" \
+          "Native Windows amd64 build with MSYS2 MinGW" \
+          build/patris-export-windows-amd64.exe \
+          build/*.dll
