@@ -1,10 +1,14 @@
 package main
 
 import (
+	"bufio"
+	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"net/url"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -12,7 +16,9 @@ import (
 
 	"github.com/atomicdeploy/patris-export/pkg/appconfig"
 	"github.com/atomicdeploy/patris-export/pkg/converter"
+	"github.com/atomicdeploy/patris-export/pkg/embedded"
 	"github.com/atomicdeploy/patris-export/pkg/filecopy"
+	"github.com/atomicdeploy/patris-export/pkg/ipc"
 	"github.com/atomicdeploy/patris-export/pkg/paradox"
 	"github.com/atomicdeploy/patris-export/pkg/processmon"
 	"github.com/atomicdeploy/patris-export/pkg/server"
@@ -120,6 +126,17 @@ Supports Persian/Farsi encoding conversion and file watching.
 	serveCmd.Flags().Int("port", 0, "Port to listen on")
 	serveCmd.Flags().BoolP("watch", "w", true, "Watch file or URL for changes and broadcast updates")
 	serveCmd.Flags().String("debounce", "0s", "Debounce duration for local files; polling interval for URLs (e.g., 0s, 500ms, 1s, 5m)")
+	serveCmd.Flags().Bool("http", true, "Enable the HTTP REST/WebSocket/Web UI listener")
+	serveCmd.Flags().Bool("ipc", false, "Enable local IPC listener (Windows named pipe, Unix socket)")
+	serveCmd.Flags().String("ipc-path", "", "IPC path/name (default: platform-specific patris-export endpoint)")
+
+	ipcCmd := &cobra.Command{
+		Use:   "ipc [method] [json-params]",
+		Short: "Call a local patris-export IPC endpoint",
+		Args:  cobra.RangeArgs(1, 2),
+		Run:   runIPC,
+	}
+	ipcCmd.Flags().String("ipc-path", "", "IPC path/name (default: platform-specific patris-export endpoint)")
 
 	tuiCmd := &cobra.Command{
 		Use:   "tui [database-file]",
@@ -145,7 +162,7 @@ Set GITHUB_TOKEN for private repositories and higher API rate limits.`,
 	}
 	updateCmd.Flags().StringP("branch", "b", "main", "Branch to download from")
 
-	rootCmd.AddCommand(convertCmd, infoCmd, companyCmd, serveCmd, tuiCmd, updateCmd)
+	rootCmd.AddCommand(convertCmd, infoCmd, companyCmd, serveCmd, ipcCmd, tuiCmd, updateCmd)
 
 	if err := rootCmd.Execute(); err != nil {
 		errorColor.Fprintf(os.Stderr, "❌ Error: %v\n", err)
@@ -745,6 +762,46 @@ func sourceBaseName(path string) string {
 	return filepath.Base(path)
 }
 
+func runIPC(cmd *cobra.Command, args []string) {
+	path, _ := cmd.Flags().GetString("ipc-path")
+	conn, err := ipc.Dial(context.Background(), path)
+	if err != nil {
+		errorColor.Printf("Failed to connect to IPC endpoint: %v\n", err)
+		os.Exit(1)
+	}
+	defer conn.Close()
+
+	req := ipc.Request{
+		ID:     1,
+		Method: args[0],
+	}
+	if len(args) > 1 {
+		params := []byte(args[1])
+		if !json.Valid(params) {
+			errorColor.Println("IPC params must be valid JSON")
+			os.Exit(1)
+		}
+		req.Params = json.RawMessage(params)
+	}
+	if err := json.NewEncoder(conn).Encode(req); err != nil {
+		errorColor.Printf("Failed to write IPC request: %v\n", err)
+		os.Exit(1)
+	}
+
+	scanner := bufio.NewScanner(conn)
+	scanner.Buffer(make([]byte, 0, 64*1024), 16*1024*1024)
+	for scanner.Scan() {
+		fmt.Println(scanner.Text())
+		if !strings.EqualFold(args[0], "subscribe") {
+			break
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		errorColor.Printf("Failed to read IPC response: %v\n", err)
+		os.Exit(1)
+	}
+}
+
 func init() {
 	// Set up logging
 	log.SetFlags(0)
@@ -766,6 +823,9 @@ func runServe(cmd *cobra.Command, args []string) {
 	debounceStr, _ := cmd.Flags().GetString("debounce")
 	host, _ := cmd.Flags().GetString("host")
 	port, _ := cmd.Flags().GetInt("port")
+	httpEnabled, _ := cmd.Flags().GetBool("http")
+	ipcEnabled, _ := cmd.Flags().GetBool("ipc")
+	ipcPath, _ := cmd.Flags().GetString("ipc-path")
 	if cmd.Flags().Changed("addr") && addr != "" {
 		appconfig.ApplyAddr(&cfg, addr)
 	}
@@ -780,6 +840,19 @@ func runServe(cmd *cobra.Command, args []string) {
 	}
 	if !cmd.Flags().Changed("debounce") {
 		debounceStr = cfg.Server.Debounce
+	}
+	if !cmd.Flags().Changed("http") {
+		httpEnabled = cfg.Server.HTTP
+	}
+	if cmd.Flags().Changed("ipc") {
+		cfg.Server.IPC.Enabled = ipcEnabled
+	}
+	if cmd.Flags().Changed("ipc-path") && ipcPath != "" {
+		cfg.Server.IPC.Path = ipcPath
+	}
+	if !httpEnabled && !cfg.Server.IPC.Enabled {
+		errorColor.Println("At least one transport must be enabled. Use --http=true or --ipc.")
+		os.Exit(1)
 	}
 	addr = cfg.Addr()
 
@@ -825,6 +898,27 @@ func runServe(cmd *cobra.Command, args []string) {
 			errorColor.Printf("❌ Failed to start file watching: %v\n", err)
 			os.Exit(1)
 		}
+	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer stop()
+
+	if cfg.Server.IPC.Enabled {
+		ipcServer := ipc.NewServer(cfg.Server.IPC.Path, embedded.NewServerHandler(srv))
+		go func() {
+			if err := ipcServer.Serve(ctx); err != nil {
+				errorColor.Printf("IPC server error: %v\n", err)
+				stop()
+			}
+		}()
+		successColor.Printf("IPC endpoint running at %s\n", ipcServer.Path())
+	}
+
+	if !httpEnabled {
+		infoColor.Printf("âš™ï¸ Config: %s\n", configManager.Path())
+		infoColor.Println("Press Ctrl+C to stop the IPC server")
+		<-ctx.Done()
+		return
 	}
 
 	// Start server

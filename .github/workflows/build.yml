@@ -53,12 +53,18 @@ jobs:
         
     - name: Build
       run: make build-linux
+
+    - name: Build Linux loadable library
+      run: make build-lib-linux
       
     - name: Upload Linux artifact
       uses: actions/upload-artifact@v4
       with:
         name: patris-export-linux-amd64
-        path: build/patris-export-linux-amd64
+        path: |
+          build/patris-export-linux-amd64
+          build/libpatris-export.so
+          build/libpatris-export.h
 
   build-windows-mingw-cross:
     name: Build for Windows (MinGW cross-compile from Linux)
@@ -127,6 +133,14 @@ jobs:
         CGO_ENABLED=1 GOOS=windows GOARCH=amd64 CC=x86_64-w64-mingw32-gcc \
           go build -ldflags "-X ${VERSION_PKG}.Version=1.0.0 -X ${VERSION_PKG}.BuildDate=$(date -u +'%Y-%m-%dT%H:%M:%SZ') -X ${VERSION_PKG}.Commit=${GITHUB_SHA::12}" \
           -o build/patris-export-windows-amd64.exe ./cmd/patris-export
+
+    - name: Build Windows loadable library
+      run: |
+        VERSION_PKG="github.com/atomicdeploy/patris-export/pkg/version"
+        CGO_ENABLED=1 GOOS=windows GOARCH=amd64 CC=x86_64-w64-mingw32-gcc \
+          go build -buildmode=c-shared \
+          -ldflags "-X ${VERSION_PKG}.Version=1.0.0 -X ${VERSION_PKG}.BuildDate=$(date -u +'%Y-%m-%dT%H:%M:%SZ') -X ${VERSION_PKG}.Commit=${GITHUB_SHA::12}" \
+          -o build/patris-export.dll ./cmd/patris-export-lib
       
     - name: Copy pxlib DLL
       run: |
@@ -177,4 +191,6 @@ jobs:
         name: patris-export-windows-mingw-cross-amd64
         path: |
           build/patris-export-windows-amd64.exe
+          build/patris-export.dll
+          build/patris-export.h
           build/*.dll

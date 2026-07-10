@@ -39,10 +39,17 @@ type Config struct {
 }
 
 type ServerConfig struct {
-	Host     string `json:"host" yaml:"host" toml:"host"`
-	Port     int    `json:"port" yaml:"port" toml:"port"`
-	Watch    bool   `json:"watch" yaml:"watch" toml:"watch"`
-	Debounce string `json:"debounce" yaml:"debounce" toml:"debounce"`
+	Host     string    `json:"host" yaml:"host" toml:"host"`
+	Port     int       `json:"port" yaml:"port" toml:"port"`
+	Watch    bool      `json:"watch" yaml:"watch" toml:"watch"`
+	Debounce string    `json:"debounce" yaml:"debounce" toml:"debounce"`
+	HTTP     bool      `json:"http" yaml:"http" toml:"http"`
+	IPC      IPCConfig `json:"ipc" yaml:"ipc" toml:"ipc"`
+}
+
+type IPCConfig struct {
+	Enabled bool   `json:"enabled" yaml:"enabled" toml:"enabled"`
+	Path    string `json:"path" yaml:"path" toml:"path"`
 }
 
 type DatabaseConfig struct {
@@ -101,6 +108,7 @@ func Default() Config {
 			Port:     8080,
 			Watch:    true,
 			Debounce: "0s",
+			HTTP:     true,
 		},
 		Database: DatabaseConfig{
 			DirectAccess: false,
@@ -474,6 +482,15 @@ func ApplyEnv(cfg *Config) {
 	if value := os.Getenv("PATRIS_WATCH"); strings.TrimSpace(value) != "" {
 		cfg.Server.Watch = parseBool(value, cfg.Server.Watch)
 	}
+	if value := os.Getenv("PATRIS_HTTP"); strings.TrimSpace(value) != "" {
+		cfg.Server.HTTP = parseBool(value, cfg.Server.HTTP)
+	}
+	if value := os.Getenv("PATRIS_IPC"); strings.TrimSpace(value) != "" {
+		cfg.Server.IPC.Enabled = parseBool(value, cfg.Server.IPC.Enabled)
+	}
+	if value := os.Getenv("PATRIS_IPC_PATH"); strings.TrimSpace(value) != "" {
+		cfg.Server.IPC.Path = strings.TrimSpace(value)
+	}
 	if value := os.Getenv("PATRIS_DIRECT_ACCESS"); strings.TrimSpace(value) != "" {
 		cfg.Database.DirectAccess = parseBool(value, cfg.Database.DirectAccess)
 	}
@@ -536,6 +553,9 @@ func normalize(cfg *Config) {
 	}
 	if cfg.Server.Debounce == "" {
 		cfg.Server.Debounce = "0s"
+	}
+	if !cfg.Server.HTTP && !cfg.Server.IPC.Enabled {
+		cfg.Server.HTTP = true
 	}
 	if cfg.Runtime.TempDir == "" {
 		cfg.Runtime.TempDir = "system"

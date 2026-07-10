@@ -1,4 +1,4 @@
-.PHONY: build build-linux build-windows build-all clean test run install install-linux uninstall-linux help deps build-web assets
+.PHONY: build build-linux build-windows build-all build-lib build-lib-linux build-lib-windows clean test run install install-linux uninstall-linux help deps build-web assets
 
 # Binary names
 BINARY_NAME=patris-export
@@ -31,11 +31,23 @@ build: build-web ## Build for current platform
 	CGO_ENABLED=1 go build $(LDFLAGS) -o $(BUILD_DIR)/$(BINARY_NAME) ./cmd/patris-export
 	@echo "✅ Build complete: $(BUILD_DIR)/$(BINARY_NAME)"
 
+build-lib: build-web ## Build loadable library for the current platform
+	@echo "Building patris-export loadable library..."
+	@mkdir -p $(BUILD_DIR)
+	CGO_ENABLED=1 go build -buildmode=c-shared $(LDFLAGS) -o $(BUILD_DIR)/patris-export-lib ./cmd/patris-export-lib
+	@echo "Build complete: $(BUILD_DIR)/patris-export-lib"
+
 build-linux: build-web ## Build for Linux
 	@echo "🐧 Building for Linux..."
 	@mkdir -p $(BUILD_DIR)
 	GOOS=linux GOARCH=amd64 CGO_ENABLED=1 go build $(LDFLAGS) -o $(BUILD_DIR)/$(BINARY_NAME)-linux-amd64 ./cmd/patris-export
 	@echo "✅ Build complete: $(BUILD_DIR)/$(BINARY_NAME)-linux-amd64"
+
+build-lib-linux: build-web ## Build Linux loadable library (.so)
+	@echo "Building Linux loadable library..."
+	@mkdir -p $(BUILD_DIR)
+	GOOS=linux GOARCH=amd64 CGO_ENABLED=1 go build -buildmode=c-shared $(LDFLAGS) -o $(BUILD_DIR)/libpatris-export.so ./cmd/patris-export-lib
+	@echo "Build complete: $(BUILD_DIR)/libpatris-export.so"
 
 build-windows: assets build-web ## Build for Windows with CGO (builds pxlib from source)
 	@echo "🪟 Building for Windows with full Paradox support..."
@@ -63,6 +75,20 @@ build-windows: assets build-web ## Build for Windows with CGO (builds pxlib from
 		find /tmp/patris-pxlib-windows/bin -name "*.dll" -type f -exec cp {} $(BUILD_DIR)/ \; ; \
 	fi
 	@echo "✅ Build complete: $(BUILD_DIR)/$(BINARY_NAME)-windows-amd64.exe"
+
+build-lib-windows: assets build-web ## Build Windows loadable library (.dll)
+	@echo "Building Windows loadable library..."
+	@mkdir -p $(BUILD_DIR)
+	@if [ -n "$$PXLIB_ROOT" ]; then \
+		export CGO_CFLAGS="-I$$PXLIB_ROOT/include $${CGO_CFLAGS}"; \
+		export CGO_LDFLAGS="-L$$PXLIB_ROOT/lib $${CGO_LDFLAGS}"; \
+	fi; \
+	if command -v x86_64-w64-mingw32-gcc >/dev/null 2>&1; then \
+		CGO_ENABLED=1 GOOS=windows GOARCH=amd64 CC=x86_64-w64-mingw32-gcc go build -buildmode=c-shared $(LDFLAGS) -o $(BUILD_DIR)/patris-export.dll ./cmd/patris-export-lib; \
+	else \
+		CGO_ENABLED=1 GOOS=windows GOARCH=amd64 go build -buildmode=c-shared $(LDFLAGS) -o $(BUILD_DIR)/patris-export.dll ./cmd/patris-export-lib; \
+	fi
+	@echo "Build complete: $(BUILD_DIR)/patris-export.dll"
 
 build-all: build-linux build-windows ## Build for all platforms
 

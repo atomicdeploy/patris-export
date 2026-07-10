@@ -52,7 +52,7 @@ func FindProcessByName(name string) ([]ProcessInfo, error) {
 		}
 
 		if processNameMatches(pName, name) {
-			found = append(found, collectProcessInfo(p, pName, nil, true))
+			found = append(found, collectProcessInfo(p, pName, nil, false))
 		}
 	}
 
