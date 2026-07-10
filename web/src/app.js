@@ -32,12 +32,128 @@ const state = {
     originalTitle: document.title,
     originalFavicon: null,
     titleFlashInterval: null,
-    faviconTimeout: null
+    faviconTimeout: null,
+    tabId: '',
+    broadcastChannel: null,
+    seenBroadcastMessages: new Set()
 };
 
 const CONFIG_STORAGE_KEY = 'patris-config';
 const SETTINGS_STORAGE_KEY = 'patris-settings';
 const RESOURCE_POLL_INTERVAL_MS = 30000;
+const BROADCAST_CHANNEL_NAME = 'patris-export-frontend';
+const BROADCAST_STORAGE_KEY = 'patris-broadcast-message';
+const BROADCAST_MESSAGE_TTL_MS = 30000;
+
+function createTabId() {
+    if (window.crypto?.randomUUID) {
+        return window.crypto.randomUUID();
+    }
+    return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+}
+
+function initFrontendBroadcast() {
+    state.tabId = createTabId();
+
+    if ('BroadcastChannel' in window) {
+        state.broadcastChannel = new BroadcastChannel(BROADCAST_CHANNEL_NAME);
+        state.broadcastChannel.addEventListener('message', event => {
+            handleFrontendBroadcast(event.data);
+        });
+    }
+
+    window.addEventListener('storage', event => {
+        if (event.key !== BROADCAST_STORAGE_KEY || !event.newValue) {
+            return;
+        }
+        try {
+            handleFrontendBroadcast(JSON.parse(event.newValue));
+        } catch (error) {
+            console.error('Failed to parse cross-tab message:', error);
+        }
+    });
+
+    window.addEventListener('beforeunload', () => {
+        if (state.broadcastChannel) {
+            state.broadcastChannel.close();
+        }
+    });
+}
+
+function publishFrontendBroadcast(type, payload = {}) {
+    if (!state.tabId) {
+        return;
+    }
+
+    const message = {
+        id: createTabId(),
+        type,
+        payload,
+        source: state.tabId,
+        timestamp: Date.now()
+    };
+
+    if (state.broadcastChannel) {
+        state.broadcastChannel.postMessage(message);
+    }
+
+    try {
+        localStorage.setItem(BROADCAST_STORAGE_KEY, JSON.stringify(message));
+        localStorage.removeItem(BROADCAST_STORAGE_KEY);
+    } catch (error) {
+        console.warn('Cross-tab storage fallback unavailable:', error);
+    }
+}
+
+function handleFrontendBroadcast(message) {
+    if (!message || message.source === state.tabId) {
+        return;
+    }
+    if (message.id) {
+        if (state.seenBroadcastMessages.has(message.id)) {
+            return;
+        }
+        state.seenBroadcastMessages.add(message.id);
+        setTimeout(() => state.seenBroadcastMessages.delete(message.id), BROADCAST_MESSAGE_TTL_MS);
+    }
+    if (Date.now() - (message.timestamp || 0) > BROADCAST_MESSAGE_TTL_MS) {
+        return;
+    }
+
+    switch (message.type) {
+        case 'settings:update':
+            applyRemoteSettings(message.payload);
+            break;
+        case 'theme:update':
+            applyRemoteTheme(message.payload);
+            break;
+        case 'sort:update':
+            applyRemoteSort(message.payload);
+            break;
+        case 'columns:update':
+            applyRemoteColumns(message.payload);
+            break;
+        case 'filters:update':
+            applyRemoteFilters(message.payload);
+            break;
+        case 'view:update':
+            applyRemoteView(message.payload);
+            break;
+        case 'app-info:update':
+            applyAppInfo(message.payload, 'tab broadcast');
+            break;
+        case 'resource:update':
+            if (message.payload?.version) {
+                reloadForResourceUpdate(message.payload.version, 'tab broadcast');
+            }
+            break;
+        case 'toast':
+            showInAppToast(message.payload?.title, message.payload?.message, message.payload?.options || {});
+            break;
+        default:
+            console.info('Ignored unknown cross-tab message:', message.type);
+    }
+}
 
 function logIntro() {
     const version = state.appInfo?.version || {};
@@ -89,9 +205,12 @@ function loadSettings() {
 }
 
 // Save settings to localStorage
-function saveSettings() {
+function saveSettings(options = {}) {
     localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify(state.settings));
     syncSettingsToConfig();
+    if (options.broadcast !== false) {
+        publishFrontendBroadcast('settings:update', { settings: state.settings });
+    }
 }
 
 function applyConfig(config, source = 'server') {
@@ -171,24 +290,106 @@ function saveConfigToServer(config) {
 }
 
 // Save sort preferences to localStorage
-function saveSortPreferences() {
+function saveSortPreferences(options = {}) {
     localStorage.setItem('patris-sort', JSON.stringify({
         field: state.sortField,
         direction: state.sortDirection
     }));
+    if (options.broadcast !== false) {
+        publishFrontendBroadcast('sort:update', {
+            field: state.sortField,
+            direction: state.sortDirection
+        });
+    }
 }
 
 // Save hidden columns to localStorage
-function saveHiddenColumns() {
+function saveHiddenColumns(options = {}) {
     localStorage.setItem('patris-hidden-columns', JSON.stringify([...state.hiddenColumns]));
+    if (options.broadcast !== false) {
+        publishFrontendBroadcast('columns:update', {
+            hiddenColumns: [...state.hiddenColumns]
+        });
+    }
 }
 
 // Save column filters to localStorage
-function saveColumnFilters() {
+function saveColumnFilters(options = {}) {
     localStorage.setItem('patris-column-filters', JSON.stringify(state.columnFilters));
+    if (options.broadcast !== false) {
+        publishFrontendBroadcast('filters:update', {
+            columnFilters: state.columnFilters
+        });
+    }
 }
 
-function removeHiddenColumnFilters() {
+let viewStatePublishTimer = null;
+function publishViewState() {
+    clearTimeout(viewStatePublishTimer);
+    viewStatePublishTimer = setTimeout(() => {
+        publishFrontendBroadcast('view:update', {
+            searchTerm: state.searchTerm,
+            selectedField: state.selectedField
+        });
+    }, 120);
+}
+
+function applyRemoteSettings(payload = {}) {
+    if (!payload.settings) return;
+    state.settings = { ...state.settings, ...payload.settings };
+    localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify(state.settings));
+    applySettings();
+    renderTable();
+}
+
+function applyRemoteTheme(payload = {}) {
+    if (!payload.theme) return;
+    localStorage.setItem('theme', payload.theme);
+    initTheme();
+}
+
+function applyRemoteSort(payload = {}) {
+    state.sortField = payload.field || 'Code';
+    state.sortDirection = payload.direction === 'desc' ? 'desc' : 'asc';
+    saveSortPreferences({ broadcast: false });
+    sortRecords();
+    renderTableHeader();
+    renderTable();
+}
+
+function applyRemoteColumns(payload = {}) {
+    const hiddenColumns = Array.isArray(payload.hiddenColumns) ? payload.hiddenColumns : [];
+    state.hiddenColumns = new Set(hiddenColumns);
+    saveHiddenColumns({ broadcast: false });
+    removeHiddenColumnFilters({ broadcast: false });
+    renderColumnManager();
+    renderTableHeader();
+    applyFilters();
+}
+
+function applyRemoteFilters(payload = {}) {
+    state.columnFilters = payload.columnFilters && typeof payload.columnFilters === 'object'
+        ? payload.columnFilters
+        : {};
+    saveColumnFilters({ broadcast: false });
+    renderTableHeader();
+    applyFilters();
+}
+
+function applyRemoteView(payload = {}) {
+    state.searchTerm = typeof payload.searchTerm === 'string' ? payload.searchTerm : '';
+    state.selectedField = typeof payload.selectedField === 'string' ? payload.selectedField : '';
+
+    const searchInput = document.getElementById('searchInput');
+    if (searchInput) searchInput.value = state.searchTerm;
+
+    const fieldFilter = document.getElementById('fieldFilter');
+    if (fieldFilter) fieldFilter.value = state.selectedField;
+
+    applyFilters();
+}
+
+function removeHiddenColumnFilters(options = {}) {
     let changed = false;
     for (const field of Object.keys(state.columnFilters)) {
         if (state.hiddenColumns.has(field)) {
@@ -197,11 +398,11 @@ function removeHiddenColumnFilters() {
         }
     }
     if (changed) {
-        saveColumnFilters();
+        saveColumnFilters(options);
     }
 }
 
-function removeUnknownColumnFilters() {
+function removeUnknownColumnFilters(options = {}) {
     const knownFields = new Set(state.fields);
     let changed = false;
     for (const field of Object.keys(state.columnFilters)) {
@@ -211,7 +412,7 @@ function removeUnknownColumnFilters() {
         }
     }
     if (changed) {
-        saveColumnFilters();
+        saveColumnFilters(options);
     }
 }
 
@@ -609,6 +810,14 @@ function showInAppToast(title, message, options = {}) {
         toast.classList.add('closing');
         setTimeout(() => toast.remove(), 180);
     }, options.duration || 4200);
+
+    if (options.broadcastToTabs) {
+        publishFrontendBroadcast('toast', {
+            title,
+            message,
+            options: { ...options, broadcastToTabs: false }
+        });
+    }
 }
 
 function openPanel(panelId) {
@@ -649,6 +858,9 @@ function applyAppInfo(appInfo, source = 'api') {
 
     const nextResourceVersion = getResourceVersion(appInfo);
     if (nextResourceVersion && state.resourceVersion && nextResourceVersion !== state.resourceVersion) {
+        if (source !== 'tab broadcast') {
+            publishFrontendBroadcast('resource:update', { version: nextResourceVersion });
+        }
         reloadForResourceUpdate(nextResourceVersion, source);
         return false;
     }
@@ -661,6 +873,9 @@ function applyAppInfo(appInfo, source = 'api') {
         state.resourceVersion = nextResourceVersion;
     }
     updateAppMetadata();
+    if (source !== 'tab broadcast') {
+        publishFrontendBroadcast('app-info:update', state.appInfo);
+    }
     return true;
 }
 
@@ -1912,9 +2127,11 @@ function inspectRecord(record) {
 function toggleTheme() {
     const isDark = document.body.classList.toggle('dark-mode');
     document.documentElement.classList.toggle('dark-mode', isDark);
-    localStorage.setItem('theme', isDark ? 'dark' : 'light');
+    const theme = isDark ? 'dark' : 'light';
+    localStorage.setItem('theme', theme);
     updateThemeIcon(isDark);
     syncSettingsToConfig();
+    publishFrontendBroadcast('theme:update', { theme });
 }
 
 // Update theme icon
@@ -1951,6 +2168,8 @@ function initTheme() {
 // Initialize app
 function init() {
     setLoadingState(true);
+    initFrontendBroadcast();
+
     // Load settings
     loadSettings();
     applySettings();
@@ -1968,6 +2187,7 @@ function init() {
         sortRecords();
         renderTable();
         updateCounts();
+        publishViewState();
     });
     
     document.getElementById('fieldFilter').addEventListener('change', (e) => {
@@ -1976,6 +2196,7 @@ function init() {
         sortRecords();
         renderTable();
         updateCounts();
+        publishViewState();
     });
     
     document.getElementById('themeToggle').addEventListener('click', toggleTheme);
@@ -2065,7 +2286,7 @@ function init() {
 
     document.getElementById('testNotificationSound').addEventListener('click', () => {
         playNotificationSound(true);
-        showInAppToast('Sound test', 'Notification audio was triggered.');
+        showInAppToast('Sound test', 'Notification audio was triggered.', { broadcastToTabs: true });
     });
 
     document.getElementById('testNativeToast').addEventListener('click', () => {
