@@ -35,9 +35,9 @@ const (
 	fileScanDeadlineDefault = 10 * time.Second
 )
 
-// FindProcessByName finds all running processes with the given name
-// For Windows, it looks for exact matches (e.g., "patris81.exe")
-// For Unix/Linux, it looks for processes containing the name
+// FindProcessByName finds all running processes with the given name.
+// Windows uses exact matching. Unix-like systems use substring matching and
+// ignore a trailing ".exe" so callers can search for Windows process names.
 func FindProcessByName(name string) ([]ProcessInfo, error) {
 	processes, err := process.Processes()
 	if err != nil {
@@ -51,48 +51,8 @@ func FindProcessByName(name string) ([]ProcessInfo, error) {
 			continue // Skip processes we can't access
 		}
 
-		// Case-insensitive matching
-		// On Windows, match exact name; on Unix/Linux, match substring
-		matches := false
-		if runtime.GOOS == "windows" {
-			matches = strings.EqualFold(pName, name)
-		} else {
-			matches = strings.Contains(strings.ToLower(pName), strings.ToLower(name))
-		}
-
-		if matches {
-			info := ProcessInfo{
-				PID:  p.Pid,
-				Name: pName,
-			}
-
-			// Get executable path
-			if exe, err := p.Exe(); err == nil {
-				info.Exe = exe
-			}
-
-			// Get command line
-			if cmdline, err := p.Cmdline(); err == nil {
-				info.Cmdline = cmdline
-			}
-
-			// Get create time
-			if createTime, err := p.CreateTime(); err == nil {
-				info.CreateTime = createTime
-			}
-
-			// Get memory usage
-			if memInfo, err := p.MemoryInfo(); err == nil {
-				info.MemoryUsage = memInfo.RSS
-			}
-
-			if openFiles, err := openFilesWithTimeout(p); err == nil {
-				for _, f := range openFiles {
-					info.OpenFiles = append(info.OpenFiles, f.Path)
-				}
-			}
-
-			found = append(found, info)
+		if processNameMatches(pName, name) {
+			found = append(found, collectProcessInfo(p, pName, nil, true))
 		}
 	}
 
@@ -149,41 +109,7 @@ func FindProcessesWithFile(filePath string) (*FileAccessInfo, error) {
 		}
 
 		if hasFile {
-			pInfo := ProcessInfo{
-				PID: p.Pid,
-			}
-
-			// Get process name
-			if pName, err := p.Name(); err == nil {
-				pInfo.Name = pName
-			}
-
-			// Get executable path
-			if exe, err := p.Exe(); err == nil {
-				pInfo.Exe = exe
-			}
-
-			// Get command line
-			if cmdline, err := p.Cmdline(); err == nil {
-				pInfo.Cmdline = cmdline
-			}
-
-			// Get create time
-			if createTime, err := p.CreateTime(); err == nil {
-				pInfo.CreateTime = createTime
-			}
-
-			// Get memory usage
-			if memInfo, err := p.MemoryInfo(); err == nil {
-				pInfo.MemoryUsage = memInfo.RSS
-			}
-
-			// Add the list of open files for this process
-			for _, f := range openFiles {
-				pInfo.OpenFiles = append(pInfo.OpenFiles, f.Path)
-			}
-
-			info.Processes = append(info.Processes, pInfo)
+			info.Processes = append(info.Processes, collectProcessInfo(p, "", openFiles, true))
 		}
 	}
 
@@ -206,43 +132,53 @@ func GetProcessInfo(pid int32) (*ProcessInfo, error) {
 		return nil, fmt.Errorf("failed to find process: %w", err)
 	}
 
-	info := &ProcessInfo{
-		PID: pid,
+	info := collectProcessInfo(p, "", nil, true)
+	return &info, nil
+}
+
+func processNameMatches(processName, target string) bool {
+	if runtime.GOOS == "windows" {
+		return strings.EqualFold(processName, target)
 	}
 
-	// Get process name
-	if pName, err := p.Name(); err == nil {
-		info.Name = pName
-	}
+	normalizedProcess := strings.TrimSuffix(strings.ToLower(processName), ".exe")
+	normalizedTarget := strings.TrimSuffix(strings.ToLower(target), ".exe")
+	return strings.Contains(normalizedProcess, normalizedTarget)
+}
 
-	// Get executable path
+func collectProcessInfo(p *process.Process, knownName string, knownOpenFiles []process.OpenFilesStat, includeOpenFiles bool) ProcessInfo {
+	info := ProcessInfo{PID: p.Pid, Name: knownName}
+
+	if info.Name == "" {
+		if pName, err := p.Name(); err == nil {
+			info.Name = pName
+		}
+	}
 	if exe, err := p.Exe(); err == nil {
 		info.Exe = exe
 	}
-
-	// Get command line
 	if cmdline, err := p.Cmdline(); err == nil {
 		info.Cmdline = cmdline
 	}
-
-	// Get create time
 	if createTime, err := p.CreateTime(); err == nil {
 		info.CreateTime = createTime
 	}
-
-	// Get memory usage
 	if memInfo, err := p.MemoryInfo(); err == nil {
 		info.MemoryUsage = memInfo.RSS
 	}
-
-	// Get open files
-	if openFiles, err := openFilesWithTimeout(p); err == nil {
+	if includeOpenFiles {
+		openFiles := knownOpenFiles
+		if openFiles == nil {
+			if files, err := openFilesWithTimeout(p); err == nil {
+				openFiles = files
+			}
+		}
 		for _, f := range openFiles {
 			info.OpenFiles = append(info.OpenFiles, f.Path)
 		}
 	}
 
-	return info, nil
+	return info
 }
 
 func openFilesTimeout() time.Duration {

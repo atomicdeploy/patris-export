@@ -444,7 +444,9 @@ func displayFileStatus(filePath string) {
 func checkProcessConflicts(dbFile string) {
 	// Check for running patris81.exe processes
 	patris81Processes, err := processmon.FindProcessByName("patris81.exe")
-	if err == nil && len(patris81Processes) > 0 {
+	if err != nil {
+		warningColor.Printf("⚠️  Could not inspect running patris81.exe processes: %v\n", err)
+	} else if len(patris81Processes) > 0 {
 		warningColor.Printf("⚠️  Warning: Found %d running patris81.exe process(es)\n", len(patris81Processes))
 		for _, p := range patris81Processes {
 			infoColor.Printf("   - PID %d: %s\n", p.PID, p.Exe)
@@ -457,7 +459,9 @@ func checkProcessConflicts(dbFile string) {
 	// Check if the file is currently open by any process
 	if directAccess {
 		fileInfo, err := processmon.FindProcessesWithFile(dbFile)
-		if err == nil && len(fileInfo.Processes) > 0 {
+		if err != nil {
+			warningColor.Printf("⚠️  Could not inspect database file locks: %v\n", err)
+		} else if len(fileInfo.Processes) > 0 {
 			warningColor.Printf("⚠️  Warning: File is currently open by %d process(es)\n", len(fileInfo.Processes))
 			for _, p := range fileInfo.Processes {
 				infoColor.Printf("   - PID %d: %s\n", p.PID, p.Name)

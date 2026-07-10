@@ -134,7 +134,7 @@ The server watches the database file by default and broadcasts updates immediate
 
 #### 🔔 Notification Features
 
-The web viewer includes smart notification features that can be enabled in the Settings panel:
+The web viewer includes smart notification features. Visual alerts are always shown for data changes, while audio alerts can be enabled in the Settings panel:
 
 - **🔊 Audio Notifications** - Play a subtle sound when data changes
 - **📋 Title Flashing** - Page title briefly flashes with change count (e.g., "🔔 3 records updated")

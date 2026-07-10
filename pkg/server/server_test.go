@@ -471,3 +471,101 @@ func TestNotificationAudioEndpoint(t *testing.T) {
 		}
 	})
 }
+
+func TestProcessEndpoints(t *testing.T) {
+	tmpDir := t.TempDir()
+	jsonFile := filepath.Join(tmpDir, "test.json")
+	if err := os.WriteFile(jsonFile, []byte(`{"101":{"Code":"101","Name":"Test"}}`), 0644); err != nil {
+		t.Fatalf("Failed to write test JSON file: %v", err)
+	}
+
+	srv, err := NewServer(jsonFile, nil)
+	if err != nil {
+		t.Fatalf("Failed to create server: %v", err)
+	}
+	defer srv.Close()
+
+	t.Run("GET /api/processes/patris81", func(t *testing.T) {
+		req := httptest.NewRequest("GET", "/api/processes/patris81", nil)
+		w := httptest.NewRecorder()
+		srv.router.ServeHTTP(w, req)
+
+		if w.Code != http.StatusOK {
+			t.Fatalf("Expected status 200, got %d: %s", w.Code, w.Body.String())
+		}
+
+		var response map[string]interface{}
+		if err := json.NewDecoder(w.Body).Decode(&response); err != nil {
+			t.Fatalf("Failed to decode response: %v", err)
+		}
+		if response["success"] != true {
+			t.Errorf("Expected success=true, got %v", response["success"])
+		}
+		if _, ok := response["processes"].([]interface{}); !ok {
+			t.Errorf("Expected processes array, got %T", response["processes"])
+		}
+	})
+
+	t.Run("GET /api/processes/file", func(t *testing.T) {
+		req := httptest.NewRequest("GET", "/api/processes/file", nil)
+		w := httptest.NewRecorder()
+		srv.router.ServeHTTP(w, req)
+
+		if w.Code != http.StatusOK {
+			t.Fatalf("Expected status 200, got %d: %s", w.Code, w.Body.String())
+		}
+
+		var response map[string]interface{}
+		if err := json.NewDecoder(w.Body).Decode(&response); err != nil {
+			t.Fatalf("Failed to decode response: %v", err)
+		}
+		if response["file"] != filepath.Base(jsonFile) {
+			t.Errorf("Expected file basename %q, got %v", filepath.Base(jsonFile), response["file"])
+		}
+		if response["path"] == "" {
+			t.Error("Expected full path in response")
+		}
+		if _, ok := response["processes"].([]interface{}); !ok {
+			t.Errorf("Expected processes array, got %T", response["processes"])
+		}
+	})
+}
+
+func TestBroadcastProcessInfo(t *testing.T) {
+	tmpDir := t.TempDir()
+	jsonFile := filepath.Join(tmpDir, "test.json")
+	if err := os.WriteFile(jsonFile, []byte(`{"101":{"Code":"101","Name":"Test"}}`), 0644); err != nil {
+		t.Fatalf("Failed to write test JSON file: %v", err)
+	}
+
+	srv, err := NewServer(jsonFile, nil)
+	if err != nil {
+		t.Fatalf("Failed to create server: %v", err)
+	}
+	defer srv.Close()
+
+	testServer := httptest.NewServer(srv.router)
+	defer testServer.Close()
+
+	wsURL := "ws" + testServer.URL[4:] + "/ws"
+	ws, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("Failed to connect WebSocket: %v", err)
+	}
+	defer ws.Close()
+
+	ws.SetReadDeadline(time.Now().Add(5 * time.Second))
+	for {
+		var msg map[string]interface{}
+		if err := ws.ReadJSON(&msg); err != nil {
+			t.Fatalf("Failed to read process info message: %v", err)
+		}
+		if msg["type"] != "process_info" {
+			continue
+		}
+		if _, ok := msg["status"].(map[string]interface{}); !ok {
+			t.Fatalf("Expected status object in process_info message, got %T", msg["status"])
+		}
+		return
+	}
+}

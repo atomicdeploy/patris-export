@@ -183,28 +183,70 @@ function saveColumnFilters() {
     localStorage.setItem('patris-column-filters', JSON.stringify(state.columnFilters));
 }
 
+function removeHiddenColumnFilters() {
+    let changed = false;
+    for (const field of Object.keys(state.columnFilters)) {
+        if (state.hiddenColumns.has(field)) {
+            delete state.columnFilters[field];
+            changed = true;
+        }
+    }
+    if (changed) {
+        saveColumnFilters();
+    }
+}
+
+function removeUnknownColumnFilters() {
+    const knownFields = new Set(state.fields);
+    let changed = false;
+    for (const field of Object.keys(state.columnFilters)) {
+        if (!knownFields.has(field)) {
+            delete state.columnFilters[field];
+            changed = true;
+        }
+    }
+    if (changed) {
+        saveColumnFilters();
+    }
+}
+
 // Field detection constants
 const FIELD_DETECTION = {
     SAMPLE_SIZE: 100,              // Number of records to sample for type detection
+    STATS_SAMPLE_SIZE: 1000,        // Number of records to sample for filter statistics
     DATE_CONFIDENCE_THRESHOLD: 0.8, // 80% of values must match date pattern
     CATEGORICAL_MAX_UNIQUE: 20,     // Max unique values for categorical
     CATEGORICAL_RATIO: 0.5          // Max ratio of unique/total for categorical
 };
+
+const FILTER_INPUT_DEBOUNCE_MS = 180;
+
+function debounce(fn, delay) {
+    let timeout = null;
+    return (...args) => {
+        clearTimeout(timeout);
+        timeout = setTimeout(() => fn(...args), delay);
+    };
+}
 
 // Jalali date utilities
 const JalaliUtils = {
     // Parse Jalali date string in format YY.mm.dd or YY/mm/dd
     parse(dateStr) {
         if (!dateStr || typeof dateStr !== 'string') return null;
-        const parts = dateStr.split(/[.\/]/);
+        const value = dateStr.trim();
+        if (!/^\d{2}[.\/]\d{2}[.\/]\d{2}$/.test(value)) return null;
+        const parts = value.split(/[.\/]/);
         if (parts.length !== 3) return null;
         
-        const year = parseInt(parts[0]);
-        const month = parseInt(parts[1]);
-        const day = parseInt(parts[2]);
+        const year = parseInt(parts[0], 10);
+        const month = parseInt(parts[1], 10);
+        const day = parseInt(parts[2], 10);
         
         if (isNaN(year) || isNaN(month) || isNaN(day)) return null;
-        if (month < 1 || month > 12 || day < 1 || day > 31) return null;
+        if (month < 1 || month > 12) return null;
+        const maxDay = month <= 6 ? 31 : month <= 11 ? 30 : 29;
+        if (day < 1 || day > maxDay) return null;
         
         // Return as object for comparison
         return { year, month, day };
@@ -220,9 +262,7 @@ const JalaliUtils = {
     
     // Check if string looks like a Jalali date
     isJalaliDate(str) {
-        if (!str || typeof str !== 'string') return false;
-        // Match YY.mm.dd or YY/mm/dd format (2-digit components)
-        return /^\d{2}[.\/]\d{1,2}[.\/]\d{1,2}$/.test(str.trim());
+        return JalaliUtils.parse(str) !== null;
     }
 };
 
@@ -235,16 +275,7 @@ function detectFieldType(field, records) {
     const values = [];
     
     for (let i = 0; i < sampleSize; i++) {
-        let value;
-        // Handle ANBAR fields
-        if (field.startsWith('ANBAR') && field.length > 5) {
-            const anbarIndex = parseInt(field.substring(5)) - 1;
-            if (records[i].ANBAR && Array.isArray(records[i].ANBAR)) {
-                value = records[i].ANBAR[anbarIndex];
-            }
-        } else {
-            value = records[i][field];
-        }
+        const value = getFieldValue(records[i], field);
         
         if (value !== null && value !== undefined && value !== '') {
             values.push(value);
@@ -294,17 +325,9 @@ function calculateFieldStats(field, records) {
     
     const values = [];
     
-    for (const record of records) {
-        let value;
-        // Handle ANBAR fields
-        if (field.startsWith('ANBAR') && field.length > 5) {
-            const anbarIndex = parseInt(field.substring(5)) - 1;
-            if (record.ANBAR && Array.isArray(record.ANBAR)) {
-                value = record.ANBAR[anbarIndex];
-            }
-        } else {
-            value = record[field];
-        }
+    const sampleSize = Math.min(FIELD_DETECTION.STATS_SAMPLE_SIZE, records.length);
+    for (let i = 0; i < sampleSize; i++) {
+        const value = getFieldValue(records[i], field);
         
         if (value === null || value === undefined || value === '') {
             stats.hasNull = true;
@@ -342,6 +365,8 @@ function analyzeFields() {
         state.fieldTypes[field] = detectFieldType(field, state.records);
         state.fieldStats[field] = calculateFieldStats(field, state.records);
     });
+    removeUnknownColumnFilters();
+    removeHiddenColumnFilters();
 }
 
 // Format number with thousand separators (e.g., 1234567 -> 1,234,567)
@@ -508,6 +533,9 @@ function flashFavicon() {
     canvas.width = 32;
     canvas.height = 32;
     const ctx = canvas.getContext('2d');
+    if (!ctx) {
+        return;
+    }
     
     // Draw red circle background
     ctx.fillStyle = '#ff4444';
@@ -956,13 +984,6 @@ function renderTableHeader() {
             const visibleAnbarFields = anbarFields.filter(f => !state.hiddenColumns.has(f));
             
             if (visibleAnbarFields.length > 0 && hasAnbarFields) {
-                // Create group header for all visible ANBAR columns (spans across ANBAR columns)
-                const groupTh = document.createElement('th');
-                groupTh.textContent = 'ANBAR';
-                groupTh.setAttribute('colspan', visibleAnbarFields.length);
-                groupTh.className = 'anbar-group-header';
-                // Note: This is only used when we have ANBAR grouping
-                
                 // Create individual ANBAR column headers and filters
                 visibleAnbarFields.forEach(anbarField => {
                     const anbarNum = anbarField.substring(5); // Extract number
@@ -1079,6 +1100,7 @@ function createFilterControl(field) {
         // Dropdown for categorical fields
         const select = document.createElement('select');
         select.className = 'filter-select';
+        select.setAttribute('aria-label', `Filter ${displayFieldName(field)}`);
         
         const defaultOption = document.createElement('option');
         defaultOption.value = '';
@@ -1126,6 +1148,7 @@ function createFilterControl(field) {
         minInput.placeholder = 'From';
         minInput.value = currentFilter?.min ?? '';
         minInput.title = 'Format: YY.mm.dd';
+        minInput.setAttribute('aria-label', `Minimum ${displayFieldName(field)} date`);
         
         const maxInput = document.createElement('input');
         maxInput.type = 'text';
@@ -1133,13 +1156,29 @@ function createFilterControl(field) {
         maxInput.placeholder = 'To';
         maxInput.value = currentFilter?.max ?? '';
         maxInput.title = 'Format: YY.mm.dd';
+        maxInput.setAttribute('aria-label', `Maximum ${displayFieldName(field)} date`);
         
         const updateFilter = () => {
             const min = minInput.value.trim();
             const max = maxInput.value.trim();
+            const validMin = min ? JalaliUtils.parse(min) : null;
+            const validMax = max ? JalaliUtils.parse(max) : null;
+            minInput.setCustomValidity(min && !validMin ? 'Use YY.mm.dd' : '');
+            maxInput.setCustomValidity(max && !validMax ? 'Use YY.mm.dd' : '');
+            if ((min && !validMin) || (max && !validMax)) {
+                return;
+            }
+            let nextMin = min;
+            let nextMax = max;
+            if (validMin && validMax && JalaliUtils.compare(validMin, validMax) > 0) {
+                nextMin = max;
+                nextMax = min;
+                minInput.value = nextMin;
+                maxInput.value = nextMax;
+            }
             
-            if (min || max) {
-                state.columnFilters[field] = { type: 'jalali-date', min, max };
+            if (nextMin || nextMax) {
+                state.columnFilters[field] = { type: 'jalali-date', min: nextMin, max: nextMax };
             } else {
                 delete state.columnFilters[field];
             }
@@ -1161,8 +1200,9 @@ function createFilterControl(field) {
         input.className = 'filter-input';
         input.placeholder = 'Filter...';
         input.value = currentFilter?.value ?? '';
+        input.setAttribute('aria-label', `Filter ${displayFieldName(field)} text`);
         
-        input.addEventListener('input', (e) => {
+        const updateTextFilter = debounce((e) => {
             const value = e.target.value.trim();
             if (value) {
                 state.columnFilters[field] = { type: 'text', value };
@@ -1171,7 +1211,8 @@ function createFilterControl(field) {
             }
             saveColumnFilters();
             applyFilters();
-        });
+        }, FILTER_INPUT_DEBOUNCE_MS);
+        input.addEventListener('input', updateTextFilter);
         
         container.appendChild(input);
     }
@@ -1185,6 +1226,7 @@ function createRangePopover(field, currentFilter, mode) {
     const button = document.createElement('button');
     button.type = 'button';
     button.className = 'range-trigger';
+    button.setAttribute('aria-label', `Set ${displayFieldName(field)} range filter`);
     const active = currentFilter?.min !== undefined && currentFilter?.min !== null || currentFilter?.max !== undefined && currentFilter?.max !== null;
     button.innerHTML = active ? `<span class="filter-badge">${currentFilter.min ?? 'min'}–${currentFilter.max ?? 'max'}</span>` : '<span class="ellipsis">•••</span>';
     const panel = document.createElement('div');
@@ -1196,6 +1238,7 @@ function createRangePopover(field, currentFilter, mode) {
     minInput.className = 'filter-input-small';
     minInput.placeholder = mode === 'numeric' ? 'Min' : 'From';
     minInput.value = currentFilter?.min ?? '';
+    minInput.setAttribute('aria-label', `Minimum ${displayFieldName(field)}`);
 
     const maxInput = document.createElement('input');
     maxInput.type = mode === 'numeric' ? 'text' : 'text';
@@ -1203,6 +1246,7 @@ function createRangePopover(field, currentFilter, mode) {
     maxInput.className = 'filter-input-small';
     maxInput.placeholder = mode === 'numeric' ? 'Max' : 'To';
     maxInput.value = currentFilter?.max ?? '';
+    maxInput.setAttribute('aria-label', `Maximum ${displayFieldName(field)}`);
 
     const applyBtn = document.createElement('button');
     applyBtn.type = 'button';
@@ -1217,8 +1261,20 @@ function createRangePopover(field, currentFilter, mode) {
     const apply = () => {
         const rawMin = minInput.value.trim();
         const rawMax = maxInput.value.trim();
-        const min = mode === 'numeric' && rawMin ? parseFloat(rawMin) : rawMin || null;
-        const max = mode === 'numeric' && rawMax ? parseFloat(rawMax) : rawMax || null;
+        let min = mode === 'numeric' && rawMin ? parseFloat(rawMin) : rawMin || null;
+        let max = mode === 'numeric' && rawMax ? parseFloat(rawMax) : rawMax || null;
+        if (mode === 'numeric') {
+            minInput.setCustomValidity(rawMin && !Number.isFinite(min) ? 'Enter a number' : '');
+            maxInput.setCustomValidity(rawMax && !Number.isFinite(max) ? 'Enter a number' : '');
+            if ((rawMin && !Number.isFinite(min)) || (rawMax && !Number.isFinite(max))) {
+                return;
+            }
+            if (min !== null && max !== null && min > max) {
+                [min, max] = [max, min];
+                minInput.value = min;
+                maxInput.value = max;
+            }
+        }
         if (min !== null || max !== null) {
             state.columnFilters[field] = { type: mode, min, max };
         } else {
@@ -1254,6 +1310,7 @@ function createCodeFilterControl(currentFilter) {
 
     const typeSelect = document.createElement('select');
     typeSelect.className = 'filter-select code-filter-type';
+    typeSelect.setAttribute('aria-label', 'Filter Code type');
     [
         ['', 'All'],
         ['group', 'Group'],
@@ -1273,6 +1330,7 @@ function createCodeFilterControl(currentFilter) {
     segmentInput.className = 'filter-input code-segment-input';
     segmentInput.placeholder = '100/200';
     segmentInput.value = currentFilter?.segment || '';
+    segmentInput.setAttribute('aria-label', 'Filter Code group segments');
 
     const badge = document.createElement('span');
     badge.className = 'filter-badge';
@@ -1368,7 +1426,7 @@ function renderTable(changedIndices = new Set()) {
             
             // Handle ANBAR fields (ANBAR1, ANBAR2, etc.)
             if (field.startsWith('ANBAR') && field.length > 5) {
-                const anbarIndex = parseInt(field.substring(5)) - 1;
+                const anbarIndex = parseInt(field.substring(5), 10) - 1;
                 if (record.ANBAR && Array.isArray(record.ANBAR) && anbarIndex < record.ANBAR.length) {
                     const value = record.ANBAR[anbarIndex];
                     // Apply thousand separator to ANBAR values
@@ -1446,7 +1504,7 @@ function sortRecords() {
         
         // Handle ANBAR fields (ANBAR1, ANBAR2, etc.)
         if (state.sortField.startsWith('ANBAR') && state.sortField.length > 5) {
-            const anbarIndex = parseInt(state.sortField.substring(5)) - 1;
+            const anbarIndex = parseInt(state.sortField.substring(5), 10) - 1;
             aVal = a.ANBAR && Array.isArray(a.ANBAR) && anbarIndex < a.ANBAR.length ? a.ANBAR[anbarIndex] : '';
             bVal = b.ANBAR && Array.isArray(b.ANBAR) && anbarIndex < b.ANBAR.length ? b.ANBAR[anbarIndex] : '';
         } else {
@@ -1513,10 +1571,12 @@ function renderColumnManager() {
                 state.hiddenColumns.delete(field);
             } else {
                 state.hiddenColumns.add(field);
+                delete state.columnFilters[field];
             }
             saveHiddenColumns();
+            saveColumnFilters();
             renderTableHeader();
-            renderTable();
+            applyFilters();
         });
         
         const span = document.createElement('span');
@@ -1571,7 +1631,7 @@ function convertToCSV(data) {
             
             // Handle ANBAR fields (ANBAR1, ANBAR2, etc.)
             if (field.startsWith('ANBAR') && field.length > 5) {
-                const anbarIndex = parseInt(field.substring(5)) - 1;
+                const anbarIndex = parseInt(field.substring(5), 10) - 1;
                 if (record.ANBAR && Array.isArray(record.ANBAR) && anbarIndex < record.ANBAR.length) {
                     value = record.ANBAR[anbarIndex];
                 } else {
@@ -1616,6 +1676,9 @@ function filterRecords() {
         filtered = filtered.filter(record => {
             // Check each active filter
             for (const [field, filter] of Object.entries(state.columnFilters)) {
+                if (state.hiddenColumns.has(field)) {
+                    continue;
+                }
                 if (!passesFilter(record, field, filter)) {
                     return false;
                 }
@@ -1650,7 +1713,7 @@ function filterRecords() {
 // Get field value from record (handles ANBAR fields)
 function getFieldValue(record, field) {
     if (field.startsWith('ANBAR') && field.length > 5) {
-        const anbarIndex = parseInt(field.substring(5)) - 1;
+        const anbarIndex = parseInt(field.substring(5), 10) - 1;
         if (record.ANBAR && Array.isArray(record.ANBAR) && anbarIndex < record.ANBAR.length) {
             return record.ANBAR[anbarIndex];
         }
@@ -1759,7 +1822,7 @@ function inspectRecord(record) {
         // Handle ANBAR fields (ANBAR1, ANBAR2, etc.)
         let value;
         if (field.startsWith('ANBAR') && field.length > 5) {
-            const anbarIndex = parseInt(field.substring(5)) - 1;
+            const anbarIndex = parseInt(field.substring(5), 10) - 1;
             if (record.ANBAR && Array.isArray(record.ANBAR) && anbarIndex < record.ANBAR.length) {
                 value = record.ANBAR[anbarIndex];
             } else {
@@ -1896,7 +1959,7 @@ function init() {
         saveHiddenColumns();
         renderColumnManager();
         renderTableHeader();
-        renderTable();
+        applyFilters();
     });
     
     document.getElementById('hideAllColumns').addEventListener('click', () => {
@@ -1906,10 +1969,11 @@ function init() {
                 state.hiddenColumns.add(field);
             }
         });
+        removeHiddenColumnFilters();
         saveHiddenColumns();
         renderColumnManager();
         renderTableHeader();
-        renderTable();
+        applyFilters();
     });
     
     // Settings checkboxes
@@ -1949,7 +2013,7 @@ function init() {
     });
     
     document.getElementById('pageSize').addEventListener('change', (e) => {
-        state.settings.pageSize = parseInt(e.target.value);
+        state.settings.pageSize = parseInt(e.target.value, 10);
         saveSettings();
         if (state.settings.enablePagination) {
             renderTable();

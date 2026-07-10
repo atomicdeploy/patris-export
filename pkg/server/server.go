@@ -30,22 +30,25 @@ import (
 
 // Server represents the HTTP/WebSocket server
 type Server struct {
-	router        *mux.Router
-	dbPath        string
-	charMap       converter.CharMapping
-	dataSource    datasource.DataSource
-	watcher       *watcher.FileWatcher
-	wsClients     map[*websocket.Conn]*sync.Mutex
-	wsClientsMu   sync.RWMutex
-	upgrader      websocket.Upgrader
-	lastRecords   []map[string]interface{}
-	lastRecordsMu sync.RWMutex
-	lastModTime   time.Time
-	lastModTimeMu sync.RWMutex
-	useTempFile   bool
-	config        *appconfig.Manager
-	configWatcher *fsnotify.Watcher
-	version       version.Info
+	router             *mux.Router
+	dbPath             string
+	charMap            converter.CharMapping
+	dataSource         datasource.DataSource
+	watcher            *watcher.FileWatcher
+	wsClients          map[*websocket.Conn]*sync.Mutex
+	wsClientsMu        sync.RWMutex
+	upgrader           websocket.Upgrader
+	lastRecords        []map[string]interface{}
+	lastRecordsMu      sync.RWMutex
+	lastModTime        time.Time
+	lastModTimeMu      sync.RWMutex
+	useTempFile        bool
+	config             *appconfig.Manager
+	configWatcher      *fsnotify.Watcher
+	version            version.Info
+	processMu          sync.Mutex
+	processStatusCache map[string]interface{}
+	processStatusAt    time.Time
 }
 
 type Options struct {
@@ -344,6 +347,7 @@ func (s *Server) handleGetFileProcesses(w http.ResponseWriter, r *http.Request) 
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"success":   true,
 		"file":      filepath.Base(s.dbPath),
+		"path":      fileInfo.FilePath,
 		"count":     len(fileInfo.Processes),
 		"in_use":    len(fileInfo.Processes) > 0,
 		"processes": fileInfo.Processes,
@@ -656,9 +660,23 @@ func (s *Server) broadcastProcessInfo() {
 	message := map[string]interface{}{
 		"type":      "process_info",
 		"timestamp": time.Now().Format(time.RFC3339),
-		"status":    s.processStatus(),
+		"status":    s.cachedProcessStatus(2 * time.Second),
 	}
 	s.broadcastMessage(message)
+}
+
+func (s *Server) cachedProcessStatus(ttl time.Duration) map[string]interface{} {
+	s.processMu.Lock()
+	defer s.processMu.Unlock()
+
+	if s.processStatusCache != nil && time.Since(s.processStatusAt) < ttl {
+		return s.processStatusCache
+	}
+
+	status := s.processStatus()
+	s.processStatusCache = status
+	s.processStatusAt = time.Now()
+	return status
 }
 
 // computeChanges computes the difference between old and new records
