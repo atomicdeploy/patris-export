@@ -2290,6 +2290,23 @@ function setLoadingState(isLoading) {
     }
 }
 
+function focusSearchInput() {
+    const searchInput = document.getElementById('searchInput');
+    if (!searchInput) {
+        return;
+    }
+    searchInput.focus({ preventScroll: true });
+    searchInput.select();
+}
+
+function handleGlobalKeydown(event) {
+    if (event.key !== 'F2' || event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) {
+        return;
+    }
+    event.preventDefault();
+    focusSearchInput();
+}
+
 // Initialize theme
 function initTheme() {
     const savedTheme = localStorage.getItem('theme');
@@ -2323,6 +2340,8 @@ function init() {
     updateFooter();
     
     // Set up event listeners
+    document.addEventListener('keydown', handleGlobalKeydown);
+
     document.getElementById('searchInput').addEventListener('input', (e) => {
         state.searchTerm = e.target.value;
         filterRecords();
