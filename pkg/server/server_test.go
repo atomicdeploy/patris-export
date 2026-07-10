@@ -1,7 +1,9 @@
 package server
 
 import (
+	"bytes"
 	"encoding/json"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -230,6 +232,60 @@ func TestServerJSON(t *testing.T) {
 		}
 		if got := w.Header().Get("Content-Range"); !strings.HasPrefix(got, "bytes 0-15/") {
 			t.Errorf("Unexpected Content-Range: %s", got)
+		}
+	})
+
+	t.Run("POST /api/edge/upload switches active source", func(t *testing.T) {
+		var body bytes.Buffer
+		writer := multipart.NewWriter(&body)
+		if err := writer.WriteField("source_id", "test-edge"); err != nil {
+			t.Fatalf("write source_id: %v", err)
+		}
+		if err := writer.WriteField("file_name", "edge.json"); err != nil {
+			t.Fatalf("write file_name: %v", err)
+		}
+		part, err := writer.CreateFormFile("file", "edge.json")
+		if err != nil {
+			t.Fatalf("create file part: %v", err)
+		}
+		if _, err := part.Write([]byte(`{"777":{"Code":"777","Name":"Uploaded Edge Record"}}`)); err != nil {
+			t.Fatalf("write file part: %v", err)
+		}
+		if err := writer.Close(); err != nil {
+			t.Fatalf("close multipart writer: %v", err)
+		}
+
+		req := httptest.NewRequest("POST", "/api/edge/upload", &body)
+		req.Header.Set("Content-Type", writer.FormDataContentType())
+		w := httptest.NewRecorder()
+		srv.router.ServeHTTP(w, req)
+
+		if w.Code != http.StatusOK {
+			t.Fatalf("Expected status 200, got %d: %s", w.Code, w.Body.String())
+		}
+		var response map[string]interface{}
+		if err := json.NewDecoder(w.Body).Decode(&response); err != nil {
+			t.Fatalf("decode upload response: %v", err)
+		}
+		if response["success"] != true {
+			t.Fatalf("Expected success=true, got %v", response["success"])
+		}
+		if response["records"].(float64) != 1 {
+			t.Fatalf("Expected records=1, got %v", response["records"])
+		}
+
+		req = httptest.NewRequest("GET", "/api/records", nil)
+		w = httptest.NewRecorder()
+		srv.router.ServeHTTP(w, req)
+		if w.Code != http.StatusOK {
+			t.Fatalf("Expected records status 200, got %d", w.Code)
+		}
+		var records map[string]interface{}
+		if err := json.NewDecoder(w.Body).Decode(&records); err != nil {
+			t.Fatalf("decode records: %v", err)
+		}
+		if _, ok := records["777"]; !ok {
+			t.Fatalf("Expected uploaded record 777, got keys %+v", records)
 		}
 	})
 }

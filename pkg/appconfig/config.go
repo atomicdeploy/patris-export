@@ -32,6 +32,7 @@ type Config struct {
 	Database      DatabaseConfig         `json:"database" yaml:"database" toml:"database"`
 	Runtime       RuntimeConfig          `json:"runtime" yaml:"runtime" toml:"runtime"`
 	Convert       ConvertConfig          `json:"convert" yaml:"convert" toml:"convert"`
+	Edge          EdgeConfig             `json:"edge" yaml:"edge" toml:"edge"`
 	Notifications NotificationsConfig    `json:"notifications" yaml:"notifications" toml:"notifications"`
 	UI            UIConfig               `json:"ui" yaml:"ui" toml:"ui"`
 	ColumnLabels  map[string]string      `json:"column_labels" yaml:"column_labels" toml:"column_labels"`
@@ -71,6 +72,16 @@ type ConvertConfig struct {
 	Format   string `json:"format" yaml:"format" toml:"format"`
 	Watch    bool   `json:"watch" yaml:"watch" toml:"watch"`
 	Debounce string `json:"debounce" yaml:"debounce" toml:"debounce"`
+}
+
+type EdgeConfig struct {
+	Enabled     bool   `json:"enabled" yaml:"enabled" toml:"enabled"`
+	TargetURL   string `json:"target_url" yaml:"target_url" toml:"target_url"`
+	Token       string `json:"token,omitempty" yaml:"token,omitempty" toml:"token,omitempty"`
+	SourceID    string `json:"source_id" yaml:"source_id" toml:"source_id"`
+	Debounce    string `json:"debounce" yaml:"debounce" toml:"debounce"`
+	MaxUploadMB int64  `json:"max_upload_mb" yaml:"max_upload_mb" toml:"max_upload_mb"`
+	UploadDir   string `json:"upload_dir" yaml:"upload_dir" toml:"upload_dir"`
 }
 
 type NotificationsConfig struct {
@@ -125,6 +136,11 @@ func Default() Config {
 			Output:   ".",
 			Format:   "json",
 			Debounce: "1s",
+		},
+		Edge: EdgeConfig{
+			Debounce:    "1s",
+			MaxUploadMB: 512,
+			UploadDir:   "edge-uploads",
 		},
 		Notifications: NotificationsConfig{
 			Native:  true,
@@ -541,6 +557,29 @@ func ApplyEnv(cfg *Config) {
 	if value := os.Getenv("PATRIS_CONVERT_DEBOUNCE"); strings.TrimSpace(value) != "" {
 		cfg.Convert.Debounce = strings.TrimSpace(value)
 	}
+	if value := os.Getenv("PATRIS_EDGE_ENABLED"); strings.TrimSpace(value) != "" {
+		cfg.Edge.Enabled = parseBool(value, cfg.Edge.Enabled)
+	}
+	if value := os.Getenv("PATRIS_EDGE_TARGET_URL"); strings.TrimSpace(value) != "" {
+		cfg.Edge.TargetURL = strings.TrimSpace(value)
+	}
+	if value := os.Getenv("PATRIS_EDGE_TOKEN"); strings.TrimSpace(value) != "" {
+		cfg.Edge.Token = strings.TrimSpace(value)
+	}
+	if value := os.Getenv("PATRIS_EDGE_SOURCE_ID"); strings.TrimSpace(value) != "" {
+		cfg.Edge.SourceID = strings.TrimSpace(value)
+	}
+	if value := os.Getenv("PATRIS_EDGE_DEBOUNCE"); strings.TrimSpace(value) != "" {
+		cfg.Edge.Debounce = strings.TrimSpace(value)
+	}
+	if value := os.Getenv("PATRIS_EDGE_MAX_UPLOAD_MB"); strings.TrimSpace(value) != "" {
+		if maxMB, err := strconv.ParseInt(strings.TrimSpace(value), 10, 64); err == nil {
+			cfg.Edge.MaxUploadMB = maxMB
+		}
+	}
+	if value := os.Getenv("PATRIS_EDGE_UPLOAD_DIR"); strings.TrimSpace(value) != "" {
+		cfg.Edge.UploadDir = strings.TrimSpace(value)
+	}
 	applyBoolEnv := func(key string, dst *bool) {
 		if value := os.Getenv(key); strings.TrimSpace(value) != "" {
 			*dst = parseBool(value, *dst)
@@ -612,6 +651,18 @@ func normalize(cfg *Config) {
 	}
 	if cfg.Convert.Debounce == "" {
 		cfg.Convert.Debounce = "1s"
+	}
+	cfg.Edge.TargetURL = strings.TrimRight(strings.TrimSpace(cfg.Edge.TargetURL), "/")
+	cfg.Edge.Token = strings.TrimSpace(cfg.Edge.Token)
+	cfg.Edge.SourceID = strings.TrimSpace(cfg.Edge.SourceID)
+	if cfg.Edge.Debounce == "" {
+		cfg.Edge.Debounce = "1s"
+	}
+	if cfg.Edge.MaxUploadMB <= 0 {
+		cfg.Edge.MaxUploadMB = 512
+	}
+	if cfg.Edge.UploadDir == "" {
+		cfg.Edge.UploadDir = "edge-uploads"
 	}
 	if !cfg.Notifications.Native && !cfg.Notifications.InApp {
 		cfg.Notifications.Native = true

@@ -16,6 +16,7 @@ import (
 
 	"github.com/atomicdeploy/patris-export/pkg/appconfig"
 	"github.com/atomicdeploy/patris-export/pkg/converter"
+	edgepkg "github.com/atomicdeploy/patris-export/pkg/edge"
 	"github.com/atomicdeploy/patris-export/pkg/embedded"
 	"github.com/atomicdeploy/patris-export/pkg/filecopy"
 	"github.com/atomicdeploy/patris-export/pkg/ipc"
@@ -35,21 +36,28 @@ import (
 
 var (
 	// Global flags
-	charMapFile  string
-	configFiles  []string
-	tempDir      string
-	tempStrategy string
-	tempLimitMB  int64
-	outputDir    string
-	outputFormat string
-	dbFileFlag   string
-	viewHTMLOut  string
-	viewNoOpen   bool
-	viewTitle    string
-	watchMode    bool
-	verbose      bool
-	directAccess bool
-	rtlMode      bool
+	charMapFile     string
+	configFiles     []string
+	tempDir         string
+	tempStrategy    string
+	tempLimitMB     int64
+	outputDir       string
+	outputFormat    string
+	dbFileFlag      string
+	viewHTMLOut     string
+	viewNoOpen      bool
+	viewTitle       string
+	watchMode       bool
+	verbose         bool
+	directAccess    bool
+	rtlMode         bool
+	edgeTargetURL   string
+	edgeToken       string
+	edgeSourceID    string
+	edgeDebounce    string
+	edgeOnce        bool
+	edgeInitial     bool
+	edgeMaxUploadMB int64
 
 	// Color definitions
 	successColor = color.New(color.FgGreen, color.Bold)
@@ -152,6 +160,27 @@ Supports Persian/Farsi encoding conversion and file watching.
 	serveCmd.Flags().Bool("ipc", false, "Enable local IPC listener (Windows named pipe, Unix socket)")
 	serveCmd.Flags().String("ipc-path", "", "IPC path/name (default: platform-specific patris-export endpoint)")
 
+	stubCmd := &cobra.Command{
+		Use:     "stub [database-file]",
+		Aliases: []string{"edge"},
+		Short:   "📡 Watch a local database and push snapshots to a remote patris-export server",
+		Long: `📡 Edge stub mode watches a local Patris .db file and uploads the raw file
+to a remote patris-export instance for conversion, transformation, REST, Web UI,
+WebSocket, IPC, and notification processing.
+
+This is intended for lightweight edge machines where Patris writes the database,
+while a stronger server does the expensive processing and serves clients.`,
+		Args: cobra.MaximumNArgs(1),
+		Run:  runStub,
+	}
+	stubCmd.Flags().StringVar(&edgeTargetURL, "target-url", "", "Remote patris-export base URL or /api/edge/upload endpoint")
+	stubCmd.Flags().StringVar(&edgeToken, "token", "", "Optional bearer token for the remote edge upload endpoint")
+	stubCmd.Flags().StringVar(&edgeSourceID, "source-id", "", "Stable edge/source identifier included with uploads")
+	stubCmd.Flags().StringVar(&edgeDebounce, "debounce", "", "Debounce duration before upload after local file changes")
+	stubCmd.Flags().BoolVar(&edgeOnce, "once", false, "Upload once and exit instead of watching")
+	stubCmd.Flags().BoolVar(&edgeInitial, "initial", true, "Upload the current file once before watching")
+	stubCmd.Flags().Int64Var(&edgeMaxUploadMB, "max-upload-mb", 0, "Maximum local file size to upload in MiB")
+
 	ipcCmd := &cobra.Command{
 		Use:   "ipc [method] [json-params]",
 		Short: "Call a local patris-export IPC endpoint",
@@ -188,7 +217,7 @@ Set GITHUB_TOKEN for private repositories and higher API rate limits.`,
 	updateCmd.Flags().String("api-url", "", "Update from a Patris Export API base URL using /api/update/manifest")
 	updateCmd.Flags().String("manifest-url", "", "Update from an explicit Patris Export executable manifest URL")
 
-	rootCmd.AddCommand(convertCmd, infoCmd, companyCmd, viewCmd, serveCmd, ipcCmd, tuiCmd, updateCmd)
+	rootCmd.AddCommand(convertCmd, infoCmd, companyCmd, viewCmd, serveCmd, stubCmd, ipcCmd, tuiCmd, updateCmd)
 
 	if err := rootCmd.Execute(); err != nil {
 		errorColor.Fprintf(os.Stderr, "❌ Error: %v\n", err)
@@ -971,6 +1000,110 @@ func isViewableSource(path string) bool {
 		}
 	}
 	return ext == ".db" || ext == ".json"
+}
+
+func runStub(cmd *cobra.Command, args []string) {
+	_, cfg := effectiveConfig(cmd)
+	dbFile := cfg.Database.Path
+	if strings.TrimSpace(dbFileFlag) != "" {
+		dbFile = strings.TrimSpace(dbFileFlag)
+	}
+	if len(args) > 0 {
+		dbFile = args[0]
+	}
+	if strings.TrimSpace(dbFile) == "" {
+		errorColor.Println("No database file specified. Pass one to stub, set --db, or set database.path in config.")
+		os.Exit(1)
+	}
+	if filecopy.IsURL(dbFile) {
+		errorColor.Println("Edge stub mode watches local files only. Use a local .db path.")
+		os.Exit(1)
+	}
+
+	targetURL := edgeTargetURL
+	if !cmd.Flags().Changed("target-url") {
+		targetURL = cfg.Edge.TargetURL
+	}
+	token := edgeToken
+	if !cmd.Flags().Changed("token") {
+		token = cfg.Edge.Token
+	}
+	sourceID := edgeSourceID
+	if !cmd.Flags().Changed("source-id") {
+		sourceID = cfg.Edge.SourceID
+	}
+	debounceStr := edgeDebounce
+	if !cmd.Flags().Changed("debounce") {
+		debounceStr = cfg.Edge.Debounce
+	}
+	maxUploadMB := edgeMaxUploadMB
+	if !cmd.Flags().Changed("max-upload-mb") {
+		maxUploadMB = cfg.Edge.MaxUploadMB
+	}
+	if maxUploadMB <= 0 {
+		maxUploadMB = 512
+	}
+	debounceDuration := parseDebounceDuration(debounceStr)
+
+	client := edgepkg.Client{
+		TargetURL: targetURL,
+		Token:     token,
+		SourceID:  sourceID,
+		MaxBytes:  maxUploadMB * 1024 * 1024,
+	}
+	if _, err := edgepkg.UploadURL(targetURL); err != nil {
+		errorColor.Printf("Invalid edge target URL: %v\n", err)
+		os.Exit(1)
+	}
+
+	displayFileStatus(dbFile)
+	checkProcessConflicts(dbFile)
+
+	upload := func(path string) bool {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+		defer cancel()
+		infoColor.Printf("📤 Uploading %s to %s\n", filepath.Base(path), targetURL)
+		result, err := client.UploadFile(ctx, path)
+		if err != nil {
+			errorColor.Printf("Edge upload failed: %v\n", err)
+			return false
+		}
+		successColor.Printf("✅ Edge upload accepted: %d records, %d bytes, hash=%s\n", result.Records, result.Size, result.Hash)
+		return true
+	}
+
+	if edgeInitial || edgeOnce {
+		if ok := upload(dbFile); !ok && edgeOnce {
+			os.Exit(1)
+		}
+	}
+	if edgeOnce {
+		return
+	}
+
+	fw, err := watcher.NewFileWatcher()
+	if err != nil {
+		errorColor.Printf("Failed to create file watcher: %v\n", err)
+		os.Exit(1)
+	}
+	defer fw.Close()
+
+	if err := fw.Watch(dbFile, func(path string) {
+		infoColor.Printf("🔄 Local database changed: %s\n", filepath.Base(path))
+		upload(path)
+	}, debounceDuration); err != nil {
+		errorColor.Printf("Failed to watch database file: %v\n", err)
+		os.Exit(1)
+	}
+	fw.Start()
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer stop()
+	successColor.Printf("📡 Edge stub watching %s\n", filepath.Base(dbFile))
+	infoColor.Printf("🎯 Remote target: %s\n", targetURL)
+	infoColor.Printf("⏱️ Debounce: %s | Max upload: %d MiB\n", debounceDuration, maxUploadMB)
+	infoColor.Println("Press Ctrl+C to stop the edge stub")
+	<-ctx.Done()
 }
 
 func runIPC(cmd *cobra.Command, args []string) {
