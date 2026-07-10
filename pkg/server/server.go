@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"net/url"
@@ -91,6 +92,11 @@ type ToastRequest struct {
 	Broadcast *bool  `json:"broadcast,omitempty"`
 }
 
+type charmapPreviewRequest struct {
+	Content string `json:"content"`
+	Path    string `json:"path"`
+}
+
 // NewServer creates a new server instance
 func NewServer(dbPath string, charMap converter.CharMapping, useTempFile ...bool) (*Server, error) {
 	return NewServerWithOptions(dbPath, charMap, Options{}, useTempFile...)
@@ -169,9 +175,12 @@ func NewServerWithOptions(dbPath string, charMap converter.CharMapping, options 
 func (s *Server) setupRoutes() {
 	s.router.HandleFunc("/", s.handleWelcome).Methods("GET")
 	s.router.HandleFunc("/viewer", s.handleViewer).Methods("GET")
+	s.router.HandleFunc("/debug/charmap", s.handleCharmapViewer).Methods("GET")
 	s.router.HandleFunc("/api/records", s.handleGetRecords).Methods("GET")
 	s.router.HandleFunc("/api/info", s.handleGetInfo).Methods("GET")
 	s.router.HandleFunc("/api/app", s.handleGetApp).Methods("GET")
+	s.router.HandleFunc("/api/charmap", s.handleGetCharmap).Methods("GET")
+	s.router.HandleFunc("/api/charmap/preview", s.handlePostCharmapPreview).Methods("POST")
 	s.router.HandleFunc("/api/config", s.handleGetConfig).Methods("GET")
 	s.router.HandleFunc("/api/config", s.handlePutConfig).Methods("PUT")
 	s.router.HandleFunc("/api/status", s.handleGetStatus).Methods("GET")
@@ -341,6 +350,12 @@ func (s *Server) handleViewer(w http.ResponseWriter, r *http.Request) {
 	w.Write(web.ViewerHTML)
 }
 
+func (s *Server) handleCharmapViewer(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Write(web.CharmapHTML)
+}
+
 // handleGetRecords returns all database records as JSON
 func (s *Server) handleGetRecords(w http.ResponseWriter, r *http.Request) {
 	transformed, err := s.Records()
@@ -370,6 +385,103 @@ func (s *Server) handleGetInfo(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleGetApp(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	writeJSON(w, s.appMetadata())
+}
+
+func (s *Server) handleGetCharmap(w http.ResponseWriter, r *http.Request) {
+	source := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("source")))
+	if source == "" {
+		source = "active"
+	}
+	path := strings.TrimSpace(r.URL.Query().Get("path"))
+	if path != "" {
+		if !s.debugEnabled() {
+			http.Error(w, "custom charmap path preview requires debug mode", http.StatusForbidden)
+			return
+		}
+		s.writeCharmapFile(w, path, "path")
+		return
+	}
+	if source == "default" {
+		writeJSON(w, s.charmapPayload("default", "", converter.DefaultCharMapping(), nil))
+		return
+	}
+	if s.config != nil {
+		cfg := s.config.Get()
+		if strings.TrimSpace(cfg.Database.Charmap) != "" {
+			s.writeCharmapFile(w, cfg.Database.Charmap, "active")
+			return
+		}
+	}
+	writeJSON(w, s.charmapPayload("embedded", "", converter.DefaultCharMapping(), nil))
+}
+
+func (s *Server) handlePostCharmapPreview(w http.ResponseWriter, r *http.Request) {
+	if !s.debugEnabled() {
+		http.Error(w, "custom charmap preview requires debug mode", http.StatusForbidden)
+		return
+	}
+	var req charmapPreviewRequest
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 2*1024*1024)).Decode(&req); err != nil {
+		http.Error(w, fmt.Sprintf("Failed to decode charmap preview request: %v", err), http.StatusBadRequest)
+		return
+	}
+	if strings.TrimSpace(req.Content) != "" {
+		mapping, issues, err := converter.ParseCharMappingReport(strings.NewReader(req.Content))
+		if err != nil {
+			http.Error(w, fmt.Sprintf("Failed to parse charmap content: %v", err), http.StatusBadRequest)
+			return
+		}
+		writeJSON(w, s.charmapPayload("preview", "", mapping, issues))
+		return
+	}
+	if strings.TrimSpace(req.Path) != "" {
+		s.writeCharmapFile(w, req.Path, "preview")
+		return
+	}
+	http.Error(w, "content or path is required", http.StatusBadRequest)
+}
+
+func (s *Server) writeCharmapFile(w http.ResponseWriter, path, source string) {
+	file, err := os.Open(path)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Failed to open charmap file: %v", err), http.StatusBadRequest)
+		return
+	}
+	defer file.Close()
+	data, err := io.ReadAll(io.LimitReader(file, 2*1024*1024+1))
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Failed to read charmap file: %v", err), http.StatusBadRequest)
+		return
+	}
+	if len(data) > 2*1024*1024 {
+		http.Error(w, "charmap file is too large", http.StatusRequestEntityTooLarge)
+		return
+	}
+	mapping, issues, err := converter.ParseCharMappingReport(bytes.NewReader(data))
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Failed to parse charmap file: %v", err), http.StatusBadRequest)
+		return
+	}
+	writeJSON(w, s.charmapPayload(source, path, mapping, issues))
+}
+
+func (s *Server) charmapPayload(source, path string, mapping converter.CharMapping, issues []converter.CharMappingIssue) map[string]interface{} {
+	return map[string]interface{}{
+		"success":       true,
+		"debug_enabled": s.debugEnabled(),
+		"source":        source,
+		"path":          path,
+		"count":         len(mapping),
+		"entries":       converter.CharMappingEntries(mapping),
+		"issues":        issues,
+	}
+}
+
+func (s *Server) debugEnabled() bool {
+	if value := strings.TrimSpace(os.Getenv("PATRIS_DEBUG")); value != "" {
+		return strings.EqualFold(value, "1") || strings.EqualFold(value, "true") || strings.EqualFold(value, "yes") || strings.EqualFold(value, "on")
+	}
+	return s.config != nil && s.config.Get().Runtime.Debug
 }
 
 func (s *Server) appMetadata() map[string]interface{} {

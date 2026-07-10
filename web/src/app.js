@@ -657,6 +657,7 @@ function applyConfigToSettingsForm() {
     setChecked('notifyIncludeRowValues', cfg.notifications?.include_row_values);
     setValue('notifyMaxRows', cfg.notifications?.max_rows || 3);
     setValue('runtimeTempDir', cfg.runtime?.temp_dir || 'system');
+    setChecked('runtimeDebug', cfg.runtime?.debug);
     const pathEl = document.getElementById('settingsConfigPath');
     if (pathEl) {
         pathEl.textContent = state.appInfo?.config_path ? `Config: ${state.appInfo.config_path}` : '';
@@ -681,7 +682,8 @@ function updateConfigFromSettingsForm() {
     };
     state.config.runtime = {
         ...(state.config.runtime || {}),
-        temp_dir: document.getElementById('runtimeTempDir')?.value.trim() || 'system'
+        temp_dir: document.getElementById('runtimeTempDir')?.value.trim() || 'system',
+        debug: !!document.getElementById('runtimeDebug')?.checked
     };
     state.config.notifications = {
         ...(state.config.notifications || {}),
@@ -2455,7 +2457,8 @@ function init() {
         'notifyRowUpdated',
         'notifyIncludeRowValues',
         'notifyMaxRows',
-        'runtimeTempDir'
+        'runtimeTempDir',
+        'runtimeDebug'
     ]
         .forEach(id => bindConfigField(id));
 

@@ -7,12 +7,27 @@ import (
 	"io"
 	"os"
 	"regexp"
+	"sort"
 	"strings"
 	"unicode"
 )
 
 // CharMapping holds the Patris to Farsi character mappings
 type CharMapping map[byte]string
+
+type CharMappingEntry struct {
+	Hex        string   `json:"hex"`
+	Decimal    int      `json:"decimal"`
+	Character  string   `json:"character"`
+	Raw        string   `json:"raw,omitempty"`
+	Codepoints []string `json:"codepoints"`
+}
+
+type CharMappingIssue struct {
+	Line    int    `json:"line"`
+	Content string `json:"content"`
+	Reason  string `json:"reason"`
+}
 
 var (
 	defaultMapping       CharMapping
@@ -28,13 +43,29 @@ func LoadCharMapping(filename string) (CharMapping, error) {
 	}
 	defer file.Close()
 
-	return parseCharMapping(file)
+	return ParseCharMapping(file)
 }
 
 func parseCharMapping(reader io.Reader) (CharMapping, error) {
+	mapping, _, err := ParseCharMappingReport(reader)
+	return mapping, err
+}
+
+// ParseCharMapping loads a character mapping from a reader.
+func ParseCharMapping(reader io.Reader) (CharMapping, error) {
+	mapping, _, err := ParseCharMappingReport(reader)
+	return mapping, err
+}
+
+// ParseCharMappingReport loads a character mapping and reports lines that were
+// ignored because they do not match the Patris charmap text format.
+func ParseCharMappingReport(reader io.Reader) (CharMapping, []CharMappingIssue, error) {
 	mapping := make(CharMapping)
+	issues := []CharMappingIssue{}
 	scanner := bufio.NewScanner(reader)
+	lineNumber := 0
 	for scanner.Scan() {
+		lineNumber++
 		line := strings.TrimSpace(scanner.Text())
 		if line == "" {
 			continue
@@ -42,6 +73,7 @@ func parseCharMapping(reader io.Reader) (CharMapping, error) {
 
 		parts := strings.Split(line, "\t")
 		if len(parts) < 2 {
+			issues = append(issues, CharMappingIssue{Line: lineNumber, Content: line, Reason: "expected hex and character separated by a tab"})
 			continue
 		}
 
@@ -54,6 +86,7 @@ func parseCharMapping(reader io.Reader) (CharMapping, error) {
 		// Decode hex value to byte
 		bytes, err := hex.DecodeString(hexVal)
 		if err != nil || len(bytes) != 1 {
+			issues = append(issues, CharMappingIssue{Line: lineNumber, Content: line, Reason: "hex value must decode to exactly one byte"})
 			continue
 		}
 
@@ -61,10 +94,10 @@ func parseCharMapping(reader io.Reader) (CharMapping, error) {
 	}
 
 	if err := scanner.Err(); err != nil {
-		return nil, fmt.Errorf("error reading character mapping file: %w", err)
+		return nil, issues, fmt.Errorf("error reading character mapping file: %w", err)
 	}
 
-	return mapping, nil
+	return mapping, issues, nil
 }
 
 // DefaultCharMapping returns a copy of the embedded default Patris81 character mapping.
@@ -74,6 +107,30 @@ func DefaultCharMapping() CharMapping {
 		copied[key] = value
 	}
 	return copied
+}
+
+func CharMappingEntries(mapping CharMapping) []CharMappingEntry {
+	entries := make([]CharMappingEntry, 0, len(mapping))
+	for b, char := range mapping {
+		entries = append(entries, CharMappingEntry{
+			Hex:        fmt.Sprintf("%02X", b),
+			Decimal:    int(b),
+			Character:  char,
+			Codepoints: codepoints(char),
+		})
+	}
+	sort.Slice(entries, func(i, j int) bool {
+		return entries[i].Decimal < entries[j].Decimal
+	})
+	return entries
+}
+
+func codepoints(value string) []string {
+	points := []string{}
+	for _, r := range value {
+		points = append(points, fmt.Sprintf("U+%04X", r))
+	}
+	return points
 }
 
 // SetDefaultMapping sets the default character mapping
