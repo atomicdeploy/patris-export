@@ -105,6 +105,7 @@
                     <button class="settings-tab active" type="button" data-settings-tab="ui">Interface</button>
                     <button class="settings-tab" type="button" data-settings-tab="server">Server</button>
                     <button class="settings-tab" type="button" data-settings-tab="database">Database</button>
+                    <button class="settings-tab" type="button" data-settings-tab="notifications">Notifications</button>
                     <button class="settings-tab" type="button" data-settings-tab="runtime">Runtime</button>
                 </div>
                 <div class="settings-pane active" data-settings-pane="ui">
@@ -168,6 +169,21 @@
                     </div>
                     <label class="checkbox-label"><input type="checkbox" id="directAccess"><span>Read database directly without temp copy</span></label>
                     <label class="checkbox-label"><input type="checkbox" id="rtlConversion"><span>Enable opt-in RTL conversion</span></label>
+                </div>
+                <div class="settings-pane" data-settings-pane="notifications">
+                    <div class="settings-grid">
+                        <label class="field-label">Max detailed rows
+                            <input id="notifyMaxRows" class="text-input" type="number" min="1" max="20">
+                        </label>
+                    </div>
+                    <label class="checkbox-label"><input type="checkbox" id="notifyEnabled"><span>Enable event notifications</span></label>
+                    <label class="checkbox-label"><input type="checkbox" id="notifyNative"><span>Show native OS toast messages</span></label>
+                    <label class="checkbox-label"><input type="checkbox" id="notifyInApp"><span>Relay notifications to connected web clients</span></label>
+                    <label class="checkbox-label"><input type="checkbox" id="notifyClientConnected"><span>Client connected</span></label>
+                    <label class="checkbox-label"><input type="checkbox" id="notifyClientDisconnected"><span>Client disconnected</span></label>
+                    <label class="checkbox-label"><input type="checkbox" id="notifyFileUpdated"><span>Source file updated with old/new hash</span></label>
+                    <label class="checkbox-label"><input type="checkbox" id="notifyRowUpdated"><span>Rows changed</span></label>
+                    <label class="checkbox-label"><input type="checkbox" id="notifyIncludeRowValues"><span>Include old/new row values in notifications</span></label>
                 </div>
                 <div class="settings-pane" data-settings-pane="runtime">
                     <div class="settings-grid">

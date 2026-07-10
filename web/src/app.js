@@ -647,6 +647,15 @@ function applyConfigToSettingsForm() {
     setValue('databaseCharmap', cfg.database?.charmap || '');
     setChecked('directAccess', cfg.database?.direct_access);
     setChecked('rtlConversion', cfg.database?.rtl_conversion);
+    setChecked('notifyEnabled', cfg.notifications?.enabled);
+    setChecked('notifyNative', cfg.notifications?.native !== false);
+    setChecked('notifyInApp', cfg.notifications?.in_app !== false);
+    setChecked('notifyClientConnected', cfg.notifications?.client_connected);
+    setChecked('notifyClientDisconnected', cfg.notifications?.client_disconnected);
+    setChecked('notifyFileUpdated', cfg.notifications?.file_updated);
+    setChecked('notifyRowUpdated', cfg.notifications?.row_updated);
+    setChecked('notifyIncludeRowValues', cfg.notifications?.include_row_values);
+    setValue('notifyMaxRows', cfg.notifications?.max_rows || 3);
     setValue('runtimeTempDir', cfg.runtime?.temp_dir || 'system');
     const pathEl = document.getElementById('settingsConfigPath');
     if (pathEl) {
@@ -673,6 +682,18 @@ function updateConfigFromSettingsForm() {
     state.config.runtime = {
         ...(state.config.runtime || {}),
         temp_dir: document.getElementById('runtimeTempDir')?.value.trim() || 'system'
+    };
+    state.config.notifications = {
+        ...(state.config.notifications || {}),
+        enabled: !!document.getElementById('notifyEnabled')?.checked,
+        native: !!document.getElementById('notifyNative')?.checked,
+        in_app: !!document.getElementById('notifyInApp')?.checked,
+        client_connected: !!document.getElementById('notifyClientConnected')?.checked,
+        client_disconnected: !!document.getElementById('notifyClientDisconnected')?.checked,
+        file_updated: !!document.getElementById('notifyFileUpdated')?.checked,
+        row_updated: !!document.getElementById('notifyRowUpdated')?.checked,
+        include_row_values: !!document.getElementById('notifyIncludeRowValues')?.checked,
+        max_rows: parseInt(document.getElementById('notifyMaxRows')?.value || '3', 10) || 3
     };
     syncSettingsToConfig();
 }
@@ -897,14 +918,19 @@ function closePanels() {
 function initSettingsTabs() {
     document.querySelectorAll('[data-settings-tab]').forEach(tab => {
         tab.addEventListener('click', () => {
-            const target = tab.dataset.settingsTab;
-            document.querySelectorAll('[data-settings-tab]').forEach(item => {
-                item.classList.toggle('active', item === tab);
-            });
-            document.querySelectorAll('[data-settings-pane]').forEach(pane => {
-                pane.classList.toggle('active', pane.dataset.settingsPane === target);
-            });
+            setActiveSettingsTab(tab.dataset.settingsTab);
         });
+    });
+}
+
+function setActiveSettingsTab(target) {
+    const tab = document.querySelector(`[data-settings-tab="${target}"]`) || document.querySelector('[data-settings-tab="ui"]');
+    const paneName = tab?.dataset.settingsTab || 'ui';
+    document.querySelectorAll('[data-settings-tab]').forEach(item => {
+        item.classList.toggle('active', item === tab);
+    });
+    document.querySelectorAll('[data-settings-pane]').forEach(pane => {
+        pane.classList.toggle('active', pane.dataset.settingsPane === paneName);
     });
 }
 
@@ -2411,7 +2437,26 @@ function init() {
         publishFrontendBroadcast('theme:update', { theme: e.target.value });
     });
 
-    ['serverHost', 'serverPort', 'serverWatch', 'serverDebounce', 'databasePath', 'databaseCharmap', 'directAccess', 'rtlConversion', 'runtimeTempDir']
+    [
+        'serverHost',
+        'serverPort',
+        'serverWatch',
+        'serverDebounce',
+        'databasePath',
+        'databaseCharmap',
+        'directAccess',
+        'rtlConversion',
+        'notifyEnabled',
+        'notifyNative',
+        'notifyInApp',
+        'notifyClientConnected',
+        'notifyClientDisconnected',
+        'notifyFileUpdated',
+        'notifyRowUpdated',
+        'notifyIncludeRowValues',
+        'notifyMaxRows',
+        'runtimeTempDir'
+    ]
         .forEach(id => bindConfigField(id));
 
     document.getElementById('testNotificationSound').addEventListener('click', () => {
@@ -2454,7 +2499,9 @@ function init() {
     // Fetch initial data via HTTP
     fetchInitialData();
 
-    if (new URLSearchParams(window.location.search).get('settings') === '1') {
+    const settingsTarget = new URLSearchParams(window.location.search).get('settings');
+    if (settingsTarget) {
+        setActiveSettingsTab(settingsTarget === '1' ? 'ui' : settingsTarget);
         applyConfigToSettingsForm();
         openPanel('settingsPanel');
     }

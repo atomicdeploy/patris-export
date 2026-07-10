@@ -71,6 +71,24 @@ func TestManagerSavesNativeFormat(t *testing.T) {
 	}
 }
 
+func TestApplyEnvNotificationOptions(t *testing.T) {
+	t.Setenv("PATRIS_NOTIFICATIONS", "true")
+	t.Setenv("PATRIS_NOTIFY_CLIENT_CONNECTED", "true")
+	t.Setenv("PATRIS_NOTIFY_FILE_UPDATED", "true")
+	t.Setenv("PATRIS_NOTIFY_ROW_UPDATED", "true")
+	t.Setenv("PATRIS_NOTIFY_INCLUDE_ROW_VALUES", "true")
+	t.Setenv("PATRIS_NOTIFY_MAX_ROWS", "7")
+
+	cfg := Default()
+	ApplyEnv(&cfg)
+	if !cfg.Notifications.Enabled || !cfg.Notifications.ClientConnected || !cfg.Notifications.FileUpdated || !cfg.Notifications.RowUpdated {
+		t.Fatalf("notification booleans were not applied: %+v", cfg.Notifications)
+	}
+	if !cfg.Notifications.IncludeRowValues || cfg.Notifications.MaxRows != 7 {
+		t.Fatalf("notification details were not applied: %+v", cfg.Notifications)
+	}
+}
+
 func containsAll(text string, needles ...string) bool {
 	for _, needle := range needles {
 		if !contains(text, needle) {
