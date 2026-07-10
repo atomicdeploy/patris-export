@@ -434,15 +434,38 @@ watched file.
 Web interface with API documentation.
 
 #### `GET /api/records`
-Returns all database records in JSON format.
+Returns all database records in JSON format by default. CSV is available through
+either content negotiation, a query parameter, or a file-style route:
 
-**Response:**
+```bash
+curl http://localhost:8080/api/records
+curl http://localhost:8080/api/records?format=csv -o kala.csv
+curl http://localhost:8080/api/records.csv -o kala.csv
+curl -H "Accept: text/csv" http://localhost:8080/api/records -o kala.csv
+```
+
+Add `download=1` to ask the API for an attachment filename, for example
+`/api/records.csv?download=1`.
+
+**JSON response:**
 ```json
 {
-  "success": true,
-  "count": 100,
-  "records": [...]
+  "100": {
+    "Name": "Group",
+    "ALLANBAR": 0
+  },
+  "100200300": {
+    "Name": "Item",
+    "ALLANBAR": 12
+  }
 }
+```
+
+**CSV response:**
+```csv
+Code,ALLANBAR,Name
+100,0,Group
+100200300,12,Item
 ```
 
 #### `GET /api/info`

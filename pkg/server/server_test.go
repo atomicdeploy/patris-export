@@ -2,6 +2,7 @@ package server
 
 import (
 	"bytes"
+	"encoding/csv"
 	"encoding/json"
 	"mime/multipart"
 	"net/http"
@@ -83,6 +84,70 @@ func TestServerJSON(t *testing.T) {
 		}
 		if _, ok := response["102"]; !ok {
 			t.Error("Expected record with Code=102")
+		}
+	})
+
+	t.Run("GET /api/records.csv", func(t *testing.T) {
+		req := httptest.NewRequest("GET", "/api/records.csv", nil)
+		w := httptest.NewRecorder()
+		srv.router.ServeHTTP(w, req)
+
+		if w.Code != http.StatusOK {
+			t.Fatalf("Expected status 200, got %d: %s", w.Code, w.Body.String())
+		}
+		if ct := w.Header().Get("Content-Type"); !strings.HasPrefix(ct, "text/csv") {
+			t.Fatalf("Expected text/csv Content-Type, got %s", ct)
+		}
+		rows, err := csv.NewReader(strings.NewReader(w.Body.String())).ReadAll()
+		if err != nil {
+			t.Fatalf("Failed to parse CSV: %v", err)
+		}
+		if len(rows) != 3 {
+			t.Fatalf("Expected header plus 2 rows, got %d rows: %#v", len(rows), rows)
+		}
+		if rows[0][0] != "Code" {
+			t.Fatalf("Expected Code as first CSV header, got %#v", rows[0])
+		}
+		codes := map[string]bool{rows[1][0]: true, rows[2][0]: true}
+		if !codes["101"] || !codes["102"] {
+			t.Fatalf("Expected CSV rows for codes 101 and 102, got %#v", codes)
+		}
+	})
+
+	t.Run("GET /api/records?format=csv download", func(t *testing.T) {
+		req := httptest.NewRequest("GET", "/api/records?format=csv&download=1", nil)
+		w := httptest.NewRecorder()
+		srv.router.ServeHTTP(w, req)
+
+		if w.Code != http.StatusOK {
+			t.Fatalf("Expected status 200, got %d: %s", w.Code, w.Body.String())
+		}
+		if cd := w.Header().Get("Content-Disposition"); !strings.Contains(cd, "test.csv") {
+			t.Fatalf("Expected CSV attachment filename, got %q", cd)
+		}
+	})
+
+	t.Run("GET /api/records with CSV accept", func(t *testing.T) {
+		req := httptest.NewRequest("GET", "/api/records", nil)
+		req.Header.Set("Accept", "text/csv")
+		w := httptest.NewRecorder()
+		srv.router.ServeHTTP(w, req)
+
+		if w.Code != http.StatusOK {
+			t.Fatalf("Expected status 200, got %d: %s", w.Code, w.Body.String())
+		}
+		if ct := w.Header().Get("Content-Type"); !strings.HasPrefix(ct, "text/csv") {
+			t.Fatalf("Expected text/csv Content-Type, got %s", ct)
+		}
+	})
+
+	t.Run("GET /api/records invalid format", func(t *testing.T) {
+		req := httptest.NewRequest("GET", "/api/records?format=xlsx", nil)
+		w := httptest.NewRecorder()
+		srv.router.ServeHTTP(w, req)
+
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("Expected status 400, got %d", w.Code)
 		}
 	})
 
