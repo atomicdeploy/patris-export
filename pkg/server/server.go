@@ -3,6 +3,7 @@ package server
 import (
 	"bytes"
 	"crypto/subtle"
+	"encoding/csv"
 	"encoding/json"
 	"fmt"
 	"hash/crc32"
@@ -14,6 +15,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -205,6 +207,7 @@ func (s *Server) setupRoutes() {
 	s.router.HandleFunc("/viewer", s.handleViewer).Methods("GET")
 	s.router.HandleFunc("/debug/charmap", s.handleCharmapViewer).Methods("GET")
 	s.router.HandleFunc("/api/records", s.handleGetRecords).Methods("GET")
+	s.router.HandleFunc("/api/records.{format:json|csv}", s.handleGetRecords).Methods("GET")
 	s.router.HandleFunc("/api/info", s.handleGetInfo).Methods("GET")
 	s.router.HandleFunc("/api/app", s.handleGetApp).Methods("GET")
 	s.router.HandleFunc("/api/charmap", s.handleGetCharmap).Methods("GET")
@@ -438,7 +441,7 @@ func (s *Server) handleCharmapViewer(w http.ResponseWriter, r *http.Request) {
 	w.Write(web.CharmapHTML)
 }
 
-// handleGetRecords returns all database records as JSON
+// handleGetRecords returns all database records as JSON or CSV.
 func (s *Server) handleGetRecords(w http.ResponseWriter, r *http.Request) {
 	transformed, err := s.Records()
 	if err != nil {
@@ -446,10 +449,119 @@ func (s *Server) handleGetRecords(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	format := requestedRecordsFormat(r)
+	if format == "" {
+		http.Error(w, "unsupported records format; use json or csv", http.StatusBadRequest)
+		return
+	}
+	if format == "csv" {
+		s.writeRecordsCSV(w, r, transformed)
+		return
+	}
+
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	if err := json.NewEncoder(w).Encode(transformed); err != nil {
 		http.Error(w, fmt.Sprintf("Failed to encode JSON: %v", err), http.StatusInternalServerError)
 	}
+}
+
+func requestedRecordsFormat(r *http.Request) string {
+	if routeFormat, ok := mux.Vars(r)["format"]; ok {
+		return strings.ToLower(strings.TrimSpace(routeFormat))
+	}
+	queryFormat := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("format")))
+	if queryFormat != "" {
+		switch queryFormat {
+		case "json", "csv":
+			return queryFormat
+		default:
+			return ""
+		}
+	}
+	accept := strings.ToLower(r.Header.Get("Accept"))
+	if strings.Contains(accept, "text/csv") {
+		return "csv"
+	}
+	return "json"
+}
+
+func (s *Server) writeRecordsCSV(w http.ResponseWriter, r *http.Request, records map[string]interface{}) {
+	w.Header().Set("Content-Type", "text/csv; charset=utf-8")
+	if wantsDownload(r) {
+		name := strings.TrimSuffix(sourceBaseName(s.currentDBPath()), filepath.Ext(sourceBaseName(s.currentDBPath())))
+		if strings.TrimSpace(name) == "" {
+			name = "patris-export"
+		}
+		w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", name+".csv"))
+	}
+
+	if err := writeRecordsCSV(w, records); err != nil {
+		http.Error(w, fmt.Sprintf("Failed to encode CSV: %v", err), http.StatusInternalServerError)
+	}
+}
+
+func wantsDownload(r *http.Request) bool {
+	value := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("download")))
+	return value == "1" || value == "true" || value == "yes"
+}
+
+func writeRecordsCSV(writer io.Writer, records map[string]interface{}) error {
+	keys := make([]string, 0, len(records))
+	fieldSet := map[string]bool{}
+	for code, value := range records {
+		keys = append(keys, code)
+		if record, ok := value.(map[string]interface{}); ok {
+			for field := range record {
+				if field != "Code" {
+					fieldSet[field] = true
+				}
+			}
+		}
+	}
+	sort.Strings(keys)
+
+	fields := make([]string, 0, len(fieldSet))
+	for field := range fieldSet {
+		fields = append(fields, field)
+	}
+	sort.Strings(fields)
+	header := append([]string{"Code"}, fields...)
+
+	cw := csv.NewWriter(writer)
+	if err := cw.Write(header); err != nil {
+		return err
+	}
+	for _, code := range keys {
+		row := make([]string, len(header))
+		row[0] = code
+		record, _ := records[code].(map[string]interface{})
+		for i, field := range fields {
+			row[i+1] = csvCell(record[field])
+		}
+		if err := cw.Write(row); err != nil {
+			return err
+		}
+	}
+	cw.Flush()
+	return cw.Error()
+}
+
+func csvCell(value interface{}) string {
+	if value == nil {
+		return ""
+	}
+	switch v := value.(type) {
+	case string:
+		return v
+	case fmt.Stringer:
+		return v.String()
+	case []interface{}, []string, []int, []float64, map[string]interface{}:
+		data, err := json.Marshal(v)
+		if err == nil {
+			return string(data)
+		}
+	}
+	return fmt.Sprintf("%v", value)
 }
 
 // handleGetInfo returns database schema information

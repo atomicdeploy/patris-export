@@ -524,6 +524,12 @@ func runConvert(cmd *cobra.Command, args []string) {
 	if !cmd.Flags().Changed("format") {
 		outputFormat = cfg.Convert.Format
 	}
+	outputFormat = strings.ToLower(strings.TrimSpace(outputFormat))
+	if outputFormat != "json" && outputFormat != "csv" {
+		errorColor.Printf("❌ Unsupported output format: %s\n", outputFormat)
+		errorColor.Println("💡 Use --format json or --format csv")
+		os.Exit(1)
+	}
 	if !cmd.Flags().Changed("watch") {
 		watchMode = cfg.Convert.Watch
 	}
@@ -549,9 +555,13 @@ func runConvert(cmd *cobra.Command, args []string) {
 			os.Exit(1)
 		}
 		converter.SetDefaultMapping(charMap)
-		successColor.Println("✅ Custom character mapping loaded from file")
+		if !useStdout {
+			successColor.Println("✅ Custom character mapping loaded from file")
+		}
 	} else {
-		infoColor.Println("ℹ️  Using embedded character mapping (Patris81 default)")
+		if !useStdout {
+			infoColor.Println("ℹ️  Using embedded character mapping (Patris81 default)")
+		}
 	}
 
 	// Create output directory if it doesn't exist and we're not using stdout

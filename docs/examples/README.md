@@ -107,18 +107,23 @@ curl http://localhost:8080/api/records
 Response:
 ```json
 {
-  "success": true,
-  "count": 354,
-  "records": [
-    {
-      "Code": 101,
-      "Name": "آی سی",
-      "Serial": "101",
-      ...
-    }
-  ]
+  "101": {
+    "Name": "آی سی",
+    "Serial": "101"
+  }
 }
 ```
+
+#### Export Records as CSV
+
+```bash
+curl http://localhost:8080/api/records.csv -o records.csv
+curl 'http://localhost:8080/api/records?format=csv&download=1' -o records.csv
+curl -H 'Accept: text/csv' http://localhost:8080/api/records -o records.csv
+```
+
+CSV responses include `Code` as the first column, followed by the detected
+record fields.
 
 #### Get Database Info
 
