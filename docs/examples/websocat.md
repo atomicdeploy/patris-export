@@ -109,6 +109,19 @@ broadcast toast message:
 
 Set `"native":true` to also try a native OS toast from the server process.
 
+## Trigger An Immediate Refresh
+
+Use this when the server is polling a remote URL and you want to reload the
+source immediately:
+
+```powershell
+'{"type":"refresh"}' |
+  websocat -B 8388608 --max-messages=1 --max-messages-rev=2 ws://127.0.0.1:8080/ws
+```
+
+The server replies with the current update payload after it reloads the source.
+For URL sources, this bypasses the next polling interval.
+
 ## Tips
 
 - Use `-B 8388608` or larger for big databases.

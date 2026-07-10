@@ -963,6 +963,33 @@ async function sendNativeToast(title, message) {
     }
 }
 
+async function requestSourceRefresh() {
+    const button = document.getElementById('refreshNowBtn');
+    if (button) {
+        button.disabled = true;
+        button.textContent = 'Refreshing...';
+    }
+    try {
+        if (state.ws && state.ws.readyState === WebSocket.OPEN) {
+            state.ws.send(JSON.stringify({ type: 'refresh' }));
+            showInAppToast('Refresh requested', 'The backend is reloading the data source.', { broadcastToTabs: true });
+        } else {
+            await fetchInitialData();
+            showInAppToast('Refreshed', 'Data was reloaded over HTTP.', { broadcastToTabs: true });
+        }
+    } catch (error) {
+        console.error('Failed to refresh data source:', error);
+        showInAppToast('Refresh failed', error.message, { error: true });
+    } finally {
+        if (button) {
+            setTimeout(() => {
+                button.disabled = false;
+                button.textContent = '🔄 Refresh Now';
+            }, 500);
+        }
+    }
+}
+
 // Initialize WebSocket connection
 function initWebSocket() {
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -2240,6 +2267,8 @@ function init() {
     document.getElementById('closeColumns').addEventListener('click', () => {
         closePanels();
     });
+
+    document.getElementById('refreshNowBtn').addEventListener('click', requestSourceRefresh);
     
     document.getElementById('showAllColumns').addEventListener('click', () => {
         state.hiddenColumns.clear();

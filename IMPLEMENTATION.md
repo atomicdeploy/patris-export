@@ -11,6 +11,8 @@ Successfully created a complete, production-ready Paradox/BDE database converter
 - **Persian/Farsi Encoding**: Complete implementation of Patris81 proprietary encoding conversion
 - **Multiple Export Formats**: JSON and CSV export with proper encoding
 - **File Watching**: Real-time monitoring with hash-based change detection
+- **Remote URL Sources**: `convert` and `serve` can read HTTP/HTTPS `.db` and `.json` sources through safe temporary downloads
+- **URL Polling Mode**: Remote sources are polled with configurable intervals because filesystem events are not available for URLs
 - **Company.inf Parser**: Support for company information files
 
 ### ✅ User Interfaces
@@ -28,6 +30,7 @@ Successfully created a complete, production-ready Paradox/BDE database converter
 - **WebSocket Server**: Real-time updates when database changes
   - Automatic broadcasting to connected clients
   - Efficient file watching with debouncing
+  - Client-triggered `{"type":"refresh"}` messages for immediate reloads
 
 ### ✅ Testing & Quality
 - **Unit Tests**: Comprehensive tests for converter and paradox packages

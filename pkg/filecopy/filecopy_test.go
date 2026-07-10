@@ -1,6 +1,8 @@
 package filecopy
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -257,5 +259,49 @@ func TestCopyToTempBasename(t *testing.T) {
 
 	if fileInfo.TempPath != fileInfo2.TempPath {
 		t.Errorf("Expected same temp path for same source file, got %s and %s", fileInfo.TempPath, fileInfo2.TempPath)
+	}
+}
+
+func TestIsURL(t *testing.T) {
+	if !IsURL("https://example.com/kala.db") {
+		t.Fatal("expected HTTPS URL to be recognized")
+	}
+	if !IsURL("http://127.0.0.1:8080/kala.db") {
+		t.Fatal("expected HTTP URL to be recognized")
+	}
+	if IsURL("file:///tmp/kala.db") {
+		t.Fatal("file URL should not be treated as a remote source")
+	}
+	if IsURL("C:/Patris/data4/kala.db") {
+		t.Fatal("local path should not be treated as a URL")
+	}
+}
+
+func TestDownloadToTemp(t *testing.T) {
+	content := []byte("remote database content")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Last-Modified", time.Now().UTC().Format(http.TimeFormat))
+		w.Write(content)
+	}))
+	defer server.Close()
+
+	info, err := DownloadToTemp(server.URL + "/kala.db")
+	if err != nil {
+		t.Fatalf("DownloadToTemp returned error: %v", err)
+	}
+	defer CleanupTemp(info.TempPath)
+
+	if info.SourcePath != server.URL+"/kala.db" {
+		t.Fatalf("unexpected source path: %s", info.SourcePath)
+	}
+	if info.Size != int64(len(content)) {
+		t.Fatalf("expected size %d, got %d", len(content), info.Size)
+	}
+	got, err := os.ReadFile(info.TempPath)
+	if err != nil {
+		t.Fatalf("failed to read temp download: %v", err)
+	}
+	if string(got) != string(content) {
+		t.Fatalf("downloaded content mismatch: %q", got)
 	}
 }

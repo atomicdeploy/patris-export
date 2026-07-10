@@ -1,6 +1,8 @@
 package watcher
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -281,5 +283,42 @@ func TestFileWatcher_Unwatch(t *testing.T) {
 	// Call count should not have increased after unwatch
 	if callsAfterUnwatch != callsBeforeUnwatch {
 		t.Errorf("Expected no callbacks after unwatch, but got %d total calls (was %d before unwatch)", callsAfterUnwatch, callsBeforeUnwatch)
+	}
+}
+
+func TestFileWatcher_PollURL(t *testing.T) {
+	var mu sync.Mutex
+	content := "initial"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		w.Write([]byte(content))
+	}))
+	defer server.Close()
+
+	fw, err := NewFileWatcher()
+	if err != nil {
+		t.Fatalf("Failed to create file watcher: %v", err)
+	}
+	defer fw.Close()
+
+	changed := make(chan string, 1)
+	if err := fw.Poll(server.URL+"/kala.db", func(path string) {
+		changed <- path
+	}, 50*time.Millisecond); err != nil {
+		t.Fatalf("Failed to poll URL: %v", err)
+	}
+
+	mu.Lock()
+	content = "changed content"
+	mu.Unlock()
+
+	select {
+	case got := <-changed:
+		if got != server.URL+"/kala.db" {
+			t.Fatalf("unexpected callback path: %s", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("expected polling callback after URL content changed")
 	}
 }

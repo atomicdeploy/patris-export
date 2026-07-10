@@ -3,17 +3,22 @@ package watcher
 import (
 	"crypto/sha256"
 	"fmt"
+	"hash/crc32"
 	"io"
 	"log"
+	"net/http"
 	"os"
 	"path/filepath"
 	"sync"
 	"time"
 
+	"github.com/atomicdeploy/patris-export/pkg/filecopy"
 	"github.com/fsnotify/fsnotify"
 )
 
-// FileWatcher watches database files for changes
+var pollHTTPClient = &http.Client{Timeout: 30 * time.Second}
+
+// FileWatcher watches database files for changes.
 type FileWatcher struct {
 	watcher     *fsnotify.Watcher
 	fileHashes  map[string]string
@@ -22,9 +27,11 @@ type FileWatcher struct {
 	debounce    map[string]time.Duration
 	watchedDirs map[string]int
 	pathDirs    map[string]string
+	stopChans   map[string]chan struct{}
+	pollers     map[string]bool
 }
 
-// NewFileWatcher creates a new file watcher
+// NewFileWatcher creates a new file watcher.
 func NewFileWatcher() (*FileWatcher, error) {
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
@@ -38,19 +45,24 @@ func NewFileWatcher() (*FileWatcher, error) {
 		debounce:    make(map[string]time.Duration),
 		watchedDirs: make(map[string]int),
 		pathDirs:    make(map[string]string),
+		stopChans:   make(map[string]chan struct{}),
+		pollers:     make(map[string]bool),
 	}, nil
 }
 
-// Watch starts watching a file or directory with a configurable debounce duration
+// Watch starts watching a local file with a configurable debounce duration.
 func (fw *FileWatcher) Watch(path string, callback func(string), debounceDuration time.Duration) error {
-	absPath, err := filepath.Abs(path)
-	if err != nil {
-		return fmt.Errorf("failed to resolve path: %w", err)
+	if filecopy.IsURL(path) {
+		return fmt.Errorf("watch requires a local file path; use Poll for URL sources")
 	}
+	absPath, err := fw.normalizePath(path)
+	if err != nil {
+		return err
+	}
+
 	fw.mu.Lock()
 	defer fw.mu.Unlock()
 
-	// Get initial hash
 	hash, err := fw.getFileHash(absPath)
 	if err != nil {
 		return fmt.Errorf("failed to get initial hash: %w", err)
@@ -72,14 +84,42 @@ func (fw *FileWatcher) Watch(path string, callback func(string), debounceDuratio
 	return nil
 }
 
-// Start begins watching for file changes
+// Poll checks a local file or URL on an interval and invokes callback after
+// content changes. It is primarily used for remote database sources.
+func (fw *FileWatcher) Poll(path string, callback func(string), interval time.Duration) error {
+	if interval <= 0 {
+		interval = 5 * time.Minute
+	}
+	key, err := fw.normalizePath(path)
+	if err != nil {
+		return err
+	}
+
+	hash, err := fw.getHashForPath(key)
+	if err != nil {
+		return fmt.Errorf("failed to get initial hash: %w", err)
+	}
+
+	stop := make(chan struct{})
+
+	fw.mu.Lock()
+	fw.fileHashes[key] = hash
+	fw.callbacks[key] = callback
+	fw.debounce[key] = 0
+	fw.stopChans[key] = stop
+	fw.pollers[key] = true
+	fw.mu.Unlock()
+
+	go fw.pollLoop(key, interval, stop)
+	return nil
+}
+
+// Start begins watching for local file changes.
 func (fw *FileWatcher) Start() {
 	go fw.watchLoop()
 }
 
-// watchLoop is the main event loop for file watching
 func (fw *FileWatcher) watchLoop() {
-	// Debounce timer to avoid multiple rapid events
 	debounceTimers := make(map[string]*time.Timer)
 
 	for {
@@ -89,14 +129,12 @@ func (fw *FileWatcher) watchLoop() {
 				return
 			}
 
-			// Only process write and create events
 			if event.Op&fsnotify.Write == fsnotify.Write || event.Op&fsnotify.Create == fsnotify.Create {
 				path, err := filepath.Abs(event.Name)
 				if err != nil {
 					continue
 				}
 
-				// Get debounce duration for this path
 				fw.mu.RLock()
 				_, watched := fw.callbacks[path]
 				debounceDuration := fw.debounce[path]
@@ -105,11 +143,9 @@ func (fw *FileWatcher) watchLoop() {
 					continue
 				}
 
-				// If debounce is 0, process immediately
 				if debounceDuration == 0 {
 					go fw.handleFileChange(path)
 				} else {
-					// Debounce: wait specified duration before processing
 					if timer, exists := debounceTimers[path]; exists {
 						timer.Stop()
 					}
@@ -130,20 +166,31 @@ func (fw *FileWatcher) watchLoop() {
 	}
 }
 
-// handleFileChange checks if file has actually changed and calls callback
+func (fw *FileWatcher) pollLoop(path string, interval time.Duration, stop <-chan struct{}) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			fw.handleFileChange(path)
+		case <-stop:
+			return
+		}
+	}
+}
+
 func (fw *FileWatcher) handleFileChange(path string) {
 	fw.mu.RLock()
 	oldHash := fw.fileHashes[path]
 	fw.mu.RUnlock()
 
-	// Calculate new hash
-	newHash, err := fw.getFileHash(path)
+	newHash, err := fw.getHashForPath(path)
 	if err != nil {
 		log.Printf("⚠️  Failed to get hash for %s: %v", path, err)
 		return
 	}
 
-	// Only trigger callback if hash changed
 	if newHash != oldHash {
 		fw.mu.Lock()
 		callback, hasCallback := fw.callbacks[path]
@@ -158,7 +205,6 @@ func (fw *FileWatcher) handleFileChange(path string) {
 	}
 }
 
-// getFileHash calculates SHA-256 hash of a file
 func (fw *FileWatcher) getFileHash(path string) (string, error) {
 	file, err := os.Open(path)
 	if err != nil {
@@ -174,27 +220,81 @@ func (fw *FileWatcher) getFileHash(path string) (string, error) {
 	return fmt.Sprintf("%x", hash.Sum(nil)), nil
 }
 
-// Close stops the file watcher
+func (fw *FileWatcher) getHashForPath(path string) (string, error) {
+	if filecopy.IsURL(path) {
+		return fw.getURLHash(path)
+	}
+	return fw.getFileHash(path)
+}
+
+func (fw *FileWatcher) getURLHash(sourceURL string) (string, error) {
+	req, err := http.NewRequest(http.MethodHead, sourceURL, nil)
+	if err == nil {
+		req.Header.Set("User-Agent", "patris-export")
+		if resp, err := pollHTTPClient.Do(req); err == nil {
+			resp.Body.Close()
+			if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+				fingerprint := resp.Header.Get("ETag") + "|" + resp.Header.Get("Last-Modified") + "|" + resp.Header.Get("Content-Length")
+				if fingerprint != "||" {
+					return fmt.Sprintf("%08x", crc32.ChecksumIEEE([]byte(fingerprint))), nil
+				}
+			}
+		}
+	}
+
+	fileInfo, err := filecopy.DownloadToTemp(sourceURL)
+	if err != nil {
+		return "", err
+	}
+	defer filecopy.CleanupTemp(fileInfo.TempPath)
+	return fileInfo.Hash, nil
+}
+
+func (fw *FileWatcher) normalizePath(path string) (string, error) {
+	if filecopy.IsURL(path) {
+		return path, nil
+	}
+	absPath, err := filepath.Abs(path)
+	if err != nil {
+		return "", fmt.Errorf("failed to resolve path: %w", err)
+	}
+	return absPath, nil
+}
+
+// Close stops the file watcher.
 func (fw *FileWatcher) Close() error {
+	fw.mu.Lock()
+	for path, stopChan := range fw.stopChans {
+		close(stopChan)
+		delete(fw.stopChans, path)
+	}
+	fw.mu.Unlock()
 	return fw.watcher.Close()
 }
 
-// Unwatch stops watching a specific file
+// Unwatch stops watching or polling a specific path.
 func (fw *FileWatcher) Unwatch(path string) error {
-	absPath, err := filepath.Abs(path)
+	key, err := fw.normalizePath(path)
 	if err != nil {
 		return err
 	}
 	fw.mu.Lock()
 	defer fw.mu.Unlock()
 
-	delete(fw.fileHashes, absPath)
-	delete(fw.callbacks, absPath)
-	delete(fw.debounce, absPath)
-	dir := fw.pathDirs[absPath]
-	delete(fw.pathDirs, absPath)
+	if stopChan, exists := fw.stopChans[key]; exists {
+		close(stopChan)
+		delete(fw.stopChans, key)
+	}
+	isPoller := fw.pollers[key]
+	delete(fw.pollers, key)
 
-	if dir != "" {
+	delete(fw.fileHashes, key)
+	delete(fw.callbacks, key)
+	delete(fw.debounce, key)
+	dir := fw.pathDirs[key]
+	delete(fw.pathDirs, key)
+
+	if dir != "" && !isPoller {
 		fw.watchedDirs[dir]--
 		if fw.watchedDirs[dir] <= 0 {
 			delete(fw.watchedDirs, dir)

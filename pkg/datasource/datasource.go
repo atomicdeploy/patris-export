@@ -3,6 +3,7 @@ package datasource
 import (
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -36,10 +37,13 @@ type JSONDataSource struct {
 
 // NewDataSource creates a new data source based on the file extension
 func NewDataSource(path string, charMap converter.CharMapping, useTempFile ...bool) (DataSource, error) {
-	ext := strings.ToLower(filepath.Ext(path))
+	ext := sourceExt(path)
 	copyBeforeRead := true
 	if len(useTempFile) > 0 {
 		copyBeforeRead = useTempFile[0]
+	}
+	if filecopy.IsURL(path) {
+		copyBeforeRead = true
 	}
 
 	switch ext {
@@ -52,11 +56,29 @@ func NewDataSource(path string, charMap converter.CharMapping, useTempFile ...bo
 	}
 }
 
+func sourceExt(path string) string {
+	if filecopy.IsURL(path) {
+		if u, err := url.Parse(path); err == nil {
+			return strings.ToLower(filepath.Ext(u.Path))
+		}
+	}
+	return strings.ToLower(filepath.Ext(path))
+}
+
 // GetRecords implements DataSource for ParadoxDataSource
 func (p *ParadoxDataSource) GetRecords() ([]map[string]interface{}, error) {
 	pathToOpen := p.path
 	cleanup := func() {}
-	if p.useTempFile {
+	if filecopy.IsURL(p.path) {
+		tempFileInfo, err := filecopy.DownloadToTemp(p.path)
+		if err != nil {
+			return nil, fmt.Errorf("failed to download database to temp: %w", err)
+		}
+		pathToOpen = tempFileInfo.TempPath
+		cleanup = func() {
+			filecopy.CleanupTemp(tempFileInfo.TempPath)
+		}
+	} else if p.useTempFile {
 		tempFileInfo, err := filecopy.CopyToTemp(p.path)
 		if err != nil {
 			return nil, fmt.Errorf("failed to copy database to temp: %w", err)
@@ -106,7 +128,21 @@ func (p *ParadoxDataSource) Close() error {
 
 // GetRecords implements DataSource for JSONDataSource
 func (j *JSONDataSource) GetRecords() ([]map[string]interface{}, error) {
-	data, err := os.ReadFile(j.path)
+	pathToRead := j.path
+	cleanup := func() {}
+	if filecopy.IsURL(j.path) {
+		tempFileInfo, err := filecopy.DownloadToTemp(j.path)
+		if err != nil {
+			return nil, fmt.Errorf("failed to download JSON to temp: %w", err)
+		}
+		pathToRead = tempFileInfo.TempPath
+		cleanup = func() {
+			filecopy.CleanupTemp(tempFileInfo.TempPath)
+		}
+	}
+	defer cleanup()
+
+	data, err := os.ReadFile(pathToRead)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read JSON file: %w", err)
 	}

@@ -4,8 +4,11 @@ import (
 	"fmt"
 	"hash/crc32"
 	"io"
+	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -13,6 +16,8 @@ const (
 	// ChunkSize defines the size of chunks for file copying (10MB)
 	ChunkSize = 10 * 1024 * 1024
 )
+
+var httpClient = &http.Client{Timeout: 2 * time.Minute}
 
 // FileInfo contains information about a file copy operation
 type FileInfo struct {
@@ -147,4 +152,93 @@ func CleanupTemp(tempPath string) error {
 	}
 
 	return nil
+}
+
+// IsURL reports whether path is an HTTP or HTTPS URL.
+func IsURL(path string) bool {
+	u, err := url.Parse(strings.TrimSpace(path))
+	if err != nil {
+		return false
+	}
+	return (u.Scheme == "http" || u.Scheme == "https") && u.Host != ""
+}
+
+// DownloadToTemp downloads an HTTP/HTTPS file into the patris-export temp
+// directory. The temp filename is stable for the URL so polling and repeated
+// reads reuse the same location while still refreshing the content.
+func DownloadToTemp(sourceURL string) (*FileInfo, error) {
+	u, err := url.Parse(strings.TrimSpace(sourceURL))
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse URL: %w", err)
+	}
+	if !IsURL(sourceURL) {
+		return nil, fmt.Errorf("unsupported URL scheme: %s", u.Scheme)
+	}
+
+	baseName := filepath.Base(u.Path)
+	if baseName == "." || baseName == "/" || baseName == "" {
+		baseName = "download.db"
+	}
+
+	tempDir := filepath.Join(os.TempDir(), "patris-export")
+	if err := os.MkdirAll(tempDir, 0755); err != nil {
+		return nil, fmt.Errorf("failed to create temp directory: %w", err)
+	}
+
+	urlHash := crc32.ChecksumIEEE([]byte(sourceURL))
+	tempPath := filepath.Join(tempDir, fmt.Sprintf("%s.%08x", baseName, urlHash))
+
+	req, err := http.NewRequest(http.MethodGet, sourceURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+	req.Header.Set("User-Agent", "patris-export")
+
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to download URL: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("failed to download URL: HTTP %d %s", resp.StatusCode, resp.Status)
+	}
+
+	dest, err := os.OpenFile(tempPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create temp file: %w", err)
+	}
+
+	var closeErr error
+	defer func() {
+		if cerr := dest.Close(); cerr != nil && closeErr == nil {
+			closeErr = cerr
+		}
+	}()
+
+	hash := crc32.NewIEEE()
+	written, err := io.CopyBuffer(io.MultiWriter(dest, hash), resp.Body, make([]byte, ChunkSize))
+	if err != nil {
+		closeErr = err
+		return nil, fmt.Errorf("failed to write downloaded file: %w", err)
+	}
+	if closeErr != nil {
+		return nil, fmt.Errorf("failed to close temp file: %w", closeErr)
+	}
+
+	modTime := time.Now()
+	if lastModified := resp.Header.Get("Last-Modified"); lastModified != "" {
+		if parsed, err := http.ParseTime(lastModified); err == nil {
+			modTime = parsed
+			_ = os.Chtimes(tempPath, time.Now(), modTime)
+		}
+	}
+
+	return &FileInfo{
+		SourcePath: sourceURL,
+		TempPath:   tempPath,
+		Hash:       fmt.Sprintf("%08x", hash.Sum32()),
+		Size:       written,
+		ModTime:    modTime,
+	}, nil
 }

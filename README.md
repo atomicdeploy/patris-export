@@ -227,13 +227,19 @@ go test -v ./...
 
 ### Commands
 
-#### `convert [database-file]`
-Convert a Paradox database file to JSON or CSV.
+#### `convert [database-file-or-url]`
+Convert a local or HTTP/HTTPS Paradox database file to JSON or CSV. Remote sources are downloaded to a temporary file before reading.
 
 **Flags:**
 - `-f, --format` - Output format: json or csv (default: json)
-- `-w, --watch` - Watch file for changes and auto-convert
-- `-d, --debounce` - Debounce duration for watch mode (default: 1s, examples: 0s, 500ms, 5s)
+- `-w, --watch` - Watch a local file or poll a URL for changes and auto-convert
+- `-d, --debounce` - Debounce duration for local watch mode; polling interval for URLs (default: 1s, examples: 500ms, 5s, 5m)
+
+**URL examples:**
+```bash
+patris-export convert https://example.com/data/kala.db -o ./exports
+patris-export convert https://example.com/data/kala.db --watch --debounce 5m
+```
 
 #### `info [database-file]`
 Display information about a Paradox database file (fields, record count, etc.)
@@ -241,13 +247,18 @@ Display information about a Paradox database file (fields, record count, etc.)
 #### `company [company.inf]`
 Parse and display company information from company.inf file.
 
-#### `serve [database-file]`
+#### `serve [database-file-or-url]`
 Start the REST API and WebSocket server.
 
 **Flags:**
 - `-a, --addr` - Server address (default: :8080)
-- `-w, --watch` - Watch file for changes and broadcast updates (default: true)
-- `-d, --debounce` - Debounce duration for watch mode (default: 0s, examples: 500ms, 1s, 5s)
+- `-w, --watch` - Watch local files or poll URL sources and broadcast updates (default: true)
+- `-d, --debounce` - Debounce duration for local files; polling interval for URLs (default: 0s for local files, 5m for URLs)
+
+**URL example:**
+```bash
+patris-export serve https://example.com/data/kala.db --host 127.0.0.1 --port 8080 --debounce 5m
+```
 
 #### `update`
 Update the installed executable from the latest successful GitHub Actions build artifact.
@@ -314,6 +325,12 @@ Connect to receive real-time database updates.
   "count": 100,
   "records": [...]
 }
+```
+
+Clients can request an immediate backend reload without waiting for the next file watcher event or URL polling interval:
+
+```json
+{"type":"refresh"}
 ```
 
 ## 🗺️ TODO

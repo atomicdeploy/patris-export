@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"log"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -76,14 +77,14 @@ Supports Persian/Farsi encoding conversion and file watching.
 
 	// Convert command
 	convertCmd := &cobra.Command{
-		Use:   "convert [database-file]",
+		Use:   "convert [database-file-or-url]",
 		Short: "🔄 Convert a Paradox database file to JSON or CSV",
 		Args:  cobra.ExactArgs(1),
 		Run:   runConvert,
 	}
 	convertCmd.Flags().StringVarP(&outputFormat, "format", "f", "json", "Output format (json or csv)")
-	convertCmd.Flags().BoolVarP(&watchMode, "watch", "w", false, "Watch file for changes and auto-convert")
-	convertCmd.Flags().String("debounce", "1s", "Debounce duration for watch mode (e.g., 0s, 500ms, 1s, 5s)")
+	convertCmd.Flags().BoolVarP(&watchMode, "watch", "w", false, "Watch file or URL for changes and auto-convert")
+	convertCmd.Flags().String("debounce", "1s", "Debounce duration for local files; polling interval for URLs (e.g., 0s, 500ms, 1s, 5m)")
 
 	// Info command
 	infoCmd := &cobra.Command{
@@ -103,7 +104,7 @@ Supports Persian/Farsi encoding conversion and file watching.
 
 	// Serve command
 	serveCmd := &cobra.Command{
-		Use:   "serve [database-file]",
+		Use:   "serve [database-file-or-url]",
 		Short: "🌐 Start REST API and WebSocket server",
 		Args:  cobra.ExactArgs(1),
 		Run:   runServe,
@@ -113,8 +114,8 @@ Supports Persian/Farsi encoding conversion and file watching.
 	serveCmd.Flags().StringP("addr", "a", "", "Server address override (e.g., 127.0.0.1:8080 or :8080)")
 	serveCmd.Flags().String("host", "", "Host to bind: 127.0.0.1, 0.0.0.0, or an explicit interface")
 	serveCmd.Flags().Int("port", 0, "Port to listen on")
-	serveCmd.Flags().BoolP("watch", "w", true, "Watch file for changes and broadcast updates")
-	serveCmd.Flags().String("debounce", "0s", "Debounce duration for watch mode (e.g., 0s, 500ms, 1s, 5s)")
+	serveCmd.Flags().BoolP("watch", "w", true, "Watch file or URL for changes and broadcast updates")
+	serveCmd.Flags().String("debounce", "0s", "Debounce duration for local files; polling interval for URLs (e.g., 0s, 500ms, 1s, 5m)")
 
 	tuiCmd := &cobra.Command{
 		Use:   "tui [database-file]",
@@ -383,6 +384,22 @@ func runConvert(cmd *cobra.Command, args []string) {
 		}
 		defer fw.Close()
 
+		if filecopy.IsURL(dbFile) {
+			pollInterval := debounceDuration
+			if pollInterval <= 0 {
+				pollInterval = 5 * time.Minute
+			}
+			infoColor.Printf("🔄 Polling URL every %v\n", pollInterval)
+			if err := fw.Poll(dbFile, func(path string) {
+				infoColor.Printf("🔄 Remote source changed: %s\n", path)
+				convertFile(path, charMap, useStdout)
+			}, pollInterval); err != nil {
+				errorColor.Printf("❌ Failed to poll URL: %v\n", err)
+				os.Exit(1)
+			}
+			select {}
+		}
+
 		if err := fw.Watch(dbFile, func(path string) {
 			infoColor.Printf("🔄 File changed: %s\n", filepath.Base(path))
 			convertFile(path, charMap, useStdout)
@@ -456,7 +473,8 @@ func convertFile(dbFile string, charMap converter.CharMapping, useStdout bool) {
 	} else {
 		// Export to file
 		// Generate output filename
-		baseName := strings.TrimSuffix(filepath.Base(dbFile), filepath.Ext(dbFile))
+		sourceName := sourceBaseName(dbFile)
+		baseName := strings.TrimSuffix(sourceName, filepath.Ext(sourceName))
 		var outputFile string
 
 		if outputFormat == "csv" {
@@ -582,6 +600,11 @@ func parseDebounceDuration(durationStr string) time.Duration {
 
 // displayFileStatus shows the file access mode status message
 func displayFileStatus(filePath string) {
+	if filecopy.IsURL(filePath) {
+		infoColor.Printf("🌐 URL source detected: %s\n", filePath)
+		infoColor.Println("📋 Will download and read a temporary file copy")
+		return
+	}
 	if directAccess {
 		warningColor.Printf("⚠️  Direct file access mode for: %s (may conflict with BDE writes)\n", filepath.Base(filePath))
 	} else {
@@ -591,6 +614,10 @@ func displayFileStatus(filePath string) {
 
 // checkProcessConflicts checks for potential conflicts with running processes
 func checkProcessConflicts(dbFile string) {
+	if filecopy.IsURL(dbFile) {
+		return
+	}
+
 	// Check for running patris81.exe processes
 	patris81Processes, err := processmon.FindProcessByName("patris81.exe")
 	if err != nil {
@@ -628,6 +655,31 @@ func prepareFileForReading(dbFile string, logStatus ...bool) (fileToOpen string,
 		shouldLog = logStatus[0]
 	}
 
+	if filecopy.IsURL(dbFile) {
+		if shouldLog {
+			infoColor.Printf("🌐 Downloading database from URL: %s\n", dbFile)
+		}
+
+		tempFileInfo, err := filecopy.DownloadToTemp(dbFile)
+		if err != nil {
+			return "", nil, fmt.Errorf("failed to download file to temp: %w", err)
+		}
+
+		if shouldLog {
+			successColor.Printf("✅ Source URL checksum: %s\n", tempFileInfo.Hash)
+		}
+		if shouldLog && verbose {
+			infoColor.Printf("   Size: %d bytes\n", tempFileInfo.Size)
+			infoColor.Printf("   Temp path: %s\n", tempFileInfo.TempPath)
+		}
+
+		cleanup = func() {
+			filecopy.CleanupTemp(tempFileInfo.TempPath)
+		}
+
+		return tempFileInfo.TempPath, cleanup, nil
+	}
+
 	if !directAccess {
 		if shouldLog {
 			infoColor.Printf("📋 Copying database to temp location: %s\n", filepath.Base(dbFile))
@@ -655,6 +707,18 @@ func prepareFileForReading(dbFile string, logStatus ...bool) (fileToOpen string,
 
 	// Direct access mode - no cleanup needed
 	return dbFile, func() {}, nil
+}
+
+func sourceBaseName(path string) string {
+	if filecopy.IsURL(path) {
+		if u, err := url.Parse(path); err == nil {
+			if base := filepath.Base(u.Path); base != "." && base != "/" && base != "" {
+				return base
+			}
+			return u.Host
+		}
+	}
+	return filepath.Base(path)
 }
 
 func init() {

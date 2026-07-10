@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -96,6 +97,9 @@ func NewServerWithOptions(dbPath string, charMap converter.CharMapping, options 
 	if len(useTempFile) > 0 {
 		copyBeforeRead = useTempFile[0]
 	}
+	if filecopy.IsURL(dbPath) {
+		copyBeforeRead = true
+	}
 
 	// Create data source (supports both .db and .json files)
 	ds, err := datasource.NewDataSource(dbPath, charMap, copyBeforeRead)
@@ -176,7 +180,16 @@ func (s *Server) setupRoutes() {
 func (s *Server) openDatabase() (*paradox.Database, func(), error) {
 	pathToOpen := s.dbPath
 	cleanup := func() {}
-	if s.useTempFile && strings.EqualFold(filepath.Ext(s.dbPath), ".db") {
+	if filecopy.IsURL(s.dbPath) {
+		tempFileInfo, err := filecopy.DownloadToTemp(s.dbPath)
+		if err != nil {
+			return nil, nil, fmt.Errorf("failed to download database to temp: %w", err)
+		}
+		pathToOpen = tempFileInfo.TempPath
+		cleanup = func() {
+			filecopy.CleanupTemp(tempFileInfo.TempPath)
+		}
+	} else if s.useTempFile && strings.EqualFold(filepath.Ext(s.dbPath), ".db") {
 		tempFileInfo, err := filecopy.CopyToTemp(s.dbPath)
 		if err != nil {
 			return nil, nil, fmt.Errorf("failed to copy database to temp: %w", err)
@@ -249,7 +262,7 @@ func (s *Server) handleGetInfo(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"success":     true,
-		"file":        filepath.Base(s.dbPath),
+		"file":        sourceBaseName(s.dbPath),
 		"path":        s.dbPath,
 		"version":     s.version,
 		"num_records": db.GetNumRecords(),
@@ -345,6 +358,20 @@ func (s *Server) handleGetPatris81Processes(w http.ResponseWriter, r *http.Reque
 
 // handleGetFileProcesses returns information about processes accessing the database file.
 func (s *Server) handleGetFileProcesses(w http.ResponseWriter, r *http.Request) {
+	if filecopy.IsURL(s.dbPath) {
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success":   true,
+			"file":      sourceBaseName(s.dbPath),
+			"path":      s.dbPath,
+			"remote":    true,
+			"count":     0,
+			"in_use":    false,
+			"processes": []processmon.ProcessInfo{},
+		})
+		return
+	}
+
 	fileInfo, err := processmon.FindProcessesWithFile(s.dbPath)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("Failed to find processes with file: %v", err), http.StatusInternalServerError)
@@ -354,7 +381,7 @@ func (s *Server) handleGetFileProcesses(w http.ResponseWriter, r *http.Request) 
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"success":   true,
-		"file":      filepath.Base(s.dbPath),
+		"file":      sourceBaseName(s.dbPath),
 		"path":      fileInfo.FilePath,
 		"count":     len(fileInfo.Processes),
 		"in_use":    len(fileInfo.Processes) > 0,
@@ -423,6 +450,11 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 				if err := s.processToastRequest(msg); err != nil {
 					log.Printf("Failed to show WebSocket toast: %v", err)
 				}
+				continue
+			}
+			if msg.Type == "refresh" {
+				log.Printf("🔄 Refresh requested from WebSocket client")
+				s.broadcastUpdate()
 			}
 		}
 	}()
@@ -442,7 +474,7 @@ func (s *Server) sendRecordsToClient(conn *websocket.Conn, connMu *sync.Mutex) {
 		"timestamp":   time.Now().Format(time.RFC3339),
 		"added":       records,
 		"total_count": len(records),
-		"file_name":   filepath.Base(s.dbPath),
+		"file_name":   sourceBaseName(s.dbPath),
 		"file_path":   s.dbPath,
 		"version":     s.version,
 		"resources":   web.Resources(),
@@ -611,7 +643,11 @@ func writeJSON(w http.ResponseWriter, payload interface{}) {
 
 func (s *Server) processStatus() map[string]interface{} {
 	patris81Processes, patrisErr := processmon.FindProcessByName("patris81.exe")
-	fileInfo, fileErr := processmon.FindProcessesWithFile(s.dbPath)
+	var fileInfo *processmon.FileAccessInfo
+	var fileErr error
+	if !filecopy.IsURL(s.dbPath) {
+		fileInfo, fileErr = processmon.FindProcessesWithFile(s.dbPath)
+	}
 
 	status := map[string]interface{}{
 		"timestamp": time.Now().Format(time.RFC3339),
@@ -621,8 +657,9 @@ func (s *Server) processStatus() map[string]interface{} {
 			"processes": patris81Processes,
 		},
 		"file_access": map[string]interface{}{
-			"file":      filepath.Base(s.dbPath),
+			"file":      sourceBaseName(s.dbPath),
 			"path":      s.dbPath,
+			"remote":    filecopy.IsURL(s.dbPath),
 			"in_use":    fileInfo != nil && len(fileInfo.Processes) > 0,
 			"count":     0,
 			"processes": []processmon.ProcessInfo{},
@@ -1021,6 +1058,21 @@ func (s *Server) StartWatching(debounceDuration time.Duration) error {
 
 	s.watcher = fw
 
+	if filecopy.IsURL(s.dbPath) {
+		pollInterval := debounceDuration
+		if pollInterval <= 0 {
+			pollInterval = 5 * time.Minute
+		}
+		if err := fw.Poll(s.dbPath, func(path string) {
+			log.Printf("🔄 Remote source changed: %s", path)
+			s.broadcastUpdate()
+		}, pollInterval); err != nil {
+			return fmt.Errorf("failed to poll URL: %w", err)
+		}
+		log.Printf("👀 Polling remote source: %s (interval: %v)", s.dbPath, pollInterval)
+		return nil
+	}
+
 	if err := fw.Watch(s.dbPath, func(path string) {
 		log.Printf("🔄 File changed: %s", filepath.Base(path))
 		s.broadcastUpdate()
@@ -1065,11 +1117,25 @@ func (s *Server) Start(addr string) error {
 	log.Printf("🚀 Starting server on %s", addr)
 	log.Printf("📊 Serving file: %s", filepath.Base(s.dbPath))
 
-	if _, err := os.Stat(s.dbPath); os.IsNotExist(err) {
-		return fmt.Errorf("file does not exist: %s", s.dbPath)
+	if !filecopy.IsURL(s.dbPath) {
+		if _, err := os.Stat(s.dbPath); os.IsNotExist(err) {
+			return fmt.Errorf("file does not exist: %s", s.dbPath)
+		}
 	}
 
 	return http.ListenAndServe(addr, s.router)
+}
+
+func sourceBaseName(path string) string {
+	if filecopy.IsURL(path) {
+		if u, err := url.Parse(path); err == nil {
+			if base := filepath.Base(u.Path); base != "." && base != "/" && base != "" {
+				return base
+			}
+			return u.Host
+		}
+	}
+	return filepath.Base(path)
 }
 
 // convertToIntSlice converts an interface{} to a slice of integers
