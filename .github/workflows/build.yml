@@ -123,8 +123,8 @@ jobs:
     - name: Build Windows executable
       run: |
         mkdir -p build
+        VERSION_PKG="github.com/atomicdeploy/patris-export/pkg/version"
         CGO_ENABLED=1 GOOS=windows GOARCH=amd64 CC=x86_64-w64-mingw32-gcc \
-          VERSION_PKG="github.com/atomicdeploy/patris-export/pkg/version"
           go build -ldflags "-X ${VERSION_PKG}.Version=1.0.0 -X ${VERSION_PKG}.BuildDate=$(date -u +'%Y-%m-%dT%H:%M:%SZ') -X ${VERSION_PKG}.Commit=${GITHUB_SHA::12}" \
           -o build/patris-export-windows-amd64.exe ./cmd/patris-export
       
