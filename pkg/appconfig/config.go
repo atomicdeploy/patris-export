@@ -61,6 +61,7 @@ type DatabaseConfig struct {
 
 type RuntimeConfig struct {
 	TempDir string `json:"temp_dir" yaml:"temp_dir" toml:"temp_dir"`
+	Debug   bool   `json:"debug" yaml:"debug" toml:"debug"`
 }
 
 type ConvertConfig struct {
@@ -502,6 +503,9 @@ func ApplyEnv(cfg *Config) {
 			cfg.Runtime.TempDir = strings.TrimSpace(value)
 			break
 		}
+	}
+	if value := os.Getenv("PATRIS_DEBUG"); strings.TrimSpace(value) != "" {
+		cfg.Runtime.Debug = parseBool(value, cfg.Runtime.Debug)
 	}
 	if value := os.Getenv("PATRIS_OUTPUT"); strings.TrimSpace(value) != "" {
 		cfg.Convert.Output = strings.TrimSpace(value)

@@ -13,6 +13,9 @@ var ViewerHTML []byte
 //go:embed dist/welcome.html
 var WelcomeHTML []byte
 
+//go:embed dist/charmap.html
+var CharmapHTML []byte
+
 //go:embed assets/notification.ogg
 var NotificationAudio []byte
 
@@ -32,6 +35,7 @@ type ResourceInfo struct {
 	Version string `json:"version"`
 	Viewer  int    `json:"viewer_bytes"`
 	Welcome int    `json:"welcome_bytes"`
+	Charmap int    `json:"charmap_bytes"`
 	Audio   int    `json:"audio_bytes"`
 	Icon    int    `json:"icon_bytes"`
 	Favicon int    `json:"favicon_bytes"`
@@ -43,6 +47,7 @@ func Resources() ResourceInfo {
 		hash := sha256.New()
 		hash.Write(ViewerHTML)
 		hash.Write(WelcomeHTML)
+		hash.Write(CharmapHTML)
 		hash.Write(NotificationAudio)
 		hash.Write(FaviconICO)
 		hash.Write(AppIconPNG)
@@ -52,6 +57,7 @@ func Resources() ResourceInfo {
 			Version: hex.EncodeToString(sum[:12]),
 			Viewer:  len(ViewerHTML),
 			Welcome: len(WelcomeHTML),
+			Charmap: len(CharmapHTML),
 			Audio:   len(NotificationAudio),
 			Icon:    len(AppIconPNG),
 			Favicon: len(FaviconICO),

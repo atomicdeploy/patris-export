@@ -43,6 +43,7 @@ async function build() {
   // Read the HTML templates
   const viewerHtml = fs.readFileSync('src/viewer.html', 'utf8');
   const welcomeHtml = fs.readFileSync('src/welcome.html', 'utf8');
+  const charmapHtml = fs.readFileSync('src/charmap.html', 'utf8');
   
   // Inline everything into viewer.html
   const finalViewerHtml = viewerHtml
@@ -57,8 +58,9 @@ async function build() {
   // Write the final files
   fs.writeFileSync('dist/viewer.html', finalViewerHtml);
   fs.writeFileSync('dist/welcome.html', welcomeHtml);
+  fs.writeFileSync('dist/charmap.html', charmapHtml);
   
-  console.log('Build complete: dist/viewer.html, dist/welcome.html');
+  console.log('Build complete: dist/viewer.html, dist/welcome.html, dist/charmap.html');
 }
 
 // Run build
@@ -70,7 +72,7 @@ build().catch(err => {
 if (watch) {
   console.log('Watching for changes...');
   // Simple file watcher
-  const watchFiles = ['src/viewer.html', 'src/welcome.html', 'src/styles.scss', 'src/app.js'];
+  const watchFiles = ['src/viewer.html', 'src/welcome.html', 'src/charmap.html', 'src/styles.scss', 'src/app.js'];
   watchFiles.forEach(file => {
     fs.watch(file, (eventType) => {
       if (eventType === 'change') {
