@@ -146,6 +146,34 @@ Generate the snapshot without opening a window:
 patris-export view kala.db --no-open --html-output output/kala-viewer.html
 ```
 
+### Temporary Storage Policy
+
+When no explicit temp directory is configured, Linux builds use `auto` temp storage selection. In that mode Patris Export prefers `/dev/shm/patris-export` for known-size temp copies up to 100 MiB when the tmpfs mount exists and has enough free space, then falls back to the normal system temp directory for larger files, unknown-size downloads, or unsupported platforms.
+
+Explicit temp directories always win:
+
+```bash
+patris-export serve kala.db --temp-dir /var/tmp/patris-export
+PATRIS_TEMP_DIR=/var/tmp/patris-export patris-export convert kala.db
+```
+
+The policy can also be configured:
+
+```bash
+patris-export convert kala.db --temp-strategy system
+patris-export convert kala.db --temp-strategy auto --temp-memory-limit-mb 128
+PATRIS_TEMP_STRATEGY=memory PATRIS_TEMP_MEMORY_LIMIT_MB=64 patris-export serve kala.db
+```
+
+Config file equivalent:
+
+```yaml
+runtime:
+  temp_dir: system
+  temp_strategy: auto
+  temp_memory_limit_mb: 100
+```
+
 Then access:
 - Web interface: http://localhost:8080
 - API records: http://localhost:8080/api/records
@@ -245,6 +273,9 @@ go test -v ./...
 
 - `-c, --charmap` - Optional path to a custom character mapping file. If omitted, the embedded Patris81 mapping is used.
 - `-o, --output` - Output directory for converted files, or `-` for stdout (default: current directory)
+- `--temp-dir` - Explicit temp directory for copied/downloaded database files. Overrides automatic temp storage selection.
+- `--temp-strategy` - Temp storage strategy: `auto`, `system`, or `memory`.
+- `--temp-memory-limit-mb` - Maximum known file size for memory-backed temp copies when the strategy allows it.
 - `-v, --verbose` - Enable verbose logging
 - `-r, --rtl` - Opt in to experimental RTL logical text conversion for mixed Persian/Latin output
 

@@ -60,8 +60,10 @@ type DatabaseConfig struct {
 }
 
 type RuntimeConfig struct {
-	TempDir string `json:"temp_dir" yaml:"temp_dir" toml:"temp_dir"`
-	Debug   bool   `json:"debug" yaml:"debug" toml:"debug"`
+	TempDir           string `json:"temp_dir" yaml:"temp_dir" toml:"temp_dir"`
+	TempStrategy      string `json:"temp_strategy" yaml:"temp_strategy" toml:"temp_strategy"`
+	TempMemoryLimitMB int64  `json:"temp_memory_limit_mb" yaml:"temp_memory_limit_mb" toml:"temp_memory_limit_mb"`
+	Debug             bool   `json:"debug" yaml:"debug" toml:"debug"`
 }
 
 type ConvertConfig struct {
@@ -115,7 +117,9 @@ func Default() Config {
 			DirectAccess: false,
 		},
 		Runtime: RuntimeConfig{
-			TempDir: "system",
+			TempDir:           "system",
+			TempStrategy:      "auto",
+			TempMemoryLimitMB: 100,
 		},
 		Convert: ConvertConfig{
 			Output:   ".",
@@ -213,6 +217,13 @@ func ResolveTempDir(value string) string {
 		return filepath.Join(cwd, value)
 	}
 	return value
+}
+
+func TempMemoryLimitBytes(limitMB int64) int64 {
+	if limitMB <= 0 {
+		limitMB = 100
+	}
+	return limitMB * 1024 * 1024
 }
 
 func cleanPathList(paths []string) []string {
@@ -504,6 +515,17 @@ func ApplyEnv(cfg *Config) {
 			break
 		}
 	}
+	if value := os.Getenv("PATRIS_TEMP_STRATEGY"); strings.TrimSpace(value) != "" {
+		cfg.Runtime.TempStrategy = strings.TrimSpace(value)
+	}
+	for _, key := range []string{"PATRIS_TEMP_MEMORY_LIMIT_MB", "PATRIS_TMPFS_LIMIT_MB"} {
+		if value := os.Getenv(key); strings.TrimSpace(value) != "" {
+			if limit, err := strconv.ParseInt(strings.TrimSpace(value), 10, 64); err == nil {
+				cfg.Runtime.TempMemoryLimitMB = limit
+			}
+			break
+		}
+	}
 	if value := os.Getenv("PATRIS_DEBUG"); strings.TrimSpace(value) != "" {
 		cfg.Runtime.Debug = parseBool(value, cfg.Runtime.Debug)
 	}
@@ -563,6 +585,20 @@ func normalize(cfg *Config) {
 	}
 	if cfg.Runtime.TempDir == "" {
 		cfg.Runtime.TempDir = "system"
+	}
+	cfg.Runtime.TempStrategy = strings.ToLower(strings.TrimSpace(cfg.Runtime.TempStrategy))
+	switch cfg.Runtime.TempStrategy {
+	case "", "auto":
+		cfg.Runtime.TempStrategy = "auto"
+	case "system", "disk", "tmp":
+		cfg.Runtime.TempStrategy = "system"
+	case "memory", "shm", "tmpfs", "ram":
+		cfg.Runtime.TempStrategy = "memory"
+	default:
+		cfg.Runtime.TempStrategy = "auto"
+	}
+	if cfg.Runtime.TempMemoryLimitMB <= 0 {
+		cfg.Runtime.TempMemoryLimitMB = 100
 	}
 	if cfg.Convert.Output == "" {
 		cfg.Convert.Output = "."

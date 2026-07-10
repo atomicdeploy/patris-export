@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -16,12 +17,22 @@ import (
 const (
 	// ChunkSize defines the size of chunks for file copying (10MB)
 	ChunkSize = 10 * 1024 * 1024
+
+	// DefaultMemoryTempLimitBytes is the default cap for tmpfs-backed copies.
+	DefaultMemoryTempLimitBytes = 100 * 1024 * 1024
+
+	TempStrategyAuto   = "auto"
+	TempStrategySystem = "system"
+	TempStrategyMemory = "memory"
 )
 
 var (
-	httpClient      = &http.Client{Timeout: 2 * time.Minute}
-	tempDirOverride string
-	tempDirMu       sync.RWMutex
+	httpClient               = &http.Client{Timeout: 2 * time.Minute}
+	tempDirOverride          string
+	tempStrategy                   = TempStrategyAuto
+	tempMemoryLimitBytes     int64 = DefaultMemoryTempLimitBytes
+	tempDirMu                sync.RWMutex
+	memoryTempFreeSpaceSlack int64 = 8 * 1024 * 1024
 )
 
 // SetTempDir configures the base temp directory used by copy/download helpers.
@@ -32,14 +43,94 @@ func SetTempDir(path string) {
 	tempDirMu.Unlock()
 }
 
-func tempRoot() string {
+// SetTempPolicy configures automatic temp storage selection. The system
+// strategy always uses os.TempDir, memory tries /dev/shm when safe, and auto
+// prefers memory only for small known-size files on supported platforms.
+func SetTempPolicy(strategy string, memoryLimitBytes int64) {
+	tempDirMu.Lock()
+	tempStrategy = normalizeTempStrategy(strategy)
+	if memoryLimitBytes > 0 {
+		tempMemoryLimitBytes = memoryLimitBytes
+	} else {
+		tempMemoryLimitBytes = DefaultMemoryTempLimitBytes
+	}
+	tempDirMu.Unlock()
+}
+
+// TempRootForSize returns the directory used for temporary files of sizeHint.
+// Explicit SetTempDir overrides always win. A negative size means unknown.
+func TempRootForSize(sizeHint int64) string {
 	tempDirMu.RLock()
 	override := tempDirOverride
+	strategy := tempStrategy
+	limit := tempMemoryLimitBytes
 	tempDirMu.RUnlock()
+
 	if override != "" {
 		return override
 	}
+	if shouldUseMemoryTemp(strategy, sizeHint, limit) {
+		return filepath.Join(memoryTempBaseDir(), "patris-export")
+	}
+	return systemTempRoot()
+}
+
+func tempRootForSize(sizeHint int64) string {
+	return TempRootForSize(sizeHint)
+}
+
+func tempRoot() string {
+	return tempRootForSize(-1)
+}
+
+func systemTempRoot() string {
 	return filepath.Join(os.TempDir(), "patris-export")
+}
+
+func normalizeTempStrategy(strategy string) string {
+	switch strings.ToLower(strings.TrimSpace(strategy)) {
+	case "", TempStrategyAuto:
+		return TempStrategyAuto
+	case TempStrategySystem, "disk", "tmp":
+		return TempStrategySystem
+	case TempStrategyMemory, "shm", "tmpfs", "ram":
+		return TempStrategyMemory
+	default:
+		return TempStrategyAuto
+	}
+}
+
+func shouldUseMemoryTemp(strategy string, sizeHint int64, limit int64) bool {
+	strategy = normalizeTempStrategy(strategy)
+	if strategy == TempStrategySystem {
+		return false
+	}
+	if sizeHint < 0 || limit <= 0 || sizeHint > limit {
+		return false
+	}
+	if runtime.GOOS != "linux" {
+		return false
+	}
+
+	base := memoryTempBaseDir()
+	info, err := os.Stat(base)
+	if err != nil || !info.IsDir() {
+		return false
+	}
+	if available, ok := availableBytes(base); ok {
+		required := uint64(sizeHint)
+		if memoryTempFreeSpaceSlack > 0 {
+			required += uint64(memoryTempFreeSpaceSlack)
+		}
+		if available < required {
+			return false
+		}
+	}
+	return true
+}
+
+func memoryTempBaseDir() string {
+	return "/dev/shm"
 }
 
 // FileInfo contains information about a file copy operation
@@ -86,10 +177,10 @@ func CopyToTemp(sourcePath string) (*FileInfo, error) {
 	}
 	defer source.Close()
 
-	// Create temp file in system temp directory
-	// Use a subdirectory to avoid conflicts with source files that might be in /tmp
+	// Create temp file in the selected temp directory. Use a subdirectory to
+	// avoid conflicts with source files that might already be in temp storage.
 	// Include a hash of the absolute path to handle multiple files with same name
-	tempDir := tempRoot()
+	tempDir := tempRootForSize(sourceInfo.Size())
 	if err := os.MkdirAll(tempDir, 0755); err != nil {
 		return nil, fmt.Errorf("failed to create temp directory: %w", err)
 	}
@@ -203,13 +294,7 @@ func DownloadToTemp(sourceURL string) (*FileInfo, error) {
 		baseName = "download.db"
 	}
 
-	tempDir := tempRoot()
-	if err := os.MkdirAll(tempDir, 0755); err != nil {
-		return nil, fmt.Errorf("failed to create temp directory: %w", err)
-	}
-
 	urlHash := crc32.ChecksumIEEE([]byte(sourceURL))
-	tempPath := filepath.Join(tempDir, fmt.Sprintf("%s.%08x", baseName, urlHash))
 
 	req, err := http.NewRequest(http.MethodGet, sourceURL, nil)
 	if err != nil {
@@ -226,6 +311,12 @@ func DownloadToTemp(sourceURL string) (*FileInfo, error) {
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return nil, fmt.Errorf("failed to download URL: HTTP %d %s", resp.StatusCode, resp.Status)
 	}
+
+	tempDir := tempRootForSize(resp.ContentLength)
+	if err := os.MkdirAll(tempDir, 0755); err != nil {
+		return nil, fmt.Errorf("failed to create temp directory: %w", err)
+	}
+	tempPath := filepath.Join(tempDir, fmt.Sprintf("%s.%08x", baseName, urlHash))
 
 	dest, err := os.OpenFile(tempPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644)
 	if err != nil {

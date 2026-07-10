@@ -190,9 +190,19 @@
                         <label class="field-label wide">Temp directory
                             <input id="runtimeTempDir" class="text-input" type="text" placeholder="system">
                         </label>
+                        <label class="field-label">Temp strategy
+                            <select id="runtimeTempStrategy" class="text-input">
+                                <option value="auto">Auto</option>
+                                <option value="system">System temp</option>
+                                <option value="memory">Memory temp</option>
+                            </select>
+                        </label>
+                        <label class="field-label">Memory temp limit (MiB)
+                            <input id="runtimeTempMemoryLimitMB" class="text-input" type="number" min="1" max="4096" step="1" placeholder="100">
+                        </label>
                     </div>
                     <label class="checkbox-label"><input type="checkbox" id="runtimeDebug"><span>Enable debug tools and custom charmap previews</span></label>
-                    <p class="settings-help">Use <code>system</code> for the operating system temp directory. Relative paths resolve under the application directory.</p>
+                    <p class="settings-help">Use <code>system</code> for the operating system temp directory. Auto prefers <code>/dev/shm</code> on Linux for known-size files within the memory limit.</p>
                 </div>
             </div>
         </div>
