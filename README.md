@@ -319,6 +319,8 @@ Update the installed executable from the latest successful GitHub Actions build 
 
 **Flags:**
 - `-b, --branch` - Branch to download from (default: main)
+- `--api-url` - Update from a running Patris Export API by fetching `/api/update/manifest`
+- `--manifest-url` - Update from an explicit executable manifest URL
 
 **Examples:**
 ```bash
@@ -327,11 +329,29 @@ patris-export update
 
 # Update from another branch
 patris-export update --branch develop
+
+# Update from another Patris Export instance/API
+patris-export update --api-url http://127.0.0.1:18080
+
+# Update from an explicit manifest endpoint
+patris-export update --manifest-url http://127.0.0.1:18080/api/update/manifest
 ```
 
 `GITHUB_TOKEN` is optional for public repositories, but recommended for higher API rate limits. Private repositories require a token that can read the repository and its Actions artifacts, such as a classic token with `repo` access.
 
 Repository lookup defaults to `atomicdeploy/patris-export`. Override it with `PATRIS_REPO_OWNER` and `PATRIS_REPO_NAME` when testing forks or custom deployments.
+
+### Executable Update API
+
+When the server is running, it can publish the exact executable that is serving the API:
+
+- `GET /api/update/manifest` returns version, platform, file name, size, SHA-256, last modified timestamp, and `download_url`.
+- `GET /api/update/executable` streams the executable.
+- `HEAD /api/update/executable` reports static headers without a body.
+
+The executable endpoint uses the real file on disk and supports byte ranges, conditional requests, `Content-Length`, `Last-Modified`, `ETag`, `X-Checksum-SHA256`, and `X-Executable-*` metadata headers. The API updater downloads by streaming to a temp file and only replaces the current executable after the manifest size and SHA-256 match the downloaded bytes.
+
+If the remote update API is protected, set `PATRIS_UPDATE_TOKEN`; this is separate from `GITHUB_TOKEN` so GitHub credentials are not sent to arbitrary update hosts.
 
 ## 🔧 API Reference
 

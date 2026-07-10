@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -158,6 +159,77 @@ func TestServerJSON(t *testing.T) {
 
 		if w.Body.Len() == 0 {
 			t.Error("Expected non-empty favicon")
+		}
+	})
+
+	t.Run("GET /api/update/manifest", func(t *testing.T) {
+		req := httptest.NewRequest("GET", "/api/update/manifest", nil)
+		w := httptest.NewRecorder()
+		srv.router.ServeHTTP(w, req)
+
+		if w.Code != http.StatusOK {
+			t.Fatalf("Expected status 200, got %d", w.Code)
+		}
+		if cc := w.Header().Get("Cache-Control"); cc != "no-store" {
+			t.Errorf("Expected Cache-Control no-store, got %s", cc)
+		}
+
+		var manifest map[string]interface{}
+		if err := json.NewDecoder(w.Body).Decode(&manifest); err != nil {
+			t.Fatalf("Failed to decode manifest: %v", err)
+		}
+		if manifest["filename"] == "" {
+			t.Error("Expected manifest filename")
+		}
+		if manifest["sha256"] == "" {
+			t.Error("Expected manifest sha256")
+		}
+		if manifest["size"].(float64) <= 0 {
+			t.Error("Expected positive manifest size")
+		}
+		if !strings.Contains(manifest["download_url"].(string), "/api/update/executable") {
+			t.Errorf("Expected manifest download URL to point at executable endpoint, got %s", manifest["download_url"])
+		}
+		if _, err := time.Parse(time.RFC3339, manifest["last_modified"].(string)); err != nil {
+			t.Fatalf("Expected RFC3339 last_modified, got %v", manifest["last_modified"])
+		}
+	})
+
+	t.Run("HEAD /api/update/executable has static headers", func(t *testing.T) {
+		req := httptest.NewRequest("HEAD", "/api/update/executable", nil)
+		w := httptest.NewRecorder()
+		srv.router.ServeHTTP(w, req)
+
+		if w.Code != http.StatusOK {
+			t.Fatalf("Expected status 200, got %d", w.Code)
+		}
+		for _, header := range []string{"Content-Length", "Last-Modified", "Date", "ETag", "X-Checksum-SHA256", "X-Executable-Size", "X-Executable-Modified"} {
+			if got := w.Header().Get(header); got == "" {
+				t.Errorf("Expected %s header", header)
+			}
+		}
+		if ct := w.Header().Get("Content-Type"); ct != "application/octet-stream" {
+			t.Errorf("Expected executable content type, got %s", ct)
+		}
+		if w.Body.Len() != 0 {
+			t.Errorf("Expected empty HEAD body, got %d bytes", w.Body.Len())
+		}
+	})
+
+	t.Run("GET /api/update/executable supports ranges", func(t *testing.T) {
+		req := httptest.NewRequest("GET", "/api/update/executable", nil)
+		req.Header.Set("Range", "bytes=0-15")
+		w := httptest.NewRecorder()
+		srv.router.ServeHTTP(w, req)
+
+		if w.Code != http.StatusPartialContent {
+			t.Fatalf("Expected status 206, got %d", w.Code)
+		}
+		if w.Body.Len() != 16 {
+			t.Errorf("Expected 16 response bytes, got %d", w.Body.Len())
+		}
+		if got := w.Header().Get("Content-Range"); !strings.HasPrefix(got, "bytes 0-15/") {
+			t.Errorf("Unexpected Content-Range: %s", got)
 		}
 	})
 }

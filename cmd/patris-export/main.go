@@ -178,11 +178,15 @@ the current executable. Use --branch to update from a branch other than main.
 Examples:
   patris-export update
   patris-export update --branch develop
+  patris-export update --api-url http://127.0.0.1:18080
+  patris-export update --manifest-url http://127.0.0.1:18080/api/update/manifest
 
 Set GITHUB_TOKEN for private repositories and higher API rate limits.`,
 		Run: runUpdate,
 	}
 	updateCmd.Flags().StringP("branch", "b", "main", "Branch to download from")
+	updateCmd.Flags().String("api-url", "", "Update from a Patris Export API base URL using /api/update/manifest")
+	updateCmd.Flags().String("manifest-url", "", "Update from an explicit Patris Export executable manifest URL")
 
 	rootCmd.AddCommand(convertCmd, infoCmd, companyCmd, viewCmd, serveCmd, ipcCmd, tuiCmd, updateCmd)
 
@@ -218,6 +222,21 @@ func runRoot(cmd *cobra.Command, args []string) {
 }
 
 func runUpdate(cmd *cobra.Command, args []string) {
+	apiURL, err := cmd.Flags().GetString("api-url")
+	if err != nil {
+		errorColor.Printf("❌ Failed to read 'api-url' flag: %v\n", err)
+		os.Exit(1)
+	}
+	manifestURL, err := cmd.Flags().GetString("manifest-url")
+	if err != nil {
+		errorColor.Printf("❌ Failed to read 'manifest-url' flag: %v\n", err)
+		os.Exit(1)
+	}
+	if strings.TrimSpace(apiURL) != "" || strings.TrimSpace(manifestURL) != "" {
+		runAPIUpdate(apiURL, manifestURL)
+		return
+	}
+
 	branch, err := cmd.Flags().GetString("branch")
 	if err != nil {
 		errorColor.Printf("❌ Failed to read 'branch' flag: %v\n", err)
@@ -332,6 +351,79 @@ func runUpdate(cmd *cobra.Command, args []string) {
 	infoColor.Printf("📅 Build date: %s\n", run.CreatedAt.Format("2006-01-02 15:04:05"))
 	infoColor.Println("💡 Run 'patris-export --version' to verify the update")
 	fmt.Println()
+}
+
+func runAPIUpdate(apiURL, manifestURL string) {
+	fmt.Println()
+	successColor.Println("🚀 Patris Export API Update")
+	fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+	fmt.Println()
+
+	manifestURL = strings.TrimSpace(manifestURL)
+	if manifestURL == "" {
+		var err error
+		manifestURL, err = updater.ManifestURLFromAPIBase(apiURL)
+		if err != nil {
+			errorColor.Printf("❌ Invalid API URL: %v\n", err)
+			os.Exit(1)
+		}
+	}
+
+	infoColor.Printf("🔎 Manifest: %s\n", manifestURL)
+	u := updater.NewAPIUpdater()
+
+	manifest, err := u.FetchExecutableManifest(manifestURL)
+	if err != nil {
+		errorColor.Printf("❌ Failed to fetch manifest: %v\n", err)
+		os.Exit(1)
+	}
+	successColor.Printf("✅ Remote version: %s (commit %s)\n", manifest.Version.Version, shortCLIHash(manifest.Version.Commit))
+	infoColor.Printf("💻 Platform: %s\n", manifest.Platform)
+	infoColor.Printf("📦 File: %s (%.2f MB)\n", manifest.Filename, float64(manifest.Size)/(1024*1024))
+	infoColor.Printf("🔐 SHA-256: %s\n", shortCLIHash(manifest.SHA256))
+	infoColor.Printf("🕒 Modified: %s\n", manifest.LastModified.Local().Format("2006-01-02 15:04:05"))
+	fmt.Println()
+
+	tempDir, err := os.MkdirTemp("", "patris-api-update-*")
+	if err != nil {
+		errorColor.Printf("❌ Failed to create temp directory: %v\n", err)
+		os.Exit(1)
+	}
+	defer os.RemoveAll(tempDir)
+
+	infoColor.Println("⬇️  Downloading and verifying executable...")
+	exePath, err := u.DownloadExecutableFromManifest(manifest, tempDir)
+	if err != nil {
+		errorColor.Printf("❌ Failed to download executable: %v\n", err)
+		os.Exit(1)
+	}
+	successColor.Printf("✅ Verified download: %s\n", filepath.Base(exePath))
+	fmt.Println()
+
+	infoColor.Println("🔄 Replacing current executable...")
+	if err := u.ReplaceCurrentExecutable(exePath); err != nil {
+		errorColor.Printf("❌ Failed to replace executable: %v\n", err)
+		errorColor.Println("💡 You may need elevated permissions to update the executable")
+		os.Exit(1)
+	}
+
+	fmt.Println()
+	successColor.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+	successColor.Println("✨ API update completed successfully! ✨")
+	successColor.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+	infoColor.Println("💡 Restart patris-export, then run 'patris-export --version' to verify.")
+	fmt.Println()
+}
+
+func shortCLIHash(value string) string {
+	value = strings.TrimPrefix(strings.TrimSpace(value), "sha256:")
+	if value == "" {
+		return "unknown"
+	}
+	if len(value) <= 12 {
+		return value
+	}
+	return value[:12]
 }
 
 func cliIntro() string {

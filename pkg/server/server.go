@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"mime"
 	"net/http"
 	"net/url"
 	"os"
@@ -22,6 +23,7 @@ import (
 	"github.com/atomicdeploy/patris-export/pkg/notifier"
 	"github.com/atomicdeploy/patris-export/pkg/paradox"
 	"github.com/atomicdeploy/patris-export/pkg/processmon"
+	"github.com/atomicdeploy/patris-export/pkg/updater"
 	"github.com/atomicdeploy/patris-export/pkg/version"
 	"github.com/atomicdeploy/patris-export/pkg/watcher"
 	"github.com/atomicdeploy/patris-export/web"
@@ -185,6 +187,8 @@ func (s *Server) setupRoutes() {
 	s.router.HandleFunc("/api/config", s.handlePutConfig).Methods("PUT")
 	s.router.HandleFunc("/api/status", s.handleGetStatus).Methods("GET")
 	s.router.HandleFunc("/api/toast", s.handlePostToast).Methods("POST")
+	s.router.HandleFunc("/api/update/manifest", s.handleGetUpdateManifest).Methods("GET")
+	s.router.HandleFunc("/api/update/executable", s.handleGetExecutable).Methods("GET", "HEAD")
 	s.router.HandleFunc("/api/processes/patris81", s.handleGetPatris81Processes).Methods("GET")
 	s.router.HandleFunc("/api/processes/file", s.handleGetFileProcesses).Methods("GET")
 	s.router.HandleFunc("/static/notification.ogg", s.handleNotificationAudio).Methods("GET", "HEAD")
@@ -531,6 +535,42 @@ func (s *Server) handleGetStatus(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, s.Status())
 }
 
+func (s *Server) handleGetUpdateManifest(w http.ResponseWriter, r *http.Request) {
+	manifest, err := s.executableManifest(r)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Failed to inspect executable: %v", err), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	writeJSON(w, manifest)
+}
+
+func (s *Server) handleGetExecutable(w http.ResponseWriter, r *http.Request) {
+	manifest, exePath, err := s.executableManifestForPath(r)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Failed to inspect executable: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	file, err := os.Open(exePath)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Failed to open executable: %v", err), http.StatusInternalServerError)
+		return
+	}
+	defer file.Close()
+
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("Content-Disposition", mime.FormatMediaType("attachment", map[string]string{"filename": manifest.Filename}))
+	w.Header().Set("Accept-Ranges", "bytes")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Date", time.Now().UTC().Format(http.TimeFormat))
+	w.Header().Set("ETag", fmt.Sprintf("\"sha256:%s\"", manifest.SHA256))
+	w.Header().Set("X-Checksum-SHA256", manifest.SHA256)
+	w.Header().Set("X-Executable-Size", fmt.Sprintf("%d", manifest.Size))
+	w.Header().Set("X-Executable-Modified", manifest.LastModified.UTC().Format(time.RFC3339))
+	http.ServeContent(w, r, manifest.Filename, manifest.LastModified, file)
+}
+
 // handlePostToast displays a native notification and broadcasts it to web clients.
 func (s *Server) handlePostToast(w http.ResponseWriter, r *http.Request) {
 	var req ToastRequest
@@ -822,6 +862,67 @@ func (s *Server) notifyConfigured(event, title, message string) {
 	if err := s.processToastRequest(req); err != nil {
 		log.Printf("Configured notification failed: %v", err)
 	}
+}
+
+func (s *Server) executableManifest(r *http.Request) (updater.ExecutableManifest, error) {
+	manifest, _, err := s.executableManifestForPath(r)
+	return manifest, err
+}
+
+func (s *Server) executableManifestForPath(r *http.Request) (updater.ExecutableManifest, string, error) {
+	exePath, err := os.Executable()
+	if err != nil {
+		return updater.ExecutableManifest{}, "", err
+	}
+	if resolved, err := filepath.EvalSymlinks(exePath); err == nil {
+		exePath = resolved
+	}
+	info, err := os.Stat(exePath)
+	if err != nil {
+		return updater.ExecutableManifest{}, "", err
+	}
+	hash, err := updater.FileSHA256(exePath)
+	if err != nil {
+		return updater.ExecutableManifest{}, "", err
+	}
+	v := s.version
+	if v.Version == "" {
+		v = version.Current()
+	}
+	manifest := updater.ExecutableManifest{
+		Name:     "Patris Export",
+		Filename: filepath.Base(exePath),
+		Version: updater.VersionShape{
+			Version:   v.Version,
+			BuildDate: v.BuildDate,
+			Commit:    v.Commit,
+			GoVersion: v.GoVersion,
+			Platform:  v.Platform,
+		},
+		Platform:     updater.CurrentPlatform(),
+		Size:         info.Size(),
+		SHA256:       hash,
+		LastModified: info.ModTime().UTC(),
+		DownloadURL:  absoluteURL(r, "/api/update/executable"),
+		GeneratedAt:  time.Now().UTC(),
+	}
+	return manifest, exePath, nil
+}
+
+func absoluteURL(r *http.Request, path string) string {
+	scheme := strings.TrimSpace(r.Header.Get("X-Forwarded-Proto"))
+	if scheme == "" {
+		if r.TLS != nil {
+			scheme = "https"
+		} else {
+			scheme = "http"
+		}
+	}
+	host := strings.TrimSpace(r.Header.Get("X-Forwarded-Host"))
+	if host == "" {
+		host = r.Host
+	}
+	return (&url.URL{Scheme: scheme, Host: host, Path: path}).String()
 }
 
 func notificationEventEnabled(cfg appconfig.NotificationsConfig, event string) bool {
