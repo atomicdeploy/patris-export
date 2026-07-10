@@ -202,12 +202,14 @@ func (s *Server) openDatabase() (*paradox.Database, func(), error) {
 // handleWelcome serves the welcome page
 func (s *Server) handleWelcome(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-cache")
 	w.Write(web.WelcomeHTML)
 }
 
 // handleViewer serves the SPA visualizer
 func (s *Server) handleViewer(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-cache")
 	w.Write(web.ViewerHTML)
 }
 
@@ -257,15 +259,21 @@ func (s *Server) handleGetInfo(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleGetApp(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	writeJSON(w, s.appMetadata())
+}
+
+func (s *Server) appMetadata() map[string]interface{} {
 	payload := map[string]interface{}{
 		"name":        "Patris Export",
 		"version":     s.version,
+		"resources":   web.Resources(),
 		"config_path": "",
 	}
 	if s.config != nil {
 		payload["config_path"] = s.config.Path()
 	}
-	writeJSON(w, payload)
+	return payload
 }
 
 func (s *Server) handleGetConfig(w http.ResponseWriter, r *http.Request) {
@@ -437,6 +445,7 @@ func (s *Server) sendRecordsToClient(conn *websocket.Conn, connMu *sync.Mutex) {
 		"file_name":   filepath.Base(s.dbPath),
 		"file_path":   s.dbPath,
 		"version":     s.version,
+		"resources":   web.Resources(),
 	}
 	if s.config != nil {
 		message["config"] = s.config.Get()

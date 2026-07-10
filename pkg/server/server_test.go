@@ -111,6 +111,36 @@ func TestServerJSON(t *testing.T) {
 		if ct := w.Header().Get("Content-Type"); ct != "text/html; charset=utf-8" {
 			t.Errorf("Expected Content-Type text/html; charset=utf-8, got %s", ct)
 		}
+
+		if cc := w.Header().Get("Cache-Control"); cc != "no-cache" {
+			t.Errorf("Expected Cache-Control no-cache, got %s", cc)
+		}
+	})
+
+	t.Run("GET /api/app includes resources", func(t *testing.T) {
+		req := httptest.NewRequest("GET", "/api/app", nil)
+		w := httptest.NewRecorder()
+		srv.router.ServeHTTP(w, req)
+
+		if w.Code != http.StatusOK {
+			t.Errorf("Expected status 200, got %d", w.Code)
+		}
+
+		if cc := w.Header().Get("Cache-Control"); cc != "no-store" {
+			t.Errorf("Expected Cache-Control no-store, got %s", cc)
+		}
+
+		var response map[string]interface{}
+		if err := json.NewDecoder(w.Body).Decode(&response); err != nil {
+			t.Fatalf("Failed to decode response: %v", err)
+		}
+		resources, ok := response["resources"].(map[string]interface{})
+		if !ok {
+			t.Fatalf("Expected resources object, got %T", response["resources"])
+		}
+		if resources["version"] == "" {
+			t.Error("Expected non-empty resources.version")
+		}
 	})
 
 	t.Run("GET /favicon.ico", func(t *testing.T) {
@@ -193,6 +223,12 @@ func TestWebSocketUpdates(t *testing.T) {
 
 	if initialMsg["type"] != "initial" {
 		t.Errorf("Expected type=initial, got %v", initialMsg["type"])
+	}
+
+	if resources, ok := initialMsg["resources"].(map[string]interface{}); !ok {
+		t.Fatalf("Expected resources object in initial message, got %T", initialMsg["resources"])
+	} else if resources["version"] == "" {
+		t.Error("Expected non-empty resources.version in initial message")
 	}
 
 	// Verify initial data has 1 record

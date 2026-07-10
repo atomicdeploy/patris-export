@@ -12,6 +12,9 @@ const state = {
     sortDirection: 'asc',
     fileName: '',  // Track the actual data file name from server
     appInfo: null,
+    resourceVersion: '',
+    resourcePollTimer: null,
+    isReloadingForUpdate: false,
     config: null,
     processStatus: null,
     isInitialLoad: true,
@@ -34,6 +37,7 @@ const state = {
 
 const CONFIG_STORAGE_KEY = 'patris-config';
 const SETTINGS_STORAGE_KEY = 'patris-settings';
+const RESOURCE_POLL_INTERVAL_MS = 30000;
 
 function logIntro() {
     const version = state.appInfo?.version || {};
@@ -44,6 +48,7 @@ function logIntro() {
     ];
     console.info('%cPatris Export%cModern HTML5 SPA', styles[0], styles[1]);
     console.info('%c✨ version=%s commit=%s build=%s', styles[2], version.version || 'dev', version.commit || 'unknown', version.build_date || 'unknown');
+    console.info('%c📦 resources=%s', styles[2], getResourceVersion(state.appInfo) || 'unknown');
     console.info('%c🔌 WebSocket, REST, native toasts, generated audio fallback, and persistent config are active.', styles[2]);
 }
 
@@ -621,17 +626,75 @@ function closePanels() {
     if (backdrop) backdrop.classList.remove('open');
 }
 
-async function fetchAppInfo() {
+async function fetchAppInfo(options = {}) {
+    const { source = 'api', log = true } = options;
     try {
-        const response = await fetch('/api/app');
+        const response = await fetch('/api/app', { cache: 'no-store' });
         if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
-        state.appInfo = await response.json();
-        updateAppMetadata();
-        logIntro();
+        const appInfo = await response.json();
+        const applied = applyAppInfo(appInfo, source);
+        if (applied && log) {
+            logIntro();
+        }
     } catch (error) {
         console.error('❌ Failed to fetch app metadata:', error);
-        logIntro();
+        if (log) {
+            logIntro();
+        }
     }
+}
+
+function applyAppInfo(appInfo, source = 'api') {
+    if (!appInfo) return false;
+
+    const nextResourceVersion = getResourceVersion(appInfo);
+    if (nextResourceVersion && state.resourceVersion && nextResourceVersion !== state.resourceVersion) {
+        reloadForResourceUpdate(nextResourceVersion, source);
+        return false;
+    }
+
+    state.appInfo = {
+        ...(state.appInfo || {}),
+        ...appInfo
+    };
+    if (nextResourceVersion && !state.resourceVersion) {
+        state.resourceVersion = nextResourceVersion;
+    }
+    updateAppMetadata();
+    return true;
+}
+
+function getResourceVersion(appInfo) {
+    return appInfo?.resources?.version || appInfo?.resource_version || '';
+}
+
+function startResourceVersionPolling() {
+    if (state.resourcePollTimer) {
+        clearInterval(state.resourcePollTimer);
+    }
+    state.resourcePollTimer = setInterval(() => {
+        if (document.visibilityState === 'hidden' || state.isReloadingForUpdate) {
+            return;
+        }
+        fetchAppInfo({ source: 'poll', log: false });
+    }, RESOURCE_POLL_INTERVAL_MS);
+}
+
+function reloadForResourceUpdate(nextResourceVersion, source) {
+    if (state.isReloadingForUpdate) return;
+    state.isReloadingForUpdate = true;
+
+    console.info('🔄 Embedded web resources changed from %s to %s via %s. Reloading viewer...', state.resourceVersion, nextResourceVersion, source);
+    updateStatus('connected', 'Updating UI...');
+    showInAppToast('Updating interface', 'A newer embedded web UI is available. Reloading now.');
+
+    const url = new URL(window.location.href);
+    url.searchParams.set('resource_version', nextResourceVersion);
+    url.searchParams.set('reloaded_at', Date.now().toString());
+
+    setTimeout(() => {
+        window.location.replace(url.toString());
+    }, 350);
 }
 
 async function fetchProcessStatus() {
@@ -648,7 +711,9 @@ function updateAppMetadata() {
     const logo = document.getElementById('appLogo');
     const title = document.getElementById('appTitle');
     const version = state.appInfo?.version || {};
-    const text = `Patris Export ${version.version || ''} (${version.commit || 'unknown'})`;
+    const resources = getResourceVersion(state.appInfo);
+    const resourceText = resources ? ` resources ${resources}` : '';
+    const text = `Patris Export ${version.version || ''} (${version.commit || 'unknown'})${resourceText}`;
     if (logo) logo.title = text;
     if (title) title.title = text;
 }
@@ -722,9 +787,14 @@ function handleWebSocketMessage(data) {
     const changedIndices = new Set();
     
     if (data.type === 'initial') {
-        if (data.version && !state.appInfo) {
-            state.appInfo = { version: data.version };
-            updateAppMetadata();
+        if (data.version || data.resources) {
+            const metadata = {};
+            if (data.version) metadata.version = data.version;
+            if (data.resources) metadata.resources = data.resources;
+            const applied = applyAppInfo(metadata, 'websocket');
+            if (!applied && state.isReloadingForUpdate) {
+                return;
+            }
         }
         if (data.config) {
             applyConfig(data.config, 'websocket');
@@ -2020,6 +2090,7 @@ function init() {
     initNotificationAudio();
     
     fetchAppInfo();
+    startResourceVersionPolling();
     loadServerConfig();
 
     // Initialize WebSocket
