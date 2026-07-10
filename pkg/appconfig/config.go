@@ -13,48 +13,71 @@ import (
 	"time"
 
 	"github.com/fsnotify/fsnotify"
+	"github.com/pelletier/go-toml/v2"
+	"gopkg.in/yaml.v3"
 )
 
 const SchemaVersion = 1
 
+var configBaseNames = []string{
+	"patris-export.json",
+	"patris-export.yaml",
+	"patris-export.yml",
+	"patris-export.toml",
+}
+
 type Config struct {
-	SchemaVersion int                    `json:"schema_version"`
-	Server        ServerConfig           `json:"server"`
-	Database      DatabaseConfig         `json:"database"`
-	UI            UIConfig               `json:"ui"`
-	ColumnLabels  map[string]string      `json:"column_labels"`
-	Extra         map[string]interface{} `json:"extra,omitempty"`
+	SchemaVersion int                    `json:"schema_version" yaml:"schema_version" toml:"schema_version"`
+	Server        ServerConfig           `json:"server" yaml:"server" toml:"server"`
+	Database      DatabaseConfig         `json:"database" yaml:"database" toml:"database"`
+	Runtime       RuntimeConfig          `json:"runtime" yaml:"runtime" toml:"runtime"`
+	Convert       ConvertConfig          `json:"convert" yaml:"convert" toml:"convert"`
+	UI            UIConfig               `json:"ui" yaml:"ui" toml:"ui"`
+	ColumnLabels  map[string]string      `json:"column_labels" yaml:"column_labels" toml:"column_labels"`
+	Extra         map[string]interface{} `json:"extra,omitempty" yaml:"extra,omitempty" toml:"extra,omitempty"`
 }
 
 type ServerConfig struct {
-	Host     string `json:"host"`
-	Port     int    `json:"port"`
-	Watch    bool   `json:"watch"`
-	Debounce string `json:"debounce"`
+	Host     string `json:"host" yaml:"host" toml:"host"`
+	Port     int    `json:"port" yaml:"port" toml:"port"`
+	Watch    bool   `json:"watch" yaml:"watch" toml:"watch"`
+	Debounce string `json:"debounce" yaml:"debounce" toml:"debounce"`
 }
 
 type DatabaseConfig struct {
-	Path          string `json:"path"`
-	Charmap       string `json:"charmap"`
-	DirectAccess  bool   `json:"direct_access"`
-	RTLConversion bool   `json:"rtl_conversion"`
+	Path          string `json:"path" yaml:"path" toml:"path"`
+	Charmap       string `json:"charmap" yaml:"charmap" toml:"charmap"`
+	DirectAccess  bool   `json:"direct_access" yaml:"direct_access" toml:"direct_access"`
+	RTLConversion bool   `json:"rtl_conversion" yaml:"rtl_conversion" toml:"rtl_conversion"`
+}
+
+type RuntimeConfig struct {
+	TempDir string `json:"temp_dir" yaml:"temp_dir" toml:"temp_dir"`
+}
+
+type ConvertConfig struct {
+	Output   string `json:"output" yaml:"output" toml:"output"`
+	Format   string `json:"format" yaml:"format" toml:"format"`
+	Watch    bool   `json:"watch" yaml:"watch" toml:"watch"`
+	Debounce string `json:"debounce" yaml:"debounce" toml:"debounce"`
 }
 
 type UIConfig struct {
-	Theme                   string `json:"theme"`
-	AutoScrollToChanged     bool   `json:"auto_scroll_to_changed"`
-	HighlightChanges        bool   `json:"highlight_changes"`
-	RTLTextDirection        bool   `json:"rtl_text_direction"`
-	EnablePagination        bool   `json:"enable_pagination"`
-	PageSize                int    `json:"page_size"`
-	PlayNotificationSound   bool   `json:"play_notification_sound"`
-	NotificationSoundSource string `json:"notification_sound_source"`
+	Theme                   string `json:"theme" yaml:"theme" toml:"theme"`
+	AutoScrollToChanged     bool   `json:"auto_scroll_to_changed" yaml:"auto_scroll_to_changed" toml:"auto_scroll_to_changed"`
+	HighlightChanges        bool   `json:"highlight_changes" yaml:"highlight_changes" toml:"highlight_changes"`
+	RTLTextDirection        bool   `json:"rtl_text_direction" yaml:"rtl_text_direction" toml:"rtl_text_direction"`
+	EnablePagination        bool   `json:"enable_pagination" yaml:"enable_pagination" toml:"enable_pagination"`
+	PageSize                int    `json:"page_size" yaml:"page_size" toml:"page_size"`
+	PlayNotificationSound   bool   `json:"play_notification_sound" yaml:"play_notification_sound" toml:"play_notification_sound"`
+	NotificationSoundSource string `json:"notification_sound_source" yaml:"notification_sound_source" toml:"notification_sound_source"`
 }
 
 type Manager struct {
-	path string
-	mu   sync.RWMutex
-	cfg  Config
+	path  string
+	paths []string
+	mu    sync.RWMutex
+	cfg   Config
 }
 
 func Default() Config {
@@ -68,6 +91,14 @@ func Default() Config {
 		},
 		Database: DatabaseConfig{
 			DirectAccess: false,
+		},
+		Runtime: RuntimeConfig{
+			TempDir: "system",
+		},
+		Convert: ConvertConfig{
+			Output:   ".",
+			Format:   "json",
+			Debounce: "1s",
 		},
 		UI: UIConfig{
 			Theme:                   "system",
@@ -100,15 +131,132 @@ func DefaultPath() string {
 	return "patris-export.json"
 }
 
-func Load(path string) (*Manager, error) {
-	if strings.TrimSpace(path) == "" {
-		path = DefaultPath()
+func ResolvePaths(paths []string) []string {
+	explicit := cleanPathList(paths)
+	if len(explicit) > 0 {
+		return explicit
 	}
-	m := &Manager{path: path, cfg: Default()}
-	if err := m.Reload(); err != nil {
-		if !errors.Is(err, os.ErrNotExist) {
+
+	if value := strings.TrimSpace(os.Getenv("PATRIS_CONFIG_FILES")); value != "" {
+		return cleanPathList(strings.Split(value, string(os.PathListSeparator)))
+	}
+	if value := strings.TrimSpace(os.Getenv("PATRIS_CONFIG_PATHS")); value != "" {
+		return cleanPathList(strings.Split(value, string(os.PathListSeparator)))
+	}
+	for _, key := range []string{"PATRIS_CONFIG", "PATRIS_CONFIG_FILE"} {
+		if value := strings.TrimSpace(os.Getenv(key)); value != "" {
+			return cleanPathList([]string{value})
+		}
+	}
+
+	discovered := []string{}
+	addCandidateDir := func(dir string) {
+		if strings.TrimSpace(dir) == "" {
+			return
+		}
+		for _, name := range configBaseNames {
+			discovered = append(discovered, filepath.Join(dir, name))
+		}
+	}
+
+	if cwd, err := os.Getwd(); err == nil {
+		addCandidateDir(cwd)
+		addCandidateDir(filepath.Join(cwd, "config"))
+	}
+	if exe, err := os.Executable(); err == nil {
+		exeDir := filepath.Dir(exe)
+		addCandidateDir(filepath.Join(exeDir, "config"))
+	}
+	discovered = append(discovered, DefaultPath())
+	return cleanPathList(discovered)
+}
+
+func ResolveTempDir(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" || strings.EqualFold(value, "system") || strings.EqualFold(value, "default") {
+		return ""
+	}
+	if filepath.IsAbs(value) {
+		return value
+	}
+	if exe, err := os.Executable(); err == nil {
+		return filepath.Join(filepath.Dir(exe), value)
+	}
+	if cwd, err := os.Getwd(); err == nil {
+		return filepath.Join(cwd, value)
+	}
+	return value
+}
+
+func cleanPathList(paths []string) []string {
+	seen := map[string]bool{}
+	out := []string{}
+	for _, path := range paths {
+		for _, part := range splitPathEntry(path) {
+			cleaned := filepath.Clean(os.ExpandEnv(strings.TrimSpace(part)))
+			if cleaned == "." || cleaned == "" || seen[cleaned] {
+				continue
+			}
+			seen[cleaned] = true
+			out = append(out, cleaned)
+		}
+	}
+	return out
+}
+
+func splitPathEntry(path string) []string {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return nil
+	}
+	if strings.Contains(path, "\n") {
+		return strings.Fields(path)
+	}
+	if strings.Contains(path, string(os.PathListSeparator)) {
+		return strings.Split(path, string(os.PathListSeparator))
+	}
+	return []string{path}
+}
+
+func Load(path string) (*Manager, error) {
+	return LoadFiles([]string{path})
+}
+
+func LoadFiles(paths []string) (*Manager, error) {
+	resolved := ResolvePaths(paths)
+	if len(resolved) == 0 {
+		resolved = []string{DefaultPath()}
+	}
+	writePath := resolved[len(resolved)-1]
+	m := &Manager{path: writePath, paths: resolved, cfg: Default()}
+
+	cfg := Default()
+	loaded := false
+	lastLoadedPath := ""
+	for _, p := range resolved {
+		if strings.TrimSpace(p) == "" {
+			continue
+		}
+		if err := loadInto(p, &cfg); err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				continue
+			}
 			return nil, err
 		}
+		loaded = true
+		lastLoadedPath = p
+	}
+	normalize(&cfg)
+	if lastLoadedPath != "" {
+		writePath = lastLoadedPath
+		m.path = writePath
+	}
+	m.cfg = cfg
+	if !loaded {
+		if err := m.Save(); err != nil {
+			return nil, err
+		}
+	} else if _, err := os.Stat(writePath); errors.Is(err, os.ErrNotExist) {
 		if err := m.Save(); err != nil {
 			return nil, err
 		}
@@ -118,6 +266,12 @@ func Load(path string) (*Manager, error) {
 
 func (m *Manager) Path() string {
 	return m.path
+}
+
+func (m *Manager) Paths() []string {
+	out := make([]string, len(m.paths))
+	copy(out, m.paths)
+	return out
 }
 
 func (m *Manager) Get() Config {
@@ -130,7 +284,7 @@ func (m *Manager) Update(fn func(*Config)) error {
 	m.mu.Lock()
 	fn(&m.cfg)
 	normalize(&m.cfg)
-	data, err := json.MarshalIndent(m.cfg, "", "  ")
+	data, err := encodeConfig(m.path, m.cfg)
 	m.mu.Unlock()
 	if err != nil {
 		return err
@@ -152,19 +306,69 @@ func (m *Manager) Replace(cfg Config) error {
 }
 
 func (m *Manager) Reload() error {
-	data, err := os.ReadFile(m.path)
-	if err != nil {
-		return err
-	}
 	cfg := Default()
-	if err := json.Unmarshal(data, &cfg); err != nil {
-		return fmt.Errorf("load config %s: %w", m.path, err)
+	loaded := false
+	for _, p := range m.paths {
+		if err := loadInto(p, &cfg); err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				continue
+			}
+			return err
+		}
+		loaded = true
+	}
+	if !loaded {
+		if err := loadInto(m.path, &cfg); err != nil {
+			return err
+		}
 	}
 	normalize(&cfg)
 	m.mu.Lock()
 	m.cfg = cfg
 	m.mu.Unlock()
 	return nil
+}
+
+func loadInto(path string, cfg *Config) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	if err := decodeConfig(path, data, cfg); err != nil {
+		return fmt.Errorf("load config %s: %w", path, err)
+	}
+	normalize(cfg)
+	return nil
+}
+
+func decodeConfig(path string, data []byte, cfg *Config) error {
+	switch strings.ToLower(filepath.Ext(path)) {
+	case ".yaml", ".yml":
+		return yaml.Unmarshal(data, cfg)
+	case ".toml":
+		return toml.Unmarshal(data, cfg)
+	default:
+		return json.Unmarshal(data, cfg)
+	}
+}
+
+func encodeConfig(path string, cfg Config) ([]byte, error) {
+	var (
+		data []byte
+		err  error
+	)
+	switch strings.ToLower(filepath.Ext(path)) {
+	case ".yaml", ".yml":
+		data, err = yaml.Marshal(cfg)
+	case ".toml":
+		data, err = toml.Marshal(cfg)
+	default:
+		data, err = json.MarshalIndent(cfg, "", "  ")
+	}
+	if err != nil {
+		return nil, err
+	}
+	return append(data, '\n'), nil
 }
 
 func (m *Manager) Watch(onChange func(Config)) (*fsnotify.Watcher, error) {
@@ -258,6 +462,24 @@ func ApplyEnv(cfg *Config) {
 	if value := os.Getenv("PATRIS_RTL"); strings.TrimSpace(value) != "" {
 		cfg.Database.RTLConversion = parseBool(value, cfg.Database.RTLConversion)
 	}
+	for _, key := range []string{"PATRIS_TEMP_DIR", "PATRIS_TMPDIR"} {
+		if value := os.Getenv(key); strings.TrimSpace(value) != "" {
+			cfg.Runtime.TempDir = strings.TrimSpace(value)
+			break
+		}
+	}
+	if value := os.Getenv("PATRIS_OUTPUT"); strings.TrimSpace(value) != "" {
+		cfg.Convert.Output = strings.TrimSpace(value)
+	}
+	if value := os.Getenv("PATRIS_FORMAT"); strings.TrimSpace(value) != "" {
+		cfg.Convert.Format = strings.TrimSpace(value)
+	}
+	if value := os.Getenv("PATRIS_CONVERT_WATCH"); strings.TrimSpace(value) != "" {
+		cfg.Convert.Watch = parseBool(value, cfg.Convert.Watch)
+	}
+	if value := os.Getenv("PATRIS_CONVERT_DEBOUNCE"); strings.TrimSpace(value) != "" {
+		cfg.Convert.Debounce = strings.TrimSpace(value)
+	}
 	normalize(cfg)
 }
 
@@ -278,6 +500,22 @@ func normalize(cfg *Config) {
 	}
 	if cfg.Server.Debounce == "" {
 		cfg.Server.Debounce = "0s"
+	}
+	if cfg.Runtime.TempDir == "" {
+		cfg.Runtime.TempDir = "system"
+	}
+	if cfg.Convert.Output == "" {
+		cfg.Convert.Output = "."
+	}
+	if cfg.Convert.Format == "" {
+		cfg.Convert.Format = "json"
+	}
+	cfg.Convert.Format = strings.ToLower(strings.TrimSpace(cfg.Convert.Format))
+	if cfg.Convert.Format != "csv" {
+		cfg.Convert.Format = "json"
+	}
+	if cfg.Convert.Debounce == "" {
+		cfg.Convert.Debounce = "1s"
 	}
 	if cfg.UI.PageSize <= 0 {
 		cfg.UI.PageSize = 100

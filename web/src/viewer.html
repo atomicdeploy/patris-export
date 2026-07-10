@@ -92,54 +92,91 @@
 
         <div class="panel-backdrop" id="panelBackdrop"></div>
 
-        <div class="settings-panel" id="settingsPanel">
+        <div class="settings-panel settings-modal" id="settingsPanel" role="dialog" aria-modal="true" aria-labelledby="settingsTitle">
             <div class="settings-content">
-                <h2>Settings</h2>
-                <div class="settings-group">
-                    <label class="checkbox-label">
-                        <input type="checkbox" id="autoScrollToChanged">
-                        <span>Auto-scroll to changed items</span>
-                    </label>
-                    <label class="checkbox-label">
-                        <input type="checkbox" id="highlightChanges" checked>
-                        <span>Highlight changed items</span>
-                    </label>
-                    <label class="checkbox-label">
-                        <input type="checkbox" id="rtlTextDirection">
-                        <span>Display table text right-to-left</span>
-                    </label>
-                    <label class="checkbox-label">
-                        <input type="checkbox" id="playNotificationSound">
-                        <span>🔔 Play notification sound on updates</span>
-                    </label>
-                    <label>
-                        Notification sound:
-                        <select id="notificationSoundSource" class="select-input">
-                            <option value="external" selected>External file</option>
-                            <option value="generated">Generated melody</option>
-                        </select>
-                    </label>
+                <div class="settings-header">
+                    <div>
+                        <h2 id="settingsTitle">Settings</h2>
+                        <p id="settingsConfigPath" class="settings-path"></p>
+                    </div>
+                    <button class="btn btn-icon" id="closeSettings" type="button" title="Close">✕</button>
+                </div>
+                <div class="settings-tabs" role="tablist" aria-label="Settings sections">
+                    <button class="settings-tab active" type="button" data-settings-tab="ui">Interface</button>
+                    <button class="settings-tab" type="button" data-settings-tab="server">Server</button>
+                    <button class="settings-tab" type="button" data-settings-tab="database">Database</button>
+                    <button class="settings-tab" type="button" data-settings-tab="runtime">Runtime</button>
+                </div>
+                <div class="settings-pane active" data-settings-pane="ui">
+                    <div class="settings-grid">
+                        <label class="field-label">Theme
+                            <select id="settingsTheme" class="select-input">
+                                <option value="system">System</option>
+                                <option value="light">Light</option>
+                                <option value="dark">Dark</option>
+                            </select>
+                        </label>
+                        <label class="field-label">Records per page
+                            <select id="pageSize" class="select-input">
+                                <option value="25">25</option>
+                                <option value="50">50</option>
+                                <option value="100" selected>100</option>
+                                <option value="500">500</option>
+                            </select>
+                        </label>
+                        <label class="field-label">Notification sound
+                            <select id="notificationSoundSource" class="select-input">
+                                <option value="external" selected>External file</option>
+                                <option value="generated">Generated melody</option>
+                            </select>
+                        </label>
+                    </div>
+                    <div class="settings-group">
+                        <label class="checkbox-label"><input type="checkbox" id="autoScrollToChanged"><span>Auto-scroll to changed items</span></label>
+                        <label class="checkbox-label"><input type="checkbox" id="highlightChanges" checked><span>Highlight changed items</span></label>
+                        <label class="checkbox-label"><input type="checkbox" id="rtlTextDirection"><span>Display table text right-to-left</span></label>
+                        <label class="checkbox-label"><input type="checkbox" id="enablePagination"><span>Enable pagination</span></label>
+                        <label class="checkbox-label"><input type="checkbox" id="playNotificationSound"><span>Play notification sound on updates</span></label>
+                    </div>
                     <div class="button-row">
                         <button class="btn btn-secondary" id="testNotificationSound" type="button">Test sound</button>
                         <button class="btn btn-secondary" id="testNativeToast" type="button">Test toast</button>
                     </div>
-                    <label class="checkbox-label">
-                        <input type="checkbox" id="enablePagination">
-                        <span>Enable pagination</span>
-                    </label>
                 </div>
-                <div class="settings-group">
-                    <label>
-                        Records per page:
-                        <select id="pageSize" class="select-input">
-                            <option value="25">25</option>
-                            <option value="50">50</option>
-                            <option value="100" selected>100</option>
-                            <option value="500">500</option>
-                        </select>
-                    </label>
+                <div class="settings-pane" data-settings-pane="server">
+                    <div class="settings-grid">
+                        <label class="field-label">Host
+                            <input id="serverHost" class="text-input" type="text" autocomplete="off">
+                        </label>
+                        <label class="field-label">Port
+                            <input id="serverPort" class="text-input" type="number" min="1" max="65535">
+                        </label>
+                        <label class="field-label">Debounce
+                            <input id="serverDebounce" class="text-input" type="text" placeholder="500ms">
+                        </label>
+                    </div>
+                    <label class="checkbox-label"><input type="checkbox" id="serverWatch"><span>Watch source and broadcast updates</span></label>
                 </div>
-                <button class="btn btn-primary" id="closeSettings">Close</button>
+                <div class="settings-pane" data-settings-pane="database">
+                    <div class="settings-grid">
+                        <label class="field-label wide">Database path or URL
+                            <input id="databasePath" class="text-input" type="text" autocomplete="off">
+                        </label>
+                        <label class="field-label wide">Custom charmap
+                            <input id="databaseCharmap" class="text-input" type="text" autocomplete="off">
+                        </label>
+                    </div>
+                    <label class="checkbox-label"><input type="checkbox" id="directAccess"><span>Read database directly without temp copy</span></label>
+                    <label class="checkbox-label"><input type="checkbox" id="rtlConversion"><span>Enable opt-in RTL conversion</span></label>
+                </div>
+                <div class="settings-pane" data-settings-pane="runtime">
+                    <div class="settings-grid">
+                        <label class="field-label wide">Temp directory
+                            <input id="runtimeTempDir" class="text-input" type="text" placeholder="system">
+                        </label>
+                    </div>
+                    <p class="settings-help">Use <code>system</code> for the operating system temp directory. Relative paths resolve under the application directory.</p>
+                </div>
             </div>
         </div>
 

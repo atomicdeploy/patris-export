@@ -219,6 +219,9 @@ function applyConfig(config, source = 'server') {
     state.config = config;
     localStorage.setItem(CONFIG_STORAGE_KEY, JSON.stringify(config));
     if (config.ui) {
+        if (config.ui.theme) {
+            localStorage.setItem('theme', config.ui.theme);
+        }
         state.settings = {
             ...state.settings,
             autoScrollToChanged: !!config.ui.auto_scroll_to_changed,
@@ -261,7 +264,7 @@ function syncSettingsToConfig() {
     if (!state.config) return;
     state.config.ui = {
         ...(state.config.ui || {}),
-        theme: localStorage.getItem('theme') || 'system',
+        theme: document.getElementById('settingsTheme')?.value || localStorage.getItem('theme') || 'system',
         auto_scroll_to_changed: state.settings.autoScrollToChanged,
         highlight_changes: state.settings.highlightChanges,
         rtl_text_direction: state.settings.rtlTextDirection,
@@ -274,22 +277,21 @@ function syncSettingsToConfig() {
 }
 
 let configSaveTimer = null;
-function saveConfigToServer(config) {
+async function saveConfigToServer(config) {
     localStorage.setItem(CONFIG_STORAGE_KEY, JSON.stringify(config));
     clearTimeout(configSaveTimer);
-    configSaveTimer = setTimeout(async () => {
-        try {
-            const response = await fetch('/api/config', {
-                method: 'PUT',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(config)
-            });
-            if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
-            console.info('💾 Settings synced to config file.');
-        } catch (error) {
-            console.error('❌ Failed to sync settings to config file:', error);
-        }
-    }, 250);
+    try {
+        const response = await fetch('/api/config', {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(config)
+        });
+        if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
+        console.info('💾 Settings synced to config file.');
+    } catch (error) {
+        console.error('❌ Failed to sync settings to config file:', error);
+        showInAppToast('Settings save failed', error.message, { error: true, broadcastToTabs: true });
+    }
 }
 
 // Save sort preferences to localStorage
@@ -613,14 +615,66 @@ function anbarTotal(record) {
 
 // Apply settings to UI
 function applySettings() {
-    document.getElementById('autoScrollToChanged').checked = state.settings.autoScrollToChanged;
-    document.getElementById('highlightChanges').checked = state.settings.highlightChanges;
-    document.getElementById('rtlTextDirection').checked = state.settings.rtlTextDirection;
-    document.getElementById('enablePagination').checked = state.settings.enablePagination;
-    document.getElementById('pageSize').value = state.settings.pageSize;
-    document.getElementById('playNotificationSound').checked = state.settings.playNotificationSound;
-    document.getElementById('notificationSoundSource').value = state.settings.notificationSoundSource || 'external';
+    setChecked('autoScrollToChanged', state.settings.autoScrollToChanged);
+    setChecked('highlightChanges', state.settings.highlightChanges);
+    setChecked('rtlTextDirection', state.settings.rtlTextDirection);
+    setChecked('enablePagination', state.settings.enablePagination);
+    setValue('pageSize', state.settings.pageSize);
+    setChecked('playNotificationSound', state.settings.playNotificationSound);
+    setValue('notificationSoundSource', state.settings.notificationSoundSource || 'external');
+    applyConfigToSettingsForm();
     document.body.classList.toggle('rtl-text-mode', !!state.settings.rtlTextDirection);
+}
+
+function setValue(id, value) {
+    const el = document.getElementById(id);
+    if (el) el.value = value ?? '';
+}
+
+function setChecked(id, value) {
+    const el = document.getElementById(id);
+    if (el) el.checked = !!value;
+}
+
+function applyConfigToSettingsForm() {
+    const cfg = state.config || {};
+    setValue('settingsTheme', cfg.ui?.theme || localStorage.getItem('theme') || 'system');
+    setValue('serverHost', cfg.server?.host || '');
+    setValue('serverPort', cfg.server?.port || '');
+    setChecked('serverWatch', cfg.server?.watch);
+    setValue('serverDebounce', cfg.server?.debounce || '');
+    setValue('databasePath', cfg.database?.path || '');
+    setValue('databaseCharmap', cfg.database?.charmap || '');
+    setChecked('directAccess', cfg.database?.direct_access);
+    setChecked('rtlConversion', cfg.database?.rtl_conversion);
+    setValue('runtimeTempDir', cfg.runtime?.temp_dir || 'system');
+    const pathEl = document.getElementById('settingsConfigPath');
+    if (pathEl) {
+        pathEl.textContent = state.appInfo?.config_path ? `Config: ${state.appInfo.config_path}` : '';
+    }
+}
+
+function updateConfigFromSettingsForm() {
+    if (!state.config) return;
+    state.config.server = {
+        ...(state.config.server || {}),
+        host: document.getElementById('serverHost')?.value.trim() || '127.0.0.1',
+        port: parseInt(document.getElementById('serverPort')?.value || '0', 10) || 8080,
+        watch: !!document.getElementById('serverWatch')?.checked,
+        debounce: document.getElementById('serverDebounce')?.value.trim() || '0s'
+    };
+    state.config.database = {
+        ...(state.config.database || {}),
+        path: document.getElementById('databasePath')?.value.trim() || '',
+        charmap: document.getElementById('databaseCharmap')?.value.trim() || '',
+        direct_access: !!document.getElementById('directAccess')?.checked,
+        rtl_conversion: !!document.getElementById('rtlConversion')?.checked
+    };
+    state.config.runtime = {
+        ...(state.config.runtime || {}),
+        temp_dir: document.getElementById('runtimeTempDir')?.value.trim() || 'system'
+    };
+    syncSettingsToConfig();
 }
 
 // Initialize notification audio
@@ -840,6 +894,26 @@ function closePanels() {
     if (backdrop) backdrop.classList.remove('open');
 }
 
+function initSettingsTabs() {
+    document.querySelectorAll('[data-settings-tab]').forEach(tab => {
+        tab.addEventListener('click', () => {
+            const target = tab.dataset.settingsTab;
+            document.querySelectorAll('[data-settings-tab]').forEach(item => {
+                item.classList.toggle('active', item === tab);
+            });
+            document.querySelectorAll('[data-settings-pane]').forEach(pane => {
+                pane.classList.toggle('active', pane.dataset.settingsPane === target);
+            });
+        });
+    });
+}
+
+function bindConfigField(id, eventName = 'change') {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.addEventListener(eventName, updateConfigFromSettingsForm);
+}
+
 async function fetchAppInfo(options = {}) {
     const { source = 'api', log = true } = options;
     try {
@@ -878,6 +952,7 @@ function applyAppInfo(appInfo, source = 'api') {
         state.resourceVersion = nextResourceVersion;
     }
     updateAppMetadata();
+    applyConfigToSettingsForm();
     if (source !== 'tab broadcast') {
         publishFrontendBroadcast('app-info:update', state.appInfo);
     }
@@ -1137,6 +1212,7 @@ function handleWebSocketMessage(data) {
         }
     } else if (data.type === 'config_update') {
         applyConfig(data.config, 'file watcher');
+        showInAppToast('Settings reloaded', 'Configuration file changes were applied.', { broadcastToTabs: true });
     } else if (data.type === 'process_info') {
         applyProcessStatus(data);
     }
@@ -2161,6 +2237,7 @@ function toggleTheme() {
     document.documentElement.classList.toggle('dark-mode', isDark);
     const theme = isDark ? 'dark' : 'light';
     localStorage.setItem('theme', theme);
+    setValue('settingsTheme', theme);
     updateThemeIcon(isDark);
     syncSettingsToConfig();
     publishFrontendBroadcast('theme:update', { theme });
@@ -2185,7 +2262,7 @@ function setLoadingState(isLoading) {
 function initTheme() {
     const savedTheme = localStorage.getItem('theme');
     const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
-    const isDark = savedTheme === 'dark' || (!savedTheme && prefersDark);
+    const isDark = savedTheme === 'dark' || ((!savedTheme || savedTheme === 'system') && prefersDark);
     
     if (isDark) {
         document.body.classList.add('dark-mode');
@@ -2194,6 +2271,7 @@ function initTheme() {
         document.body.classList.remove('dark-mode');
         document.documentElement.classList.remove('dark-mode');
     }
+    setValue('settingsTheme', savedTheme || 'system');
     updateThemeIcon(isDark);
 }
 
@@ -2251,6 +2329,7 @@ function init() {
     });
     
     document.getElementById('settingsBtn').addEventListener('click', () => {
+        applyConfigToSettingsForm();
         openPanel('settingsPanel');
     });
     
@@ -2258,6 +2337,7 @@ function init() {
         closePanels();
     });
     document.getElementById('panelBackdrop').addEventListener('click', closePanels);
+    initSettingsTabs();
     
     document.getElementById('closeInspector').addEventListener('click', () => {
         document.getElementById('inspectorPanel').classList.remove('open');
@@ -2324,6 +2404,16 @@ function init() {
         saveSettings();
     });
 
+    document.getElementById('settingsTheme').addEventListener('change', (e) => {
+        localStorage.setItem('theme', e.target.value);
+        initTheme();
+        saveSettings();
+        publishFrontendBroadcast('theme:update', { theme: e.target.value });
+    });
+
+    ['serverHost', 'serverPort', 'serverWatch', 'serverDebounce', 'databasePath', 'databaseCharmap', 'directAccess', 'rtlConversion', 'runtimeTempDir']
+        .forEach(id => bindConfigField(id));
+
     document.getElementById('testNotificationSound').addEventListener('click', () => {
         playNotificationSound(true);
         showInAppToast('Sound test', 'Notification audio was triggered.', { broadcastToTabs: true });
@@ -2363,6 +2453,11 @@ function init() {
 
     // Fetch initial data via HTTP
     fetchInitialData();
+
+    if (new URLSearchParams(window.location.search).get('settings') === '1') {
+        applyConfigToSettingsForm();
+        openPanel('settingsPanel');
+    }
 }
 
 // Fetch database file metadata
