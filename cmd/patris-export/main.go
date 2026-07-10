@@ -38,6 +38,11 @@ var (
 	warningColor = color.New(color.FgYellow)
 )
 
+const (
+	defaultRepoOwner = "atomicdeploy"
+	defaultRepoName  = "patris-export"
+)
+
 func main() {
 	rootCmd := &cobra.Command{
 		Use:   "patris-export",
@@ -122,6 +127,14 @@ Note: Set GITHUB_TOKEN environment variable for higher API rate limits.`,
 		errorColor.Fprintf(os.Stderr, "❌ Error: %v\n", err)
 		os.Exit(1)
 	}
+}
+
+func getenvDefault(name, fallback string) string {
+	value := strings.TrimSpace(os.Getenv(name))
+	if value == "" {
+		return fallback
+	}
+	return value
 }
 
 func runConvert(cmd *cobra.Command, args []string) {
@@ -388,20 +401,9 @@ func runUpdate(cmd *cobra.Command, args []string) {
 	fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 	fmt.Println()
 
-	// Derive repository information from go.mod or environment variables
-	repoOwner, repoName, err := updater.DeriveRepoInfoFromModule()
-	if err != nil {
-		errorColor.Printf("❌ Failed to determine repository information: %v\n", err)
-		fmt.Println()
-		warningColor.Println("💡 You can set repository information using environment variables:")
-		infoColor.Println("   export PATRIS_REPO_OWNER='atomicdeploy'")
-		infoColor.Println("   export PATRIS_REPO_NAME='patris-export'")
-		infoColor.Println("   patris-export update")
-		fmt.Println()
-		warningColor.Println("   Or run from within the project directory containing go.mod")
-		fmt.Println()
-		os.Exit(1)
-	}
+	// Use the installed binary defaults, with environment variables as overrides.
+	repoOwner := getenvDefault("PATRIS_REPO_OWNER", defaultRepoOwner)
+	repoName := getenvDefault("PATRIS_REPO_NAME", defaultRepoName)
 
 	infoColor.Printf("📦 Repository: %s/%s\n", repoOwner, repoName)
 
@@ -470,7 +472,7 @@ func runUpdate(cmd *cobra.Command, args []string) {
 
 	// Step 3: Download artifact
 	infoColor.Println("⬇️  Downloading artifact...")
-	
+
 	// Create temp directory
 	tempDir, err := os.MkdirTemp("", "patris-update-*")
 	if err != nil {
@@ -490,7 +492,7 @@ func runUpdate(cmd *cobra.Command, args []string) {
 		infoColor.Println("   patris-export update")
 		fmt.Println()
 		warningColor.Println("   Get your token from: https://github.com/settings/tokens")
-		warningColor.Println("   Required scope: 'actions:read'")
+		warningColor.Println("   Use a token with repo access for private repositories; public repositories can use anonymous API access subject to rate limits.")
 		fmt.Println()
 		os.Exit(1)
 	}

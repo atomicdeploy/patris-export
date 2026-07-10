@@ -4,11 +4,12 @@ import (
 	"archive/zip"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
 
-func TestExtractExecutable_Linux(t *testing.T) {
+func TestExtractExecutable_CurrentPlatform(t *testing.T) {
 	// Create a temporary directory for testing
 	tmpDir, err := os.MkdirTemp("", "updater-test-*")
 	if err != nil {
@@ -22,20 +23,19 @@ func TestExtractExecutable_Linux(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create zip file: %v", err)
 	}
-	defer zipFile.Close()
 
 	zipWriter := zip.NewWriter(zipFile)
 
 	// Test extraction
 	u := NewUpdater("testowner", "testrepo")
 	expectedName := u.GetPlatformBinaryName()
-	
+
 	// Add an executable with the expected name to the ZIP
 	exeWriter, err := zipWriter.Create(expectedName)
 	if err != nil {
 		t.Fatalf("Failed to create file in zip: %v", err)
 	}
-	
+
 	testContent := []byte("#!/bin/bash\necho 'test'")
 	if _, err := exeWriter.Write(testContent); err != nil {
 		t.Fatalf("Failed to write to zip: %v", err)
@@ -43,6 +43,9 @@ func TestExtractExecutable_Linux(t *testing.T) {
 
 	if err := zipWriter.Close(); err != nil {
 		t.Fatalf("Failed to close zip: %v", err)
+	}
+	if err := zipFile.Close(); err != nil {
+		t.Fatalf("Failed to close zip file: %v", err)
 	}
 
 	extractDir := filepath.Join(tmpDir, "extract")
@@ -61,10 +64,11 @@ func TestExtractExecutable_Linux(t *testing.T) {
 		t.Fatalf("Failed to stat extracted file: %v", err)
 	}
 
-	// Check exact permissions (should be 0755)
-	expectedPerms := os.FileMode(0755)
-	if info.Mode().Perm() != expectedPerms {
-		t.Errorf("Extracted file has permissions %o, expected %o", info.Mode().Perm(), expectedPerms)
+	if runtime.GOOS != "windows" {
+		expectedPerms := os.FileMode(0755)
+		if info.Mode().Perm() != expectedPerms {
+			t.Errorf("Extracted file has permissions %o, expected %o", info.Mode().Perm(), expectedPerms)
+		}
 	}
 
 	// Verify content
@@ -92,7 +96,6 @@ func TestExtractExecutable_NoExecutable(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create zip file: %v", err)
 	}
-	defer zipFile.Close()
 
 	zipWriter := zip.NewWriter(zipFile)
 
@@ -101,13 +104,16 @@ func TestExtractExecutable_NoExecutable(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create file in zip: %v", err)
 	}
-	
+
 	if _, err := fileWriter.Write([]byte("test")); err != nil {
 		t.Fatalf("Failed to write to zip: %v", err)
 	}
 
 	if err := zipWriter.Close(); err != nil {
 		t.Fatalf("Failed to close zip: %v", err)
+	}
+	if err := zipFile.Close(); err != nil {
+		t.Fatalf("Failed to close zip file: %v", err)
 	}
 
 	// Test extraction - should fail
@@ -125,6 +131,39 @@ func TestExtractExecutable_NoExecutable(t *testing.T) {
 	// Check that error message contains the key phrase about no executable found
 	if !strings.Contains(err.Error(), "no executable found in zip file") {
 		t.Errorf("Expected error to contain 'no executable found in zip file', got %q", err.Error())
+	}
+}
+
+func TestExtractExecutable_SkipsUnsafeZipPaths(t *testing.T) {
+	tmpDir := t.TempDir()
+	zipPath := filepath.Join(tmpDir, "test.zip")
+	zipFile, err := os.Create(zipPath)
+	if err != nil {
+		t.Fatalf("Failed to create zip file: %v", err)
+	}
+
+	zipWriter := zip.NewWriter(zipFile)
+	u := NewUpdater("testowner", "testrepo")
+	expectedName := u.GetPlatformBinaryName()
+
+	maliciousWriter, err := zipWriter.Create("../" + expectedName)
+	if err != nil {
+		t.Fatalf("Failed to create unsafe zip entry: %v", err)
+	}
+	if _, err := maliciousWriter.Write([]byte("bad")); err != nil {
+		t.Fatalf("Failed to write unsafe zip entry: %v", err)
+	}
+
+	if err := zipWriter.Close(); err != nil {
+		t.Fatalf("Failed to close zip: %v", err)
+	}
+	if err := zipFile.Close(); err != nil {
+		t.Fatalf("Failed to close zip file: %v", err)
+	}
+
+	_, err = u.ExtractExecutable(zipPath, filepath.Join(tmpDir, "extract"))
+	if err == nil || !strings.Contains(err.Error(), "no executable found") {
+		t.Fatalf("expected unsafe executable entry to be skipped, got %v", err)
 	}
 }
 

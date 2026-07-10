@@ -3,11 +3,15 @@ package updater
 import (
 	"archive/zip"
 	"bufio"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
+	"os/exec"
+	"path"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -15,7 +19,9 @@ import (
 )
 
 const (
-	githubAPIURL = "https://api.github.com"
+	githubAPIURL       = "https://api.github.com"
+	githubAPIVersion   = "2022-11-28"
+	defaultHTTPTimeout = 5 * time.Minute
 )
 
 // Updater handles auto-update functionality
@@ -25,6 +31,7 @@ type Updater struct {
 	binaryName string // Base name of the binary (e.g., "patris-export")
 	repoOwner  string // GitHub repository owner
 	repoName   string // GitHub repository name
+	apiBaseURL string // GitHub API base URL; overridden by tests
 }
 
 // WorkflowRun represents a GitHub Actions workflow run
@@ -49,6 +56,7 @@ type Artifact struct {
 	Name               string    `json:"name"`
 	SizeInBytes        int64     `json:"size_in_bytes"`
 	ArchiveDownloadURL string    `json:"archive_download_url"`
+	Digest             string    `json:"digest,omitempty"`
 	Expired            bool      `json:"expired"`
 	CreatedAt          time.Time `json:"created_at"`
 }
@@ -63,14 +71,15 @@ type ArtifactsResponse struct {
 func NewUpdater(repoOwner, repoName string) *Updater {
 	// Derive binary name from the current executable
 	binaryName := deriveBinaryName(repoName)
-	
+
 	return &Updater{
 		apiToken:   os.Getenv("GITHUB_TOKEN"),
 		binaryName: binaryName,
 		repoOwner:  repoOwner,
 		repoName:   repoName,
+		apiBaseURL: githubAPIURL,
 		client: &http.Client{
-			Timeout: 5 * time.Minute,
+			Timeout: defaultHTTPTimeout,
 		},
 	}
 }
@@ -82,30 +91,34 @@ func deriveBinaryName(fallbackName string) string {
 		// Fallback to provided name if we can't get the executable
 		return fallbackName
 	}
-	
+
 	// Get the base name without path
 	baseName := filepath.Base(exe)
-	
+
+	return normalizeBinaryName(baseName, fallbackName)
+}
+
+func normalizeBinaryName(baseName, fallbackName string) string {
 	// Remove platform suffix and extension if present
 	// Examples: "patris-export-linux-amd64" -> "patris-export"
 	//           "patris-export-windows-amd64.exe" -> "patris-export"
 	//           "patris-export.exe" -> "patris-export"
 	//           "patris-export" -> "patris-export"
-	
+
 	// Remove .exe extension if present
 	baseName = strings.TrimSuffix(baseName, ".exe")
-	
+
 	// Remove platform suffixes
 	baseName = strings.TrimSuffix(baseName, "-linux-amd64")
 	baseName = strings.TrimSuffix(baseName, "-windows-amd64")
 	baseName = strings.TrimSuffix(baseName, "-darwin-amd64")
 	baseName = strings.TrimSuffix(baseName, "-darwin-arm64")
-	
+
 	// If we ended up with an empty string, use fallback name
 	if baseName == "" {
 		return fallbackName
 	}
-	
+
 	return baseName
 }
 
@@ -118,7 +131,7 @@ func (u *Updater) doRequest(url string) (*http.Response, error) {
 
 	// Add GitHub API headers
 	req.Header.Set("Accept", "application/vnd.github+json")
-	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+	req.Header.Set("X-GitHub-Api-Version", githubAPIVersion)
 
 	// Add token if available
 	if u.apiToken != "" {
@@ -131,8 +144,14 @@ func (u *Updater) doRequest(url string) (*http.Response, error) {
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		defer resp.Body.Close()
-		body, _ := io.ReadAll(resp.Body)
+		body, readErr := io.ReadAll(resp.Body)
+		closeErr := resp.Body.Close()
+		if readErr != nil {
+			return nil, fmt.Errorf("API request failed with status %d and failed to read error body: %w", resp.StatusCode, readErr)
+		}
+		if closeErr != nil {
+			return nil, fmt.Errorf("API request failed with status %d and failed to close error body: %w", resp.StatusCode, closeErr)
+		}
 		return nil, fmt.Errorf("API request failed with status %d: %s", resp.StatusCode, string(body))
 	}
 
@@ -142,7 +161,7 @@ func (u *Updater) doRequest(url string) (*http.Response, error) {
 // GetLatestSuccessfulRun gets the latest successful workflow run for a branch
 func (u *Updater) GetLatestSuccessfulRun(branch string) (*WorkflowRun, error) {
 	url := fmt.Sprintf("%s/repos/%s/%s/actions/runs?branch=%s&status=success&per_page=100",
-		githubAPIURL, u.repoOwner, u.repoName, branch)
+		u.apiBaseURL, u.repoOwner, u.repoName, branch)
 
 	resp, err := u.doRequest(url)
 	if err != nil {
@@ -173,7 +192,7 @@ func (u *Updater) GetLatestSuccessfulRun(branch string) (*WorkflowRun, error) {
 // GetArtifactsForRun gets all artifacts for a workflow run
 func (u *Updater) GetArtifactsForRun(runID int64) ([]Artifact, error) {
 	url := fmt.Sprintf("%s/repos/%s/%s/actions/runs/%d/artifacts",
-		githubAPIURL, u.repoOwner, u.repoName, runID)
+		u.apiBaseURL, u.repoOwner, u.repoName, runID)
 
 	resp, err := u.doRequest(url)
 	if err != nil {
@@ -193,31 +212,32 @@ func (u *Updater) GetArtifactsForRun(runID int64) ([]Artifact, error) {
 	return artifactsResp.Artifacts, nil
 }
 
-// DownloadArtifact downloads an artifact and returns the path to the downloaded file
-func (u *Updater) DownloadArtifact(artifact *Artifact, destDir string) (string, error) {
+// DownloadArtifact downloads an artifact, verifies its GitHub-provided digest when
+// available, and returns the path to the downloaded file.
+func (u *Updater) DownloadArtifact(artifact *Artifact, destDir string) (destPath string, err error) {
 	// Ensure destination directory exists
 	if err := os.MkdirAll(destDir, 0755); err != nil {
 		return "", fmt.Errorf("failed to create destination directory: %w", err)
 	}
 
-	destPath := filepath.Join(destDir, artifact.Name+".zip")
+	destPath = filepath.Join(destDir, artifact.Name+".zip")
 
 	// Create the file
 	out, err := os.Create(destPath)
 	if err != nil {
 		return "", fmt.Errorf("failed to create file: %w", err)
 	}
-	defer out.Close()
 
 	// Download the artifact
 	req, err := http.NewRequest("GET", artifact.ArchiveDownloadURL, nil)
 	if err != nil {
+		_ = out.Close()
 		return "", fmt.Errorf("failed to create request: %w", err)
 	}
 
 	// Add GitHub API headers
 	req.Header.Set("Accept", "application/vnd.github+json")
-	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+	req.Header.Set("X-GitHub-Api-Version", githubAPIVersion)
 
 	if u.apiToken != "" {
 		req.Header.Set("Authorization", "Bearer "+u.apiToken)
@@ -225,22 +245,58 @@ func (u *Updater) DownloadArtifact(artifact *Artifact, destDir string) (string, 
 
 	resp, err := u.client.Do(req)
 	if err != nil {
+		_ = out.Close()
 		return "", fmt.Errorf("download failed: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if closeErr := resp.Body.Close(); err == nil && closeErr != nil {
+			err = fmt.Errorf("failed to close download response body: %w", closeErr)
+		}
+	}()
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
+		_ = out.Close()
 		return "", fmt.Errorf("download failed with status %d: %s", resp.StatusCode, string(body))
 	}
 
 	// Write to file
-	_, err = io.Copy(out, resp.Body)
-	if err != nil {
+	hash := sha256.New()
+	if _, err = io.Copy(io.MultiWriter(out, hash), resp.Body); err != nil {
+		_ = out.Close()
 		return "", fmt.Errorf("failed to write file: %w", err)
 	}
 
+	if err = out.Close(); err != nil {
+		return "", fmt.Errorf("failed to close downloaded file: %w", err)
+	}
+
+	if err = verifyArtifactDigest(artifact.Digest, hash.Sum(nil)); err != nil {
+		return "", err
+	}
+
 	return destPath, nil
+}
+
+func verifyArtifactDigest(expected string, actual []byte) error {
+	if expected == "" {
+		return nil
+	}
+
+	algorithm, encoded, ok := strings.Cut(expected, ":")
+	if !ok {
+		return fmt.Errorf("artifact digest %q is not in algorithm:hex format", expected)
+	}
+	if !strings.EqualFold(algorithm, "sha256") {
+		return fmt.Errorf("unsupported artifact digest algorithm %q", algorithm)
+	}
+
+	actualHex := hex.EncodeToString(actual)
+	if !strings.EqualFold(encoded, actualHex) {
+		return fmt.Errorf("artifact digest mismatch: expected %s, got sha256:%s", expected, actualHex)
+	}
+
+	return nil
 }
 
 // ExtractExecutable extracts the executable from a ZIP file
@@ -263,17 +319,15 @@ func (u *Updater) ExtractExecutable(zipPath, destDir string) (string, error) {
 			continue
 		}
 
-		baseName := filepath.Base(f.Name)
-		
-		// Validate against path traversal attacks
-		// Reject paths containing ".." or absolute paths
-		if strings.Contains(f.Name, "..") || filepath.IsAbs(f.Name) {
-			continue // Skip potentially malicious paths
+		if !isSafeZipPath(f.Name) {
+			continue
 		}
-		
+
+		baseName := path.Base(strings.ReplaceAll(f.Name, "\\", "/"))
+
 		// Check if this file matches our expected executable name
 		isExecutable := baseName == expectedName
-		
+
 		if isExecutable {
 			// Extract this specific file
 			executablePath, err = extractSingleFile(f, destDir, baseName)
@@ -290,6 +344,30 @@ func (u *Updater) ExtractExecutable(zipPath, destDir string) (string, error) {
 	}
 
 	return executablePath, nil
+}
+
+func isSafeZipPath(name string) bool {
+	if strings.TrimSpace(name) == "" {
+		return false
+	}
+
+	normalized := strings.ReplaceAll(name, "\\", "/")
+	if path.IsAbs(normalized) || filepath.IsAbs(name) {
+		return false
+	}
+
+	cleaned := path.Clean(normalized)
+	if cleaned == "." || cleaned == ".." || strings.HasPrefix(cleaned, "../") {
+		return false
+	}
+
+	for _, part := range strings.Split(cleaned, "/") {
+		if part == ".." {
+			return false
+		}
+	}
+
+	return true
 }
 
 // extractSingleFile extracts a single file from a ZIP archive
@@ -355,9 +433,17 @@ func (u *Updater) ReplaceCurrentExecutable(newExePath string) error {
 		return fmt.Errorf("failed to resolve symlinks: %w", err)
 	}
 
+	if runtime.GOOS == "windows" {
+		return scheduleWindowsReplacement(currentExe, newExePath)
+	}
+
+	return replaceExecutable(currentExe, newExePath)
+}
+
+func replaceExecutable(currentExe, newExePath string) error {
 	// Create backup of old executable
 	backupPath := currentExe + ".old"
-	
+
 	// Remove old backup if it exists
 	if err := os.Remove(backupPath); err != nil && !os.IsNotExist(err) {
 		// Log warning but continue - old backup removal is not critical
@@ -380,6 +466,9 @@ func (u *Updater) ReplaceCurrentExecutable(newExePath string) error {
 
 	// Make it executable
 	if err := os.Chmod(currentExe, 0755); err != nil {
+		if restoreErr := restoreBackup(currentExe, backupPath); restoreErr != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to restore backup after chmod failure: %v\n", restoreErr)
+		}
 		return fmt.Errorf("failed to set executable permissions: %w", err)
 	}
 
@@ -392,28 +481,83 @@ func (u *Updater) ReplaceCurrentExecutable(newExePath string) error {
 	return nil
 }
 
+func restoreBackup(currentExe, backupPath string) error {
+	if err := os.Remove(currentExe); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return os.Rename(backupPath, currentExe)
+}
+
+func scheduleWindowsReplacement(currentExe, newExePath string) error {
+	scriptPath := currentExe + ".update.cmd"
+	backupPath := currentExe + ".old"
+	stagedPath := currentExe + ".new"
+
+	if err := copyFile(newExePath, stagedPath); err != nil {
+		return fmt.Errorf("failed to stage replacement executable: %w", err)
+	}
+
+	script := fmt.Sprintf(`@echo off
+setlocal
+set "NEW_EXE=%s"
+set "CURRENT_EXE=%s"
+set "BACKUP_EXE=%s"
+set "SELF=%%~f0"
+ping 127.0.0.1 -n 3 >NUL
+if exist "%%BACKUP_EXE%%" del /f /q "%%BACKUP_EXE%%" >NUL 2>NUL
+if exist "%%CURRENT_EXE%%" ren "%%CURRENT_EXE%%" "%s" >NUL 2>NUL
+copy /y "%%NEW_EXE%%" "%%CURRENT_EXE%%" >NUL
+if errorlevel 1 (
+  if exist "%%BACKUP_EXE%%" ren "%%BACKUP_EXE%%" "%s" >NUL 2>NUL
+  exit /b 1
+)
+del /f /q "%%BACKUP_EXE%%" >NUL 2>NUL
+del /f /q "%%NEW_EXE%%" >NUL 2>NUL
+del /f /q "%%SELF%%" >NUL 2>NUL
+`, stagedPath, currentExe, backupPath, filepath.Base(backupPath), filepath.Base(currentExe))
+
+	if err := os.WriteFile(scriptPath, []byte(script), 0600); err != nil {
+		return fmt.Errorf("failed to write deferred Windows update script: %w", err)
+	}
+
+	cmd := exec.Command("cmd", "/C", "start", "", "/MIN", scriptPath)
+	if err := cmd.Start(); err != nil {
+		_ = os.Remove(stagedPath)
+		return fmt.Errorf("failed to start deferred Windows update script: %w", err)
+	}
+
+	fmt.Fprintf(os.Stderr, "Windows update scheduled; the executable will be replaced after this process exits.\n")
+	return nil
+}
+
 // copyFile copies a file from src to dst
-func copyFile(src, dst string) error {
+func copyFile(src, dst string) (err error) {
 	in, err := os.Open(src)
 	if err != nil {
 		return err
 	}
-	defer in.Close()
+	defer func() {
+		if closeErr := in.Close(); err == nil && closeErr != nil {
+			err = closeErr
+		}
+	}()
 
 	out, err := os.Create(dst)
 	if err != nil {
 		return err
 	}
 
-	_, err = io.Copy(out, in)
-	// Close the output file and check for errors
-	closeErr := out.Close()
-	
-	// Return the first error encountered
-	if err != nil {
+	if _, err = io.Copy(out, in); err != nil {
+		_ = out.Close()
+		_ = os.Remove(dst)
 		return err
 	}
-	return closeErr
+	if err = out.Close(); err != nil {
+		_ = os.Remove(dst)
+		return err
+	}
+
+	return nil
 }
 
 // GetCurrentPlatformArtifactName returns the artifact name for the current platform
@@ -466,7 +610,7 @@ func (u *Updater) FindPlatformArtifact(artifacts []Artifact) *Artifact {
 	}
 
 	// For Windows, try flexible matching to handle mingw variants
-	// This allows finding "patris-export-windows-mingw-amd64" or 
+	// This allows finding "patris-export-windows-mingw-amd64" or
 	// "patris-export-windows-mingw-cross-amd64" when looking for
 	// "patris-export-windows-amd64"
 	if runtime.GOOS == "windows" {
@@ -500,18 +644,18 @@ func DeriveRepoInfoFromModule() (string, string, error) {
 	// First, try environment variables
 	repoOwner := os.Getenv("PATRIS_REPO_OWNER")
 	repoName := os.Getenv("PATRIS_REPO_NAME")
-	
+
 	if repoOwner != "" && repoName != "" {
 		return repoOwner, repoName, nil
 	}
-	
+
 	// Fallback: try to find go.mod file
 	// Start from current directory and walk up
 	dir, err := os.Getwd()
 	if err != nil {
 		return "", "", fmt.Errorf("failed to get working directory: %w", err)
 	}
-	
+
 	// Try to find go.mod file
 	for {
 		goModPath := filepath.Join(dir, "go.mod")
@@ -523,7 +667,7 @@ func DeriveRepoInfoFromModule() (string, string, error) {
 			}
 			return owner, name, nil
 		}
-		
+
 		// Move to parent directory
 		parent := filepath.Dir(dir)
 		if parent == dir {
@@ -532,7 +676,7 @@ func DeriveRepoInfoFromModule() (string, string, error) {
 		}
 		dir = parent
 	}
-	
+
 	return "", "", fmt.Errorf("repository info not found: set PATRIS_REPO_OWNER and PATRIS_REPO_NAME environment variables, or run from within the project directory")
 }
 
@@ -543,30 +687,30 @@ func parseGoMod(path string) (string, string, error) {
 		return "", "", fmt.Errorf("failed to open go.mod: %w", err)
 	}
 	defer file.Close()
-	
+
 	scanner := bufio.NewScanner(file)
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
-		
+
 		// Look for module line
 		if strings.HasPrefix(line, "module ") {
 			modulePath := strings.TrimPrefix(line, "module ")
 			modulePath = strings.TrimSpace(modulePath)
-			
+
 			// Extract owner and repo from module path
 			// Expected format: github.com/owner/repo
 			parts := strings.Split(modulePath, "/")
 			if len(parts) >= 3 && parts[0] == "github.com" {
 				return parts[1], parts[2], nil
 			}
-			
+
 			return "", "", fmt.Errorf("module path '%s' is not a GitHub module", modulePath)
 		}
 	}
-	
+
 	if err := scanner.Err(); err != nil {
 		return "", "", fmt.Errorf("error reading go.mod: %w", err)
 	}
-	
+
 	return "", "", fmt.Errorf("module declaration not found in go.mod")
 }
