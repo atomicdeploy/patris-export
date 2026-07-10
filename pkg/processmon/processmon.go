@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
 
 	"github.com/shirou/gopsutil/v4/process"
 )
@@ -26,6 +27,13 @@ type FileAccessInfo struct {
 	FilePath  string        `json:"file_path"`
 	Processes []ProcessInfo `json:"processes"`
 }
+
+const (
+	openFilesTimeoutWindows = 50 * time.Millisecond
+	openFilesTimeoutDefault = 250 * time.Millisecond
+	fileScanDeadlineWindows = 3 * time.Second
+	fileScanDeadlineDefault = 10 * time.Second
+)
 
 // FindProcessByName finds all running processes with the given name
 // For Windows, it looks for exact matches (e.g., "patris81.exe")
@@ -78,8 +86,7 @@ func FindProcessByName(name string) ([]ProcessInfo, error) {
 				info.MemoryUsage = memInfo.RSS
 			}
 
-			// Get open files
-			if openFiles, err := p.OpenFiles(); err == nil {
+			if openFiles, err := openFilesWithTimeout(p); err == nil {
 				for _, f := range openFiles {
 					info.OpenFiles = append(info.OpenFiles, f.Path)
 				}
@@ -115,9 +122,13 @@ func FindProcessesWithFile(filePath string) (*FileAccessInfo, error) {
 		Processes: make([]ProcessInfo, 0),
 	}
 
+	deadline := time.Now().Add(fileScanDeadline())
 	for _, p := range processes {
-		// Get open files for this process
-		openFiles, err := p.OpenFiles()
+		if time.Now().After(deadline) {
+			break
+		}
+
+		openFiles, err := openFilesWithTimeout(p)
 		if err != nil {
 			continue // Skip processes we can't access
 		}
@@ -225,11 +236,45 @@ func GetProcessInfo(pid int32) (*ProcessInfo, error) {
 	}
 
 	// Get open files
-	if openFiles, err := p.OpenFiles(); err == nil {
+	if openFiles, err := openFilesWithTimeout(p); err == nil {
 		for _, f := range openFiles {
 			info.OpenFiles = append(info.OpenFiles, f.Path)
 		}
 	}
 
 	return info, nil
+}
+
+func openFilesTimeout() time.Duration {
+	if runtime.GOOS == "windows" {
+		return openFilesTimeoutWindows
+	}
+	return openFilesTimeoutDefault
+}
+
+func fileScanDeadline() time.Duration {
+	if runtime.GOOS == "windows" {
+		return fileScanDeadlineWindows
+	}
+	return fileScanDeadlineDefault
+}
+
+func openFilesWithTimeout(p *process.Process) ([]process.OpenFilesStat, error) {
+	type result struct {
+		files []process.OpenFilesStat
+		err   error
+	}
+
+	ch := make(chan result, 1)
+	go func() {
+		files, err := p.OpenFiles()
+		ch <- result{files: files, err: err}
+	}()
+
+	select {
+	case res := <-ch:
+		return res.files, res.err
+	case <-time.After(openFilesTimeout()):
+		return nil, fmt.Errorf("timed out reading open files for pid %d", p.Pid)
+	}
 }

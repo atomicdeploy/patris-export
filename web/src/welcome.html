@@ -63,6 +63,15 @@
             font-size: 2.5rem;
             font-weight: 700;
             color: var(--text-light);
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+        }
+
+        .welcome-logo {
+            width: 48px;
+            height: 48px;
+            object-fit: contain;
         }
         
         body.dark-mode h1 {
@@ -247,7 +256,7 @@
 <body>
     <div class="container">
         <header>
-            <h1>📊 Patris Export</h1>
+            <h1><img class="welcome-logo" src="/static/patris-api-icon.png" alt="">Patris Export</h1>
             <button class="theme-toggle" id="themeToggle">🌙</button>
         </header>
         

@@ -8,23 +8,25 @@ import (
 	"strings"
 	"time"
 
+	"github.com/atomicdeploy/patris-export/pkg/appconfig"
 	"github.com/atomicdeploy/patris-export/pkg/converter"
 	"github.com/atomicdeploy/patris-export/pkg/filecopy"
 	"github.com/atomicdeploy/patris-export/pkg/paradox"
 	"github.com/atomicdeploy/patris-export/pkg/processmon"
 	"github.com/atomicdeploy/patris-export/pkg/server"
+	"github.com/atomicdeploy/patris-export/pkg/tui"
+	"github.com/atomicdeploy/patris-export/pkg/version"
 	"github.com/atomicdeploy/patris-export/pkg/watcher"
+	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/lipgloss/table"
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
 )
 
 var (
-	// Version information
-	Version   = "1.0.0"
-	BuildDate = "unknown"
-
 	// Global flags
 	charMapFile  string
+	configFile   string
 	outputDir    string
 	outputFormat string
 	watchMode    bool
@@ -52,10 +54,14 @@ func main() {
 Reads Paradox .db files and converts them to JSON or CSV format.
 Supports Persian/Farsi encoding conversion and file watching.
 `,
-		Version: Version,
+		Version: version.String(),
 	}
+	rootCmd.Short = "📦 Paradox/BDE database export service for Patris81"
+	rootCmd.Long = cliIntro()
+	rootCmd.SetVersionTemplate(version.Detailed() + "\n")
 
 	// Global flags
+	rootCmd.PersistentFlags().StringVar(&configFile, "config", "", "Path to patris-export JSON config file")
 	rootCmd.PersistentFlags().StringVarP(&charMapFile, "charmap", "c", "", "Path to character mapping file (farsi_chars.txt)")
 	rootCmd.PersistentFlags().StringVarP(&outputDir, "output", "o", ".", "Output directory for converted files (use '-' for stdout)")
 	rootCmd.PersistentFlags().BoolVarP(&verbose, "verbose", "v", false, "Enable verbose logging")
@@ -95,11 +101,22 @@ Supports Persian/Farsi encoding conversion and file watching.
 		Args:  cobra.ExactArgs(1),
 		Run:   runServe,
 	}
-	serveCmd.Flags().StringP("addr", "a", ":8080", "Server address (e.g., :8080)")
+	serveCmd.Short = "🌐 Start REST API and WebSocket server"
+	serveCmd.Args = cobra.MaximumNArgs(1)
+	serveCmd.Flags().StringP("addr", "a", "", "Server address override (e.g., 127.0.0.1:8080 or :8080)")
+	serveCmd.Flags().String("host", "", "Host to bind: 127.0.0.1, 0.0.0.0, or an explicit interface")
+	serveCmd.Flags().Int("port", 0, "Port to listen on")
 	serveCmd.Flags().BoolP("watch", "w", true, "Watch file for changes and broadcast updates")
 	serveCmd.Flags().String("debounce", "0s", "Debounce duration for watch mode (e.g., 0s, 500ms, 1s, 5s)")
 
-	rootCmd.AddCommand(convertCmd, infoCmd, companyCmd, serveCmd)
+	tuiCmd := &cobra.Command{
+		Use:   "tui [database-file]",
+		Short: "🖥️ Open the terminal dashboard",
+		Args:  cobra.MaximumNArgs(1),
+		Run:   runTUI,
+	}
+
+	rootCmd.AddCommand(convertCmd, infoCmd, companyCmd, serveCmd, tuiCmd)
 
 	if err := rootCmd.Execute(); err != nil {
 		errorColor.Fprintf(os.Stderr, "❌ Error: %v\n", err)
@@ -107,7 +124,53 @@ Supports Persian/Farsi encoding conversion and file watching.
 	}
 }
 
+func cliIntro() string {
+	title := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("229")).Background(lipgloss.Color("57")).Padding(0, 1).Render("Patris Export")
+	t := table.New().
+		Border(lipgloss.RoundedBorder()).
+		BorderStyle(lipgloss.NewStyle().Foreground(lipgloss.Color("63"))).
+		Headers("Feature", "Status").
+		Rows(
+			[]string{"Paradox/BDE reader", "pxlib-backed native reader"},
+			[]string{"Web UI", "REST API + WebSocket live updates"},
+			[]string{"Config", "JSON file + env + CLI overrides"},
+			[]string{"Build", version.String()},
+		)
+	return title + "\n\n" + t.String() + "\n\nReads Patris81 Paradox .db files and serves them as JSON, CSV, REST, WebSocket, Web UI, and TUI views."
+}
+
+func effectiveConfig(cmd *cobra.Command) (*appconfig.Manager, appconfig.Config) {
+	mgr, err := appconfig.Load(configFile)
+	if err != nil {
+		errorColor.Printf("❌ Failed to load config: %v\n", err)
+		os.Exit(1)
+	}
+	cfg := mgr.Get()
+	appconfig.ApplyEnv(&cfg)
+
+	rootFlags := cmd.Root().PersistentFlags()
+	if !rootFlags.Changed("charmap") && charMapFile == "" {
+		charMapFile = cfg.Database.Charmap
+	}
+	if !rootFlags.Changed("direct-access") {
+		directAccess = cfg.Database.DirectAccess
+	}
+	return mgr, cfg
+}
+
+func runTUI(cmd *cobra.Command, args []string) {
+	mgr, cfg := effectiveConfig(cmd)
+	if len(args) > 0 {
+		cfg.Database.Path = args[0]
+	}
+	if err := tui.Run(cfg, mgr.Path(), version.Current()); err != nil {
+		errorColor.Printf("❌ TUI error: %v\n", err)
+		os.Exit(1)
+	}
+}
+
 func runConvert(cmd *cobra.Command, args []string) {
+	effectiveConfig(cmd)
 	dbFile := args[0]
 
 	// Check if output is stdout
@@ -274,6 +337,7 @@ func convertFile(dbFile string, charMap converter.CharMapping, useStdout bool) {
 }
 
 func runInfo(cmd *cobra.Command, args []string) {
+	effectiveConfig(cmd)
 	dbFile := args[0]
 
 	// Check for process conflicts
@@ -320,6 +384,7 @@ func runInfo(cmd *cobra.Command, args []string) {
 }
 
 func runCompany(cmd *cobra.Command, args []string) {
+	effectiveConfig(cmd)
 	companyFile := args[0]
 
 	// Load character mapping if provided, otherwise use embedded default
@@ -446,10 +511,36 @@ func init() {
 }
 
 func runServe(cmd *cobra.Command, args []string) {
-	dbFile := args[0]
+	configManager, cfg := effectiveConfig(cmd)
+	if len(args) > 0 {
+		cfg.Database.Path = args[0]
+	}
+	if cfg.Database.Path == "" {
+		errorColor.Println("❌ No database file specified. Pass one to serve or set database.path in the config.")
+		os.Exit(1)
+	}
+	dbFile := cfg.Database.Path
 	addr, _ := cmd.Flags().GetString("addr")
 	watchFile, _ := cmd.Flags().GetBool("watch")
 	debounceStr, _ := cmd.Flags().GetString("debounce")
+	host, _ := cmd.Flags().GetString("host")
+	port, _ := cmd.Flags().GetInt("port")
+	if cmd.Flags().Changed("addr") && addr != "" {
+		appconfig.ApplyAddr(&cfg, addr)
+	}
+	if cmd.Flags().Changed("host") && host != "" {
+		cfg.Server.Host = host
+	}
+	if cmd.Flags().Changed("port") && port > 0 {
+		cfg.Server.Port = port
+	}
+	if !cmd.Flags().Changed("watch") {
+		watchFile = cfg.Server.Watch
+	}
+	if !cmd.Flags().Changed("debounce") {
+		debounceStr = cfg.Server.Debounce
+	}
+	addr = cfg.Addr()
 
 	// Load character mapping if provided, otherwise use embedded default
 	var charMap converter.CharMapping
@@ -468,7 +559,10 @@ func runServe(cmd *cobra.Command, args []string) {
 	}
 
 	// Create server
-	srv, err := server.NewServer(dbFile, charMap, !directAccess)
+	srv, err := server.NewServerWithOptions(dbFile, charMap, server.Options{
+		Config:  configManager,
+		Version: version.Current(),
+	}, !directAccess)
 	if err != nil {
 		errorColor.Printf("❌ Failed to create server: %v\n", err)
 		os.Exit(1)
@@ -493,7 +587,8 @@ func runServe(cmd *cobra.Command, args []string) {
 	}
 
 	// Start server
-	successColor.Printf("🌐 Server running at http://localhost%s\n", addr)
+	successColor.Printf("🌐 Server running at http://%s\n", addr)
+	infoColor.Printf("⚙️ Config: %s\n", configManager.Path())
 	infoColor.Println("📝 Press Ctrl+C to stop the server")
 
 	if err := srv.Start(addr); err != nil {

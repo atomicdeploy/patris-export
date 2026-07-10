@@ -4,14 +4,23 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Patris Export - Live Data Viewer</title>
+    <link rel="icon" href="/favicon.ico" sizes="any">
+    <script>
+        (() => {
+            const saved = localStorage.getItem('theme');
+            const dark = saved === 'dark' || (!saved && matchMedia('(prefers-color-scheme: dark)').matches);
+            if (dark) document.documentElement.classList.add('dark-mode');
+        })();
+    </script>
     <!-- STYLES -->
 </head>
 <body>
     <div class="app">
         <header class="header">
             <div class="header-content">
-                <h1>📊 Patris Export</h1>
+                <h1 id="appTitle"><img id="appLogo" class="app-logo" src="/static/patris-api-icon.png" alt="">Patris Export</h1>
                 <div class="header-actions">
+                    <div class="process-status" id="processStatus">Checking Patris81...</div>
                     <div class="status">
                         <span class="status-indicator" id="statusIndicator"></span>
                         <span id="statusText">Connecting...</span>
@@ -43,7 +52,7 @@
                             </div>
                         </button>
                         <button class="export-option" id="exportCSV">
-                            <span class="export-icon">📊</span>
+                            <span class="export-icon"><img class="mini-logo" src="/static/patris-api-icon.png" alt=""></span>
                             <div class="export-details">
                                 <div class="export-title">Export as CSV</div>
                                 <div class="export-desc">Comma-Separated Values</div>
@@ -78,6 +87,8 @@
             </div>
         </div>
 
+        <div class="panel-backdrop" id="panelBackdrop"></div>
+
         <div class="settings-panel" id="settingsPanel">
             <div class="settings-content">
                 <h2>Settings</h2>
@@ -101,6 +112,10 @@
                             <option value="generated">Generated melody</option>
                         </select>
                     </label>
+                    <div class="button-row">
+                        <button class="btn btn-secondary" id="testNotificationSound" type="button">Test sound</button>
+                        <button class="btn btn-secondary" id="testNativeToast" type="button">Test toast</button>
+                    </div>
                     <label class="checkbox-label">
                         <input type="checkbox" id="enablePagination">
                         <span>Enable pagination</span>

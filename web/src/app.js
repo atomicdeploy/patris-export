@@ -11,6 +11,10 @@ const state = {
     sortField: 'Code',
     sortDirection: 'asc',
     fileName: '',  // Track the actual data file name from server
+    appInfo: null,
+    config: null,
+    processStatus: null,
+    isInitialLoad: true,
     columnFilters: {},  // Store active filters per column: { fieldName: { type, value, ... } }
     hiddenColumns: new Set(),  // Track hidden columns
     settings: {
@@ -28,11 +32,30 @@ const state = {
     faviconTimeout: null
 };
 
+const CONFIG_STORAGE_KEY = 'patris-config';
+const SETTINGS_STORAGE_KEY = 'patris-settings';
+
+function logIntro() {
+    const version = state.appInfo?.version || {};
+    const styles = [
+        'background:#111827;color:#facc15;padding:6px 10px;border-radius:6px 0 0 6px;font:700 13px ui-monospace,Cascadia Code,Consolas,monospace',
+        'background:#312e81;color:#e0e7ff;padding:6px 10px;border-radius:0 6px 6px 0;font:600 13px ui-monospace,Cascadia Code,Consolas,monospace',
+        'color:#6b7280;font:12px ui-monospace,Cascadia Code,Consolas,monospace'
+    ];
+    console.info('%cPatris Export%cModern HTML5 SPA', styles[0], styles[1]);
+    console.info('%c✨ version=%s commit=%s build=%s', styles[2], version.version || 'dev', version.commit || 'unknown', version.build_date || 'unknown');
+    console.info('%c🔌 WebSocket, REST, native toasts, generated audio fallback, and persistent config are active.', styles[2]);
+}
+
 // Load settings from localStorage
 function loadSettings() {
-    const saved = localStorage.getItem('patris-settings');
+    const saved = localStorage.getItem(SETTINGS_STORAGE_KEY);
     if (saved) {
-        state.settings = { ...state.settings, ...JSON.parse(saved) };
+        try {
+            state.settings = { ...state.settings, ...JSON.parse(saved) };
+        } catch (error) {
+            console.error('❌ Failed to parse local settings:', error);
+        }
     }
     
     // Load sort preferences
@@ -62,7 +85,84 @@ function loadSettings() {
 
 // Save settings to localStorage
 function saveSettings() {
-    localStorage.setItem('patris-settings', JSON.stringify(state.settings));
+    localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify(state.settings));
+    syncSettingsToConfig();
+}
+
+function applyConfig(config, source = 'server') {
+    if (!config) return;
+    state.config = config;
+    localStorage.setItem(CONFIG_STORAGE_KEY, JSON.stringify(config));
+    if (config.ui) {
+        state.settings = {
+            ...state.settings,
+            autoScrollToChanged: !!config.ui.auto_scroll_to_changed,
+            highlightChanges: config.ui.highlight_changes !== false,
+            enablePagination: !!config.ui.enable_pagination,
+            pageSize: config.ui.page_size || state.settings.pageSize,
+            playNotificationSound: !!config.ui.play_notification_sound,
+            notificationSoundSource: config.ui.notification_sound_source || state.settings.notificationSoundSource
+        };
+        localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify(state.settings));
+        applySettings();
+        initTheme();
+    }
+    if (source !== 'local') {
+        console.info('⚙️ Configuration applied from %s', source, config);
+    }
+}
+
+async function loadServerConfig() {
+    try {
+        const response = await fetch('/api/config');
+        if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
+        const config = await response.json();
+        applyConfig(config, 'server');
+    } catch (error) {
+        console.error('❌ Failed to load server config:', error);
+        const cached = localStorage.getItem(CONFIG_STORAGE_KEY);
+        if (cached) {
+            try {
+                applyConfig(JSON.parse(cached), 'local');
+            } catch (parseError) {
+                console.error('❌ Failed to parse cached config:', parseError);
+            }
+        }
+    }
+}
+
+function syncSettingsToConfig() {
+    if (!state.config) return;
+    state.config.ui = {
+        ...(state.config.ui || {}),
+        theme: localStorage.getItem('theme') || 'system',
+        auto_scroll_to_changed: state.settings.autoScrollToChanged,
+        highlight_changes: state.settings.highlightChanges,
+        enable_pagination: state.settings.enablePagination,
+        page_size: state.settings.pageSize,
+        play_notification_sound: state.settings.playNotificationSound,
+        notification_sound_source: state.settings.notificationSoundSource
+    };
+    saveConfigToServer(state.config);
+}
+
+let configSaveTimer = null;
+function saveConfigToServer(config) {
+    localStorage.setItem(CONFIG_STORAGE_KEY, JSON.stringify(config));
+    clearTimeout(configSaveTimer);
+    configSaveTimer = setTimeout(async () => {
+        try {
+            const response = await fetch('/api/config', {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(config)
+            });
+            if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
+            console.info('💾 Settings synced to config file.');
+        } catch (error) {
+            console.error('❌ Failed to sync settings to config file:', error);
+        }
+    }, 250);
 }
 
 // Save sort preferences to localStorage
@@ -256,6 +356,27 @@ function formatNumberWithSeparator(value) {
     return num.toLocaleString('en-US');
 }
 
+function displayFieldName(field) {
+    const labels = state.config?.column_labels || {};
+    return labels[field] || labels[field.replace(/[0-9]+$/, '')] || field;
+}
+
+function parsePatrisCode(code) {
+    const raw = String(code ?? '').replace(/\D/g, '');
+    const groups = raw.match(/.{1,3}/g) || [];
+    const depth = Math.min(groups.length, 3);
+    const type = depth <= 1 ? 'group' : depth === 2 ? 'subgroup' : 'item';
+    return { raw, groups, depth, type, group: groups[0] || '', subgroup: groups[1] || '', item: groups[2] || '' };
+}
+
+function anbarTotal(record) {
+    if (!Array.isArray(record.ANBAR)) return 0;
+    return record.ANBAR.reduce((sum, value) => {
+        const n = typeof value === 'string' ? parseFloat(value) : value;
+        return sum + (Number.isFinite(n) ? n : 0);
+    }, 0);
+}
+
 // Apply settings to UI
 function applySettings() {
     document.getElementById('autoScrollToChanged').checked = state.settings.autoScrollToChanged;
@@ -275,8 +396,8 @@ function initNotificationAudio() {
 
 // Play notification sound
 // Creates a new Audio instance for each notification to support overlapping sounds.
-function playNotificationSound() {
-    if (!state.settings.playNotificationSound) {
+function playNotificationSound(force = false) {
+    if (!force && !state.settings.playNotificationSound) {
         return;
     }
 
@@ -424,6 +545,116 @@ function setFavicon(href) {
     link.href = href;
 }
 
+function showInAppToast(title, message, options = {}) {
+    let container = document.getElementById('toastContainer');
+    if (!container) {
+        container = document.createElement('div');
+        container.id = 'toastContainer';
+        container.className = 'toast-container';
+        document.body.appendChild(container);
+    }
+
+    const toast = document.createElement('div');
+    toast.className = 'app-toast';
+    if (options.error) {
+        toast.classList.add('warning');
+    }
+
+    const titleEl = document.createElement('div');
+    titleEl.className = 'app-toast-title';
+    titleEl.textContent = title || 'Patris Export';
+
+    const messageEl = document.createElement('div');
+    messageEl.className = 'app-toast-message';
+    messageEl.textContent = message || '';
+
+    toast.appendChild(titleEl);
+    toast.appendChild(messageEl);
+    container.appendChild(toast);
+
+    setTimeout(() => {
+        toast.classList.add('closing');
+        setTimeout(() => toast.remove(), 180);
+    }, options.duration || 4200);
+}
+
+function openPanel(panelId) {
+    closePanels();
+    document.getElementById(panelId).classList.add('open');
+    document.getElementById('panelBackdrop').classList.add('open');
+}
+
+function closePanels() {
+    ['settingsPanel', 'columnsPanel'].forEach(id => {
+        const panel = document.getElementById(id);
+        if (panel) panel.classList.remove('open');
+    });
+    const backdrop = document.getElementById('panelBackdrop');
+    if (backdrop) backdrop.classList.remove('open');
+}
+
+async function fetchAppInfo() {
+    try {
+        const response = await fetch('/api/app');
+        if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
+        state.appInfo = await response.json();
+        updateAppMetadata();
+        logIntro();
+    } catch (error) {
+        console.error('❌ Failed to fetch app metadata:', error);
+        logIntro();
+    }
+}
+
+async function fetchProcessStatus() {
+    try {
+        const response = await fetch('/api/status');
+        if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
+        applyProcessStatus(await response.json());
+    } catch (error) {
+        console.error('❌ Failed to fetch process status:', error);
+    }
+}
+
+function updateAppMetadata() {
+    const logo = document.getElementById('appLogo');
+    const title = document.getElementById('appTitle');
+    const version = state.appInfo?.version || {};
+    const text = `Patris Export ${version.version || ''} (${version.commit || 'unknown'})`;
+    if (logo) logo.title = text;
+    if (title) title.title = text;
+}
+
+function applyProcessStatus(status) {
+    if (!status) return;
+    state.processStatus = status.status || status;
+    const patris = state.processStatus.patris81 || {};
+    const fileAccess = state.processStatus.file_access || {};
+    const el = document.getElementById('processStatus');
+    if (el) {
+        const patrisText = patris.running ? `Patris81 running (${patris.count})` : 'Patris81 not running';
+        const lockText = fileAccess.in_use ? `DB locked (${fileAccess.count})` : 'DB unlocked';
+        el.textContent = `${patrisText} · ${lockText}`;
+        el.classList.toggle('warning', !!patris.running || !!fileAccess.in_use);
+    }
+}
+
+async function sendNativeToast(title, message) {
+    try {
+        const response = await fetch('/api/toast', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ title, message })
+        });
+        const result = await response.json();
+        if (result.native_error) {
+            showInAppToast('Native toast unavailable', result.native_error, { error: true });
+        }
+    } catch (error) {
+        showInAppToast('Toast request failed', error.message, { error: true });
+    }
+}
+
 // Initialize WebSocket connection
 function initWebSocket() {
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -463,12 +694,22 @@ function handleWebSocketMessage(data) {
     const changedIndices = new Set();
     
     if (data.type === 'initial') {
+        if (data.version && !state.appInfo) {
+            state.appInfo = { version: data.version };
+            updateAppMetadata();
+        }
+        if (data.config) {
+            applyConfig(data.config, 'websocket');
+        }
+        if (data.status) {
+            applyProcessStatus(data.status);
+        }
         // Initial load - records are already transformed with ANBAR as array
         state.records = data.added || [];
         
         // Store file name if provided
-        if (data.file_name) {
-            state.fileName = data.file_name;
+        if (data.file_path || data.file_name) {
+            state.fileName = data.file_path || data.file_name;
             updateFooterFileName();
         }
         
@@ -544,6 +785,15 @@ function handleWebSocketMessage(data) {
             // Flash favicon
             flashFavicon();
         }
+    } else if (data.type === 'toast') {
+        showInAppToast(data.title, data.message, { error: !!data.native_error });
+        if (data.native_error) {
+            console.warn('Native toast failed:', data.native_error);
+        }
+    } else if (data.type === 'config_update') {
+        applyConfig(data.config, 'file watcher');
+    } else if (data.type === 'process_info') {
+        applyProcessStatus(data);
     }
     
     // Extract fields from first record if not already set
@@ -558,6 +808,8 @@ function handleWebSocketMessage(data) {
     sortRecords();
     renderTable(changedIndices);
     updateCounts();
+    state.isInitialLoad = false;
+    setLoadingState(false);
 }
 
 // Update connection status
@@ -590,8 +842,10 @@ function updateFooterFileName() {
     if (state.fileName) {
         const baseName = state.fileName.split('/').pop().split('\\').pop();
         footerFile.textContent = baseName;
+        footerFile.title = state.fileName;
     } else {
-        footerFile.textContent = 'Loading...';
+        footerFile.textContent = 'Unknown';
+        footerFile.removeAttribute('title');
     }
 }
 
@@ -719,7 +973,7 @@ function renderTableHeader() {
                     sortContainer.className = 'header-content';
                     
                     const fieldName = document.createElement('span');
-                    fieldName.textContent = anbarNum;
+                    fieldName.textContent = displayFieldName(anbarField) === anbarField ? anbarNum : displayFieldName(anbarField);
                     sortContainer.appendChild(fieldName);
                     
                     const sortIndicator = document.createElement('span');
@@ -754,7 +1008,7 @@ function renderTableHeader() {
             sortContainer.className = 'header-content';
             
             const fieldName = document.createElement('span');
-            fieldName.textContent = field;
+            fieldName.textContent = displayFieldName(field);
             sortContainer.appendChild(fieldName);
             
             const sortIndicator = document.createElement('span');
@@ -819,7 +1073,9 @@ function createFilterControl(field) {
     const fieldType = stats.type;
     const currentFilter = state.columnFilters[field];
     
-    if (fieldType === 'categorical') {
+    if (field === 'Code') {
+        container.appendChild(createCodeFilterControl(currentFilter));
+    } else if (fieldType === 'categorical') {
         // Dropdown for categorical fields
         const select = document.createElement('select');
         select.className = 'filter-select';
@@ -857,41 +1113,7 @@ function createFilterControl(field) {
         container.appendChild(select);
         
     } else if (fieldType === 'numeric') {
-        // Range inputs for numeric fields
-        const wrapper = document.createElement('div');
-        wrapper.className = 'filter-range';
-        
-        const minInput = document.createElement('input');
-        minInput.type = 'number';
-        minInput.className = 'filter-input-small';
-        minInput.placeholder = 'Min';
-        minInput.value = currentFilter?.min ?? '';
-        
-        const maxInput = document.createElement('input');
-        maxInput.type = 'number';
-        maxInput.className = 'filter-input-small';
-        maxInput.placeholder = 'Max';
-        maxInput.value = currentFilter?.max ?? '';
-        
-        const updateFilter = () => {
-            const min = minInput.value ? parseFloat(minInput.value) : null;
-            const max = maxInput.value ? parseFloat(maxInput.value) : null;
-            
-            if (min !== null || max !== null) {
-                state.columnFilters[field] = { type: 'numeric', min, max };
-            } else {
-                delete state.columnFilters[field];
-            }
-            saveColumnFilters();
-            applyFilters();
-        };
-        
-        minInput.addEventListener('change', updateFilter);
-        maxInput.addEventListener('change', updateFilter);
-        
-        wrapper.appendChild(minInput);
-        wrapper.appendChild(maxInput);
-        container.appendChild(wrapper);
+        container.appendChild(createRangePopover(field, currentFilter, 'numeric'));
         
     } else if (fieldType === 'jalali-date') {
         // Date range for Jalali dates (YY.mm.dd format)
@@ -957,6 +1179,125 @@ function createFilterControl(field) {
     return container;
 }
 
+function createRangePopover(field, currentFilter, mode) {
+    const wrapper = document.createElement('div');
+    wrapper.className = 'range-popover';
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'range-trigger';
+    const active = currentFilter?.min !== undefined && currentFilter?.min !== null || currentFilter?.max !== undefined && currentFilter?.max !== null;
+    button.innerHTML = active ? `<span class="filter-badge">${currentFilter.min ?? 'min'}–${currentFilter.max ?? 'max'}</span>` : '<span class="ellipsis">•••</span>';
+    const panel = document.createElement('div');
+    panel.className = 'range-panel';
+
+    const minInput = document.createElement('input');
+    minInput.type = mode === 'numeric' ? 'text' : 'text';
+    minInput.inputMode = mode === 'numeric' ? 'decimal' : 'text';
+    minInput.className = 'filter-input-small';
+    minInput.placeholder = mode === 'numeric' ? 'Min' : 'From';
+    minInput.value = currentFilter?.min ?? '';
+
+    const maxInput = document.createElement('input');
+    maxInput.type = mode === 'numeric' ? 'text' : 'text';
+    maxInput.inputMode = mode === 'numeric' ? 'decimal' : 'text';
+    maxInput.className = 'filter-input-small';
+    maxInput.placeholder = mode === 'numeric' ? 'Max' : 'To';
+    maxInput.value = currentFilter?.max ?? '';
+
+    const applyBtn = document.createElement('button');
+    applyBtn.type = 'button';
+    applyBtn.className = 'range-apply';
+    applyBtn.textContent = 'Apply';
+
+    const clearBtn = document.createElement('button');
+    clearBtn.type = 'button';
+    clearBtn.className = 'range-clear';
+    clearBtn.textContent = 'Clear';
+
+    const apply = () => {
+        const rawMin = minInput.value.trim();
+        const rawMax = maxInput.value.trim();
+        const min = mode === 'numeric' && rawMin ? parseFloat(rawMin) : rawMin || null;
+        const max = mode === 'numeric' && rawMax ? parseFloat(rawMax) : rawMax || null;
+        if (min !== null || max !== null) {
+            state.columnFilters[field] = { type: mode, min, max };
+        } else {
+            delete state.columnFilters[field];
+        }
+        saveColumnFilters();
+        renderTableHeader();
+        applyFilters();
+    };
+    button.addEventListener('click', (event) => {
+        event.stopPropagation();
+        panel.classList.toggle('open');
+    });
+    applyBtn.addEventListener('click', apply);
+    clearBtn.addEventListener('click', () => {
+        delete state.columnFilters[field];
+        saveColumnFilters();
+        renderTableHeader();
+        applyFilters();
+    });
+    panel.appendChild(minInput);
+    panel.appendChild(maxInput);
+    panel.appendChild(applyBtn);
+    panel.appendChild(clearBtn);
+    wrapper.appendChild(button);
+    wrapper.appendChild(panel);
+    return wrapper;
+}
+
+function createCodeFilterControl(currentFilter) {
+    const wrapper = document.createElement('div');
+    wrapper.className = 'code-filter';
+
+    const typeSelect = document.createElement('select');
+    typeSelect.className = 'filter-select code-filter-type';
+    [
+        ['', 'All'],
+        ['group', 'Group'],
+        ['subgroup', 'Subgroup'],
+        ['item', 'Item']
+    ].forEach(([value, label]) => {
+        const option = document.createElement('option');
+        option.value = value;
+        option.textContent = label;
+        option.selected = (currentFilter?.codeType || '') === value;
+        typeSelect.appendChild(option);
+    });
+
+    const segmentInput = document.createElement('input');
+    segmentInput.type = 'text';
+    segmentInput.inputMode = 'numeric';
+    segmentInput.className = 'filter-input code-segment-input';
+    segmentInput.placeholder = '100/200';
+    segmentInput.value = currentFilter?.segment || '';
+
+    const badge = document.createElement('span');
+    badge.className = 'filter-badge';
+    badge.textContent = currentFilter ? 'Code' : 'Any';
+
+    const update = () => {
+        const codeType = typeSelect.value;
+        const segment = segmentInput.value.trim();
+        if (codeType || segment) {
+            state.columnFilters.Code = { type: 'code', codeType, segment };
+        } else {
+            delete state.columnFilters.Code;
+        }
+        saveColumnFilters();
+        applyFilters();
+    };
+
+    typeSelect.addEventListener('change', update);
+    segmentInput.addEventListener('input', update);
+    wrapper.appendChild(typeSelect);
+    wrapper.appendChild(segmentInput);
+    wrapper.appendChild(badge);
+    return wrapper;
+}
+
 // Apply all column filters
 function applyFilters() {
     filterRecords();
@@ -997,6 +1338,9 @@ function renderTable(changedIndices = new Set()) {
     
     recordsToShow.forEach((record, displayIndex) => {
         const row = document.createElement('tr');
+        const codeInfo = parsePatrisCode(record.Code);
+        row.classList.add(`code-${codeInfo.type}`);
+        row.classList.add(anbarTotal(record) > 0 ? 'has-stock' : 'no-stock');
         
         // Find the original index in state.records
         const originalIndex = state.records.indexOf(record);
@@ -1357,6 +1701,15 @@ function passesFilter(record, field, filter) {
             
         case 'text':
             return String(value).toLowerCase().includes(filter.value.toLowerCase());
+
+        case 'code':
+            const parsed = parsePatrisCode(value);
+            if (filter.codeType && parsed.type !== filter.codeType) return false;
+            if (filter.segment) {
+                const segments = filter.segment.split(/[\/\s.-]+/).filter(Boolean);
+                return segments.every((segment, index) => parsed.groups[index] === segment.padStart(3, '0') || parsed.groups[index] === segment);
+            }
+            return true;
             
         default:
             return true;
@@ -1429,14 +1782,25 @@ function inspectRecord(record) {
 // Toggle theme
 function toggleTheme() {
     const isDark = document.body.classList.toggle('dark-mode');
+    document.documentElement.classList.toggle('dark-mode', isDark);
     localStorage.setItem('theme', isDark ? 'dark' : 'light');
     updateThemeIcon(isDark);
+    syncSettingsToConfig();
 }
 
 // Update theme icon
 function updateThemeIcon(isDark) {
     const btn = document.getElementById('themeToggle');
     btn.textContent = isDark ? '☀️' : '🌙';
+}
+
+function setLoadingState(isLoading) {
+    state.isInitialLoad = isLoading;
+    document.body.classList.toggle('is-loading', isLoading);
+    const loading = document.getElementById('loading');
+    if (loading) {
+        loading.style.display = isLoading ? 'flex' : 'none';
+    }
 }
 
 // Initialize theme
@@ -1447,12 +1811,17 @@ function initTheme() {
     
     if (isDark) {
         document.body.classList.add('dark-mode');
+        document.documentElement.classList.add('dark-mode');
+    } else {
+        document.body.classList.remove('dark-mode');
+        document.documentElement.classList.remove('dark-mode');
     }
     updateThemeIcon(isDark);
 }
 
 // Initialize app
 function init() {
+    setLoadingState(true);
     // Load settings
     loadSettings();
     applySettings();
@@ -1500,12 +1869,13 @@ function init() {
     });
     
     document.getElementById('settingsBtn').addEventListener('click', () => {
-        document.getElementById('settingsPanel').classList.toggle('open');
+        openPanel('settingsPanel');
     });
     
     document.getElementById('closeSettings').addEventListener('click', () => {
-        document.getElementById('settingsPanel').classList.remove('open');
+        closePanels();
     });
+    document.getElementById('panelBackdrop').addEventListener('click', closePanels);
     
     document.getElementById('closeInspector').addEventListener('click', () => {
         document.getElementById('inspectorPanel').classList.remove('open');
@@ -1514,11 +1884,11 @@ function init() {
     // Column manager
     document.getElementById('columnsBtn').addEventListener('click', () => {
         renderColumnManager();
-        document.getElementById('columnsPanel').classList.toggle('open');
+        openPanel('columnsPanel');
     });
     
     document.getElementById('closeColumns').addEventListener('click', () => {
-        document.getElementById('columnsPanel').classList.remove('open');
+        closePanels();
     });
     
     document.getElementById('showAllColumns').addEventListener('click', () => {
@@ -1562,6 +1932,15 @@ function init() {
         state.settings.notificationSoundSource = e.target.value;
         saveSettings();
     });
+
+    document.getElementById('testNotificationSound').addEventListener('click', () => {
+        playNotificationSound(true);
+        showInAppToast('Sound test', 'Notification audio was triggered.');
+    });
+
+    document.getElementById('testNativeToast').addEventListener('click', () => {
+        sendNativeToast('Patris Export', 'Native desktop notifications are connected.');
+    });
     
     document.getElementById('enablePagination').addEventListener('change', (e) => {
         state.settings.enablePagination = e.target.checked;
@@ -1580,11 +1959,34 @@ function init() {
     // Initialize notification audio
     initNotificationAudio();
     
+    fetchAppInfo();
+    loadServerConfig();
+
     // Initialize WebSocket
     initWebSocket();
     
+    // Fetch database metadata
+    fetchFileInfo();
+    fetchProcessStatus();
+
     // Fetch initial data via HTTP
     fetchInitialData();
+}
+
+// Fetch database file metadata
+async function fetchFileInfo() {
+    try {
+        const response = await fetch('/api/info');
+        if (!response.ok) {
+            throw new Error(`HTTP error! status: ${response.status}`);
+        }
+        const info = await response.json();
+        state.fileName = info.path || info.file || '';
+        updateFooterFileName();
+    } catch (error) {
+        console.error('Failed to fetch file info:', error);
+        updateFooterFileName();
+    }
 }
 
 // Fetch initial data
@@ -1615,8 +2017,10 @@ async function fetchInitialData() {
         filterRecords();
         renderTable();
         updateCounts();
+        setLoadingState(false);
     } catch (error) {
         console.error('Failed to fetch initial data:', error);
+        setLoadingState(false);
     }
 }
 

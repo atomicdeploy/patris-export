@@ -97,11 +97,13 @@ jobs:
         export CGO_LDFLAGS="-LC:/pxlib-install/lib"
         
         # Get version info
-        VERSION="1.0.0"
-        BUILD_DATE=$(date -u +'%Y-%m-%dT%H:%M:%SZ')
-        
-        go build \
-          -ldflags "-X main.Version=${VERSION} -X main.BuildDate=${BUILD_DATE}" \
+          VERSION="1.0.0"
+          BUILD_DATE=$(date -u +'%Y-%m-%dT%H:%M:%SZ')
+          COMMIT="${GITHUB_SHA::12}"
+          VERSION_PKG="github.com/atomicdeploy/patris-export/pkg/version"
+
+          go build \
+          -ldflags "-X ${VERSION_PKG}.Version=${VERSION} -X ${VERSION_PKG}.BuildDate=${BUILD_DATE} -X ${VERSION_PKG}.Commit=${COMMIT}" \
           -o build/patris-export-windows-amd64.exe \
           ./cmd/patris-export
         

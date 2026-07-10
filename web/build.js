@@ -21,7 +21,7 @@ function compileSass() {
 
 // Build function
 async function build() {
-  console.log('🔨 Building frontend...');
+  console.log('Building frontend...');
   
   // Compile SCSS
   const css = compileSass();
@@ -58,7 +58,7 @@ async function build() {
   fs.writeFileSync('dist/viewer.html', finalViewerHtml);
   fs.writeFileSync('dist/welcome.html', welcomeHtml);
   
-  console.log('✅ Build complete: dist/viewer.html, dist/welcome.html');
+  console.log('Build complete: dist/viewer.html, dist/welcome.html');
 }
 
 // Run build
@@ -68,13 +68,13 @@ build().catch(err => {
 });
 
 if (watch) {
-  console.log('👀 Watching for changes...');
+  console.log('Watching for changes...');
   // Simple file watcher
   const watchFiles = ['src/viewer.html', 'src/welcome.html', 'src/styles.scss', 'src/app.js'];
   watchFiles.forEach(file => {
     fs.watch(file, (eventType) => {
       if (eventType === 'change') {
-        console.log(`\n📝 ${file} changed, rebuilding...`);
+        console.log(`\n${file} changed, rebuilding...`);
         build();
       }
     });

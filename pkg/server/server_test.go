@@ -112,6 +112,24 @@ func TestServerJSON(t *testing.T) {
 			t.Errorf("Expected Content-Type text/html; charset=utf-8, got %s", ct)
 		}
 	})
+
+	t.Run("GET /favicon.ico", func(t *testing.T) {
+		req := httptest.NewRequest("GET", "/favicon.ico", nil)
+		w := httptest.NewRecorder()
+		srv.router.ServeHTTP(w, req)
+
+		if w.Code != http.StatusOK {
+			t.Errorf("Expected status 200, got %d", w.Code)
+		}
+
+		if ct := w.Header().Get("Content-Type"); ct != "image/x-icon" {
+			t.Errorf("Expected Content-Type image/x-icon, got %s", ct)
+		}
+
+		if w.Body.Len() == 0 {
+			t.Error("Expected non-empty favicon")
+		}
+	})
 }
 
 // TestWebSocketUpdates tests WebSocket broadcasting of changes

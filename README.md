@@ -1,4 +1,4 @@
-# 📊 Patris Export
+# <img src="web/assets/patris-api-icon.png" alt="" width="36" height="36" align="absmiddle"> Patris Export
 
 A fast and performant application for reading, parsing, and converting Paradox/BDE database files (`*.db`) from Patris81 software.
 
@@ -121,6 +121,8 @@ patris-export company company.inf -c testdata/farsi_chars.txt
 ```bash
 patris-export serve kala.db -a :8080
 ```
+
+Terminal WebSocket inspection with WebSocat is documented in [docs/examples/websocat.md](docs/examples/websocat.md).
 
 Then access:
 - Web interface: http://localhost:8080

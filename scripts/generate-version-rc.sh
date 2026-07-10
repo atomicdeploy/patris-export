@@ -32,7 +32,8 @@ if ! [[ "$CURRENT_YEAR" =~ ^[0-9]{4}$ ]] || [ "$CURRENT_YEAR" -lt 2024 ] || [ "$
     CURRENT_YEAR=2024
 fi
 # Parse repository URL to get owner and name
-REPO_URL=$(git config --get remote.origin.url | sed 's/\.git$//')
+REPO_URL=$(git config --get remote.origin.url 2>/dev/null || true)
+REPO_URL="${REPO_URL%.git}"
 # Handle both SSH (git@github.com:owner/repo) and HTTPS (https://github.com/owner/repo)
 if [[ "$REPO_URL" =~ ^git@github\.com:(.+)/(.+)$ ]]; then
     REPO_OWNER="${BASH_REMATCH[1]}"

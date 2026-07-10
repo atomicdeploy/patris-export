@@ -11,12 +11,17 @@ param(
 $ErrorActionPreference = "Stop"
 
 $deployRoot = Join-Path $AtomicDeployRoot "deploy"
-$appExe = Join-Path $deployRoot "patris-export-windows-amd64.exe"
+$appExe = Join-Path $deployRoot "patris-export.exe"
+$fallbackExe = Join-Path $deployRoot "patris-export-windows-amd64.exe"
 $winswExe = Join-Path $deployRoot "$ServiceName.exe"
 $winswXml = Join-Path $deployRoot "$ServiceName.xml"
 
 if (-not (Test-Path $appExe)) {
-    throw "Executable not found: $appExe. Run Build-LocalWindows.ps1 first."
+    if (Test-Path $fallbackExe) {
+        Copy-Item $fallbackExe $appExe -Force
+    } else {
+        throw "Executable not found: $appExe. Run Build-LocalWindows.ps1 first."
+    }
 }
 
 New-Item -ItemType Directory -Force $deployRoot | Out-Null
@@ -42,6 +47,12 @@ $xml = @"
 </service>
 "@
 Set-Content -Path $winswXml -Value $xml -Encoding UTF8
+
+$userPath = [Environment]::GetEnvironmentVariable("Path", "User")
+if (($userPath -split ';') -notcontains $deployRoot) {
+    [Environment]::SetEnvironmentVariable("Path", ($userPath.TrimEnd(';') + ";$deployRoot").TrimStart(';'), "User")
+    Write-Host "Added to user PATH: $deployRoot"
+}
 
 & $winswExe install
 if ($Start) {

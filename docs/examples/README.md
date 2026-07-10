@@ -2,6 +2,8 @@
 
 This directory contains examples and usage demonstrations for Patris Export.
 
+- [WebSocat terminal inspection](websocat.md)
+
 ## Basic Usage Examples
 
 ### 1. Converting a Database to JSON

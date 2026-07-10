@@ -8,7 +8,10 @@ param(
 $ErrorActionPreference = "Stop"
 
 $deployRoot = Join-Path $AtomicDeployRoot "deploy"
-$exe = Join-Path $deployRoot "patris-export-windows-amd64.exe"
+$exe = Join-Path $deployRoot "patris-export.exe"
+if (-not (Test-Path $exe)) {
+    $exe = Join-Path $deployRoot "patris-export-windows-amd64.exe"
+}
 if (-not (Test-Path $exe)) {
     throw "Executable not found: $exe. Run Build-LocalWindows.ps1 first."
 }

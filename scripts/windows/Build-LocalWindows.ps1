@@ -57,6 +57,9 @@ $pxlibSource = Join-Path $depsRoot "pxlib"
 $pxlibBuild = Join-Path $depsRoot "pxlib-build-windows"
 $pxlibInstall = Join-Path $depsRoot "pxlib-install-windows"
 $deployRoot = Join-Path $AtomicDeployRoot "deploy"
+$vcpkgRoot = $(if ($env:VCPKG_ROOT) { $env:VCPKG_ROOT } else { Join-Path $depsRoot "vcpkg" })
+$vcpkgTriplet = $(if ($env:VCPKG_DEFAULT_TRIPLET) { $env:VCPKG_DEFAULT_TRIPLET } else { "x64-windows" })
+$useVcpkg = $env:USE_VCPKG -match '^(1|true|yes|on)$'
 
 New-Item -ItemType Directory -Force $depsRoot, $deployRoot | Out-Null
 
@@ -149,6 +152,9 @@ if (-not (Test-Path (Join-Path $pxlibInstall "include\paradox.h"))) {
     if ($env:PXLIB_ROOT -and (Test-Path (Join-Path $env:PXLIB_ROOT "include\paradox.h"))) {
         $pxlibInstall = $env:PXLIB_ROOT
         Write-Warning "Using system pxlib from PXLIB_ROOT=$pxlibInstall"
+    } elseif ($useVcpkg -and (Test-Path (Join-Path $vcpkgRoot "installed\$vcpkgTriplet\include\paradox.h"))) {
+        $pxlibInstall = Join-Path $vcpkgRoot "installed\$vcpkgTriplet"
+        Write-Warning "Using pxlib from vcpkg: $pxlibInstall"
     } else {
         throw "pxlib build did not produce include\paradox.h and PXLIB_ROOT is not set."
     }
@@ -156,6 +162,8 @@ if (-not (Test-Path (Join-Path $pxlibInstall "include\paradox.h"))) {
 
 Push-Location $repoRoot
 try {
+    & (Join-Path $PSScriptRoot "Rebuild-Assets.ps1")
+
     Push-Location web
     try {
         cmd /c npm install
@@ -173,10 +181,20 @@ try {
     $env:CC = $gcc
     $env:CGO_CFLAGS = "-I$pxlibInstall\include"
     $env:CGO_LDFLAGS = "-L$pxlibInstall\lib -L$pxlibInstall\bin"
+    if ($useVcpkg -and (Test-Path (Join-Path $vcpkgRoot "installed\$vcpkgTriplet"))) {
+        $vcpkgInstalled = Join-Path $vcpkgRoot "installed\$vcpkgTriplet"
+        $env:CGO_CFLAGS = "$($env:CGO_CFLAGS) -I$vcpkgInstalled\include"
+        $env:CGO_LDFLAGS = "$($env:CGO_LDFLAGS) -L$vcpkgInstalled\lib -L$vcpkgInstalled\bin"
+        $env:PATH = "$vcpkgInstalled\bin;$env:PATH"
+        Write-Host "Using optional vcpkg C dependency paths: $vcpkgInstalled"
+    }
 
     $buildDate = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
+    $commit = (& $git -C $repoRoot rev-parse --short=12 HEAD).Trim()
+    $versionPkg = "github.com/atomicdeploy/patris-export/pkg/version"
     $outExe = Join-Path $deployRoot "patris-export-windows-amd64.exe"
-    Invoke-Checked $go @("build", "-ldflags", "-X main.Version=$Version -X main.BuildDate=$buildDate", "-o", $outExe, ".\cmd\patris-export")
+    Invoke-Checked $go @("build", "-ldflags", "-X $versionPkg.Version=$Version -X $versionPkg.BuildDate=$buildDate -X $versionPkg.Commit=$commit", "-o", $outExe, ".\cmd\patris-export")
+    Copy-Item $outExe (Join-Path $deployRoot "patris-export.exe") -Force
 
     Copy-Item (Join-Path $pxlibInstall "bin\*.dll") $deployRoot -ErrorAction SilentlyContinue
     foreach ($runtimeDll in @("libgcc_s_seh-1.dll", "libwinpthread-1.dll", "libstdc++-6.dll")) {

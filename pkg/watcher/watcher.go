@@ -6,6 +6,7 @@ import (
 	"io"
 	"log"
 	"os"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -14,11 +15,13 @@ import (
 
 // FileWatcher watches database files for changes
 type FileWatcher struct {
-	watcher    *fsnotify.Watcher
-	fileHashes map[string]string
-	mu         sync.RWMutex
-	callbacks  map[string]func(string)
-	debounce   map[string]time.Duration
+	watcher     *fsnotify.Watcher
+	fileHashes  map[string]string
+	mu          sync.RWMutex
+	callbacks   map[string]func(string)
+	debounce    map[string]time.Duration
+	watchedDirs map[string]int
+	pathDirs    map[string]string
 }
 
 // NewFileWatcher creates a new file watcher
@@ -29,32 +32,42 @@ func NewFileWatcher() (*FileWatcher, error) {
 	}
 
 	return &FileWatcher{
-		watcher:    watcher,
-		fileHashes: make(map[string]string),
-		callbacks:  make(map[string]func(string)),
-		debounce:   make(map[string]time.Duration),
+		watcher:     watcher,
+		fileHashes:  make(map[string]string),
+		callbacks:   make(map[string]func(string)),
+		debounce:    make(map[string]time.Duration),
+		watchedDirs: make(map[string]int),
+		pathDirs:    make(map[string]string),
 	}, nil
 }
 
 // Watch starts watching a file or directory with a configurable debounce duration
 func (fw *FileWatcher) Watch(path string, callback func(string), debounceDuration time.Duration) error {
+	absPath, err := filepath.Abs(path)
+	if err != nil {
+		return fmt.Errorf("failed to resolve path: %w", err)
+	}
 	fw.mu.Lock()
 	defer fw.mu.Unlock()
 
 	// Get initial hash
-	hash, err := fw.getFileHash(path)
+	hash, err := fw.getFileHash(absPath)
 	if err != nil {
 		return fmt.Errorf("failed to get initial hash: %w", err)
 	}
 
-	fw.fileHashes[path] = hash
-	fw.callbacks[path] = callback
-	fw.debounce[path] = debounceDuration
+	fw.fileHashes[absPath] = hash
+	fw.callbacks[absPath] = callback
+	fw.debounce[absPath] = debounceDuration
 
-	// Add to watcher
-	if err := fw.watcher.Add(path); err != nil {
-		return fmt.Errorf("failed to watch file: %w", err)
+	dir := filepath.Dir(absPath)
+	fw.pathDirs[absPath] = dir
+	if fw.watchedDirs[dir] == 0 {
+		if err := fw.watcher.Add(dir); err != nil {
+			return fmt.Errorf("failed to watch directory: %w", err)
+		}
 	}
+	fw.watchedDirs[dir]++
 
 	return nil
 }
@@ -78,12 +91,19 @@ func (fw *FileWatcher) watchLoop() {
 
 			// Only process write and create events
 			if event.Op&fsnotify.Write == fsnotify.Write || event.Op&fsnotify.Create == fsnotify.Create {
-				path := event.Name
+				path, err := filepath.Abs(event.Name)
+				if err != nil {
+					continue
+				}
 
 				// Get debounce duration for this path
 				fw.mu.RLock()
+				_, watched := fw.callbacks[path]
 				debounceDuration := fw.debounce[path]
 				fw.mu.RUnlock()
+				if !watched {
+					continue
+				}
 
 				// If debounce is 0, process immediately
 				if debounceDuration == 0 {
@@ -113,13 +133,8 @@ func (fw *FileWatcher) watchLoop() {
 // handleFileChange checks if file has actually changed and calls callback
 func (fw *FileWatcher) handleFileChange(path string) {
 	fw.mu.RLock()
-	callback, hasCallback := fw.callbacks[path]
 	oldHash := fw.fileHashes[path]
 	fw.mu.RUnlock()
-
-	if !hasCallback {
-		return
-	}
 
 	// Calculate new hash
 	newHash, err := fw.getFileHash(path)
@@ -131,6 +146,11 @@ func (fw *FileWatcher) handleFileChange(path string) {
 	// Only trigger callback if hash changed
 	if newHash != oldHash {
 		fw.mu.Lock()
+		callback, hasCallback := fw.callbacks[path]
+		if !hasCallback {
+			fw.mu.Unlock()
+			return
+		}
 		fw.fileHashes[path] = newHash
 		fw.mu.Unlock()
 
@@ -161,12 +181,25 @@ func (fw *FileWatcher) Close() error {
 
 // Unwatch stops watching a specific file
 func (fw *FileWatcher) Unwatch(path string) error {
+	absPath, err := filepath.Abs(path)
+	if err != nil {
+		return err
+	}
 	fw.mu.Lock()
 	defer fw.mu.Unlock()
 
-	delete(fw.fileHashes, path)
-	delete(fw.callbacks, path)
-	delete(fw.debounce, path)
+	delete(fw.fileHashes, absPath)
+	delete(fw.callbacks, absPath)
+	delete(fw.debounce, absPath)
+	dir := fw.pathDirs[absPath]
+	delete(fw.pathDirs, absPath)
 
-	return fw.watcher.Remove(path)
+	if dir != "" {
+		fw.watchedDirs[dir]--
+		if fw.watchedDirs[dir] <= 0 {
+			delete(fw.watchedDirs, dir)
+			return fw.watcher.Remove(dir)
+		}
+	}
+	return nil
 }

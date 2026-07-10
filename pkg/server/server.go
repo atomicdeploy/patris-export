@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -8,18 +9,21 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/atomicdeploy/patris-export/pkg/appconfig"
 	"github.com/atomicdeploy/patris-export/pkg/converter"
 	"github.com/atomicdeploy/patris-export/pkg/datasource"
 	"github.com/atomicdeploy/patris-export/pkg/filecopy"
+	"github.com/atomicdeploy/patris-export/pkg/notifier"
 	"github.com/atomicdeploy/patris-export/pkg/paradox"
 	"github.com/atomicdeploy/patris-export/pkg/processmon"
+	"github.com/atomicdeploy/patris-export/pkg/version"
 	"github.com/atomicdeploy/patris-export/pkg/watcher"
 	"github.com/atomicdeploy/patris-export/web"
+	"github.com/fsnotify/fsnotify"
 	"github.com/gorilla/mux"
 	"github.com/gorilla/websocket"
 )
@@ -39,6 +43,14 @@ type Server struct {
 	lastModTime   time.Time
 	lastModTimeMu sync.RWMutex
 	useTempFile   bool
+	config        *appconfig.Manager
+	configWatcher *fsnotify.Watcher
+	version       version.Info
+}
+
+type Options struct {
+	Config  *appconfig.Manager
+	Version version.Info
 }
 
 // RecordChange represents a change to a specific record
@@ -60,8 +72,23 @@ type ChangeSet struct {
 	TotalCount int                      `json:"total_count"`
 }
 
+// ToastRequest represents a desktop/browser notification request.
+type ToastRequest struct {
+	Type      string `json:"type,omitempty"`
+	Title     string `json:"title"`
+	Message   string `json:"message"`
+	Icon      string `json:"icon,omitempty"`
+	Source    string `json:"source,omitempty"`
+	Native    *bool  `json:"native,omitempty"`
+	Broadcast *bool  `json:"broadcast,omitempty"`
+}
+
 // NewServer creates a new server instance
 func NewServer(dbPath string, charMap converter.CharMapping, useTempFile ...bool) (*Server, error) {
+	return NewServerWithOptions(dbPath, charMap, Options{}, useTempFile...)
+}
+
+func NewServerWithOptions(dbPath string, charMap converter.CharMapping, options Options, useTempFile ...bool) (*Server, error) {
 	copyBeforeRead := true
 	if len(useTempFile) > 0 {
 		copyBeforeRead = useTempFile[0]
@@ -80,6 +107,8 @@ func NewServer(dbPath string, charMap converter.CharMapping, useTempFile ...bool
 		dataSource:  ds,
 		wsClients:   make(map[*websocket.Conn]*sync.Mutex),
 		useTempFile: copyBeforeRead,
+		config:      options.Config,
+		version:     options.Version,
 		upgrader: websocket.Upgrader{
 			// Security: Configure origin checking for production use
 			// Default allows localhost only
@@ -101,9 +130,23 @@ func NewServer(dbPath string, charMap converter.CharMapping, useTempFile ...bool
 			},
 		},
 	}
+	if s.version.Version == "" {
+		s.version = version.Current()
+	}
 
 	// Set up routes
 	s.setupRoutes()
+
+	if s.config != nil {
+		w, err := s.config.Watch(func(cfg appconfig.Config) {
+			log.Printf("⚙️ Config reloaded: %s", s.config.Path())
+			s.broadcastConfig(cfg)
+		})
+		if err != nil {
+			return nil, fmt.Errorf("failed to watch config: %w", err)
+		}
+		s.configWatcher = w
+	}
 
 	return s, nil
 }
@@ -114,9 +157,16 @@ func (s *Server) setupRoutes() {
 	s.router.HandleFunc("/viewer", s.handleViewer).Methods("GET")
 	s.router.HandleFunc("/api/records", s.handleGetRecords).Methods("GET")
 	s.router.HandleFunc("/api/info", s.handleGetInfo).Methods("GET")
+	s.router.HandleFunc("/api/app", s.handleGetApp).Methods("GET")
+	s.router.HandleFunc("/api/config", s.handleGetConfig).Methods("GET")
+	s.router.HandleFunc("/api/config", s.handlePutConfig).Methods("PUT")
+	s.router.HandleFunc("/api/status", s.handleGetStatus).Methods("GET")
+	s.router.HandleFunc("/api/toast", s.handlePostToast).Methods("POST")
 	s.router.HandleFunc("/api/processes/patris81", s.handleGetPatris81Processes).Methods("GET")
 	s.router.HandleFunc("/api/processes/file", s.handleGetFileProcesses).Methods("GET")
-	s.router.HandleFunc("/static/notification.ogg", s.handleNotificationAudio).Methods("GET")
+	s.router.HandleFunc("/static/notification.ogg", s.handleNotificationAudio).Methods("GET", "HEAD")
+	s.router.HandleFunc("/static/patris-api-icon.png", s.handleAppIcon).Methods("GET", "HEAD")
+	s.router.HandleFunc("/favicon.ico", s.handleFavicon).Methods("GET", "HEAD")
 	s.router.HandleFunc("/ws", s.handleWebSocket)
 }
 
@@ -195,9 +245,74 @@ func (s *Server) handleGetInfo(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"success":     true,
 		"file":        filepath.Base(s.dbPath),
+		"path":        s.dbPath,
+		"version":     s.version,
 		"num_records": db.GetNumRecords(),
 		"num_fields":  db.GetNumFields(),
 		"fields":      fields,
+	})
+}
+
+func (s *Server) handleGetApp(w http.ResponseWriter, r *http.Request) {
+	payload := map[string]interface{}{
+		"name":        "Patris Export",
+		"version":     s.version,
+		"config_path": "",
+	}
+	if s.config != nil {
+		payload["config_path"] = s.config.Path()
+	}
+	writeJSON(w, payload)
+}
+
+func (s *Server) handleGetConfig(w http.ResponseWriter, r *http.Request) {
+	if s.config == nil {
+		writeJSON(w, appconfig.Default())
+		return
+	}
+	writeJSON(w, s.config.Get())
+}
+
+func (s *Server) handlePutConfig(w http.ResponseWriter, r *http.Request) {
+	if s.config == nil {
+		http.Error(w, "configuration storage is not enabled", http.StatusServiceUnavailable)
+		return
+	}
+	var cfg appconfig.Config
+	if err := json.NewDecoder(r.Body).Decode(&cfg); err != nil {
+		http.Error(w, fmt.Sprintf("Failed to decode config: %v", err), http.StatusBadRequest)
+		return
+	}
+	if err := s.config.Replace(cfg); err != nil {
+		http.Error(w, fmt.Sprintf("Failed to save config: %v", err), http.StatusInternalServerError)
+		return
+	}
+	s.broadcastConfig(s.config.Get())
+	writeJSON(w, map[string]interface{}{
+		"success": true,
+		"config":  s.config.Get(),
+	})
+}
+
+func (s *Server) handleGetStatus(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, s.processStatus())
+}
+
+// handlePostToast displays a native notification and broadcasts it to web clients.
+func (s *Server) handlePostToast(w http.ResponseWriter, r *http.Request) {
+	var req ToastRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, fmt.Sprintf("Failed to decode toast request: %v", err), http.StatusBadRequest)
+		return
+	}
+
+	req.Source = "api"
+	nativeErr := s.processToastRequest(req)
+
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success":      nativeErr == nil,
+		"native_error": errorString(nativeErr),
 	})
 }
 
@@ -235,87 +350,27 @@ func (s *Server) handleGetFileProcesses(w http.ResponseWriter, r *http.Request) 
 	})
 }
 
-// handleNotificationAudio serves the notification audio file with proper headers
-// Supports resumable downloads via HTTP Range requests
+// handleNotificationAudio serves the notification audio file with HEAD/range support.
 func (s *Server) handleNotificationAudio(w http.ResponseWriter, r *http.Request) {
-	audioData := web.NotificationAudio
-	audioSize := int64(len(audioData))
-
-	// Set headers for caching and content type
 	w.Header().Set("Content-Type", "audio/ogg")
 	w.Header().Set("Accept-Ranges", "bytes")
-	w.Header().Set("Cache-Control", "public, max-age=31536000, immutable") // Cache for 1 year
+	w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+	http.ServeContent(w, r, "notification.ogg", time.Time{}, bytes.NewReader(web.NotificationAudio))
+}
 
-	// Handle Range requests for resumable downloads
-	rangeHeader := r.Header.Get("Range")
-	if rangeHeader == "" {
-		// No range requested, serve the entire file
-		w.Header().Set("Content-Length", strconv.FormatInt(audioSize, 10))
-		w.WriteHeader(http.StatusOK)
-		w.Write(audioData)
-		return
-	}
+func (s *Server) handleAppIcon(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "image/png")
+	w.Header().Set("Accept-Ranges", "bytes")
+	w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+	http.ServeContent(w, r, "patris-api-icon.png", time.Time{}, bytes.NewReader(web.AppIconPNG))
+}
 
-	// Parse the Range header - supports multiple formats per RFC 7233:
-	// - "bytes=start-end" (specific range)
-	// - "bytes=start-" (from start to end)
-	// - "bytes=-suffix" (last N bytes)
-	var start, end int64
-	rangeSpec := strings.TrimPrefix(rangeHeader, "bytes=")
-	if rangeSpec == rangeHeader || strings.Contains(rangeSpec, ",") {
-		http.Error(w, "Range Not Satisfiable", http.StatusRequestedRangeNotSatisfiable)
-		return
-	}
-
-	if strings.HasPrefix(rangeSpec, "-") {
-		suffixLength, err := strconv.ParseInt(strings.TrimPrefix(rangeSpec, "-"), 10, 64)
-		if err != nil || suffixLength <= 0 {
-			http.Error(w, "Range Not Satisfiable", http.StatusRequestedRangeNotSatisfiable)
-			return
-		}
-		start = audioSize - suffixLength
-		end = audioSize - 1
-		if start < 0 {
-			start = 0
-		}
-	} else {
-		parts := strings.SplitN(rangeSpec, "-", 2)
-		if len(parts) != 2 || parts[0] == "" {
-			http.Error(w, "Range Not Satisfiable", http.StatusRequestedRangeNotSatisfiable)
-			return
-		}
-		parsedStart, err := strconv.ParseInt(parts[0], 10, 64)
-		if err != nil {
-			http.Error(w, "Range Not Satisfiable", http.StatusRequestedRangeNotSatisfiable)
-			return
-		}
-		start = parsedStart
-		if parts[1] == "" {
-			end = audioSize - 1
-		} else {
-			parsedEnd, err := strconv.ParseInt(parts[1], 10, 64)
-			if err != nil {
-				http.Error(w, "Range Not Satisfiable", http.StatusRequestedRangeNotSatisfiable)
-				return
-			}
-			end = parsedEnd
-		}
-	}
-
-	// Validate range
-	// Valid byte indices are 0 to audioSize-1
-	if start < 0 || start >= audioSize || end >= audioSize || start > end {
-		w.Header().Set("Content-Range", "bytes */"+strconv.FormatInt(audioSize, 10))
-		http.Error(w, "Range Not Satisfiable", http.StatusRequestedRangeNotSatisfiable)
-		return
-	}
-
-	// Serve the requested range
-	contentLength := end - start + 1
-	w.Header().Set("Content-Length", strconv.FormatInt(contentLength, 10))
-	w.Header().Set("Content-Range", "bytes "+strconv.FormatInt(start, 10)+"-"+strconv.FormatInt(end, 10)+"/"+strconv.FormatInt(audioSize, 10))
-	w.WriteHeader(http.StatusPartialContent)
-	w.Write(audioData[start : end+1])
+// handleFavicon serves the application icon.
+func (s *Server) handleFavicon(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "image/x-icon")
+	w.Header().Set("Accept-Ranges", "bytes")
+	w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+	http.ServeContent(w, r, "favicon.ico", time.Time{}, bytes.NewReader(web.FaviconICO))
 }
 
 // handleWebSocket handles WebSocket connections
@@ -347,8 +402,15 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		}()
 
 		for {
-			if _, _, err := conn.ReadMessage(); err != nil {
+			var msg ToastRequest
+			if err := conn.ReadJSON(&msg); err != nil {
 				break
+			}
+			if msg.Type == "toast" {
+				msg.Source = "websocket"
+				if err := s.processToastRequest(msg); err != nil {
+					log.Printf("Failed to show WebSocket toast: %v", err)
+				}
 			}
 		}
 	}()
@@ -368,6 +430,12 @@ func (s *Server) sendRecordsToClient(conn *websocket.Conn, connMu *sync.Mutex) {
 		"timestamp":   time.Now().Format(time.RFC3339),
 		"added":       records,
 		"total_count": len(records),
+		"file_name":   filepath.Base(s.dbPath),
+		"file_path":   s.dbPath,
+		"version":     s.version,
+	}
+	if s.config != nil {
+		message["config"] = s.config.Get()
 	}
 
 	connMu.Lock()
@@ -385,6 +453,7 @@ func (s *Server) sendRecordsToClient(conn *websocket.Conn, connMu *sync.Mutex) {
 	s.lastRecordsMu.Unlock()
 
 	log.Printf("📤 Sent initial %d records to client", len(records))
+	go s.broadcastProcessInfo()
 }
 
 // broadcastUpdate broadcasts database changes to all connected WebSocket clients
@@ -443,35 +512,50 @@ func (s *Server) broadcastUpdate() {
 	s.wsClientsMu.RUnlock()
 
 	log.Printf("✅ Broadcast complete")
+	if nativeToastsOnChanges() && added+modified+deleted > 0 {
+		message := fmt.Sprintf("%d added, %d modified, %d deleted", added, modified, deleted)
+		if err := notifier.Show(notifier.Toast{Title: "Patris data changed", Message: message}, web.AppIconPNG); err != nil {
+			log.Printf("Native toast failed: %v", err)
+		}
+	}
 	go s.broadcastProcessInfo()
 }
 
-func (s *Server) broadcastProcessInfo() {
-	patris81Processes, err := processmon.FindProcessByName("patris81.exe")
-	if err != nil {
-		log.Printf("Failed to find patris81 processes: %v", err)
-		return
+func (s *Server) processToastRequest(req ToastRequest) error {
+	if strings.TrimSpace(req.Title) == "" {
+		req.Title = "Patris Export"
+	}
+	if strings.TrimSpace(req.Message) == "" {
+		req.Message = "Notification"
 	}
 
-	fileInfo, err := processmon.FindProcessesWithFile(s.dbPath)
-	if err != nil {
-		log.Printf("Failed to find processes with file: %v", err)
-		return
+	if req.Broadcast == nil || *req.Broadcast {
+		s.broadcastToast(req, "")
 	}
 
+	if req.Native == nil || *req.Native {
+		err := notifier.Show(notifier.Toast{Title: req.Title, Message: req.Message}, web.AppIconPNG)
+		if err != nil && (req.Broadcast == nil || *req.Broadcast) {
+			s.broadcastToast(req, errorString(err))
+		}
+		return err
+	}
+	return nil
+}
+
+func (s *Server) broadcastToast(req ToastRequest, nativeError string) {
 	message := map[string]interface{}{
-		"type":      "process_info",
+		"type":      "toast",
 		"timestamp": time.Now().Format(time.RFC3339),
-		"patris81": map[string]interface{}{
-			"count":     len(patris81Processes),
-			"processes": patris81Processes,
-		},
-		"file_access": map[string]interface{}{
-			"file":      filepath.Base(s.dbPath),
-			"in_use":    len(fileInfo.Processes) > 0,
-			"count":     len(fileInfo.Processes),
-			"processes": fileInfo.Processes,
-		},
+		"title":     req.Title,
+		"message":   req.Message,
+		"source":    req.Source,
+	}
+	if req.Icon != "" {
+		message["icon"] = req.Icon
+	}
+	if nativeError != "" {
+		message["native_error"] = nativeError
 	}
 
 	s.wsClientsMu.RLock()
@@ -482,10 +566,99 @@ func (s *Server) broadcastProcessInfo() {
 			err := c.WriteJSON(message)
 			mu.Unlock()
 			if err != nil {
-				log.Printf("Failed to send process info to WebSocket: %v", err)
+				log.Printf("Failed to send toast to WebSocket: %v", err)
 			}
 		}(conn, connMu)
 	}
+}
+
+func nativeToastsOnChanges() bool {
+	value := strings.ToLower(strings.TrimSpace(os.Getenv("PATRIS_NATIVE_TOASTS")))
+	switch value {
+	case "1", "true", "yes", "on", "changes", "all":
+		return true
+	default:
+		return false
+	}
+}
+
+func errorString(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
+}
+
+func writeJSON(w http.ResponseWriter, payload interface{}) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	if err := json.NewEncoder(w).Encode(payload); err != nil {
+		http.Error(w, fmt.Sprintf("Failed to encode JSON: %v", err), http.StatusInternalServerError)
+	}
+}
+
+func (s *Server) processStatus() map[string]interface{} {
+	patris81Processes, patrisErr := processmon.FindProcessByName("patris81.exe")
+	fileInfo, fileErr := processmon.FindProcessesWithFile(s.dbPath)
+
+	status := map[string]interface{}{
+		"timestamp": time.Now().Format(time.RFC3339),
+		"patris81": map[string]interface{}{
+			"running":   len(patris81Processes) > 0,
+			"count":     len(patris81Processes),
+			"processes": patris81Processes,
+		},
+		"file_access": map[string]interface{}{
+			"file":      filepath.Base(s.dbPath),
+			"path":      s.dbPath,
+			"in_use":    fileInfo != nil && len(fileInfo.Processes) > 0,
+			"count":     0,
+			"processes": []processmon.ProcessInfo{},
+		},
+	}
+	if patrisErr != nil {
+		status["patris81"].(map[string]interface{})["error"] = patrisErr.Error()
+	}
+	if fileInfo != nil {
+		status["file_access"].(map[string]interface{})["count"] = len(fileInfo.Processes)
+		status["file_access"].(map[string]interface{})["processes"] = fileInfo.Processes
+	}
+	if fileErr != nil {
+		status["file_access"].(map[string]interface{})["error"] = fileErr.Error()
+	}
+	return status
+}
+
+func (s *Server) broadcastConfig(cfg appconfig.Config) {
+	message := map[string]interface{}{
+		"type":      "config_update",
+		"timestamp": time.Now().Format(time.RFC3339),
+		"config":    cfg,
+	}
+	s.broadcastMessage(message)
+}
+
+func (s *Server) broadcastMessage(message map[string]interface{}) {
+	s.wsClientsMu.RLock()
+	defer s.wsClientsMu.RUnlock()
+	for conn, connMu := range s.wsClients {
+		go func(c *websocket.Conn, mu *sync.Mutex) {
+			mu.Lock()
+			err := c.WriteJSON(message)
+			mu.Unlock()
+			if err != nil {
+				log.Printf("Failed to send WebSocket message: %v", err)
+			}
+		}(conn, connMu)
+	}
+}
+
+func (s *Server) broadcastProcessInfo() {
+	message := map[string]interface{}{
+		"type":      "process_info",
+		"timestamp": time.Now().Format(time.RFC3339),
+		"status":    s.processStatus(),
+	}
+	s.broadcastMessage(message)
 }
 
 // computeChanges computes the difference between old and new records
@@ -841,13 +1014,23 @@ func (s *Server) StartWatching(debounceDuration time.Duration) error {
 
 // Close cleans up server resources
 func (s *Server) Close() error {
+	var firstErr error
+	if s.configWatcher != nil {
+		if err := s.configWatcher.Close(); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
 	if s.watcher != nil {
-		return s.watcher.Close()
+		if err := s.watcher.Close(); err != nil && firstErr == nil {
+			firstErr = err
+		}
 	}
 	if s.dataSource != nil {
-		return s.dataSource.Close()
+		if err := s.dataSource.Close(); err != nil && firstErr == nil {
+			firstErr = err
+		}
 	}
-	return nil
+	return firstErr
 }
 
 // Start starts the HTTP server
