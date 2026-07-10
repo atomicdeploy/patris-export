@@ -19,6 +19,7 @@ import (
 	"github.com/atomicdeploy/patris-export/pkg/embedded"
 	"github.com/atomicdeploy/patris-export/pkg/filecopy"
 	"github.com/atomicdeploy/patris-export/pkg/ipc"
+	"github.com/atomicdeploy/patris-export/pkg/oneshot"
 	"github.com/atomicdeploy/patris-export/pkg/paradox"
 	"github.com/atomicdeploy/patris-export/pkg/processmon"
 	"github.com/atomicdeploy/patris-export/pkg/server"
@@ -39,6 +40,10 @@ var (
 	tempDir      string
 	outputDir    string
 	outputFormat string
+	dbFileFlag   string
+	viewHTMLOut  string
+	viewNoOpen   bool
+	viewTitle    string
 	watchMode    bool
 	verbose      bool
 	directAccess bool
@@ -58,7 +63,7 @@ const (
 
 func main() {
 	rootCmd := &cobra.Command{
-		Use:   "patris-export",
+		Use:   "patris-export [database-file]",
 		Short: "📊 Paradox/BDE database file converter for Patris81",
 		Long: `
 ╔═══════════════════════════════════════════════════════════╗
@@ -71,6 +76,8 @@ Reads Paradox .db files and converts them to JSON or CSV format.
 Supports Persian/Farsi encoding conversion and file watching.
 `,
 		Version: version.String(),
+		Args:    cobra.MaximumNArgs(1),
+		Run:     runRoot,
 	}
 	rootCmd.Short = "📦 Paradox/BDE database export service for Patris81"
 	rootCmd.Long = cliIntro()
@@ -78,6 +85,7 @@ Supports Persian/Farsi encoding conversion and file watching.
 
 	// Global flags
 	rootCmd.PersistentFlags().StringArrayVar(&configFiles, "config", nil, "Path to patris-export config file; repeat to layer JSON/YAML/TOML files")
+	rootCmd.PersistentFlags().StringVar(&dbFileFlag, "db", "", "Open a database file in one-shot native viewer mode when no subcommand is used")
 	rootCmd.PersistentFlags().StringVarP(&charMapFile, "charmap", "c", "", "Optional custom character mapping file; embedded Patris81 mapping is used by default")
 	rootCmd.PersistentFlags().StringVarP(&outputDir, "output", "o", ".", "Output directory for converted files (use '-' for stdout)")
 	rootCmd.PersistentFlags().StringVar(&tempDir, "temp-dir", "", "Temp directory for copied/downloaded database files (default: system temp)")
@@ -111,6 +119,16 @@ Supports Persian/Farsi encoding conversion and file watching.
 		Args:  cobra.ExactArgs(1),
 		Run:   runCompany,
 	}
+
+	viewCmd := &cobra.Command{
+		Use:   "view [database-file-or-url]",
+		Short: "Open a one-shot native database viewer",
+		Args:  cobra.MaximumNArgs(1),
+		Run:   runView,
+	}
+	viewCmd.Flags().StringVar(&viewHTMLOut, "html-output", "", "Write the generated one-shot HTML snapshot to this file or directory")
+	viewCmd.Flags().BoolVar(&viewNoOpen, "no-open", false, "Generate the HTML snapshot without opening a native viewer window")
+	viewCmd.Flags().StringVar(&viewTitle, "title", "", "Native viewer window title")
 
 	// Serve command
 	serveCmd := &cobra.Command{
@@ -162,7 +180,7 @@ Set GITHUB_TOKEN for private repositories and higher API rate limits.`,
 	}
 	updateCmd.Flags().StringP("branch", "b", "main", "Branch to download from")
 
-	rootCmd.AddCommand(convertCmd, infoCmd, companyCmd, serveCmd, ipcCmd, tuiCmd, updateCmd)
+	rootCmd.AddCommand(convertCmd, infoCmd, companyCmd, viewCmd, serveCmd, ipcCmd, tuiCmd, updateCmd)
 
 	if err := rootCmd.Execute(); err != nil {
 		errorColor.Fprintf(os.Stderr, "❌ Error: %v\n", err)
@@ -176,6 +194,23 @@ func getenvDefault(name, fallback string) string {
 		return fallback
 	}
 	return value
+}
+
+func runRoot(cmd *cobra.Command, args []string) {
+	dbFile := strings.TrimSpace(dbFileFlag)
+	if dbFile == "" && len(args) > 0 {
+		dbFile = args[0]
+	}
+	if dbFile == "" {
+		_ = cmd.Help()
+		return
+	}
+	if !isViewableSource(dbFile) {
+		errorColor.Printf("Unsupported one-shot viewer source: %s\n", dbFile)
+		errorColor.Println("Use a .db or .json file, or run a subcommand such as convert, serve, info, or tui.")
+		os.Exit(1)
+	}
+	runViewSource(cmd, dbFile, "", false, "")
 }
 
 func runUpdate(cmd *cobra.Command, args []string) {
@@ -628,6 +663,69 @@ func runCompany(cmd *cobra.Command, args []string) {
 	fmt.Println()
 }
 
+func runView(cmd *cobra.Command, args []string) {
+	_, cfg := effectiveConfig(cmd)
+	dbFile := cfg.Database.Path
+	if strings.TrimSpace(dbFileFlag) != "" {
+		dbFile = strings.TrimSpace(dbFileFlag)
+	}
+	if len(args) > 0 {
+		dbFile = args[0]
+	}
+	if strings.TrimSpace(dbFile) == "" {
+		errorColor.Println("No database file specified. Pass one to view, set --db, or set database.path in config.")
+		os.Exit(1)
+	}
+	if !isViewableSource(dbFile) {
+		errorColor.Printf("Unsupported one-shot viewer source: %s\n", dbFile)
+		errorColor.Println("Use a .db or .json file.")
+		os.Exit(1)
+	}
+	runViewSource(cmd, dbFile, viewHTMLOut, viewNoOpen, viewTitle)
+}
+
+func runViewSource(cmd *cobra.Command, dbFile, outputPath string, noOpen bool, title string) {
+	effectiveConfig(cmd)
+	var charMap converter.CharMapping
+	if charMapFile != "" {
+		var err error
+		charMap, err = converter.LoadCharMapping(charMapFile)
+		if err != nil {
+			errorColor.Printf("Failed to load character mapping: %v\n", err)
+			os.Exit(1)
+		}
+		converter.SetDefaultMapping(charMap)
+		successColor.Println("Custom character mapping loaded from file")
+	} else {
+		infoColor.Println("Using embedded character mapping (Patris81 default)")
+	}
+
+	displayFileStatus(dbFile)
+	checkProcessConflicts(dbFile)
+
+	if strings.TrimSpace(title) == "" {
+		title = fmt.Sprintf("Patris Export - %s", sourceBaseName(dbFile))
+	}
+	result, err := oneshot.Run(oneshot.Options{
+		Path:         dbFile,
+		CharMap:      charMap,
+		UseTempFile:  !directAccess,
+		OutputPath:   outputPath,
+		Open:         !noOpen,
+		Title:        title,
+		BuildVersion: version.Current(),
+	})
+	if err != nil {
+		errorColor.Printf("One-shot viewer failed: %v\n", err)
+		os.Exit(1)
+	}
+	successColor.Printf("Generated one-shot viewer: %s\n", result.HTMLPath)
+	infoColor.Printf("Rows: %d  Columns: %d\n", result.Records, result.Fields)
+	if result.Opened {
+		successColor.Println("Opened native viewer window")
+	}
+}
+
 // parseDebounceDuration parses and validates a debounce duration string
 func parseDebounceDuration(durationStr string) time.Duration {
 	duration, err := time.ParseDuration(durationStr)
@@ -760,6 +858,16 @@ func sourceBaseName(path string) string {
 		}
 	}
 	return filepath.Base(path)
+}
+
+func isViewableSource(path string) bool {
+	ext := strings.ToLower(filepath.Ext(path))
+	if filecopy.IsURL(path) {
+		if u, err := url.Parse(path); err == nil {
+			ext = strings.ToLower(filepath.Ext(u.Path))
+		}
+	}
+	return ext == ".db" || ext == ".json"
 }
 
 func runIPC(cmd *cobra.Command, args []string) {

@@ -128,6 +128,24 @@ Embedding, loadable-library builds, and local IPC are documented in [docs/EMBEDD
 Experimental RTL logical text conversion is available as an opt-in backend flag
 and web display setting. See [docs/RTL_CONVERSION.md](docs/RTL_CONVERSION.md).
 
+### One-shot Native Viewer
+
+Open a local snapshot viewer directly from a database file:
+
+```bash
+patris-export kala.db
+patris-export --db kala.db
+patris-export view kala.db
+```
+
+The command safely reads through a temporary copy by default, generates a self-contained HTML snapshot, and opens it in a native app-style window where the platform provides one. On Windows it prefers Microsoft Edge/WebView2 runtime app mode; on Linux it prefers browser app mode and falls back to `xdg-open`.
+
+Generate the snapshot without opening a window:
+
+```bash
+patris-export view kala.db --no-open --html-output output/kala-viewer.html
+```
+
 Then access:
 - Web interface: http://localhost:8080
 - API records: http://localhost:8080/api/records
