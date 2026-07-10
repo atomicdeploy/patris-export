@@ -16,7 +16,7 @@ func TestLoadFilesLayersJSONYAMLTOML(t *testing.T) {
 	if err := os.WriteFile(jsonPath, []byte(`{"server":{"host":"127.0.0.1","port":18080},"database":{"path":"base.db"},"convert":{"format":"csv"}}`), 0644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(yamlPath, []byte("server:\n  port: 19090\nruntime:\n  temp_dir: tmp/patris\n"), 0644); err != nil {
+	if err := os.WriteFile(yamlPath, []byte("server:\n  port: 19090\nruntime:\n  temp_dir: tmp/patris\n  temp_strategy: memory\n  temp_memory_limit_mb: 64\n"), 0644); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(tomlPath, []byte("[ui]\npage_size = 250\nrtl_text_direction = true\n"), 0644); err != nil {
@@ -39,6 +39,9 @@ func TestLoadFilesLayersJSONYAMLTOML(t *testing.T) {
 	}
 	if cfg.Runtime.TempDir != "tmp/patris" {
 		t.Fatalf("temp dir = %q", cfg.Runtime.TempDir)
+	}
+	if cfg.Runtime.TempStrategy != "memory" || cfg.Runtime.TempMemoryLimitMB != 64 {
+		t.Fatalf("runtime temp policy was not layered correctly: %+v", cfg.Runtime)
 	}
 	if cfg.UI.PageSize != 250 || !cfg.UI.RTLTextDirection {
 		t.Fatalf("ui config was not layered correctly: %+v", cfg.UI)
@@ -86,6 +89,23 @@ func TestApplyEnvNotificationOptions(t *testing.T) {
 	}
 	if !cfg.Notifications.IncludeRowValues || cfg.Notifications.MaxRows != 7 {
 		t.Fatalf("notification details were not applied: %+v", cfg.Notifications)
+	}
+}
+
+func TestApplyEnvRuntimeTempPolicy(t *testing.T) {
+	t.Setenv("PATRIS_TEMP_STRATEGY", "tmpfs")
+	t.Setenv("PATRIS_TEMP_MEMORY_LIMIT_MB", "42")
+
+	cfg := Default()
+	ApplyEnv(&cfg)
+	if cfg.Runtime.TempStrategy != "memory" {
+		t.Fatalf("temp strategy = %q", cfg.Runtime.TempStrategy)
+	}
+	if cfg.Runtime.TempMemoryLimitMB != 42 {
+		t.Fatalf("temp memory limit = %d", cfg.Runtime.TempMemoryLimitMB)
+	}
+	if TempMemoryLimitBytes(cfg.Runtime.TempMemoryLimitMB) != 42*1024*1024 {
+		t.Fatalf("unexpected temp memory limit bytes")
 	}
 }
 

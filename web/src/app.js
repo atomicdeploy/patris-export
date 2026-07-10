@@ -657,6 +657,8 @@ function applyConfigToSettingsForm() {
     setChecked('notifyIncludeRowValues', cfg.notifications?.include_row_values);
     setValue('notifyMaxRows', cfg.notifications?.max_rows || 3);
     setValue('runtimeTempDir', cfg.runtime?.temp_dir || 'system');
+    setValue('runtimeTempStrategy', cfg.runtime?.temp_strategy || 'auto');
+    setValue('runtimeTempMemoryLimitMB', cfg.runtime?.temp_memory_limit_mb || 100);
     setChecked('runtimeDebug', cfg.runtime?.debug);
     const pathEl = document.getElementById('settingsConfigPath');
     if (pathEl) {
@@ -683,6 +685,8 @@ function updateConfigFromSettingsForm() {
     state.config.runtime = {
         ...(state.config.runtime || {}),
         temp_dir: document.getElementById('runtimeTempDir')?.value.trim() || 'system',
+        temp_strategy: document.getElementById('runtimeTempStrategy')?.value || 'auto',
+        temp_memory_limit_mb: parseInt(document.getElementById('runtimeTempMemoryLimitMB')?.value || '100', 10) || 100,
         debug: !!document.getElementById('runtimeDebug')?.checked
     };
     state.config.notifications = {
@@ -2458,6 +2462,8 @@ function init() {
         'notifyIncludeRowValues',
         'notifyMaxRows',
         'runtimeTempDir',
+        'runtimeTempStrategy',
+        'runtimeTempMemoryLimitMB',
         'runtimeDebug'
     ]
         .forEach(id => bindConfigField(id));

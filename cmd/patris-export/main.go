@@ -38,6 +38,8 @@ var (
 	charMapFile  string
 	configFiles  []string
 	tempDir      string
+	tempStrategy string
+	tempLimitMB  int64
 	outputDir    string
 	outputFormat string
 	dbFileFlag   string
@@ -89,6 +91,8 @@ Supports Persian/Farsi encoding conversion and file watching.
 	rootCmd.PersistentFlags().StringVarP(&charMapFile, "charmap", "c", "", "Optional custom character mapping file; embedded Patris81 mapping is used by default")
 	rootCmd.PersistentFlags().StringVarP(&outputDir, "output", "o", ".", "Output directory for converted files (use '-' for stdout)")
 	rootCmd.PersistentFlags().StringVar(&tempDir, "temp-dir", "", "Temp directory for copied/downloaded database files (default: system temp)")
+	rootCmd.PersistentFlags().StringVar(&tempStrategy, "temp-strategy", "", "Temp storage strategy: auto, system, or memory (auto prefers /dev/shm on Linux for small files)")
+	rootCmd.PersistentFlags().Int64Var(&tempLimitMB, "temp-memory-limit-mb", 0, "Maximum file size in MiB for /dev/shm temp copies when temp strategy allows memory")
 	rootCmd.PersistentFlags().BoolVarP(&verbose, "verbose", "v", false, "Enable verbose logging")
 	rootCmd.PersistentFlags().BoolVarP(&directAccess, "direct-access", "d", false, "Access database file directly without temp copy (may conflict with BDE writes)")
 	rootCmd.PersistentFlags().BoolVarP(&rtlMode, "rtl", "r", false, "Opt in to RTL logical text conversion for mixed Persian/Latin output")
@@ -370,7 +374,14 @@ func effectiveConfig(cmd *cobra.Command) (*appconfig.Manager, appconfig.Config) 
 	if !rootFlags.Changed("temp-dir") {
 		tempDir = cfg.Runtime.TempDir
 	}
+	if !rootFlags.Changed("temp-strategy") {
+		tempStrategy = cfg.Runtime.TempStrategy
+	}
+	if !rootFlags.Changed("temp-memory-limit-mb") {
+		tempLimitMB = cfg.Runtime.TempMemoryLimitMB
+	}
 	filecopy.SetTempDir(appconfig.ResolveTempDir(tempDir))
+	filecopy.SetTempPolicy(tempStrategy, appconfig.TempMemoryLimitBytes(tempLimitMB))
 	converter.SetRTLConversion(rtlMode)
 	return mgr, cfg
 }

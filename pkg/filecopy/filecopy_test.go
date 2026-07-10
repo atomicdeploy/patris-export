@@ -243,8 +243,8 @@ func TestCopyToTempBasename(t *testing.T) {
 		t.Errorf("Expected basename to start with 'test-database.db.', got '%s'", baseName)
 	}
 
-	// Verify temp file is in system temp directory under patris-export subdirectory
-	expectedDir := filepath.Join(os.TempDir(), "patris-export")
+	// Verify temp file is in the selected patris-export temp directory.
+	expectedDir := TempRootForSize(4)
 	actualDir := filepath.Dir(fileInfo.TempPath)
 	if actualDir != expectedDir {
 		t.Errorf("Expected temp dir %s, got %s", expectedDir, actualDir)
@@ -259,6 +259,43 @@ func TestCopyToTempBasename(t *testing.T) {
 
 	if fileInfo.TempPath != fileInfo2.TempPath {
 		t.Errorf("Expected same temp path for same source file, got %s and %s", fileInfo.TempPath, fileInfo2.TempPath)
+	}
+}
+
+func TestTempRootExplicitOverrideWins(t *testing.T) {
+	override := filepath.Join(t.TempDir(), "override")
+	SetTempDir(override)
+	SetTempPolicy(TempStrategyMemory, DefaultMemoryTempLimitBytes)
+	defer SetTempDir("")
+	defer SetTempPolicy(TempStrategyAuto, DefaultMemoryTempLimitBytes)
+
+	if got := TempRootForSize(1); got != override {
+		t.Fatalf("explicit temp dir should win: got %s want %s", got, override)
+	}
+}
+
+func TestTempRootSystemStrategy(t *testing.T) {
+	SetTempDir("")
+	SetTempPolicy(TempStrategySystem, DefaultMemoryTempLimitBytes)
+	defer SetTempPolicy(TempStrategyAuto, DefaultMemoryTempLimitBytes)
+
+	expected := filepath.Join(os.TempDir(), "patris-export")
+	if got := TempRootForSize(1); got != expected {
+		t.Fatalf("system strategy temp root = %s, want %s", got, expected)
+	}
+}
+
+func TestTempRootLargeOrUnknownUsesSystem(t *testing.T) {
+	SetTempDir("")
+	SetTempPolicy(TempStrategyAuto, 10)
+	defer SetTempPolicy(TempStrategyAuto, DefaultMemoryTempLimitBytes)
+
+	expected := filepath.Join(os.TempDir(), "patris-export")
+	if got := TempRootForSize(-1); got != expected {
+		t.Fatalf("unknown size temp root = %s, want %s", got, expected)
+	}
+	if got := TempRootForSize(11); got != expected {
+		t.Fatalf("oversized temp root = %s, want %s", got, expected)
 	}
 }
 

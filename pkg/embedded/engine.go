@@ -72,6 +72,7 @@ func New(options Options) (*Engine, error) {
 	}
 
 	filecopy.SetTempDir(appconfig.ResolveTempDir(cfg.Runtime.TempDir))
+	filecopy.SetTempPolicy(cfg.Runtime.TempStrategy, appconfig.TempMemoryLimitBytes(cfg.Runtime.TempMemoryLimitMB))
 	converter.SetRTLConversion(cfg.Database.RTLConversion)
 
 	var charMap converter.CharMapping
