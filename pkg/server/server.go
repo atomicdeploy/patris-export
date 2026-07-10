@@ -114,6 +114,17 @@ type edgeUploadResponse struct {
 	Message  string `json:"message,omitempty"`
 }
 
+type sourceFileManifest struct {
+	Name         string    `json:"name"`
+	Filename     string    `json:"filename"`
+	Path         string    `json:"path"`
+	Size         int64     `json:"size"`
+	SHA256       string    `json:"sha256"`
+	LastModified time.Time `json:"last_modified"`
+	DownloadURL  string    `json:"download_url"`
+	GeneratedAt  time.Time `json:"generated_at"`
+}
+
 // NewServer creates a new server instance
 func NewServer(dbPath string, charMap converter.CharMapping, useTempFile ...bool) (*Server, error) {
 	return NewServerWithOptions(dbPath, charMap, Options{}, useTempFile...)
@@ -203,6 +214,8 @@ func (s *Server) setupRoutes() {
 	s.router.HandleFunc("/api/status", s.handleGetStatus).Methods("GET")
 	s.router.HandleFunc("/api/toast", s.handlePostToast).Methods("POST")
 	s.router.HandleFunc("/api/edge/upload", s.handlePostEdgeUpload).Methods("POST")
+	s.router.HandleFunc("/api/source/manifest", s.handleGetSourceManifest).Methods("GET")
+	s.router.HandleFunc("/api/source/file", s.handleGetSourceFile).Methods("GET", "HEAD")
 	s.router.HandleFunc("/api/update/manifest", s.handleGetUpdateManifest).Methods("GET")
 	s.router.HandleFunc("/api/update/executable", s.handleGetExecutable).Methods("GET", "HEAD")
 	s.router.HandleFunc("/api/processes/patris81", s.handleGetPatris81Processes).Methods("GET")
@@ -598,6 +611,43 @@ func (s *Server) handlePutConfig(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleGetStatus(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, s.Status())
+}
+
+func (s *Server) handleGetSourceManifest(w http.ResponseWriter, r *http.Request) {
+	manifest, _, err := s.sourceFileManifest(r)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Failed to inspect source file: %v", err), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	writeJSON(w, manifest)
+}
+
+func (s *Server) handleGetSourceFile(w http.ResponseWriter, r *http.Request) {
+	manifest, sourcePath, err := s.sourceFileManifest(r)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Failed to inspect source file: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	file, err := os.Open(sourcePath)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Failed to open source file: %v", err), http.StatusInternalServerError)
+		return
+	}
+	defer file.Close()
+
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("Content-Disposition", mime.FormatMediaType("attachment", map[string]string{"filename": manifest.Filename}))
+	w.Header().Set("Accept-Ranges", "bytes")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Date", time.Now().UTC().Format(http.TimeFormat))
+	w.Header().Set("ETag", fmt.Sprintf("\"sha256:%s\"", manifest.SHA256))
+	w.Header().Set("X-Checksum-SHA256", manifest.SHA256)
+	w.Header().Set("X-Source-File", manifest.Filename)
+	w.Header().Set("X-Source-Size", fmt.Sprintf("%d", manifest.Size))
+	w.Header().Set("X-Source-Modified", manifest.LastModified.UTC().Format(time.RFC3339))
+	http.ServeContent(w, r, manifest.Filename, manifest.LastModified, file)
 }
 
 func (s *Server) handleGetUpdateManifest(w http.ResponseWriter, r *http.Request) {
@@ -1097,6 +1147,38 @@ func (s *Server) executableManifestForPath(r *http.Request) (updater.ExecutableM
 		GeneratedAt:  time.Now().UTC(),
 	}
 	return manifest, exePath, nil
+}
+
+func (s *Server) sourceFileManifest(r *http.Request) (sourceFileManifest, string, error) {
+	sourcePath := s.currentDBPath()
+	if filecopy.IsURL(sourcePath) {
+		return sourceFileManifest{}, "", fmt.Errorf("current source is remote URL-backed and cannot be served as a local static file")
+	}
+	if resolved, err := filepath.EvalSymlinks(sourcePath); err == nil {
+		sourcePath = resolved
+	}
+	info, err := os.Stat(sourcePath)
+	if err != nil {
+		return sourceFileManifest{}, "", err
+	}
+	if info.IsDir() {
+		return sourceFileManifest{}, "", fmt.Errorf("current source is a directory: %s", sourcePath)
+	}
+	hash, err := updater.FileSHA256(sourcePath)
+	if err != nil {
+		return sourceFileManifest{}, "", err
+	}
+	manifest := sourceFileManifest{
+		Name:         "Patris Export Source Database",
+		Filename:     filepath.Base(sourcePath),
+		Path:         sourcePath,
+		Size:         info.Size(),
+		SHA256:       hash,
+		LastModified: info.ModTime().UTC(),
+		DownloadURL:  absoluteURL(r, "/api/source/file"),
+		GeneratedAt:  time.Now().UTC(),
+	}
+	return manifest, sourcePath, nil
 }
 
 func absoluteURL(r *http.Request, path string) string {

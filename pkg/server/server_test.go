@@ -235,6 +235,74 @@ func TestServerJSON(t *testing.T) {
 		}
 	})
 
+	t.Run("GET /api/source/manifest", func(t *testing.T) {
+		req := httptest.NewRequest("GET", "/api/source/manifest", nil)
+		w := httptest.NewRecorder()
+		srv.router.ServeHTTP(w, req)
+
+		if w.Code != http.StatusOK {
+			t.Fatalf("Expected status 200, got %d: %s", w.Code, w.Body.String())
+		}
+		if cc := w.Header().Get("Cache-Control"); cc != "no-store" {
+			t.Errorf("Expected Cache-Control no-store, got %s", cc)
+		}
+
+		var manifest map[string]interface{}
+		if err := json.NewDecoder(w.Body).Decode(&manifest); err != nil {
+			t.Fatalf("Failed to decode manifest: %v", err)
+		}
+		if manifest["filename"] != filepath.Base(jsonFile) {
+			t.Fatalf("Expected source filename %q, got %v", filepath.Base(jsonFile), manifest["filename"])
+		}
+		if manifest["sha256"] == "" {
+			t.Error("Expected source sha256")
+		}
+		if manifest["size"].(float64) <= 0 {
+			t.Error("Expected positive source size")
+		}
+		if !strings.Contains(manifest["download_url"].(string), "/api/source/file") {
+			t.Errorf("Expected source download URL, got %s", manifest["download_url"])
+		}
+	})
+
+	t.Run("HEAD /api/source/file has static headers", func(t *testing.T) {
+		req := httptest.NewRequest("HEAD", "/api/source/file", nil)
+		w := httptest.NewRecorder()
+		srv.router.ServeHTTP(w, req)
+
+		if w.Code != http.StatusOK {
+			t.Fatalf("Expected status 200, got %d", w.Code)
+		}
+		for _, header := range []string{"Content-Length", "Last-Modified", "Date", "ETag", "X-Checksum-SHA256", "X-Source-File", "X-Source-Size", "X-Source-Modified"} {
+			if got := w.Header().Get(header); got == "" {
+				t.Errorf("Expected %s header", header)
+			}
+		}
+		if ct := w.Header().Get("Content-Type"); ct != "application/octet-stream" {
+			t.Errorf("Expected source file content type, got %s", ct)
+		}
+		if w.Body.Len() != 0 {
+			t.Errorf("Expected empty HEAD body, got %d bytes", w.Body.Len())
+		}
+	})
+
+	t.Run("GET /api/source/file supports ranges", func(t *testing.T) {
+		req := httptest.NewRequest("GET", "/api/source/file", nil)
+		req.Header.Set("Range", "bytes=0-9")
+		w := httptest.NewRecorder()
+		srv.router.ServeHTTP(w, req)
+
+		if w.Code != http.StatusPartialContent {
+			t.Fatalf("Expected status 206, got %d", w.Code)
+		}
+		if w.Body.Len() != 10 {
+			t.Errorf("Expected 10 response bytes, got %d", w.Body.Len())
+		}
+		if got := w.Header().Get("Content-Range"); !strings.HasPrefix(got, "bytes 0-9/") {
+			t.Errorf("Unexpected Content-Range: %s", got)
+		}
+	})
+
 	t.Run("POST /api/edge/upload switches active source", func(t *testing.T) {
 		var body bytes.Buffer
 		writer := multipart.NewWriter(&body)
