@@ -31,9 +31,15 @@
                         <span class="status-indicator" id="statusIndicator"></span>
                         <span id="statusText">Connecting...</span>
                     </button>
-                    <button class="btn btn-icon" id="footerToggleBtn" type="button" title="Toggle footer">▤</button>
-                    <button class="btn btn-icon" id="settingsBtn" title="Settings">⚙️</button>
-                    <button class="btn btn-icon" id="themeToggle" title="Toggle Theme">🌙</button>
+                    <button class="btn btn-icon" id="footerToggleBtn" type="button" title="Toggle footer" aria-label="Toggle footer">
+                        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16v14H4z" /><path d="M4 15h16" /></svg>
+                    </button>
+                    <button class="btn btn-icon" id="settingsBtn" title="Settings" aria-label="Settings">
+                        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 15.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7z" /><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.87l.05.05a2 2 0 1 1-2.83 2.83l-.05-.05A1.7 1.7 0 0 0 15 19.4a1.7 1.7 0 0 0-1 .6 1.7 1.7 0 0 0-.4 1.05V21a2 2 0 1 1-4 0v-.08A1.7 1.7 0 0 0 8.6 19.4a1.7 1.7 0 0 0-1.87.34l-.05.05a2 2 0 1 1-2.83-2.83l.05-.05A1.7 1.7 0 0 0 4.6 15a1.7 1.7 0 0 0-.6-1 1.7 1.7 0 0 0-1.05-.4H3a2 2 0 1 1 0-4h.08A1.7 1.7 0 0 0 4.6 8.6a1.7 1.7 0 0 0-.34-1.87l-.05-.05a2 2 0 1 1 2.83-2.83l.05.05A1.7 1.7 0 0 0 9 4.6a1.7 1.7 0 0 0 1-.6 1.7 1.7 0 0 0 .4-1.05V3a2 2 0 1 1 4 0v.08A1.7 1.7 0 0 0 15.4 4.6a1.7 1.7 0 0 0 1.87-.34l.05-.05a2 2 0 1 1 2.83 2.83l-.05.05A1.7 1.7 0 0 0 19.4 9c.19.38.52.7 1 .9.31.13.65.2 1 .2H21a2 2 0 1 1 0 4h-.08a1.7 1.7 0 0 0-1.52.9z" /></svg>
+                    </button>
+                    <button class="btn btn-icon" id="themeToggle" title="Toggle Theme" aria-label="Toggle theme">
+                        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20.5 14.5A8.5 8.5 0 0 1 9.5 3.5 9 9 0 1 0 20.5 14.5z" /></svg>
+                    </button>
                 </div>
             </div>
         </header>
@@ -117,7 +123,9 @@
                         <h2 id="settingsTitle">Settings</h2>
                         <p id="settingsConfigPath" class="settings-path"></p>
                     </div>
-                    <button class="btn btn-icon" id="closeSettings" type="button" title="Close">✕</button>
+                    <button class="btn btn-icon" id="closeSettings" type="button" title="Close" aria-label="Close">
+                        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12" /><path d="M18 6L6 18" /></svg>
+                    </button>
                 </div>
                 <div class="settings-tabs" role="tablist" aria-label="Settings sections">
                     <button class="settings-tab active" type="button" data-settings-tab="ui">Interface</button>
@@ -262,7 +270,7 @@
                         <button class="btn btn-secondary" id="showAllColumns" type="button">Show all</button>
                         <button class="btn btn-secondary" id="hideAllColumns" type="button">Hide all</button>
                         <button class="btn btn-icon dialog-menu-btn" type="button" title="More actions" data-dialog-menu="columnsPanel">&hellip;</button>
-                        <button class="btn btn-icon dialog-close-btn" id="closeColumns" type="button" title="Close">&times;</button>
+                        <button class="btn btn-icon dialog-close-btn" id="closeColumns" type="button" title="Close" aria-label="Close"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12" /><path d="M18 6L6 18" /></svg></button>
                     </div>
                 </div>
                 <div class="column-manager">
@@ -286,7 +294,7 @@
                     </div>
                     <div class="dialog-actions">
                         <button class="btn btn-icon dialog-menu-btn" type="button" title="More actions" data-dialog-menu="connectionPanel">&hellip;</button>
-                        <button class="btn btn-icon dialog-close-btn" id="closeConnection" type="button" title="Close">&times;</button>
+                        <button class="btn btn-icon dialog-close-btn" id="closeConnection" type="button" title="Close" aria-label="Close"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12" /><path d="M18 6L6 18" /></svg></button>
                     </div>
                 </div>
                 <div class="connection-details" id="connectionDetails"></div>
@@ -304,7 +312,7 @@
                     <div class="dialog-actions">
                         <button class="btn btn-secondary" id="clearEventLog" type="button">Clear</button>
                         <button class="btn btn-icon dialog-menu-btn" type="button" title="More actions" data-dialog-menu="eventLogPanel">&hellip;</button>
-                        <button class="btn btn-icon dialog-close-btn" id="closeEventLog" type="button" title="Close">&times;</button>
+                        <button class="btn btn-icon dialog-close-btn" id="closeEventLog" type="button" title="Close" aria-label="Close"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12" /><path d="M18 6L6 18" /></svg></button>
                     </div>
                 </div>
                 <div class="event-log-summary" id="eventLogSummary"></div>
@@ -316,7 +324,7 @@
             <div class="inspector-content">
                 <div class="inspector-header">
                     <h2>Record Inspector</h2>
-                    <button class="btn btn-icon" id="closeInspector">✕</button>
+                    <button class="btn btn-icon" id="closeInspector" type="button" title="Close" aria-label="Close"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12" /><path d="M18 6L6 18" /></svg></button>
                 </div>
                 <div class="inspector-body" id="inspectorBody">
                     <p class="text-muted">Select a record to inspect</p>
@@ -350,7 +358,9 @@
                     <span class="process-status footer-process-status" id="footerProcessStatus">Checking Patris81...</span>
                 </div>
                 <div class="footer-section footer-actions">
-                    <button class="btn btn-icon footer-collapse" id="footerCollapseBtn" type="button" title="Hide footer">⌄</button>
+                    <button class="btn btn-icon footer-collapse" id="footerCollapseBtn" type="button" title="Hide footer" aria-label="Hide footer">
+                        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 9l6 6 6-6" /></svg>
+                    </button>
                 </div>
             </div>
         </footer>

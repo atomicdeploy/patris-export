@@ -742,6 +742,37 @@ const JalaliUtils = {
         // Return as object for comparison
         return { year, month, day };
     },
+
+    format(date) {
+        if (!date) return '';
+        return [
+            String(date.year).padStart(2, '0'),
+            String(date.month).padStart(2, '0'),
+            String(date.day).padStart(2, '0')
+        ].join('.');
+    },
+
+    daysInMonth(year, month) {
+        if (month >= 1 && month <= 6) return 31;
+        if (month >= 7 && month <= 11) return 30;
+        return 29;
+    },
+
+    addMonths(date, delta) {
+        if (!date) return { year: 0, month: 1, day: 1 };
+        let year = date.year;
+        let month = date.month + delta;
+        while (month < 1) {
+            month += 12;
+            year -= 1;
+        }
+        while (month > 12) {
+            month -= 12;
+            year += 1;
+        }
+        const day = Math.min(date.day, JalaliUtils.daysInMonth(year, month));
+        return { year, month, day };
+    },
     
     // Compare two Jalali dates (-1 if a < b, 0 if equal, 1 if a > b)
     compare(a, b) {
@@ -754,6 +785,13 @@ const JalaliUtils = {
     // Check if string looks like a Jalali date
     isJalaliDate(str) {
         return JalaliUtils.parse(str) !== null;
+    },
+
+    clamp(date, min, max) {
+        if (!date) return date;
+        if (min && JalaliUtils.compare(date, min) < 0) return min;
+        if (max && JalaliUtils.compare(date, max) > 0) return max;
+        return date;
     }
 };
 
@@ -957,16 +995,24 @@ function applyFooterVisibility() {
     document.body.classList.toggle('footer-hidden', !showFooter);
     const footer = document.getElementById('appFooter');
     if (footer) footer.hidden = !showFooter;
-    const footerToggleBtn = document.getElementById('footerToggleBtn');
-    if (footerToggleBtn) {
-        footerToggleBtn.title = showFooter ? 'Hide footer' : 'Show footer';
-    }
+    renderFooterToggleButton(document.getElementById('footerToggleBtn'), showFooter);
+    renderFooterToggleButton(document.getElementById('footerCollapseBtn'), showFooter);
 }
 
 function toggleFooterVisibility() {
-    state.settings.showFooter = state.settings.showFooter === false;
+    state.settings.showFooter = !(state.settings.showFooter !== false);
     applySettings();
     saveSettings();
+}
+
+function renderFooterToggleButton(button, showFooter) {
+    if (!button) return;
+    button.title = showFooter ? 'Hide footer' : 'Show footer';
+    button.setAttribute('aria-pressed', String(showFooter));
+    button.setAttribute('aria-label', showFooter ? 'Hide footer' : 'Show footer');
+    button.innerHTML = showFooter
+        ? '<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M6 9l6 6 6-6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>'
+        : '<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M6 15l6-6 6 6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
 }
 
 function formatRelativeTime(date) {
@@ -1165,7 +1211,7 @@ function initDialogActionButtons() {
         const closeButton = document.getElementById(closeId);
         if (!closeButton || closeButton.dataset.normalizedDialogActions) return;
         closeButton.classList.add('dialog-close-btn');
-        closeButton.innerHTML = '&times;';
+        closeButton.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12" /><path d="M18 6L6 18" /></svg>';
         const menuButton = document.createElement('button');
         menuButton.type = 'button';
         menuButton.className = 'btn btn-icon dialog-menu-btn';
@@ -2648,7 +2694,16 @@ function renderTableHeader() {
     // Add clear all filters button
     const clearBtn = document.createElement('button');
     clearBtn.className = 'btn-clear-filters';
-    clearBtn.textContent = '✕ Clear';
+    clearBtn.innerHTML = `
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M5 7h14" />
+            <path d="M10 11v6" />
+            <path d="M14 11v6" />
+            <path d="M9 7V5h6v2" />
+            <path d="M7 7l1 13h8l1-13" />
+        </svg>
+        <span>Clear</span>
+    `;
     clearBtn.title = 'Clear all filters';
     clearBtn.addEventListener('click', clearAllFilters);
     actionsFilter.appendChild(clearBtn);
@@ -2750,60 +2805,7 @@ function createFilterControl(field) {
         container.appendChild(createRangePopover2(field, currentFilter, 'numeric'));
         
     } else if (fieldType === 'jalali-date') {
-        // Date range for Jalali dates (YY.mm.dd format)
-        const wrapper = document.createElement('div');
-        wrapper.className = 'filter-range';
-        
-        const minInput = document.createElement('input');
-        minInput.type = 'text';
-        minInput.className = 'filter-input-small';
-        minInput.placeholder = 'From';
-        minInput.value = currentFilter?.min ?? '';
-        minInput.title = 'Format: YY.mm.dd';
-        minInput.setAttribute('aria-label', `Minimum ${displayFieldName(field)} date`);
-        
-        const maxInput = document.createElement('input');
-        maxInput.type = 'text';
-        maxInput.className = 'filter-input-small';
-        maxInput.placeholder = 'To';
-        maxInput.value = currentFilter?.max ?? '';
-        maxInput.title = 'Format: YY.mm.dd';
-        maxInput.setAttribute('aria-label', `Maximum ${displayFieldName(field)} date`);
-        
-        const updateFilter = () => {
-            const min = minInput.value.trim();
-            const max = maxInput.value.trim();
-            const validMin = min ? JalaliUtils.parse(min) : null;
-            const validMax = max ? JalaliUtils.parse(max) : null;
-            minInput.setCustomValidity(min && !validMin ? 'Use YY.mm.dd' : '');
-            maxInput.setCustomValidity(max && !validMax ? 'Use YY.mm.dd' : '');
-            if ((min && !validMin) || (max && !validMax)) {
-                return;
-            }
-            let nextMin = min;
-            let nextMax = max;
-            if (validMin && validMax && JalaliUtils.compare(validMin, validMax) > 0) {
-                nextMin = max;
-                nextMax = min;
-                minInput.value = nextMin;
-                maxInput.value = nextMax;
-            }
-            
-            if (nextMin || nextMax) {
-                state.columnFilters[field] = { type: 'jalali-date', min: nextMin, max: nextMax };
-            } else {
-                delete state.columnFilters[field];
-            }
-            saveColumnFilters();
-            applyFilters();
-        };
-        
-        minInput.addEventListener('change', updateFilter);
-        maxInput.addEventListener('change', updateFilter);
-        
-        wrapper.appendChild(minInput);
-        wrapper.appendChild(maxInput);
-        container.appendChild(wrapper);
+        container.appendChild(createJalaliDateFilterControl(field, currentFilter));
         
     } else {
         // Text search for text fields
@@ -2834,21 +2836,39 @@ function createFilterControl(field) {
 
 function createRangePopover2(field, currentFilter, mode) {
     const wrapper = document.createElement('div');
-    wrapper.className = 'range-popover';
+    wrapper.className = 'range-popover range-combo';
+
+    const stats = state.fieldStats[field] || {};
+    const minLimit = Number.isFinite(stats.min) ? stats.min : 0;
+    const maxLimit = Number.isFinite(stats.max) ? stats.max : Math.max(minLimit + 1, 1);
+    const hasUsableRange = Number.isFinite(stats.min) && Number.isFinite(stats.max) && stats.min !== stats.max;
+    const step = Number.isInteger(minLimit) && Number.isInteger(maxLimit) ? 1 : 0.01;
+
+    const exactInput = document.createElement('input');
+    exactInput.type = 'text';
+    exactInput.inputMode = 'decimal';
+    exactInput.className = 'filter-input range-direct-input';
+    exactInput.placeholder = hasUsableRange ? `${formatRangeValue(minLimit)}-${formatRangeValue(maxLimit)}` : formatRangeValue(minLimit);
+    exactInput.title = hasUsableRange
+        ? `Type an exact value, a range like ${formatRangeValue(minLimit)}-${formatRangeValue(maxLimit)}, >=value, or <=value`
+        : `All sampled values are ${formatRangeValue(minLimit)}`;
+    exactInput.setAttribute('aria-label', `${displayFieldName(field)} exact or range filter`);
 
     const button = document.createElement('button');
     button.type = 'button';
-    button.className = 'range-trigger';
-    button.setAttribute('aria-label', `Set ${displayFieldName(field)} range filter`);
+    button.className = 'range-trigger range-trigger-ellipsis';
+    button.innerHTML = '<span aria-hidden="true">&hellip;</span>';
+    button.setAttribute('aria-label', `Open ${displayFieldName(field)} range options`);
 
     const panel = document.createElement('div');
     panel.className = 'range-panel';
     panel.addEventListener('click', event => event.stopPropagation());
 
-    const stats = state.fieldStats[field] || {};
-    const minLimit = Number.isFinite(stats.min) ? stats.min : 0;
-    const maxLimit = Number.isFinite(stats.max) ? stats.max : Math.max(minLimit + 1, 1);
-    const step = Number.isInteger(minLimit) && Number.isInteger(maxLimit) ? 1 : 0.01;
+    const meta = document.createElement('div');
+    meta.className = 'range-meta';
+    meta.innerHTML = hasUsableRange
+        ? `<span>Min <strong>${escapeHtml(formatRangeValue(minLimit))}</strong></span><span>Max <strong>${escapeHtml(formatRangeValue(maxLimit))}</strong></span>`
+        : `<span class="range-meta-note">All sampled values are <strong>${escapeHtml(formatRangeValue(minLimit))}</strong></span>`;
 
     const minInput = document.createElement('input');
     minInput.type = 'text';
@@ -2881,16 +2901,27 @@ function createRangePopover2(field, currentFilter, mode) {
     maxSlider.max = String(maxLimit);
     maxSlider.step = String(step);
     maxSlider.value = String(currentFilter?.max ?? maxLimit);
+    minSlider.disabled = !hasUsableRange;
+    maxSlider.disabled = !hasUsableRange;
 
     const clearBtn = document.createElement('button');
     clearBtn.type = 'button';
     clearBtn.className = 'range-clear';
     clearBtn.textContent = 'Clear';
 
-    const updateTrigger = () => {
+    const updateDirectInput = () => {
         const latest = state.columnFilters[field];
         const active = latest?.min !== undefined && latest?.min !== null || latest?.max !== undefined && latest?.max !== null;
-        button.innerHTML = active ? `<span class="filter-badge">${latest.min ?? 'min'}-${latest.max ?? 'max'}</span>` : '<span class="ellipsis">&bull;&bull;&bull;</span>';
+        if (!active) {
+            exactInput.value = '';
+        } else if (latest.min !== null && latest.min !== undefined && latest.max !== null && latest.max !== undefined) {
+            exactInput.value = latest.min === latest.max ? formatRangeValue(latest.min) : `${formatRangeValue(latest.min)}-${formatRangeValue(latest.max)}`;
+        } else if (latest.min !== null && latest.min !== undefined) {
+            exactInput.value = `>=${formatRangeValue(latest.min)}`;
+        } else {
+            exactInput.value = `<=${formatRangeValue(latest.max)}`;
+        }
+        wrapper.classList.toggle('has-filter', !!active);
     };
 
     const commit = debounce(() => {
@@ -2912,15 +2943,38 @@ function createRangePopover2(field, currentFilter, mode) {
             delete state.columnFilters[field];
         }
         saveColumnFilters();
-        updateTrigger();
+        updateDirectInput();
         applyFilters();
     }, 80);
 
-    const syncFromInput = () => {
+    const commitDirect = debounce(() => {
+        const parsed = parseNumericFilterText(exactInput.value);
+        exactInput.setCustomValidity(parsed.error || '');
+        if (parsed.error) return;
+        if (parsed.empty) {
+            minInput.value = '';
+            maxInput.value = '';
+            delete state.columnFilters[field];
+        } else {
+            minInput.value = parsed.min === null || parsed.min === undefined ? '' : String(parsed.min);
+            maxInput.value = parsed.max === null || parsed.max === undefined ? '' : String(parsed.max);
+            state.columnFilters[field] = { type: mode, min: parsed.min, max: parsed.max };
+        }
+        wrapper.classList.toggle('has-filter', !parsed.empty);
+        syncSlidersFromInputs();
+        saveColumnFilters();
+        applyFilters();
+    }, FILTER_INPUT_DEBOUNCE_MS);
+
+    const syncSlidersFromInputs = () => {
         const min = parseFloat(minInput.value);
         const max = parseFloat(maxInput.value);
         if (Number.isFinite(min)) minSlider.value = String(Math.min(Math.max(min, minLimit), maxLimit));
         if (Number.isFinite(max)) maxSlider.value = String(Math.min(Math.max(max, minLimit), maxLimit));
+    };
+
+    const syncFromInput = () => {
+        syncSlidersFromInputs();
         commit();
     };
 
@@ -2945,6 +2999,13 @@ function createRangePopover2(field, currentFilter, mode) {
         }
     });
 
+    exactInput.addEventListener('input', commitDirect);
+    exactInput.addEventListener('keydown', event => {
+        if (event.key === 'Enter') {
+            event.preventDefault();
+            exactInput.blur();
+        }
+    });
     minInput.addEventListener('input', syncFromInput);
     maxInput.addEventListener('input', syncFromInput);
     minSlider.addEventListener('input', syncFromSlider);
@@ -2956,18 +3017,218 @@ function createRangePopover2(field, currentFilter, mode) {
         minSlider.value = String(minLimit);
         maxSlider.value = String(maxLimit);
         saveColumnFilters();
-        updateTrigger();
+        updateDirectInput();
         applyFilters();
     });
 
+    panel.appendChild(meta);
     panel.appendChild(wrapRangeField('Min', minInput));
     panel.appendChild(wrapRangeField('Max', maxInput));
     panel.appendChild(minSlider);
     panel.appendChild(maxSlider);
     panel.appendChild(clearBtn);
+    wrapper.appendChild(exactInput);
     wrapper.appendChild(button);
     wrapper.appendChild(panel);
-    updateTrigger();
+    updateDirectInput();
+    return wrapper;
+}
+
+function parseNumericFilterText(text) {
+    const value = String(text || '').trim();
+    if (!value) return { empty: true };
+    const compact = value.replace(/\s+/g, '');
+    let match = compact.match(/^>=(-?\d+(?:\.\d+)?)$/);
+    if (match) return { min: parseFloat(match[1]), max: null };
+    match = compact.match(/^<=(-?\d+(?:\.\d+)?)$/);
+    if (match) return { min: null, max: parseFloat(match[1]) };
+    match = compact.match(/^(-?\d+(?:\.\d+)?)(?:\.\.|-|:)(-?\d+(?:\.\d+)?)$/);
+    if (match) {
+        let min = parseFloat(match[1]);
+        let max = parseFloat(match[2]);
+        if (min > max) [min, max] = [max, min];
+        return { min, max };
+    }
+    match = compact.match(/^-?\d+(?:\.\d+)?$/);
+    if (match) {
+        const exact = parseFloat(compact);
+        return { min: exact, max: exact };
+    }
+    return { error: 'Use a number, min-max, >=min, or <=max' };
+}
+
+function formatRangeValue(value) {
+    if (!Number.isFinite(Number(value))) return '';
+    const n = Number(value);
+    return Number.isInteger(n) ? String(n) : String(Number(n.toFixed(2)));
+}
+
+function createJalaliDateFilterControl(field, currentFilter) {
+    const wrapper = document.createElement('div');
+    wrapper.className = 'jalali-filter range-popover';
+    const stats = state.fieldStats[field] || {};
+    const minDate = stats.min || null;
+    const maxDate = stats.max || null;
+
+    const fromInput = document.createElement('input');
+    fromInput.type = 'text';
+    fromInput.inputMode = 'numeric';
+    fromInput.className = 'filter-input jalali-date-input';
+    fromInput.placeholder = minDate ? JalaliUtils.format(minDate) : 'From';
+    fromInput.value = currentFilter?.min ?? '';
+    fromInput.title = 'Jalali date, YY.MM.DD';
+    fromInput.setAttribute('aria-label', `From ${displayFieldName(field)} Jalali date`);
+
+    const toInput = document.createElement('input');
+    toInput.type = 'text';
+    toInput.inputMode = 'numeric';
+    toInput.className = 'filter-input jalali-date-input';
+    toInput.placeholder = maxDate ? JalaliUtils.format(maxDate) : 'To';
+    toInput.value = currentFilter?.max ?? '';
+    toInput.title = 'Jalali date, YY.MM.DD';
+    toInput.setAttribute('aria-label', `To ${displayFieldName(field)} Jalali date`);
+
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'range-trigger range-trigger-ellipsis date-picker-trigger';
+    button.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M7 3v3M17 3v3M4 9h16M6 5h12a2 2 0 0 1 2 2v11a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2Z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>';
+    button.setAttribute('aria-label', `Open ${displayFieldName(field)} Jalali date picker`);
+
+    const panel = document.createElement('div');
+    panel.className = 'range-panel jalali-picker-panel';
+    panel.addEventListener('click', event => event.stopPropagation());
+
+    const meta = document.createElement('div');
+    meta.className = 'range-meta';
+    meta.innerHTML = minDate && maxDate
+        ? `<span>Min <strong>${escapeHtml(JalaliUtils.format(minDate))}</strong></span><span>Max <strong>${escapeHtml(JalaliUtils.format(maxDate))}</strong></span>`
+        : '<span class="range-meta-note">No valid Jalali dates detected</span>';
+
+    const pickerState = {
+        cursor: JalaliUtils.parse(fromInput.value) || minDate || maxDate || { year: 0, month: 1, day: 1 },
+        target: 'min'
+    };
+
+    const commitDateFilter = debounce(() => {
+        const minText = fromInput.value.trim();
+        const maxText = toInput.value.trim();
+        const parsedMin = minText ? JalaliUtils.parse(minText) : null;
+        const parsedMax = maxText ? JalaliUtils.parse(maxText) : null;
+        fromInput.setCustomValidity(minText && !parsedMin ? 'Use YY.MM.DD' : '');
+        toInput.setCustomValidity(maxText && !parsedMax ? 'Use YY.MM.DD' : '');
+        if ((minText && !parsedMin) || (maxText && !parsedMax)) return;
+
+        let nextMin = minText;
+        let nextMax = maxText;
+        if (parsedMin && parsedMax && JalaliUtils.compare(parsedMin, parsedMax) > 0) {
+            nextMin = maxText;
+            nextMax = minText;
+            fromInput.value = nextMin;
+            toInput.value = nextMax;
+        }
+
+        if (nextMin || nextMax) {
+            state.columnFilters[field] = { type: 'jalali-date', min: nextMin, max: nextMax };
+            wrapper.classList.add('has-filter');
+        } else {
+            delete state.columnFilters[field];
+            wrapper.classList.remove('has-filter');
+        }
+        saveColumnFilters();
+        applyFilters();
+    }, FILTER_INPUT_DEBOUNCE_MS);
+
+    const renderPicker = () => {
+        const title = document.createElement('div');
+        title.className = 'jalali-picker-title';
+        const prev = document.createElement('button');
+        prev.type = 'button';
+        prev.className = 'picker-nav';
+        prev.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 6l-6 6 6 6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+        const next = document.createElement('button');
+        next.type = 'button';
+        next.className = 'picker-nav';
+        next.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+        const label = document.createElement('strong');
+        label.textContent = `${String(pickerState.cursor.year).padStart(2, '0')}.${String(pickerState.cursor.month).padStart(2, '0')}`;
+        prev.addEventListener('click', () => {
+            pickerState.cursor = JalaliUtils.addMonths(pickerState.cursor, -1);
+            renderPicker();
+        });
+        next.addEventListener('click', () => {
+            pickerState.cursor = JalaliUtils.addMonths(pickerState.cursor, 1);
+            renderPicker();
+        });
+        title.append(prev, label, next);
+
+        const targetSwitch = document.createElement('div');
+        targetSwitch.className = 'jalali-target-switch';
+        ['min', 'max'].forEach(target => {
+            const targetButton = document.createElement('button');
+            targetButton.type = 'button';
+            targetButton.className = pickerState.target === target ? 'active' : '';
+            targetButton.textContent = target === 'min' ? 'From' : 'To';
+            targetButton.addEventListener('click', () => {
+                pickerState.target = target;
+                renderPicker();
+            });
+            targetSwitch.appendChild(targetButton);
+        });
+
+        const grid = document.createElement('div');
+        grid.className = 'jalali-day-grid';
+        const days = JalaliUtils.daysInMonth(pickerState.cursor.year, pickerState.cursor.month);
+        for (let day = 1; day <= days; day += 1) {
+            const date = { year: pickerState.cursor.year, month: pickerState.cursor.month, day };
+            const dayButton = document.createElement('button');
+            dayButton.type = 'button';
+            dayButton.textContent = String(day);
+            dayButton.disabled = (minDate && JalaliUtils.compare(date, minDate) < 0) || (maxDate && JalaliUtils.compare(date, maxDate) > 0);
+            dayButton.addEventListener('click', () => {
+                const formatted = JalaliUtils.format(date);
+                if (pickerState.target === 'min') {
+                    fromInput.value = formatted;
+                    pickerState.target = 'max';
+                } else {
+                    toInput.value = formatted;
+                }
+                commitDateFilter();
+                renderPicker();
+            });
+            grid.appendChild(dayButton);
+        }
+
+        const clearBtn = document.createElement('button');
+        clearBtn.type = 'button';
+        clearBtn.className = 'range-clear';
+        clearBtn.textContent = 'Clear';
+        clearBtn.addEventListener('click', () => {
+            fromInput.value = '';
+            toInput.value = '';
+            delete state.columnFilters[field];
+            wrapper.classList.remove('has-filter');
+            saveColumnFilters();
+            applyFilters();
+        });
+
+        panel.replaceChildren(meta, targetSwitch, title, grid, clearBtn);
+    };
+
+    fromInput.addEventListener('input', commitDateFilter);
+    toInput.addEventListener('input', commitDateFilter);
+    button.addEventListener('click', event => {
+        event.stopPropagation();
+        if (state.openRangePanel && state.openRangePanel !== panel) {
+            state.openRangePanel.classList.remove('open');
+        }
+        pickerState.cursor = JalaliUtils.parse(fromInput.value) || JalaliUtils.parse(toInput.value) || minDate || maxDate || pickerState.cursor;
+        renderPicker();
+        panel.classList.toggle('open');
+        state.openRangePanel = panel.classList.contains('open') ? panel : null;
+    });
+
+    wrapper.classList.toggle('has-filter', !!(currentFilter?.min || currentFilter?.max));
+    wrapper.append(fromInput, toInput, button, panel);
     return wrapper;
 }
 
@@ -2978,90 +3239,6 @@ function wrapRangeField(label, input) {
     span.textContent = label;
     wrapper.appendChild(span);
     wrapper.appendChild(input);
-    return wrapper;
-}
-
-function createRangePopover(field, currentFilter, mode) {
-    const wrapper = document.createElement('div');
-    wrapper.className = 'range-popover';
-    const button = document.createElement('button');
-    button.type = 'button';
-    button.className = 'range-trigger';
-    button.setAttribute('aria-label', `Set ${displayFieldName(field)} range filter`);
-    const active = currentFilter?.min !== undefined && currentFilter?.min !== null || currentFilter?.max !== undefined && currentFilter?.max !== null;
-    button.innerHTML = active ? `<span class="filter-badge">${currentFilter.min ?? 'min'}–${currentFilter.max ?? 'max'}</span>` : '<span class="ellipsis">•••</span>';
-    const panel = document.createElement('div');
-    panel.className = 'range-panel';
-
-    const minInput = document.createElement('input');
-    minInput.type = mode === 'numeric' ? 'text' : 'text';
-    minInput.inputMode = mode === 'numeric' ? 'decimal' : 'text';
-    minInput.className = 'filter-input-small';
-    minInput.placeholder = mode === 'numeric' ? 'Min' : 'From';
-    minInput.value = currentFilter?.min ?? '';
-    minInput.setAttribute('aria-label', `Minimum ${displayFieldName(field)}`);
-
-    const maxInput = document.createElement('input');
-    maxInput.type = mode === 'numeric' ? 'text' : 'text';
-    maxInput.inputMode = mode === 'numeric' ? 'decimal' : 'text';
-    maxInput.className = 'filter-input-small';
-    maxInput.placeholder = mode === 'numeric' ? 'Max' : 'To';
-    maxInput.value = currentFilter?.max ?? '';
-    maxInput.setAttribute('aria-label', `Maximum ${displayFieldName(field)}`);
-
-    const applyBtn = document.createElement('button');
-    applyBtn.type = 'button';
-    applyBtn.className = 'range-apply';
-    applyBtn.textContent = 'Apply';
-
-    const clearBtn = document.createElement('button');
-    clearBtn.type = 'button';
-    clearBtn.className = 'range-clear';
-    clearBtn.textContent = 'Clear';
-
-    const apply = () => {
-        const rawMin = minInput.value.trim();
-        const rawMax = maxInput.value.trim();
-        let min = mode === 'numeric' && rawMin ? parseFloat(rawMin) : rawMin || null;
-        let max = mode === 'numeric' && rawMax ? parseFloat(rawMax) : rawMax || null;
-        if (mode === 'numeric') {
-            minInput.setCustomValidity(rawMin && !Number.isFinite(min) ? 'Enter a number' : '');
-            maxInput.setCustomValidity(rawMax && !Number.isFinite(max) ? 'Enter a number' : '');
-            if ((rawMin && !Number.isFinite(min)) || (rawMax && !Number.isFinite(max))) {
-                return;
-            }
-            if (min !== null && max !== null && min > max) {
-                [min, max] = [max, min];
-                minInput.value = min;
-                maxInput.value = max;
-            }
-        }
-        if (min !== null || max !== null) {
-            state.columnFilters[field] = { type: mode, min, max };
-        } else {
-            delete state.columnFilters[field];
-        }
-        saveColumnFilters();
-        renderTableHeader();
-        applyFilters();
-    };
-    button.addEventListener('click', (event) => {
-        event.stopPropagation();
-        panel.classList.toggle('open');
-    });
-    applyBtn.addEventListener('click', apply);
-    clearBtn.addEventListener('click', () => {
-        delete state.columnFilters[field];
-        saveColumnFilters();
-        renderTableHeader();
-        applyFilters();
-    });
-    panel.appendChild(minInput);
-    panel.appendChild(maxInput);
-    panel.appendChild(applyBtn);
-    panel.appendChild(clearBtn);
-    wrapper.appendChild(button);
-    wrapper.appendChild(panel);
     return wrapper;
 }
 
@@ -3232,6 +3409,8 @@ function renderTable(changedIndices = new Set()) {
         // Add actions cell
         const actionsCell = document.createElement('td');
         actionsCell.className = 'action-cell';
+        const actionsWrap = document.createElement('div');
+        actionsWrap.className = 'action-cell-content';
         
         const inspectBtn = document.createElement('button');
         inspectBtn.className = 'action-btn';
@@ -3242,7 +3421,8 @@ function renderTable(changedIndices = new Set()) {
             inspectRecord(record);
         };
         
-        actionsCell.appendChild(inspectBtn);
+        actionsWrap.appendChild(inspectBtn);
+        actionsCell.appendChild(actionsWrap);
         row.appendChild(actionsCell);
         
         // Make row clickable to inspect
