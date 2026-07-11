@@ -5,7 +5,7 @@ set -euo pipefail
 # Usage: ./generate-version-rc.sh <output_file>
 
 OUTPUT_FILE="${1:-cmd/patris-export/patris-export.rc}"
-ICON_FILE="${PATRIS_ICON_FILE:-assets/windows/patris-api.ico}"
+ICON_FILE="${PATRIS_EXPORT_ICON_FILE:-assets/windows/patris-api.ico}"
 
 # Validate OUTPUT_FILE to prevent directory traversal and absolute paths
 if [[ "$OUTPUT_FILE" == /* ]] || [[ "$OUTPUT_FILE" == *".."* ]]; then

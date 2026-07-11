@@ -198,7 +198,7 @@ raw `.db` snapshots whenever Patris updates the file:
 
 ```bash
 # Central receiver
-PATRIS_EDGE_TOKEN=change-me patris-export serve received.db --addr 0.0.0.0:18080
+PATRIS_EXPORT_EDGE_TOKEN=change-me patris-export serve received.db --addr 0.0.0.0:18080
 
 # Edge machine beside Patris81
 patris-export stub C:\Patris\data4\kala.db ^
@@ -225,11 +225,11 @@ edge:
 ```
 
 ```bash
-PATRIS_EDGE_TARGET_URL=http://central-server:18080
-PATRIS_EDGE_TOKEN=change-me
-PATRIS_EDGE_SOURCE_ID=branch-a
-PATRIS_EDGE_DEBOUNCE=750ms
-PATRIS_EDGE_MAX_UPLOAD_MB=512
+PATRIS_EXPORT_EDGE_TARGET_URL=http://central-server:18080
+PATRIS_EXPORT_EDGE_TOKEN=change-me
+PATRIS_EXPORT_EDGE_SOURCE_ID=branch-a
+PATRIS_EXPORT_EDGE_DEBOUNCE=750ms
+PATRIS_EXPORT_EDGE_MAX_UPLOAD_MB=512
 ```
 
 ### One-shot Native Viewer
@@ -258,7 +258,7 @@ Explicit temp directories always win:
 
 ```bash
 patris-export serve kala.db --temp-dir /var/tmp/patris-export
-PATRIS_TEMP_DIR=/var/tmp/patris-export patris-export convert kala.db
+PATRIS_EXPORT_TEMP_DIR=/var/tmp/patris-export patris-export convert kala.db
 ```
 
 The policy can also be configured:
@@ -266,7 +266,7 @@ The policy can also be configured:
 ```bash
 patris-export convert kala.db --temp-strategy system
 patris-export convert kala.db --temp-strategy auto --temp-memory-limit-mb 128
-PATRIS_TEMP_STRATEGY=memory PATRIS_TEMP_MEMORY_LIMIT_MB=64 patris-export serve kala.db
+PATRIS_EXPORT_TEMP_STRATEGY=memory PATRIS_EXPORT_TEMP_MEMORY_LIMIT_MB=64 patris-export serve kala.db
 ```
 
 Config file equivalent:
@@ -457,7 +457,7 @@ patris-export update --manifest-url http://127.0.0.1:18080/api/update/manifest
 
 `GITHUB_TOKEN` is optional for public repositories, but recommended for higher API rate limits. Private repositories require a token that can read the repository and its Actions artifacts, such as a classic token with `repo` access.
 
-Repository lookup defaults to `atomicdeploy/patris-export`. Override it with `PATRIS_REPO_OWNER` and `PATRIS_REPO_NAME` when testing forks or custom deployments.
+Repository lookup defaults to `atomicdeploy/patris-export`. Override it with `PATRIS_EXPORT_REPO_OWNER` and `PATRIS_EXPORT_REPO_NAME` when testing forks or custom deployments.
 
 ### Executable Update API
 
@@ -469,7 +469,7 @@ When the server is running, it can publish the exact executable that is serving 
 
 The executable endpoint uses the real file on disk and supports byte ranges, conditional requests, `Content-Length`, `Last-Modified`, `ETag`, `X-Checksum-SHA256`, and `X-Executable-*` metadata headers. The API updater downloads by streaming to a temp file and only replaces the current executable after the manifest size and SHA-256 match the downloaded bytes.
 
-If the remote update API is protected, set `PATRIS_UPDATE_TOKEN`; this is separate from `GITHUB_TOKEN` so GitHub credentials are not sent to arbitrary update hosts.
+If the remote update API is protected, set `PATRIS_EXPORT_UPDATE_TOKEN`; this is separate from `GITHUB_TOKEN` so GitHub credentials are not sent to arbitrary update hosts.
 
 ### Source Database File API
 

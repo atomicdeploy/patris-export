@@ -2,19 +2,19 @@
 set -euo pipefail
 
 ACTION="${1:-install}"
-SERVICE_NAME="${PATRIS_SERVICE_NAME:-patris-export}"
+SERVICE_NAME="${PATRIS_EXPORT_SERVICE_NAME:-patris-export}"
 APP_USER="${PATRIS_EXPORT_USER:-patris-export}"
 APP_GROUP="${PATRIS_EXPORT_GROUP:-$APP_USER}"
-PREFIX="${PATRIS_PREFIX:-/opt/patris-export}"
-BIN_DIR="${PATRIS_BIN_DIR:-$PREFIX/bin}"
-LIB_DIR="${PATRIS_LIB_DIR:-$PREFIX/lib}"
-CONFIG_DIR="${PATRIS_CONFIG_DIR:-/etc/patris-export}"
-ENV_FILE="${PATRIS_ENV_FILE:-$CONFIG_DIR/patris-export.env}"
-UNIT_FILE="${PATRIS_UNIT_FILE:-/etc/systemd/system/$SERVICE_NAME.service}"
-DB_PATH="${PATRIS_DB_PATH:-/var/lib/patris-export/kala.db}"
-ADDR="${PATRIS_ADDR:-:8080}"
-DEBOUNCE="${PATRIS_DEBOUNCE:-500ms}"
-NATIVE_TOASTS="${PATRIS_NATIVE_TOASTS:-false}"
+PREFIX="${PATRIS_EXPORT_PREFIX:-/opt/patris-export}"
+BIN_DIR="${PATRIS_EXPORT_BIN_DIR:-$PREFIX/bin}"
+LIB_DIR="${PATRIS_EXPORT_LIB_DIR:-$PREFIX/lib}"
+CONFIG_DIR="${PATRIS_EXPORT_CONFIG_DIR:-/etc/patris-export}"
+ENV_FILE="${PATRIS_EXPORT_ENV_FILE:-$CONFIG_DIR/patris-export.env}"
+UNIT_FILE="${PATRIS_EXPORT_UNIT_FILE:-/etc/systemd/system/$SERVICE_NAME.service}"
+DB_PATH="${PATRIS_EXPORT_DB_PATH:-/var/lib/patris-export/kala.db}"
+ADDR="${PATRIS_EXPORT_ADDR:-:8080}"
+DEBOUNCE="${PATRIS_EXPORT_DEBOUNCE:-500ms}"
+NATIVE_TOASTS="${PATRIS_EXPORT_NATIVE_TOASTS:-false}"
 VERSION="${VERSION:-1.0.0}"
 VERSION_PKG="github.com/atomicdeploy/patris-export/pkg/version"
 COMMIT="${COMMIT:-$(git -C "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)" rev-parse --short=12 HEAD 2>/dev/null || echo unknown)}"
@@ -82,11 +82,11 @@ build_binary() {
 
 env_content() {
     cat <<EOF
-PATRIS_DB_PATH="$DB_PATH"
-PATRIS_ADDR="$ADDR"
-PATRIS_DEBOUNCE="$DEBOUNCE"
-PATRIS_EXTRA_ARGS=""
-PATRIS_NATIVE_TOASTS="$NATIVE_TOASTS"
+PATRIS_EXPORT_DB_PATH="$DB_PATH"
+PATRIS_EXPORT_ADDR="$ADDR"
+PATRIS_EXPORT_DEBOUNCE="$DEBOUNCE"
+PATRIS_EXPORT_EXTRA_ARGS=""
+PATRIS_EXPORT_NATIVE_TOASTS="$NATIVE_TOASTS"
 LD_LIBRARY_PATH="$PXLIB_PREFIX/lib:$LIB_DIR"
 EOF
 }
@@ -110,7 +110,7 @@ User=$APP_USER
 Group=$APP_GROUP
 EnvironmentFile=$ENV_FILE
 WorkingDirectory=$PREFIX
-ExecStart=$BIN_DIR/patris-export serve \${PATRIS_DB_PATH} --addr \${PATRIS_ADDR} --debounce \${PATRIS_DEBOUNCE} \${PATRIS_EXTRA_ARGS}
+ExecStart=$BIN_DIR/patris-export serve \${PATRIS_EXPORT_DB_PATH} --addr \${PATRIS_EXPORT_ADDR} --debounce \${PATRIS_EXPORT_DEBOUNCE} \${PATRIS_EXPORT_EXTRA_ARGS}
 Restart=on-failure
 RestartSec=5s
 NoNewPrivileges=true
