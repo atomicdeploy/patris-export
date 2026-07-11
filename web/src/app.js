@@ -2299,8 +2299,28 @@ function focusSearchInput() {
     searchInput.select();
 }
 
+function eventMatchesAriaShortcut(event, element) {
+    const shortcuts = (element?.getAttribute('aria-keyshortcuts') || '')
+        .split(/\s+/)
+        .filter(Boolean);
+    if (shortcuts.length === 0) {
+        return false;
+    }
+
+    const pressed = [
+        event.ctrlKey ? 'Control' : '',
+        event.altKey ? 'Alt' : '',
+        event.shiftKey ? 'Shift' : '',
+        event.metaKey ? 'Meta' : '',
+        event.key,
+    ].filter(Boolean).join('+').toLowerCase();
+
+    return shortcuts.some((shortcut) => shortcut.toLowerCase() === pressed);
+}
+
 function handleGlobalKeydown(event) {
-    if (event.key !== 'F2' || event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) {
+    const searchInput = document.getElementById('searchInput');
+    if (!eventMatchesAriaShortcut(event, searchInput)) {
         return;
     }
     event.preventDefault();
