@@ -5,7 +5,8 @@ param(
     [string]$IconSizes = $(if ($env:PATRIS_ICON_SIZES) { $env:PATRIS_ICON_SIZES } else { "256,128,64,48,32,24,16" }),
     [string]$WebIconPng,
     [string]$WebFaviconIco,
-    [string]$NotificationAudio
+    [string]$NotificationAudio,
+    [string]$CropAlphaThreshold = $(if ($env:PATRIS_CROP_ALPHA_THRESHOLD) { $env:PATRIS_CROP_ALPHA_THRESHOLD } else { "2%" })
 )
 
 $ErrorActionPreference = "Stop"
@@ -47,17 +48,17 @@ if (-not (Test-Path $LogoSource)) {
 }
 
 New-Item -ItemType Directory -Force (Split-Path -Parent $IconPng), (Split-Path -Parent $IconIco) | Out-Null
-$geometry = (& $magick.Source $LogoSource -alpha extract -threshold 0 -format "%@" "info:").Trim()
+$geometry = (& $magick.Source $LogoSource -alpha extract -threshold $CropAlphaThreshold -format "%@" "info:").Trim()
 if (-not $geometry) {
-    throw "Could not determine non-transparent logo bounds."
+    throw "Could not determine visible logo bounds with alpha threshold $CropAlphaThreshold."
 }
 & $magick.Source $LogoSource -alpha set -crop $geometry +repage -background none -strip $IconPng
 if ($LASTEXITCODE -ne 0) { throw "Failed to create $IconPng" }
 
-$croppedGeometry = (& $magick.Source $IconPng -alpha extract -threshold 0 -format "%@" "info:").Trim()
+$croppedGeometry = (& $magick.Source $IconPng -alpha extract -threshold $CropAlphaThreshold -format "%@" "info:").Trim()
 $croppedExpected = (& $magick.Source identify -format "%wx%h+0+0" $IconPng).Trim()
 if ($croppedGeometry -ne $croppedExpected) {
-    throw "Generated icon PNG still has transparent edge padding: bounds $croppedGeometry, expected $croppedExpected."
+    throw "Generated icon PNG still has transparent edge padding at alpha threshold ${CropAlphaThreshold}: bounds $croppedGeometry, expected $croppedExpected."
 }
 
 & $magick.Source $IconPng -define "icon:auto-resize=$IconSizes" $IconIco
@@ -72,6 +73,7 @@ if (-not (Test-Path $NotificationAudio)) {
 }
 
 Write-Host "Rebuilt assets:"
+Write-Host "  Crop alpha threshold: $CropAlphaThreshold"
 Write-Host "  $IconPng"
 Write-Host "  $IconIco"
 Write-Host "  $WebIconPng"

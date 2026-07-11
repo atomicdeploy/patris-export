@@ -13,6 +13,7 @@ ICON_SIZES="${PATRIS_ICON_SIZES:-256,128,64,48,32,24,16}"
 WEB_ICON_PNG="${PATRIS_WEB_ICON_PNG:-$ROOT_DIR/web/assets/patris-api-icon.png}"
 WEB_FAVICON_ICO="${PATRIS_WEB_FAVICON_ICO:-$ROOT_DIR/web/assets/favicon.ico}"
 NOTIFICATION_AUDIO="${PATRIS_NOTIFICATION_AUDIO:-$ROOT_DIR/web/assets/notification.ogg}"
+CROP_ALPHA_THRESHOLD="${PATRIS_CROP_ALPHA_THRESHOLD:-2%}"
 
 if command -v magick >/dev/null 2>&1; then
     MAGICK=(magick)
@@ -29,16 +30,16 @@ if [ ! -f "$LOGO_SOURCE" ]; then
 fi
 
 mkdir -p "$(dirname "$ICON_PNG")"
-GEOMETRY="$("${MAGICK[@]}" "$LOGO_SOURCE" -alpha extract -threshold 0 -format "%@" info:)"
+GEOMETRY="$("${MAGICK[@]}" "$LOGO_SOURCE" -alpha extract -threshold "$CROP_ALPHA_THRESHOLD" -format "%@" info:)"
 if [ -z "$GEOMETRY" ]; then
-    echo "Could not determine non-transparent logo bounds." >&2
+    echo "Could not determine visible logo bounds with alpha threshold $CROP_ALPHA_THRESHOLD." >&2
     exit 1
 fi
 "${MAGICK[@]}" "$LOGO_SOURCE" -alpha set -crop "$GEOMETRY" +repage -background none -strip "$ICON_PNG"
-CROPPED_GEOMETRY="$("${MAGICK[@]}" "$ICON_PNG" -alpha extract -threshold 0 -format "%@" info:)"
+CROPPED_GEOMETRY="$("${MAGICK[@]}" "$ICON_PNG" -alpha extract -threshold "$CROP_ALPHA_THRESHOLD" -format "%@" info:)"
 CROPPED_EXPECTED="$("${MAGICK[@]}" identify -format "%wx%h+0+0" "$ICON_PNG")"
 if [ "$CROPPED_GEOMETRY" != "$CROPPED_EXPECTED" ]; then
-    echo "Generated icon PNG still has transparent edge padding: bounds $CROPPED_GEOMETRY, expected $CROPPED_EXPECTED." >&2
+    echo "Generated icon PNG still has transparent edge padding at alpha threshold $CROP_ALPHA_THRESHOLD: bounds $CROPPED_GEOMETRY, expected $CROPPED_EXPECTED." >&2
     exit 1
 fi
 "${MAGICK[@]}" "$ICON_PNG" -define icon:auto-resize="$ICON_SIZES" "$ICON_ICO"
@@ -52,6 +53,7 @@ if [ ! -f "$NOTIFICATION_AUDIO" ]; then
 fi
 
 echo "Rebuilt assets:"
+echo "  Crop alpha threshold: $CROP_ALPHA_THRESHOLD"
 echo "  $ICON_PNG"
 echo "  $ICON_ICO"
 echo "  $WEB_ICON_PNG"
