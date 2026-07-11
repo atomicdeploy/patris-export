@@ -392,7 +392,7 @@ func (s *Server) ShowToast(req ToastRequest) error {
 // Refresh forces a data refresh broadcast to browser, IPC, and embedded
 // subscribers.
 func (s *Server) Refresh() {
-	s.broadcastUpdate()
+	s.broadcastInitialSnapshot("source_changed")
 }
 
 // SubscribeEvents subscribes to the same event stream used by the WebSocket
@@ -937,7 +937,7 @@ func (s *Server) handlePostEdgeUpload(w http.ResponseWriter, r *http.Request) {
 
 	log.Printf("📥 Edge upload accepted from %s: %s (%d bytes, %d records, crc32=%s)", sourceID, filepath.Base(destPath), written, len(records), gotHash)
 	s.notifyConfigured("file_updated", "Patris edge upload received", fmt.Sprintf("%s uploaded %s (%d records)", sourceID, filepath.Base(originalName), len(records)))
-	s.broadcastUpdate()
+	s.broadcastInitialSnapshot("source_changed")
 
 	writeJSON(w, edgeUploadResponse{
 		Success:  true,
@@ -1086,22 +1086,7 @@ func (s *Server) sendRecordsToClient(conn *websocket.Conn, connMu *sync.Mutex) {
 	records := result.Rows
 	dbPath := s.currentDBPath()
 
-	// Send as initial load (all records are "added")
-	message := map[string]interface{}{
-		"type":        "initial",
-		"timestamp":   time.Now().Format(time.RFC3339),
-		"added":       records,
-		"total_count": len(records),
-		"file_name":   sourceBaseName(dbPath),
-		"file_path":   dbPath,
-		"version":     s.version,
-		"resources":   web.Resources(),
-		"raw":         result.Raw,
-		"key_field":   result.KeyField,
-	}
-	if s.config != nil {
-		message["config"] = s.config.Get()
-	}
+	message := s.initialSnapshotMessage(result, dbPath, "")
 
 	connMu.Lock()
 	err = conn.WriteJSON(message)
@@ -1118,6 +1103,68 @@ func (s *Server) sendRecordsToClient(conn *websocket.Conn, connMu *sync.Mutex) {
 	s.lastRecordsMu.Unlock()
 
 	log.Printf("📤 Sent initial %d records to client", len(records))
+	go s.broadcastProcessInfo()
+}
+
+func (s *Server) initialSnapshotMessage(result recordpipe.Result, dbPath, reason string) map[string]interface{} {
+	message := map[string]interface{}{
+		"type":        "initial",
+		"timestamp":   time.Now().Format(time.RFC3339),
+		"added":       result.Rows,
+		"total_count": len(result.Rows),
+		"file_name":   sourceBaseName(dbPath),
+		"file_path":   dbPath,
+		"version":     s.version,
+		"resources":   web.Resources(),
+		"raw":         result.Raw,
+		"key_field":   result.KeyField,
+	}
+	if reason != "" {
+		message["reason"] = reason
+		message["source_changed"] = true
+	}
+	if s.config != nil {
+		message["config"] = s.config.Get()
+	}
+	return message
+}
+
+func (s *Server) broadcastInitialSnapshot(reason string) {
+	result, err := s.RecordResult()
+	if err != nil {
+		log.Printf("Failed to read records for initial snapshot: %v", err)
+		return
+	}
+	records := result.Rows
+	dbPath := s.currentDBPath()
+	message := s.initialSnapshotMessage(result, dbPath, reason)
+
+	s.lastRecordsMu.Lock()
+	s.lastRecords = records
+	s.lastRecordsMu.Unlock()
+
+	s.wsClientsMu.RLock()
+	for conn, connMu := range s.wsClients {
+		go func(c *websocket.Conn, mu *sync.Mutex) {
+			mu.Lock()
+			err := c.WriteJSON(message)
+			mu.Unlock()
+			if err != nil {
+				log.Printf("Failed to send source snapshot to WebSocket: %v", err)
+			}
+		}(conn, connMu)
+	}
+	s.wsClientsMu.RUnlock()
+
+	log.Printf("📤 Broadcast initial snapshot (%s): %d records from %s", reason, len(records), sourceBaseName(dbPath))
+	s.dispatchUpdateEvent(updateout.Event{
+		Type:      "initial",
+		Timestamp: fmt.Sprintf("%v", message["timestamp"]),
+		Source:    dbPath,
+		Raw:       result.Raw,
+		Records:   records,
+		KeyField:  result.KeyField,
+	})
 	go s.broadcastProcessInfo()
 }
 
