@@ -54,8 +54,8 @@ patris-export --mapping .\mapping.kala.json serve C:\Patris\data4\kala.db --addr
 Environment equivalent:
 
 ```powershell
-$env:PATRIS_MAPPING_FILE = "C:\Patris\mapping.kala.json"
-$env:PATRIS_RAW = "0"
+$env:PATRIS_EXPORT_MAPPING_FILE = "C:\Patris\mapping.kala.json"
+$env:PATRIS_EXPORT_RAW = "0"
 ```
 
 ## Excel, SQLite, and MySQL
@@ -68,7 +68,7 @@ patris-export --mapping .\mapping.kala.json convert C:\Patris\data4\kala.db `
   --sqlite-path .\exports\patris-products.sqlite `
   --sqlite-table products
 
-$env:PATRIS_MYSQL_DSN = "user:password@tcp(127.0.0.1:3306)/shop?parseTime=true"
+$env:PATRIS_EXPORT_MYSQL_DSN = "user:password@tcp(127.0.0.1:3306)/shop?parseTime=true"
 patris-export --mapping .\mapping.kala.json convert C:\Patris\data4\kala.db `
   -f mysql `
   --mysql-table products

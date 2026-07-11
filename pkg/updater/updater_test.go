@@ -72,7 +72,7 @@ func TestNewUpdater(t *testing.T) {
 
 func TestNewAPIUpdaterUsesSeparateToken(t *testing.T) {
 	t.Setenv("GITHUB_TOKEN", "github-secret")
-	t.Setenv("PATRIS_UPDATE_TOKEN", "update-secret")
+	t.Setenv("PATRIS_EXPORT_UPDATE_TOKEN", "update-secret")
 
 	u := NewAPIUpdater()
 	if u.apiToken != "update-secret" {

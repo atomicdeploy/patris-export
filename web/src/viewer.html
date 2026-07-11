@@ -31,9 +31,15 @@
                         <span class="status-indicator" id="statusIndicator"></span>
                         <span id="statusText">Connecting...</span>
                     </button>
-                    <button class="btn btn-icon" id="footerToggleBtn" type="button" title="Toggle footer">▤</button>
-                    <button class="btn btn-icon" id="settingsBtn" title="Settings">⚙️</button>
-                    <button class="btn btn-icon" id="themeToggle" title="Toggle Theme">🌙</button>
+                    <button class="btn btn-icon" id="footerToggleBtn" type="button" title="Toggle footer" aria-label="Toggle footer">
+                        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16v14H4z" /><path d="M4 15h16" /></svg>
+                    </button>
+                    <button class="btn btn-icon" id="settingsBtn" title="Settings" aria-label="Settings">
+                        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 15.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7z" /><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.87l.05.05a2 2 0 1 1-2.83 2.83l-.05-.05A1.7 1.7 0 0 0 15 19.4a1.7 1.7 0 0 0-1 .6 1.7 1.7 0 0 0-.4 1.05V21a2 2 0 1 1-4 0v-.08A1.7 1.7 0 0 0 8.6 19.4a1.7 1.7 0 0 0-1.87.34l-.05.05a2 2 0 1 1-2.83-2.83l.05-.05A1.7 1.7 0 0 0 4.6 15a1.7 1.7 0 0 0-.6-1 1.7 1.7 0 0 0-1.05-.4H3a2 2 0 1 1 0-4h.08A1.7 1.7 0 0 0 4.6 8.6a1.7 1.7 0 0 0-.34-1.87l-.05-.05a2 2 0 1 1 2.83-2.83l.05.05A1.7 1.7 0 0 0 9 4.6a1.7 1.7 0 0 0 1-.6 1.7 1.7 0 0 0 .4-1.05V3a2 2 0 1 1 4 0v.08A1.7 1.7 0 0 0 15.4 4.6a1.7 1.7 0 0 0 1.87-.34l.05-.05a2 2 0 1 1 2.83 2.83l-.05.05A1.7 1.7 0 0 0 19.4 9c.19.38.52.7 1 .9.31.13.65.2 1 .2H21a2 2 0 1 1 0 4h-.08a1.7 1.7 0 0 0-1.52.9z" /></svg>
+                    </button>
+                    <button class="btn btn-icon" id="themeToggle" title="Toggle Theme" aria-label="Toggle theme">
+                        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20.5 14.5A8.5 8.5 0 0 1 9.5 3.5 9 9 0 1 0 20.5 14.5z" /></svg>
+                    </button>
                 </div>
             </div>
         </header>
@@ -72,6 +78,9 @@
                 </button>
                 <button class="btn btn-secondary" id="refreshNowBtn" title="Reload data from the source">
                     🔄 Refresh Now
+                </button>
+                <button class="btn btn-secondary event-log-button" id="eventLogBtn" title="Open event log">
+                    Logs <span class="event-log-count" id="eventLogCount">0</span>
                 </button>
                 <div class="record-count">
                     Total: <strong id="totalCount">0</strong> | 
@@ -114,7 +123,9 @@
                         <h2 id="settingsTitle">Settings</h2>
                         <p id="settingsConfigPath" class="settings-path"></p>
                     </div>
-                    <button class="btn btn-icon" id="closeSettings" type="button" title="Close">✕</button>
+                    <button class="btn btn-icon" id="closeSettings" type="button" title="Close" aria-label="Close">
+                        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12" /><path d="M18 6L6 18" /></svg>
+                    </button>
                 </div>
                 <div class="settings-tabs" role="tablist" aria-label="Settings sections">
                     <button class="settings-tab active" type="button" data-settings-tab="ui">Interface</button>
@@ -123,127 +134,129 @@
                     <button class="settings-tab" type="button" data-settings-tab="notifications">Notifications</button>
                     <button class="settings-tab" type="button" data-settings-tab="runtime">Runtime</button>
                 </div>
-                <div class="settings-pane active" data-settings-pane="ui">
-                    <div class="settings-grid">
-                        <label class="field-label">Theme
-                            <select id="settingsTheme" class="select-input">
-                                <option value="system">System</option>
-                                <option value="light">Light</option>
-                                <option value="dark">Dark</option>
-                            </select>
-                        </label>
-                        <label class="field-label">Records per page
-                            <select id="pageSize" class="select-input">
-                                <option value="25">25</option>
-                                <option value="50">50</option>
-                                <option value="100" selected>100</option>
-                                <option value="500">500</option>
-                            </select>
-                        </label>
-                        <label class="field-label">Notification sound
-                            <select id="notificationSoundSource" class="select-input">
-                                <option value="external" selected>External file</option>
-                                <option value="generated">Generated melody</option>
-                            </select>
-                        </label>
-                        <label class="field-label">Last update
-                            <select id="lastUpdateDisplayMode" class="select-input">
-                                <option value="both">Absolute and relative</option>
-                                <option value="absolute">Absolute</option>
-                                <option value="relative">Relative</option>
-                            </select>
-                        </label>
-                    </div>
-                    <div class="settings-group">
-                        <label class="checkbox-label"><input type="checkbox" id="showFooter" checked><span>Show footer</span></label>
-                        <label class="checkbox-label"><input type="checkbox" id="autoScrollToChanged"><span>Auto-scroll to changed items</span></label>
-                        <label class="checkbox-label"><input type="checkbox" id="highlightChanges" checked><span>Highlight changed items</span></label>
-                        <label class="checkbox-label"><input type="checkbox" id="rtlTextDirection"><span>Display table text right-to-left</span></label>
-                        <label class="checkbox-label"><input type="checkbox" id="enablePagination"><span>Enable pagination</span></label>
-                        <label class="checkbox-label"><input type="checkbox" id="playNotificationSound"><span>Play notification sound on updates</span></label>
-                    </div>
-                    <div class="settings-subsection">
-                        <h3>Row coloring</h3>
-                        <div class="settings-grid color-grid">
-                            <label class="checkbox-label color-toggle"><input type="checkbox" id="enableRowColoring" checked><span>Enable row coloring rules</span></label>
-                            <label class="field-label">Group rows
-                                <input id="rowColorGroup" class="color-input" type="color" value="#6366f1">
+                <div class="settings-body">
+                    <div class="settings-pane active" data-settings-pane="ui">
+                        <div class="settings-grid">
+                            <label class="field-label">Theme
+                                <select id="settingsTheme" class="select-input">
+                                    <option value="system">System</option>
+                                    <option value="light">Light</option>
+                                    <option value="dark">Dark</option>
+                                </select>
                             </label>
-                            <label class="field-label">Subgroup rows
-                                <input id="rowColorSubgroup" class="color-input" type="color" value="#0ea5e9">
+                            <label class="field-label">Records per page
+                                <select id="pageSize" class="select-input">
+                                    <option value="25">25</option>
+                                    <option value="50">50</option>
+                                    <option value="100" selected>100</option>
+                                    <option value="500">500</option>
+                                </select>
                             </label>
-                            <label class="field-label">No stock text
-                                <input id="rowColorNoStock" class="color-input" type="color" value="#6b7280">
+                            <label class="field-label">Notification sound
+                                <select id="notificationSoundSource" class="select-input">
+                                    <option value="external" selected>External file</option>
+                                    <option value="generated">Generated melody</option>
+                                </select>
                             </label>
-                            <label class="field-label">Stock accent
-                                <input id="rowColorHasStock" class="color-input" type="color" value="#10b981">
+                            <label class="field-label">Last update
+                                <select id="lastUpdateDisplayMode" class="select-input">
+                                    <option value="both">Absolute and relative</option>
+                                    <option value="absolute">Absolute</option>
+                                    <option value="relative">Relative</option>
+                                </select>
                             </label>
                         </div>
+                        <div class="settings-group">
+                            <label class="checkbox-label"><input type="checkbox" id="showFooter" checked><span>Show footer</span></label>
+                            <label class="checkbox-label"><input type="checkbox" id="autoScrollToChanged"><span>Auto-scroll to changed items</span></label>
+                            <label class="checkbox-label"><input type="checkbox" id="highlightChanges" checked><span>Highlight changed items</span></label>
+                            <label class="checkbox-label"><input type="checkbox" id="rtlTextDirection"><span>Display table text right-to-left</span></label>
+                            <label class="checkbox-label"><input type="checkbox" id="enablePagination"><span>Enable pagination</span></label>
+                            <label class="checkbox-label"><input type="checkbox" id="playNotificationSound"><span>Play notification sound on updates</span></label>
+                        </div>
+                        <div class="settings-subsection">
+                            <h3>Row coloring</h3>
+                            <div class="settings-grid color-grid">
+                                <label class="checkbox-label color-toggle"><input type="checkbox" id="enableRowColoring" checked><span>Enable row coloring rules</span></label>
+                                <label class="field-label">Group rows
+                                    <input id="rowColorGroup" class="color-input" type="color" value="#6366f1">
+                                </label>
+                                <label class="field-label">Subgroup rows
+                                    <input id="rowColorSubgroup" class="color-input" type="color" value="#0ea5e9">
+                                </label>
+                                <label class="field-label">No stock text
+                                    <input id="rowColorNoStock" class="color-input" type="color" value="#6b7280">
+                                </label>
+                                <label class="field-label">Stock accent
+                                    <input id="rowColorHasStock" class="color-input" type="color" value="#10b981">
+                                </label>
+                            </div>
+                        </div>
+                        <div class="button-row">
+                            <button class="btn btn-secondary" id="testNotificationSound" type="button">Test sound</button>
+                            <button class="btn btn-secondary" id="testNativeToast" type="button">Test toast</button>
+                        </div>
                     </div>
-                    <div class="button-row">
-                        <button class="btn btn-secondary" id="testNotificationSound" type="button">Test sound</button>
-                        <button class="btn btn-secondary" id="testNativeToast" type="button">Test toast</button>
+                    <div class="settings-pane" data-settings-pane="server">
+                        <div class="settings-grid">
+                            <label class="field-label">Host
+                                <input id="serverHost" class="text-input" type="text" autocomplete="off">
+                            </label>
+                            <label class="field-label">Port
+                                <input id="serverPort" class="text-input" type="number" min="1" max="65535">
+                            </label>
+                            <label class="field-label">Debounce
+                                <input id="serverDebounce" class="text-input" type="text" placeholder="500ms">
+                            </label>
+                        </div>
+                        <label class="checkbox-label"><input type="checkbox" id="serverWatch"><span>Watch source and broadcast updates</span></label>
                     </div>
-                </div>
-                <div class="settings-pane" data-settings-pane="server">
-                    <div class="settings-grid">
-                        <label class="field-label">Host
-                            <input id="serverHost" class="text-input" type="text" autocomplete="off">
-                        </label>
-                        <label class="field-label">Port
-                            <input id="serverPort" class="text-input" type="number" min="1" max="65535">
-                        </label>
-                        <label class="field-label">Debounce
-                            <input id="serverDebounce" class="text-input" type="text" placeholder="500ms">
-                        </label>
+                    <div class="settings-pane" data-settings-pane="database">
+                        <div class="settings-grid">
+                            <label class="field-label wide">Database path or URL
+                                <input id="databasePath" class="text-input" type="text" autocomplete="off">
+                            </label>
+                            <label class="field-label wide">Custom charmap
+                                <input id="databaseCharmap" class="text-input" type="text" autocomplete="off">
+                            </label>
+                        </div>
+                        <label class="checkbox-label"><input type="checkbox" id="directAccess"><span>Read database directly without temp copy</span></label>
+                        <label class="checkbox-label"><input type="checkbox" id="rtlConversion"><span>Enable opt-in RTL conversion</span></label>
                     </div>
-                    <label class="checkbox-label"><input type="checkbox" id="serverWatch"><span>Watch source and broadcast updates</span></label>
-                </div>
-                <div class="settings-pane" data-settings-pane="database">
-                    <div class="settings-grid">
-                        <label class="field-label wide">Database path or URL
-                            <input id="databasePath" class="text-input" type="text" autocomplete="off">
-                        </label>
-                        <label class="field-label wide">Custom charmap
-                            <input id="databaseCharmap" class="text-input" type="text" autocomplete="off">
-                        </label>
+                    <div class="settings-pane" data-settings-pane="notifications">
+                        <div class="settings-grid">
+                            <label class="field-label">Max detailed rows
+                                <input id="notifyMaxRows" class="text-input" type="number" min="1" max="20">
+                            </label>
+                        </div>
+                        <label class="checkbox-label"><input type="checkbox" id="notifyEnabled"><span>Enable event notifications</span></label>
+                        <label class="checkbox-label"><input type="checkbox" id="notifyNative"><span>Show native OS toast messages</span></label>
+                        <label class="checkbox-label"><input type="checkbox" id="notifyInApp"><span>Relay notifications to connected web clients</span></label>
+                        <label class="checkbox-label"><input type="checkbox" id="notifyClientConnected"><span>Client connected</span></label>
+                        <label class="checkbox-label"><input type="checkbox" id="notifyClientDisconnected"><span>Client disconnected</span></label>
+                        <label class="checkbox-label"><input type="checkbox" id="notifyFileUpdated"><span>Source file updated with old/new hash</span></label>
+                        <label class="checkbox-label"><input type="checkbox" id="notifyRowUpdated"><span>Rows changed</span></label>
+                        <label class="checkbox-label"><input type="checkbox" id="notifyIncludeRowValues"><span>Include old/new row values in notifications</span></label>
                     </div>
-                    <label class="checkbox-label"><input type="checkbox" id="directAccess"><span>Read database directly without temp copy</span></label>
-                    <label class="checkbox-label"><input type="checkbox" id="rtlConversion"><span>Enable opt-in RTL conversion</span></label>
-                </div>
-                <div class="settings-pane" data-settings-pane="notifications">
-                    <div class="settings-grid">
-                        <label class="field-label">Max detailed rows
-                            <input id="notifyMaxRows" class="text-input" type="number" min="1" max="20">
-                        </label>
+                    <div class="settings-pane" data-settings-pane="runtime">
+                        <div class="settings-grid">
+                            <label class="field-label wide">Temp directory
+                                <input id="runtimeTempDir" class="text-input" type="text" placeholder="system">
+                            </label>
+                            <label class="field-label">Temp strategy
+                                <select id="runtimeTempStrategy" class="text-input">
+                                    <option value="auto">Auto</option>
+                                    <option value="system">System temp</option>
+                                    <option value="memory">Memory temp</option>
+                                </select>
+                            </label>
+                            <label class="field-label">Memory temp limit (MiB)
+                                <input id="runtimeTempMemoryLimitMB" class="text-input" type="number" min="1" max="4096" step="1" placeholder="100">
+                            </label>
+                        </div>
+                        <label class="checkbox-label"><input type="checkbox" id="runtimeDebug"><span>Enable debug tools and custom charmap previews</span></label>
+                        <p class="settings-help">Use <code>system</code> for the operating system temp directory. Auto prefers <code>/dev/shm</code> on Linux for known-size files within the memory limit.</p>
                     </div>
-                    <label class="checkbox-label"><input type="checkbox" id="notifyEnabled"><span>Enable event notifications</span></label>
-                    <label class="checkbox-label"><input type="checkbox" id="notifyNative"><span>Show native OS toast messages</span></label>
-                    <label class="checkbox-label"><input type="checkbox" id="notifyInApp"><span>Relay notifications to connected web clients</span></label>
-                    <label class="checkbox-label"><input type="checkbox" id="notifyClientConnected"><span>Client connected</span></label>
-                    <label class="checkbox-label"><input type="checkbox" id="notifyClientDisconnected"><span>Client disconnected</span></label>
-                    <label class="checkbox-label"><input type="checkbox" id="notifyFileUpdated"><span>Source file updated with old/new hash</span></label>
-                    <label class="checkbox-label"><input type="checkbox" id="notifyRowUpdated"><span>Rows changed</span></label>
-                    <label class="checkbox-label"><input type="checkbox" id="notifyIncludeRowValues"><span>Include old/new row values in notifications</span></label>
-                </div>
-                <div class="settings-pane" data-settings-pane="runtime">
-                    <div class="settings-grid">
-                        <label class="field-label wide">Temp directory
-                            <input id="runtimeTempDir" class="text-input" type="text" placeholder="system">
-                        </label>
-                        <label class="field-label">Temp strategy
-                            <select id="runtimeTempStrategy" class="text-input">
-                                <option value="auto">Auto</option>
-                                <option value="system">System temp</option>
-                                <option value="memory">Memory temp</option>
-                            </select>
-                        </label>
-                        <label class="field-label">Memory temp limit (MiB)
-                            <input id="runtimeTempMemoryLimitMB" class="text-input" type="number" min="1" max="4096" step="1" placeholder="100">
-                        </label>
-                    </div>
-                    <label class="checkbox-label"><input type="checkbox" id="runtimeDebug"><span>Enable debug tools and custom charmap previews</span></label>
-                    <p class="settings-help">Use <code>system</code> for the operating system temp directory. Auto prefers <code>/dev/shm</code> on Linux for known-size files within the memory limit.</p>
                 </div>
             </div>
         </div>
@@ -259,17 +272,19 @@
                         <button class="btn btn-secondary" id="showAllColumns" type="button">Show all</button>
                         <button class="btn btn-secondary" id="hideAllColumns" type="button">Hide all</button>
                         <button class="btn btn-icon dialog-menu-btn" type="button" title="More actions" data-dialog-menu="columnsPanel">&hellip;</button>
-                        <button class="btn btn-icon dialog-close-btn" id="closeColumns" type="button" title="Close">&times;</button>
+                        <button class="btn btn-icon dialog-close-btn" id="closeColumns" type="button" title="Close" aria-label="Close"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12" /><path d="M18 6L6 18" /></svg></button>
                     </div>
                 </div>
-                <div class="column-manager">
-                    <div class="column-manager-row column-manager-head">
-                        <span>Visible</span>
-                        <span>Source key</span>
-                        <span>Display label</span>
-                        <span>Type</span>
+                <div class="settings-body">
+                    <div class="column-manager">
+                        <div class="column-manager-row column-manager-head">
+                            <span>Visible</span>
+                            <span>Source key</span>
+                            <span>Display label</span>
+                            <span>Type</span>
+                        </div>
+                        <div class="column-manager-rows" id="columnCheckboxes"></div>
                     </div>
-                    <div class="column-manager-rows" id="columnCheckboxes"></div>
                 </div>
             </div>
         </div>
@@ -283,11 +298,33 @@
                     </div>
                     <div class="dialog-actions">
                         <button class="btn btn-icon dialog-menu-btn" type="button" title="More actions" data-dialog-menu="connectionPanel">&hellip;</button>
-                        <button class="btn btn-icon dialog-close-btn" id="closeConnection" type="button" title="Close">&times;</button>
+                        <button class="btn btn-icon dialog-close-btn" id="closeConnection" type="button" title="Close" aria-label="Close"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12" /><path d="M18 6L6 18" /></svg></button>
                     </div>
                 </div>
-                <div class="connection-details" id="connectionDetails"></div>
-                <div class="connection-log" id="connectionLog" aria-live="polite"></div>
+                <div class="settings-body">
+                    <div class="connection-details" id="connectionDetails"></div>
+                    <div class="connection-log" id="connectionLog" aria-live="polite"></div>
+                </div>
+            </div>
+        </div>
+
+        <div class="settings-panel event-log-modal" id="eventLogPanel" role="dialog" aria-modal="true" aria-labelledby="eventLogTitle">
+            <div class="settings-content">
+                <div class="settings-header">
+                    <div>
+                        <h2 id="eventLogTitle">Event Logs</h2>
+                        <p class="settings-path">Notification-capable events received by this viewer.</p>
+                    </div>
+                    <div class="dialog-actions">
+                        <button class="btn btn-secondary" id="clearEventLog" type="button">Clear</button>
+                        <button class="btn btn-icon dialog-menu-btn" type="button" title="More actions" data-dialog-menu="eventLogPanel">&hellip;</button>
+                        <button class="btn btn-icon dialog-close-btn" id="closeEventLog" type="button" title="Close" aria-label="Close"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12" /><path d="M18 6L6 18" /></svg></button>
+                    </div>
+                </div>
+                <div class="settings-body">
+                    <div class="event-log-summary" id="eventLogSummary"></div>
+                    <div class="event-log-list" id="eventLogList" aria-live="polite"></div>
+                </div>
             </div>
         </div>
 
@@ -295,7 +332,7 @@
             <div class="inspector-content">
                 <div class="inspector-header">
                     <h2>Record Inspector</h2>
-                    <button class="btn btn-icon" id="closeInspector">✕</button>
+                    <button class="btn btn-icon" id="closeInspector" type="button" title="Close" aria-label="Close"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12" /><path d="M18 6L6 18" /></svg></button>
                 </div>
                 <div class="inspector-body" id="inspectorBody">
                     <p class="text-muted">Select a record to inspect</p>
@@ -329,7 +366,9 @@
                     <span class="process-status footer-process-status" id="footerProcessStatus">Checking Patris81...</span>
                 </div>
                 <div class="footer-section footer-actions">
-                    <button class="btn btn-icon footer-collapse" id="footerCollapseBtn" type="button" title="Hide footer">⌄</button>
+                    <button class="btn btn-icon footer-collapse" id="footerCollapseBtn" type="button" title="Hide footer" aria-label="Hide footer">
+                        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 9l6 6 6-6" /></svg>
+                    </button>
                 </div>
             </div>
         </footer>

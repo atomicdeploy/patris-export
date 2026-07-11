@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strconv"
 	"strings"
@@ -185,7 +186,7 @@ func Default() Config {
 }
 
 func DefaultPath() string {
-	for _, key := range []string{"PATRIS_CONFIG", "PATRIS_CONFIG_FILE"} {
+	for _, key := range []string{"PATRIS_EXPORT_CONFIG", "PATRIS_EXPORT_CONFIG_FILE"} {
 		if value := strings.TrimSpace(os.Getenv(key)); value != "" {
 			return value
 		}
@@ -207,13 +208,13 @@ func ResolvePaths(paths []string) []string {
 		return explicit
 	}
 
-	if value := strings.TrimSpace(os.Getenv("PATRIS_CONFIG_FILES")); value != "" {
+	if value := strings.TrimSpace(os.Getenv("PATRIS_EXPORT_CONFIG_FILES")); value != "" {
 		return cleanPathList(strings.Split(value, string(os.PathListSeparator)))
 	}
-	if value := strings.TrimSpace(os.Getenv("PATRIS_CONFIG_PATHS")); value != "" {
+	if value := strings.TrimSpace(os.Getenv("PATRIS_EXPORT_CONFIG_PATHS")); value != "" {
 		return cleanPathList(strings.Split(value, string(os.PathListSeparator)))
 	}
-	for _, key := range []string{"PATRIS_CONFIG", "PATRIS_CONFIG_FILE"} {
+	for _, key := range []string{"PATRIS_EXPORT_CONFIG", "PATRIS_EXPORT_CONFIG_FILE"} {
 		if value := strings.TrimSpace(os.Getenv(key)); value != "" {
 			return cleanPathList([]string{value})
 		}
@@ -369,7 +370,7 @@ func (m *Manager) Update(fn func(*Config)) error {
 	if err := os.MkdirAll(filepath.Dir(m.path), 0755); err != nil {
 		return err
 	}
-	return os.WriteFile(m.path, append(data, '\n'), 0644)
+	return os.WriteFile(m.path, data, 0644)
 }
 
 func (m *Manager) Save() error {
@@ -430,22 +431,97 @@ func decodeConfig(path string, data []byte, cfg *Config) error {
 }
 
 func encodeConfig(path string, cfg Config) ([]byte, error) {
+	payload, err := sparseConfigMap(cfg)
+	if err != nil {
+		return nil, err
+	}
 	var (
 		data []byte
-		err  error
 	)
 	switch strings.ToLower(filepath.Ext(path)) {
 	case ".yaml", ".yml":
-		data, err = yaml.Marshal(cfg)
+		data, err = yaml.Marshal(payload)
 	case ".toml":
-		data, err = toml.Marshal(cfg)
+		data, err = toml.Marshal(payload)
 	default:
-		data, err = json.MarshalIndent(cfg, "", "  ")
+		data, err = json.MarshalIndent(payload, "", "  ")
 	}
 	if err != nil {
 		return nil, err
 	}
 	return append(data, '\n'), nil
+}
+
+func sparseConfigMap(cfg Config) (map[string]interface{}, error) {
+	normalize(&cfg)
+	defaults := Default()
+	normalize(&defaults)
+
+	current, err := configToMap(cfg)
+	if err != nil {
+		return nil, err
+	}
+	defaultMap, err := configToMap(defaults)
+	if err != nil {
+		return nil, err
+	}
+	return diffMap(defaultMap, current), nil
+}
+
+func configToMap(cfg Config) (map[string]interface{}, error) {
+	data, err := json.Marshal(cfg)
+	if err != nil {
+		return nil, err
+	}
+	var out map[string]interface{}
+	if err := json.Unmarshal(data, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func diffMap(defaults, current map[string]interface{}) map[string]interface{} {
+	out := map[string]interface{}{}
+	for key, value := range current {
+		defaultValue, ok := defaults[key]
+		if ok {
+			if childCurrent, ok := value.(map[string]interface{}); ok {
+				if childDefault, ok := defaultValue.(map[string]interface{}); ok {
+					childDiff := diffMap(childDefault, childCurrent)
+					if len(childDiff) > 0 {
+						out[key] = childDiff
+					}
+					continue
+				}
+			}
+			if valuesEqual(defaultValue, value) {
+				continue
+			}
+		}
+		if !isEmptyConfigValue(value) {
+			out[key] = value
+		}
+	}
+	return out
+}
+
+func valuesEqual(a, b interface{}) bool {
+	return reflect.DeepEqual(a, b)
+}
+
+func isEmptyConfigValue(value interface{}) bool {
+	switch v := value.(type) {
+	case nil:
+		return true
+	case string:
+		return v == ""
+	case []interface{}:
+		return len(v) == 0
+	case map[string]interface{}:
+		return len(v) == 0
+	default:
+		return false
+	}
 }
 
 func (m *Manager) Watch(onChange func(Config)) (*fsnotify.Watcher, error) {
@@ -510,62 +586,62 @@ func (c Config) Addr() string {
 }
 
 func ApplyEnv(cfg *Config) {
-	if value := os.Getenv("PATRIS_HOST"); strings.TrimSpace(value) != "" {
+	if value := os.Getenv("PATRIS_EXPORT_HOST"); strings.TrimSpace(value) != "" {
 		cfg.Server.Host = strings.TrimSpace(value)
 	}
-	if value := os.Getenv("PATRIS_PORT"); strings.TrimSpace(value) != "" {
+	if value := os.Getenv("PATRIS_EXPORT_PORT"); strings.TrimSpace(value) != "" {
 		if port, err := strconv.Atoi(value); err == nil {
 			cfg.Server.Port = port
 		}
 	}
-	if value := os.Getenv("PATRIS_ADDR"); strings.TrimSpace(value) != "" {
+	if value := os.Getenv("PATRIS_EXPORT_ADDR"); strings.TrimSpace(value) != "" {
 		setAddr(cfg, value)
 	}
-	if value := os.Getenv("PATRIS_DB_PATH"); strings.TrimSpace(value) != "" {
+	if value := os.Getenv("PATRIS_EXPORT_DB_PATH"); strings.TrimSpace(value) != "" {
 		cfg.Database.Path = value
 	}
-	if value := os.Getenv("PATRIS_CHARMAP"); strings.TrimSpace(value) != "" {
+	if value := os.Getenv("PATRIS_EXPORT_CHARMAP"); strings.TrimSpace(value) != "" {
 		cfg.Database.Charmap = value
 	}
-	if value := os.Getenv("PATRIS_DEBOUNCE"); strings.TrimSpace(value) != "" {
+	if value := os.Getenv("PATRIS_EXPORT_DEBOUNCE"); strings.TrimSpace(value) != "" {
 		cfg.Server.Debounce = value
 	}
-	if value := os.Getenv("PATRIS_WATCH"); strings.TrimSpace(value) != "" {
+	if value := os.Getenv("PATRIS_EXPORT_WATCH"); strings.TrimSpace(value) != "" {
 		cfg.Server.Watch = parseBool(value, cfg.Server.Watch)
 	}
-	if value := os.Getenv("PATRIS_HTTP"); strings.TrimSpace(value) != "" {
+	if value := os.Getenv("PATRIS_EXPORT_HTTP"); strings.TrimSpace(value) != "" {
 		cfg.Server.HTTP = parseBool(value, cfg.Server.HTTP)
 	}
-	if value := os.Getenv("PATRIS_IPC"); strings.TrimSpace(value) != "" {
+	if value := os.Getenv("PATRIS_EXPORT_IPC"); strings.TrimSpace(value) != "" {
 		cfg.Server.IPC.Enabled = parseBool(value, cfg.Server.IPC.Enabled)
 	}
-	if value := os.Getenv("PATRIS_IPC_PATH"); strings.TrimSpace(value) != "" {
+	if value := os.Getenv("PATRIS_EXPORT_IPC_PATH"); strings.TrimSpace(value) != "" {
 		cfg.Server.IPC.Path = strings.TrimSpace(value)
 	}
-	if value := os.Getenv("PATRIS_DIRECT_ACCESS"); strings.TrimSpace(value) != "" {
+	if value := os.Getenv("PATRIS_EXPORT_DIRECT_ACCESS"); strings.TrimSpace(value) != "" {
 		cfg.Database.DirectAccess = parseBool(value, cfg.Database.DirectAccess)
 	}
-	if value := os.Getenv("PATRIS_RTL"); strings.TrimSpace(value) != "" {
+	if value := os.Getenv("PATRIS_EXPORT_RTL"); strings.TrimSpace(value) != "" {
 		cfg.Database.RTLConversion = parseBool(value, cfg.Database.RTLConversion)
 	}
-	if value := os.Getenv("PATRIS_RAW"); strings.TrimSpace(value) != "" {
+	if value := os.Getenv("PATRIS_EXPORT_RAW"); strings.TrimSpace(value) != "" {
 		cfg.Database.Raw = parseBool(value, cfg.Database.Raw)
 		cfg.Convert.Raw = cfg.Database.Raw
 	}
-	if value := os.Getenv("PATRIS_MAPPING_FILE"); strings.TrimSpace(value) != "" {
+	if value := os.Getenv("PATRIS_EXPORT_MAPPING_FILE"); strings.TrimSpace(value) != "" {
 		cfg.Transform.MappingFile = strings.TrimSpace(value)
 		cfg.Transform.Enabled = true
 	}
-	for _, key := range []string{"PATRIS_TEMP_DIR", "PATRIS_TMPDIR"} {
+	for _, key := range []string{"PATRIS_EXPORT_TEMP_DIR", "PATRIS_EXPORT_TMPDIR"} {
 		if value := os.Getenv(key); strings.TrimSpace(value) != "" {
 			cfg.Runtime.TempDir = strings.TrimSpace(value)
 			break
 		}
 	}
-	if value := os.Getenv("PATRIS_TEMP_STRATEGY"); strings.TrimSpace(value) != "" {
+	if value := os.Getenv("PATRIS_EXPORT_TEMP_STRATEGY"); strings.TrimSpace(value) != "" {
 		cfg.Runtime.TempStrategy = strings.TrimSpace(value)
 	}
-	for _, key := range []string{"PATRIS_TEMP_MEMORY_LIMIT_MB", "PATRIS_TMPFS_LIMIT_MB"} {
+	for _, key := range []string{"PATRIS_EXPORT_TEMP_MEMORY_LIMIT_MB", "PATRIS_EXPORT_TMPFS_LIMIT_MB"} {
 		if value := os.Getenv(key); strings.TrimSpace(value) != "" {
 			if limit, err := strconv.ParseInt(strings.TrimSpace(value), 10, 64); err == nil {
 				cfg.Runtime.TempMemoryLimitMB = limit
@@ -573,28 +649,28 @@ func ApplyEnv(cfg *Config) {
 			break
 		}
 	}
-	if value := os.Getenv("PATRIS_DEBUG"); strings.TrimSpace(value) != "" {
+	if value := os.Getenv("PATRIS_EXPORT_DEBUG"); strings.TrimSpace(value) != "" {
 		cfg.Runtime.Debug = parseBool(value, cfg.Runtime.Debug)
 	}
-	if value := os.Getenv("PATRIS_OUTPUT"); strings.TrimSpace(value) != "" {
+	if value := os.Getenv("PATRIS_EXPORT_OUTPUT"); strings.TrimSpace(value) != "" {
 		cfg.Convert.Output = strings.TrimSpace(value)
 	}
-	if value := os.Getenv("PATRIS_FORMAT"); strings.TrimSpace(value) != "" {
+	if value := os.Getenv("PATRIS_EXPORT_FORMAT"); strings.TrimSpace(value) != "" {
 		cfg.Convert.Format = strings.TrimSpace(value)
 	}
 	if value := os.Getenv("PATRIS_EXPORT_TABLE"); strings.TrimSpace(value) != "" {
 		cfg.Convert.Table = strings.TrimSpace(value)
 	}
-	if value := os.Getenv("PATRIS_SQLITE_PATH"); strings.TrimSpace(value) != "" {
+	if value := os.Getenv("PATRIS_EXPORT_SQLITE_PATH"); strings.TrimSpace(value) != "" {
 		cfg.Export.SQLitePath = strings.TrimSpace(value)
 	}
-	if value := os.Getenv("PATRIS_SQLITE_TABLE"); strings.TrimSpace(value) != "" {
+	if value := os.Getenv("PATRIS_EXPORT_SQLITE_TABLE"); strings.TrimSpace(value) != "" {
 		cfg.Export.SQLiteTable = strings.TrimSpace(value)
 	}
-	if value := os.Getenv("PATRIS_MYSQL_DSN"); strings.TrimSpace(value) != "" {
+	if value := os.Getenv("PATRIS_EXPORT_MYSQL_DSN"); strings.TrimSpace(value) != "" {
 		cfg.Export.MySQLDSN = strings.TrimSpace(value)
 	}
-	if value := os.Getenv("PATRIS_MYSQL_TABLE"); strings.TrimSpace(value) != "" {
+	if value := os.Getenv("PATRIS_EXPORT_MYSQL_TABLE"); strings.TrimSpace(value) != "" {
 		cfg.Export.MySQLTable = strings.TrimSpace(value)
 	}
 	if value := os.Getenv("PATRIS_EXPORT_BATCH_SIZE"); strings.TrimSpace(value) != "" {
@@ -602,59 +678,59 @@ func ApplyEnv(cfg *Config) {
 			cfg.Export.BatchSize = batch
 		}
 	}
-	if value := os.Getenv("PATRIS_CONVERT_WATCH"); strings.TrimSpace(value) != "" {
+	if value := os.Getenv("PATRIS_EXPORT_CONVERT_WATCH"); strings.TrimSpace(value) != "" {
 		cfg.Convert.Watch = parseBool(value, cfg.Convert.Watch)
 	}
-	if value := os.Getenv("PATRIS_CONVERT_DEBOUNCE"); strings.TrimSpace(value) != "" {
+	if value := os.Getenv("PATRIS_EXPORT_CONVERT_DEBOUNCE"); strings.TrimSpace(value) != "" {
 		cfg.Convert.Debounce = strings.TrimSpace(value)
 	}
-	if value := os.Getenv("PATRIS_SEND_UPDATES"); strings.TrimSpace(value) != "" {
+	if value := os.Getenv("PATRIS_EXPORT_SEND_UPDATES"); strings.TrimSpace(value) != "" {
 		cfg.SendUpdates.Enabled = parseBool(value, cfg.SendUpdates.Enabled)
 	}
-	if value := os.Getenv("PATRIS_SEND_URL"); strings.TrimSpace(value) != "" {
+	if value := os.Getenv("PATRIS_EXPORT_SEND_URL"); strings.TrimSpace(value) != "" {
 		cfg.SendUpdates.URL = strings.TrimSpace(value)
 		cfg.SendUpdates.Enabled = true
 	}
-	if value := os.Getenv("PATRIS_SEND_METHOD"); strings.TrimSpace(value) != "" {
+	if value := os.Getenv("PATRIS_EXPORT_SEND_METHOD"); strings.TrimSpace(value) != "" {
 		cfg.SendUpdates.Method = strings.TrimSpace(value)
 	}
-	if value := os.Getenv("PATRIS_SEND_FORMAT"); strings.TrimSpace(value) != "" {
+	if value := os.Getenv("PATRIS_EXPORT_SEND_FORMAT"); strings.TrimSpace(value) != "" {
 		cfg.SendUpdates.Format = strings.TrimSpace(value)
 	}
-	if value := os.Getenv("PATRIS_SEND_MODE"); strings.TrimSpace(value) != "" {
+	if value := os.Getenv("PATRIS_EXPORT_SEND_MODE"); strings.TrimSpace(value) != "" {
 		cfg.SendUpdates.Mode = strings.TrimSpace(value)
 	}
-	if value := os.Getenv("PATRIS_SEND_INITIAL"); strings.TrimSpace(value) != "" {
+	if value := os.Getenv("PATRIS_EXPORT_SEND_INITIAL"); strings.TrimSpace(value) != "" {
 		cfg.SendUpdates.Initial = parseBool(value, cfg.SendUpdates.Initial)
 	}
-	if value := os.Getenv("PATRIS_SEND_TIMEOUT"); strings.TrimSpace(value) != "" {
+	if value := os.Getenv("PATRIS_EXPORT_SEND_TIMEOUT"); strings.TrimSpace(value) != "" {
 		cfg.SendUpdates.Timeout = strings.TrimSpace(value)
 	}
-	if value := os.Getenv("PATRIS_SEND_COMMAND"); strings.TrimSpace(value) != "" {
+	if value := os.Getenv("PATRIS_EXPORT_SEND_COMMAND"); strings.TrimSpace(value) != "" {
 		cfg.SendUpdates.Command = strings.Fields(value)
 		cfg.SendUpdates.Enabled = true
 	}
-	if value := os.Getenv("PATRIS_EDGE_ENABLED"); strings.TrimSpace(value) != "" {
+	if value := os.Getenv("PATRIS_EXPORT_EDGE_ENABLED"); strings.TrimSpace(value) != "" {
 		cfg.Edge.Enabled = parseBool(value, cfg.Edge.Enabled)
 	}
-	if value := os.Getenv("PATRIS_EDGE_TARGET_URL"); strings.TrimSpace(value) != "" {
+	if value := os.Getenv("PATRIS_EXPORT_EDGE_TARGET_URL"); strings.TrimSpace(value) != "" {
 		cfg.Edge.TargetURL = strings.TrimSpace(value)
 	}
-	if value := os.Getenv("PATRIS_EDGE_TOKEN"); strings.TrimSpace(value) != "" {
+	if value := os.Getenv("PATRIS_EXPORT_EDGE_TOKEN"); strings.TrimSpace(value) != "" {
 		cfg.Edge.Token = strings.TrimSpace(value)
 	}
-	if value := os.Getenv("PATRIS_EDGE_SOURCE_ID"); strings.TrimSpace(value) != "" {
+	if value := os.Getenv("PATRIS_EXPORT_EDGE_SOURCE_ID"); strings.TrimSpace(value) != "" {
 		cfg.Edge.SourceID = strings.TrimSpace(value)
 	}
-	if value := os.Getenv("PATRIS_EDGE_DEBOUNCE"); strings.TrimSpace(value) != "" {
+	if value := os.Getenv("PATRIS_EXPORT_EDGE_DEBOUNCE"); strings.TrimSpace(value) != "" {
 		cfg.Edge.Debounce = strings.TrimSpace(value)
 	}
-	if value := os.Getenv("PATRIS_EDGE_MAX_UPLOAD_MB"); strings.TrimSpace(value) != "" {
+	if value := os.Getenv("PATRIS_EXPORT_EDGE_MAX_UPLOAD_MB"); strings.TrimSpace(value) != "" {
 		if maxMB, err := strconv.ParseInt(strings.TrimSpace(value), 10, 64); err == nil {
 			cfg.Edge.MaxUploadMB = maxMB
 		}
 	}
-	if value := os.Getenv("PATRIS_EDGE_UPLOAD_DIR"); strings.TrimSpace(value) != "" {
+	if value := os.Getenv("PATRIS_EXPORT_EDGE_UPLOAD_DIR"); strings.TrimSpace(value) != "" {
 		cfg.Edge.UploadDir = strings.TrimSpace(value)
 	}
 	applyBoolEnv := func(key string, dst *bool) {
@@ -662,15 +738,15 @@ func ApplyEnv(cfg *Config) {
 			*dst = parseBool(value, *dst)
 		}
 	}
-	applyBoolEnv("PATRIS_NOTIFICATIONS", &cfg.Notifications.Enabled)
-	applyBoolEnv("PATRIS_NOTIFY_NATIVE", &cfg.Notifications.Native)
-	applyBoolEnv("PATRIS_NOTIFY_IN_APP", &cfg.Notifications.InApp)
-	applyBoolEnv("PATRIS_NOTIFY_CLIENT_CONNECTED", &cfg.Notifications.ClientConnected)
-	applyBoolEnv("PATRIS_NOTIFY_CLIENT_DISCONNECTED", &cfg.Notifications.ClientDisconnected)
-	applyBoolEnv("PATRIS_NOTIFY_FILE_UPDATED", &cfg.Notifications.FileUpdated)
-	applyBoolEnv("PATRIS_NOTIFY_ROW_UPDATED", &cfg.Notifications.RowUpdated)
-	applyBoolEnv("PATRIS_NOTIFY_INCLUDE_ROW_VALUES", &cfg.Notifications.IncludeRowValues)
-	if value := os.Getenv("PATRIS_NOTIFY_MAX_ROWS"); strings.TrimSpace(value) != "" {
+	applyBoolEnv("PATRIS_EXPORT_NOTIFICATIONS", &cfg.Notifications.Enabled)
+	applyBoolEnv("PATRIS_EXPORT_NOTIFY_NATIVE", &cfg.Notifications.Native)
+	applyBoolEnv("PATRIS_EXPORT_NOTIFY_IN_APP", &cfg.Notifications.InApp)
+	applyBoolEnv("PATRIS_EXPORT_NOTIFY_CLIENT_CONNECTED", &cfg.Notifications.ClientConnected)
+	applyBoolEnv("PATRIS_EXPORT_NOTIFY_CLIENT_DISCONNECTED", &cfg.Notifications.ClientDisconnected)
+	applyBoolEnv("PATRIS_EXPORT_NOTIFY_FILE_UPDATED", &cfg.Notifications.FileUpdated)
+	applyBoolEnv("PATRIS_EXPORT_NOTIFY_ROW_UPDATED", &cfg.Notifications.RowUpdated)
+	applyBoolEnv("PATRIS_EXPORT_NOTIFY_INCLUDE_ROW_VALUES", &cfg.Notifications.IncludeRowValues)
+	if value := os.Getenv("PATRIS_EXPORT_NOTIFY_MAX_ROWS"); strings.TrimSpace(value) != "" {
 		if maxRows, err := strconv.Atoi(value); err == nil {
 			cfg.Notifications.MaxRows = maxRows
 		}

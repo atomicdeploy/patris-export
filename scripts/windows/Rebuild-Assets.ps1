@@ -1,12 +1,12 @@
 param(
-    [string]$LogoSource = $(if ($env:PATRIS_LOGO_SOURCE) { $env:PATRIS_LOGO_SOURCE } else { "" }),
+    [string]$LogoSource = $(if ($env:PATRIS_EXPORT_LOGO_SOURCE) { $env:PATRIS_EXPORT_LOGO_SOURCE } else { "" }),
     [string]$IconPng,
     [string]$IconIco,
-    [string]$IconSizes = $(if ($env:PATRIS_ICON_SIZES) { $env:PATRIS_ICON_SIZES } else { "256,128,64,48,32,24,16" }),
+    [string]$IconSizes = $(if ($env:PATRIS_EXPORT_ICON_SIZES) { $env:PATRIS_EXPORT_ICON_SIZES } else { "256,128,64,48,32,24,16" }),
     [string]$WebIconPng,
     [string]$WebFaviconIco,
     [string]$NotificationAudio,
-    [string]$CropAlphaThreshold = $(if ($env:PATRIS_CROP_ALPHA_THRESHOLD) { $env:PATRIS_CROP_ALPHA_THRESHOLD } else { "2%" })
+    [string]$CropAlphaThreshold = $(if ($env:PATRIS_EXPORT_CROP_ALPHA_THRESHOLD) { $env:PATRIS_EXPORT_CROP_ALPHA_THRESHOLD } else { "2%" })
 )
 
 $ErrorActionPreference = "Stop"

@@ -138,10 +138,10 @@ func runCommand(ctx context.Context, cfg Config, event Event) error {
 	}
 	cmd.Stdin = bytes.NewReader(body)
 	cmd.Env = append(os.Environ(),
-		"PATRIS_EVENT_TYPE="+event.Type,
-		"PATRIS_EVENT_SOURCE="+event.Source,
-		"PATRIS_EVENT_TIMESTAMP="+event.Timestamp,
-		"PATRIS_EVENT_KEY_FIELD="+event.KeyField,
+		"PATRIS_EXPORT_EVENT_TYPE="+event.Type,
+		"PATRIS_EXPORT_EVENT_SOURCE="+event.Source,
+		"PATRIS_EXPORT_EVENT_TIMESTAMP="+event.Timestamp,
+		"PATRIS_EXPORT_EVENT_KEY_FIELD="+event.KeyField,
 	)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
