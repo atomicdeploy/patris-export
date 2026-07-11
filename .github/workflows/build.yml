@@ -46,17 +46,9 @@ jobs:
           sudo apt-get install -y pxlib-dev pxlib1
         fi
     
-    - name: Build web frontend
-      run: |
-        cd web
-        npm install
-        npm run build
-        
-    - name: Build
-      run: make build-linux
-
-    - name: Build Linux loadable library
-      run: make build-lib-linux
+    - name: Build Linux artifacts
+      shell: bash
+      run: bash ./build.sh --target linux --ci --skip-pxlib --no-assets
       
     - name: Upload Linux artifact
       uses: actions/upload-artifact@v7.0.1
@@ -113,65 +105,9 @@ jobs:
         x86_64-w64-mingw32-gcc --version
         ls -la /usr/share/mingw-w64/include/ 2>/dev/null || echo "MinGW headers not in standard location"
     
-    - name: Build web frontend
-      run: |
-        cd web
-        npm install
-        npm run build
-
-    - name: Generate version resource file
-      run: |
-        ${GITHUB_WORKSPACE}/scripts/generate-version-rc.sh cmd/patris-export/patris-export.rc
-        
-    - name: Build upstream pxlib for Windows
-      run: |
-        export PXLIB_MINGW_CROSS=1
-        bash scripts/build-pxlib-mingw.sh "$GITHUB_WORKSPACE/.deps/pxlib-windows"
-        echo "CGO_CFLAGS=-I$GITHUB_WORKSPACE/.deps/pxlib-windows/include" >> "$GITHUB_ENV"
-        echo "CGO_LDFLAGS=-L$GITHUB_WORKSPACE/.deps/pxlib-windows/lib" >> "$GITHUB_ENV"
-    
-    - name: Compile resource file for patris-export
-      run: |
-        # Compile the Windows resource file to .syso for embedding
-        echo "Compiling Windows resource file..."
-        x86_64-w64-mingw32-windres \
-          -i cmd/patris-export/patris-export.rc \
-          -o cmd/patris-export/patris-export_windows_amd64.syso \
-          -O coff \
-          --target=pe-x86-64
-        
-        echo "Resource file compiled successfully:"
-        ls -lh cmd/patris-export/patris-export_windows_amd64.syso
-        
-    - name: Build Windows executable
-      run: |
-        mkdir -p build
-        VERSION_PKG="github.com/atomicdeploy/patris-export/pkg/version"
-        CGO_ENABLED=1 GOOS=windows GOARCH=amd64 CC=x86_64-w64-mingw32-gcc \
-          go build -ldflags "-X ${VERSION_PKG}.Version=1.0.0 -X ${VERSION_PKG}.BuildDate=$(date -u +'%Y-%m-%dT%H:%M:%SZ') -X ${VERSION_PKG}.Commit=${GITHUB_SHA::12}" \
-          -o build/patris-export-windows-amd64.exe ./cmd/patris-export
-
-    - name: Build Windows loadable library
-      run: |
-        VERSION_PKG="github.com/atomicdeploy/patris-export/pkg/version"
-        CGO_ENABLED=1 GOOS=windows GOARCH=amd64 CC=x86_64-w64-mingw32-gcc \
-          go build -buildmode=c-shared \
-          -ldflags "-X ${VERSION_PKG}.Version=1.0.0 -X ${VERSION_PKG}.BuildDate=$(date -u +'%Y-%m-%dT%H:%M:%SZ') -X ${VERSION_PKG}.Commit=${GITHUB_SHA::12}" \
-          -o build/patris-export.dll ./cmd/patris-export-lib
-      
-    - name: Copy pxlib DLL
-      run: |
-        # Find and copy DLL files
-        mkdir -p build
-        if find "$GITHUB_WORKSPACE/.deps/pxlib-windows/bin" -name "*.dll" -type f 2>/dev/null | grep -q .; then
-          find "$GITHUB_WORKSPACE/.deps/pxlib-windows/bin" -name "*.dll" -type f -exec cp {} build/ \;
-          echo "DLL files copied:"
-          ls -la build/*.dll
-        else
-          echo "Warning: No DLL files found - Windows executable may require runtime linking"
-        fi
-        echo "Build directory contents:"
-        ls -la build/
+    - name: Build Windows cross artifacts
+      shell: bash
+      run: bash ./build.sh --target windows-cross --ci --no-assets
     
     - name: Test Windows executable with Wine
       run: |

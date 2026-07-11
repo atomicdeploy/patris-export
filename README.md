@@ -49,8 +49,29 @@ go install github.com/atomicdeploy/patris-export/cmd/patris-export@latest
 ```bash
 git clone https://github.com/atomicdeploy/patris-export.git
 cd patris-export
-make build
+./build.sh --target current
 ```
+
+Windows users can use the batch launcher, which detects Git Bash/MSYS2 and
+calls the same build orchestration:
+
+```cmd
+build.cmd
+```
+
+Useful build variants:
+
+```bash
+./build.sh --target linux
+./build.sh --target windows-cross
+./build.sh --target all --test
+./build.sh --target linux --skip-pxlib
+```
+
+The scripts check required tools, build or reuse upstream pxlib, rebuild the web
+frontend, compile Win32 icon/version resources for Windows targets, and print an
+artifact summary. Set `PXLIB_ROOT` to use an existing pxlib install, or
+`USE_VCPKG=1` to add optional vcpkg C dependency paths.
 
 ## 📖 Usage
 
