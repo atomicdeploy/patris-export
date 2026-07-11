@@ -4006,6 +4006,13 @@ function init() {
     
     // Set up event listeners
     document.addEventListener('keydown', handleGlobalKeydown);
+    document.addEventListener('click', event => {
+        if (event.target.closest('#footerToggleBtn, #footerCollapseBtn')) {
+            event.preventDefault();
+            event.stopPropagation();
+            toggleFooterVisibility();
+        }
+    }, true);
 
     document.getElementById('searchInput').addEventListener('input', (e) => {
         state.searchTerm = e.target.value;
@@ -4026,8 +4033,6 @@ function init() {
     });
     
     document.getElementById('themeToggle').addEventListener('click', toggleTheme);
-    document.getElementById('footerToggleBtn')?.addEventListener('click', toggleFooterVisibility);
-    document.getElementById('footerCollapseBtn')?.addEventListener('click', toggleFooterVisibility);
     document.getElementById('footerLastUpdate')?.addEventListener('click', cycleLastUpdateMode);
     document.getElementById('headerConnectionButton')?.addEventListener('click', () => openModalRoute('connection'));
     document.getElementById('footerConnectionButton')?.addEventListener('click', () => openModalRoute('connection'));
