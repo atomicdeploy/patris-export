@@ -18,13 +18,20 @@
     <div class="app">
         <header class="header">
             <div class="header-content">
-                <h1 id="appTitle"><img id="appLogo" class="app-logo" src="/static/patris-api-icon.png" alt="">Patris Export</h1>
+                <a class="brand-link" id="brandLink" href="/" title="Go to home">
+                    <h1 id="appTitle"><img id="appLogo" class="app-logo" src="/static/patris-api-icon.png" alt="">Patris Export</h1>
+                </a>
                 <div class="header-actions">
+                    <button class="header-chip header-file-chip" id="headerFileChip" type="button" title="Current source file">
+                        <span>File</span>
+                        <strong id="headerFile">—</strong>
+                    </button>
                     <div class="process-status" id="processStatus">Checking Patris81...</div>
-                    <div class="status">
+                    <button class="status clickable-status" id="headerConnectionButton" type="button" title="Connection details">
                         <span class="status-indicator" id="statusIndicator"></span>
                         <span id="statusText">Connecting...</span>
-                    </div>
+                    </button>
+                    <button class="btn btn-icon" id="footerToggleBtn" type="button" title="Toggle footer">▤</button>
                     <button class="btn btn-icon" id="settingsBtn" title="Settings">⚙️</button>
                     <button class="btn btn-icon" id="themeToggle" title="Toggle Theme">🌙</button>
                 </div>
@@ -139,13 +146,39 @@
                                 <option value="generated">Generated melody</option>
                             </select>
                         </label>
+                        <label class="field-label">Last update
+                            <select id="lastUpdateDisplayMode" class="select-input">
+                                <option value="both">Absolute and relative</option>
+                                <option value="absolute">Absolute</option>
+                                <option value="relative">Relative</option>
+                            </select>
+                        </label>
                     </div>
                     <div class="settings-group">
+                        <label class="checkbox-label"><input type="checkbox" id="showFooter" checked><span>Show footer</span></label>
                         <label class="checkbox-label"><input type="checkbox" id="autoScrollToChanged"><span>Auto-scroll to changed items</span></label>
                         <label class="checkbox-label"><input type="checkbox" id="highlightChanges" checked><span>Highlight changed items</span></label>
                         <label class="checkbox-label"><input type="checkbox" id="rtlTextDirection"><span>Display table text right-to-left</span></label>
                         <label class="checkbox-label"><input type="checkbox" id="enablePagination"><span>Enable pagination</span></label>
                         <label class="checkbox-label"><input type="checkbox" id="playNotificationSound"><span>Play notification sound on updates</span></label>
+                    </div>
+                    <div class="settings-subsection">
+                        <h3>Row coloring</h3>
+                        <div class="settings-grid color-grid">
+                            <label class="checkbox-label color-toggle"><input type="checkbox" id="enableRowColoring" checked><span>Enable row coloring rules</span></label>
+                            <label class="field-label">Group rows
+                                <input id="rowColorGroup" class="color-input" type="color" value="#6366f1">
+                            </label>
+                            <label class="field-label">Subgroup rows
+                                <input id="rowColorSubgroup" class="color-input" type="color" value="#0ea5e9">
+                            </label>
+                            <label class="field-label">No stock text
+                                <input id="rowColorNoStock" class="color-input" type="color" value="#6b7280">
+                            </label>
+                            <label class="field-label">Stock accent
+                                <input id="rowColorHasStock" class="color-input" type="color" value="#10b981">
+                            </label>
+                        </div>
                     </div>
                     <div class="button-row">
                         <button class="btn btn-secondary" id="testNotificationSound" type="button">Test sound</button>
@@ -215,17 +248,46 @@
             </div>
         </div>
 
-        <div class="settings-panel" id="columnsPanel">
+        <div class="settings-panel columns-modal" id="columnsPanel" role="dialog" aria-modal="true" aria-labelledby="columnsTitle">
             <div class="settings-content">
-                <h2>Column Visibility</h2>
-                <div class="settings-group">
-                    <div id="columnCheckboxes"></div>
+                <div class="settings-header column-manager-header">
+                    <div>
+                        <h2 id="columnsTitle">Column Visibility</h2>
+                        <p class="settings-path">Show, transform, and reorder columns. Stock warehouses are managed as one grouped band.</p>
+                    </div>
+                    <div class="dialog-actions">
+                        <button class="btn btn-secondary" id="showAllColumns" type="button">Show all</button>
+                        <button class="btn btn-secondary" id="hideAllColumns" type="button">Hide all</button>
+                        <button class="btn btn-icon dialog-menu-btn" type="button" title="More actions" data-dialog-menu="columnsPanel">&hellip;</button>
+                        <button class="btn btn-icon dialog-close-btn" id="closeColumns" type="button" title="Close">&times;</button>
+                    </div>
                 </div>
-                <div class="button-group" style="display: flex; gap: 0.5rem; margin-top: 1rem;">
-                    <button class="btn btn-secondary" id="showAllColumns">Show All</button>
-                    <button class="btn btn-secondary" id="hideAllColumns">Hide All</button>
-                    <button class="btn btn-primary" id="closeColumns">Close</button>
+                <div class="column-manager">
+                    <div class="column-manager-row column-manager-head">
+                        <span>Visible</span>
+                        <span>Source key</span>
+                        <span>Display label</span>
+                        <span>Type</span>
+                    </div>
+                    <div class="column-manager-rows" id="columnCheckboxes"></div>
                 </div>
+            </div>
+        </div>
+
+        <div class="settings-panel connection-modal" id="connectionPanel" role="dialog" aria-modal="true" aria-labelledby="connectionTitle">
+            <div class="settings-content">
+                <div class="settings-header">
+                    <div>
+                        <h2 id="connectionTitle">Connection Status</h2>
+                        <p class="settings-path">Live WebSocket, source, and process status.</p>
+                    </div>
+                    <div class="dialog-actions">
+                        <button class="btn btn-icon dialog-menu-btn" type="button" title="More actions" data-dialog-menu="connectionPanel">&hellip;</button>
+                        <button class="btn btn-icon dialog-close-btn" id="closeConnection" type="button" title="Close">&times;</button>
+                    </div>
+                </div>
+                <div class="connection-details" id="connectionDetails"></div>
+                <div class="connection-log" id="connectionLog" aria-live="polite"></div>
             </div>
         </div>
 
@@ -241,7 +303,7 @@
             </div>
         </div>
 
-        <footer class="footer">
+        <footer class="footer" id="appFooter">
             <div class="footer-content">
                 <div class="footer-section">
                     <span class="footer-label">File:</span>
@@ -257,7 +319,17 @@
                 </div>
                 <div class="footer-section">
                     <span class="footer-label">Connection:</span>
-                    <span class="footer-value" id="footerConnection">Connecting...</span>
+                    <button class="status footer-status clickable-status" id="footerConnectionButton" type="button" title="Connection details">
+                        <span class="status-indicator" id="footerStatusIndicator"></span>
+                        <span class="footer-value" id="footerConnection">Connecting...</span>
+                    </button>
+                </div>
+                <div class="footer-section">
+                    <span class="footer-label">Patris:</span>
+                    <span class="process-status footer-process-status" id="footerProcessStatus">Checking Patris81...</span>
+                </div>
+                <div class="footer-section footer-actions">
+                    <button class="btn btn-icon footer-collapse" id="footerCollapseBtn" type="button" title="Hide footer">⌄</button>
                 </div>
             </div>
         </footer>
