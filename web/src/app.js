@@ -317,7 +317,7 @@ function applyConfig(config, source = 'server') {
             pageSize: config.ui.page_size || state.settings.pageSize,
             playNotificationSound: !!config.ui.play_notification_sound,
             notificationSoundSource: config.ui.notification_sound_source || state.settings.notificationSoundSource,
-            showFooter: config.ui.show_footer !== false,
+            showFooter: config.ui.show_footer === undefined ? state.settings.showFooter : config.ui.show_footer !== false,
             lastUpdateDisplayMode: config.ui.last_update_display_mode || state.settings.lastUpdateDisplayMode,
             enableRowColoring: config.ui.enable_row_coloring !== false,
             rowColorGroup: config.ui.row_color_group || state.settings.rowColorGroup,
@@ -557,8 +557,6 @@ async function saveConfigToServer(config) {
         showInAppToast('Settings save failed', error.message, { error: true, broadcastToTabs: true, source: 'config_update', eventType: 'config_update' });
     }
 }
-
-const handledFooterToggleEvents = new WeakSet();
 
 // Save sort preferences to localStorage
 function saveSortPreferences(options = {}) {
@@ -1009,32 +1007,27 @@ function toggleFooterVisibility() {
 
 function renderFooterToggleButton(button, showFooter) {
     if (!button) return;
+    if (button.dataset.footerToggleBound !== '1') {
+        const replacement = button.cloneNode(false);
+        replacement.dataset.footerToggleBound = '1';
+        replacement.addEventListener('click', handleFooterToggleClick);
+        button.replaceWith(replacement);
+        button = replacement;
+    }
     button.title = showFooter ? 'Hide footer' : 'Show footer';
     button.setAttribute('aria-pressed', String(showFooter));
     button.setAttribute('aria-label', showFooter ? 'Hide footer' : 'Show footer');
-    button.onclick = handleFooterToggleClick;
     button.innerHTML = showFooter
         ? '<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M6 9l6 6 6-6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>'
         : '<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M6 15l6-6 6 6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
 }
 
 function handleFooterToggleClick(event) {
-    if (event && handledFooterToggleEvents.has(event)) return;
     if (event) {
-        handledFooterToggleEvents.add(event);
         event.preventDefault();
         event.stopPropagation();
     }
     toggleFooterVisibility();
-}
-
-function findFooterToggleButton(target) {
-    for (let node = target; node && node !== document; node = node.parentElement || node.parentNode) {
-        if (node.id === 'footerToggleBtn' || node.id === 'footerCollapseBtn') {
-            return node;
-        }
-    }
-    return null;
 }
 
 function formatRelativeTime(date) {
@@ -4028,12 +4021,6 @@ function init() {
     
     // Set up event listeners
     document.addEventListener('keydown', handleGlobalKeydown);
-    document.addEventListener('click', event => {
-        if (findFooterToggleButton(event.target)) {
-            handleFooterToggleClick(event);
-        }
-    }, true);
-
     document.getElementById('searchInput').addEventListener('input', (e) => {
         state.searchTerm = e.target.value;
         filterRecords();
