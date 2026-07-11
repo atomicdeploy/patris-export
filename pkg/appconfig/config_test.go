@@ -69,8 +69,42 @@ func TestManagerSavesNativeFormat(t *testing.T) {
 		t.Fatal(err)
 	}
 	text := string(data)
-	if !containsAll(text, "[server]", "port = 18181", "[runtime]") {
+	if !containsAll(text, "[server]", "port = 18181") {
 		t.Fatalf("saved TOML did not contain expected sections:\n%s", text)
+	}
+	if contains(text, "temp_dir") || contains(text, "[runtime]") {
+		t.Fatalf("saved TOML should omit unchanged default runtime values:\n%s", text)
+	}
+}
+
+func TestManagerSavesOnlyChangedValues(t *testing.T) {
+	dir := t.TempDir()
+	jsonPath := filepath.Join(dir, "patris-export.json")
+	mgr, err := LoadFiles([]string{jsonPath})
+	if err != nil {
+		t.Fatalf("LoadFiles failed: %v", err)
+	}
+	if err := mgr.Update(func(cfg *Config) {
+		cfg.UI.Theme = "dark"
+		cfg.UI.PageSize = 100
+		cfg.Notifications.Native = true
+		cfg.Notifications.MaxRows = 3
+		cfg.Database.Path = "C:/Patris/data4/kala.db"
+	}); err != nil {
+		t.Fatalf("Update failed: %v", err)
+	}
+	data, err := os.ReadFile(jsonPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(data)
+	if !containsAll(text, `"ui"`, `"theme": "dark"`, `"database"`, `"path": "C:/Patris/data4/kala.db"`) {
+		t.Fatalf("saved JSON did not contain changed values:\n%s", text)
+	}
+	for _, needle := range []string{`"page_size"`, `"notification_sound_source"`, `"notifications"`, `"column_labels"`, `"schema_version"`} {
+		if contains(text, needle) {
+			t.Fatalf("saved JSON should omit default key %s:\n%s", needle, text)
+		}
 	}
 }
 
