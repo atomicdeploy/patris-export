@@ -682,8 +682,12 @@ body.is-loading .data-table {
 .dialog-actions {
     display: flex;
     align-items: center;
-    gap: 0.5rem;
+    gap: 0.4rem;
     flex-wrap: wrap;
+
+    .dialog-menu-btn + .dialog-close-btn {
+        margin-inline-start: -0.4rem;
+    }
 }
 
 .dialog-close-btn,
@@ -874,6 +878,7 @@ body.is-loading .data-table {
     visibility: hidden;
     transition: opacity 0.18s ease, transform 0.18s ease, visibility 0.18s ease;
     z-index: 1000;
+    overflow: hidden;
     
     .dark-mode & {
         background: $bg-dark;
@@ -888,9 +893,10 @@ body.is-loading .data-table {
 }
 
 .settings-content {
-    padding: 1.25rem;
+    display: flex;
+    flex-direction: column;
     max-height: inherit;
-    overflow-y: auto;
+    overflow: hidden;
     
     h2 {
         margin: 0;
@@ -903,7 +909,9 @@ body.is-loading .data-table {
     align-items: flex-start;
     justify-content: space-between;
     gap: 1rem;
-    margin-bottom: 1rem;
+    flex: 0 0 auto;
+    margin: 0;
+    padding: 1.25rem 1.25rem 1rem;
 }
 
 .settings-path {
@@ -921,12 +929,25 @@ body.is-loading .data-table {
 .settings-tabs {
     display: flex;
     gap: 0.35rem;
-    margin-bottom: 1rem;
+    flex: 0 0 auto;
+    margin: 0;
+    padding: 0 1.25rem;
     border-bottom: 1px solid $border-light;
+    overflow-x: auto;
+    scrollbar-width: thin;
 
     .dark-mode & {
         border-color: $border-dark;
     }
+}
+
+.settings-body {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto;
+    padding: 1rem 1.25rem 1.25rem;
+    overscroll-behavior: contain;
+    scrollbar-width: thin;
 }
 
 .settings-tab {
@@ -954,6 +975,7 @@ body.is-loading .data-table {
 
 .settings-pane {
     display: none;
+    min-height: 0;
 
     &.active {
         display: block;
@@ -1155,12 +1177,7 @@ body.is-loading .data-table {
 }
 
 .column-manager-header {
-    position: sticky;
-    top: -1.25rem;
-    z-index: 5;
     background: $bg-light;
-    padding-top: 1.25rem;
-    padding-bottom: 0.75rem;
     border-bottom: 1px solid $border-light;
 
     .dark-mode & {
@@ -1329,8 +1346,6 @@ body.is-loading .data-table {
 .connection-log {
     display: grid;
     gap: 0.45rem;
-    max-height: 320px;
-    overflow: auto;
     font-family: var(--font-mono);
 }
 
@@ -1422,8 +1437,6 @@ body.is-loading .data-table {
 .event-log-list {
     display: grid;
     gap: 0.6rem;
-    max-height: min(58vh, 560px);
-    overflow: auto;
     padding-right: 0.25rem;
 }
 
