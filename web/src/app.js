@@ -2290,6 +2290,43 @@ function setLoadingState(isLoading) {
     }
 }
 
+function focusSearchInput() {
+    const searchInput = document.getElementById('searchInput');
+    if (!searchInput) {
+        return;
+    }
+    searchInput.focus({ preventScroll: true });
+    searchInput.select();
+}
+
+function eventMatchesAriaShortcut(event, element) {
+    const shortcuts = (element?.getAttribute('aria-keyshortcuts') || '')
+        .split(/\s+/)
+        .filter(Boolean);
+    if (shortcuts.length === 0) {
+        return false;
+    }
+
+    const pressed = [
+        event.ctrlKey ? 'Control' : '',
+        event.altKey ? 'Alt' : '',
+        event.shiftKey ? 'Shift' : '',
+        event.metaKey ? 'Meta' : '',
+        event.key,
+    ].filter(Boolean).join('+').toLowerCase();
+
+    return shortcuts.some((shortcut) => shortcut.toLowerCase() === pressed);
+}
+
+function handleGlobalKeydown(event) {
+    const searchInput = document.getElementById('searchInput');
+    if (!eventMatchesAriaShortcut(event, searchInput)) {
+        return;
+    }
+    event.preventDefault();
+    focusSearchInput();
+}
+
 // Initialize theme
 function initTheme() {
     const savedTheme = localStorage.getItem('theme');
@@ -2323,6 +2360,8 @@ function init() {
     updateFooter();
     
     // Set up event listeners
+    document.addEventListener('keydown', handleGlobalKeydown);
+
     document.getElementById('searchInput').addEventListener('input', (e) => {
         state.searchTerm = e.target.value;
         filterRecords();

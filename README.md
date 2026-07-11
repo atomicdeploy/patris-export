@@ -158,7 +158,7 @@ API shortcuts, and a WebSocat launcher. Use `tab` or the arrow keys to switch
 views, `1` through `7` to jump to a tab, `r` to refresh, `o` to open the web
 viewer, and `w` to inspect WebSocket updates through WebSocat.
 
-![Patris Export TUI dashboard](docs/screenshots/issue-3-tui-dashboard.svg)
+![Patris Export TUI dashboard](docs/screenshots/tui-dashboard.svg)
 
 Terminal WebSocket inspection with WebSocat is documented in [docs/examples/websocat.md](docs/examples/websocat.md).
 Embedding, loadable-library builds, and local IPC are documented in [docs/EMBEDDING.md](docs/EMBEDDING.md).
