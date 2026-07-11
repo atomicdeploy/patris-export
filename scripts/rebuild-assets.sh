@@ -4,13 +4,13 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DEFAULT_LOGO="$HOME/Downloads/Patris_API_Logo.png"
 if [ ! -f "$DEFAULT_LOGO" ]; then
-    DEFAULT_LOGO="$ROOT_DIR/assets/windows/patris-api-icon.png"
+    DEFAULT_LOGO="$ROOT_DIR/assets/patris-api-icon.png"
 fi
 LOGO_SOURCE="${1:-${PATRIS_LOGO_SOURCE:-$DEFAULT_LOGO}}"
-ICON_PNG="${PATRIS_ICON_PNG:-$ROOT_DIR/assets/windows/patris-api-icon.png}"
+ICON_PNG="${PATRIS_ICON_PNG:-$ROOT_DIR/assets/patris-api-icon.png}"
 ICON_ICO="${PATRIS_ICON_ICO:-$ROOT_DIR/assets/windows/patris-api.ico}"
 ICON_SIZES="${PATRIS_ICON_SIZES:-256,128,64,48,32,24,16}"
-WEB_ICON_PNG="${PATRIS_WEB_ICON_PNG:-$ROOT_DIR/web/assets/patris-api-icon.png}"
+WEB_ICON_PNG="${PATRIS_WEB_ICON_PNG:-}"
 WEB_FAVICON_ICO="${PATRIS_WEB_FAVICON_ICO:-$ROOT_DIR/web/assets/favicon.ico}"
 NOTIFICATION_AUDIO="${PATRIS_NOTIFICATION_AUDIO:-$ROOT_DIR/web/assets/notification.ogg}"
 CROP_ALPHA_THRESHOLD="${PATRIS_CROP_ALPHA_THRESHOLD:-2%}"
@@ -43,8 +43,11 @@ if [ "$CROPPED_GEOMETRY" != "$CROPPED_EXPECTED" ]; then
     exit 1
 fi
 "${MAGICK[@]}" "$ICON_PNG" -define icon:auto-resize="$ICON_SIZES" "$ICON_ICO"
-mkdir -p "$(dirname "$WEB_ICON_PNG")" "$(dirname "$WEB_FAVICON_ICO")"
-cp "$ICON_PNG" "$WEB_ICON_PNG"
+mkdir -p "$(dirname "$WEB_FAVICON_ICO")"
+if [ -n "$WEB_ICON_PNG" ]; then
+    mkdir -p "$(dirname "$WEB_ICON_PNG")"
+    cp "$ICON_PNG" "$WEB_ICON_PNG"
+fi
 cp "$ICON_ICO" "$WEB_FAVICON_ICO"
 
 if [ ! -f "$NOTIFICATION_AUDIO" ]; then
@@ -56,6 +59,8 @@ echo "Rebuilt assets:"
 echo "  Crop alpha threshold: $CROP_ALPHA_THRESHOLD"
 echo "  $ICON_PNG"
 echo "  $ICON_ICO"
-echo "  $WEB_ICON_PNG"
+if [ -n "$WEB_ICON_PNG" ]; then
+    echo "  $WEB_ICON_PNG"
+fi
 echo "  $WEB_FAVICON_ICO"
 echo "  $NOTIFICATION_AUDIO"

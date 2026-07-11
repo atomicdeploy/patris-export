@@ -17,17 +17,14 @@ if (-not $LogoSource) {
     if (Test-Path $downloadLogo) {
         $LogoSource = $downloadLogo
     } else {
-        $LogoSource = Join-Path $repoRoot "assets\windows\patris-api-icon.png"
+        $LogoSource = Join-Path $repoRoot "assets\patris-api-icon.png"
     }
 }
 if (-not $IconPng) {
-    $IconPng = Join-Path $repoRoot "assets\windows\patris-api-icon.png"
+    $IconPng = Join-Path $repoRoot "assets\patris-api-icon.png"
 }
 if (-not $IconIco) {
     $IconIco = Join-Path $repoRoot "assets\windows\patris-api.ico"
-}
-if (-not $WebIconPng) {
-    $WebIconPng = Join-Path $repoRoot "web\assets\patris-api-icon.png"
 }
 if (-not $WebFaviconIco) {
     $WebFaviconIco = Join-Path $repoRoot "web\assets\favicon.ico"
@@ -64,8 +61,11 @@ if ($croppedGeometry -ne $croppedExpected) {
 & $magick.Source $IconPng -define "icon:auto-resize=$IconSizes" $IconIco
 if ($LASTEXITCODE -ne 0) { throw "Failed to create $IconIco" }
 
-New-Item -ItemType Directory -Force (Split-Path -Parent $WebIconPng), (Split-Path -Parent $WebFaviconIco) | Out-Null
-Copy-Item $IconPng $WebIconPng -Force
+New-Item -ItemType Directory -Force (Split-Path -Parent $WebFaviconIco) | Out-Null
+if ($WebIconPng) {
+    New-Item -ItemType Directory -Force (Split-Path -Parent $WebIconPng) | Out-Null
+    Copy-Item $IconPng $WebIconPng -Force
+}
 Copy-Item $IconIco $WebFaviconIco -Force
 
 if (-not (Test-Path $NotificationAudio)) {
@@ -76,6 +76,8 @@ Write-Host "Rebuilt assets:"
 Write-Host "  Crop alpha threshold: $CropAlphaThreshold"
 Write-Host "  $IconPng"
 Write-Host "  $IconIco"
-Write-Host "  $WebIconPng"
+if ($WebIconPng) {
+    Write-Host "  $WebIconPng"
+}
 Write-Host "  $WebFaviconIco"
 Write-Host "  $NotificationAudio"

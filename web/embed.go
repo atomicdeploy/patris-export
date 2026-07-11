@@ -5,6 +5,8 @@ import (
 	_ "embed"
 	"encoding/hex"
 	"sync"
+
+	appassets "github.com/atomicdeploy/patris-export/assets"
 )
 
 //go:embed dist/viewer.html
@@ -22,8 +24,7 @@ var NotificationAudio []byte
 //go:embed assets/favicon.ico
 var FaviconICO []byte
 
-//go:embed assets/patris-api-icon.png
-var AppIconPNG []byte
+var AppIconPNG = appassets.AppIconPNG
 
 var (
 	resourceOnce sync.Once
