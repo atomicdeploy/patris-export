@@ -346,6 +346,19 @@ make install       # Install to GOPATH/bin
 go test -v ./...
 ```
 
+On Windows, use the CGO helper when running tests against the native pxlib
+reader:
+
+```bat
+test-cgo.cmd
+```
+
+For custom CGO commands, pass the command after the helper script:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\windows\Invoke-CGO.ps1 go test ./pkg/server
+```
+
 ## 📋 Command Reference
 
 ### Global Flags
