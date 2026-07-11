@@ -17,9 +17,14 @@ const state = {
     isReloadingForUpdate: false,
     config: null,
     processStatus: null,
+    connectionStatus: { state: 'connecting', text: 'Connecting...' },
+    connectionLog: [],
+    lastUpdateAt: null,
     isInitialLoad: true,
     columnFilters: {},  // Store active filters per column: { fieldName: { type, value, ... } }
     hiddenColumns: new Set(),  // Track hidden columns
+    columnOrder: [],
+    openRangePanel: null,
     settings: {
         autoScrollToChanged: false,
         highlightChanges: true,
@@ -27,7 +32,14 @@ const state = {
         enablePagination: false,
         pageSize: 100,
         playNotificationSound: false,
-        notificationSoundSource: 'external'
+        notificationSoundSource: 'external',
+        showFooter: true,
+        lastUpdateDisplayMode: 'both',
+        enableRowColoring: true,
+        rowColorGroup: '#6366f1',
+        rowColorSubgroup: '#0ea5e9',
+        rowColorNoStock: '#6b7280',
+        rowColorHasStock: '#10b981'
     },
     notificationAudio: null,
     originalTitle: document.title,
@@ -195,6 +207,15 @@ function loadSettings() {
     if (hiddenCols) {
         state.hiddenColumns = new Set(JSON.parse(hiddenCols));
     }
+
+    const savedOrder = localStorage.getItem('patris-column-order');
+    if (savedOrder) {
+        try {
+            state.columnOrder = JSON.parse(savedOrder).filter(Boolean);
+        } catch (e) {
+            state.columnOrder = [];
+        }
+    }
     
     // Load column filters
     const savedFilters = localStorage.getItem('patris-column-filters');
@@ -232,7 +253,14 @@ function applyConfig(config, source = 'server') {
             enablePagination: !!config.ui.enable_pagination,
             pageSize: config.ui.page_size || state.settings.pageSize,
             playNotificationSound: !!config.ui.play_notification_sound,
-            notificationSoundSource: config.ui.notification_sound_source || state.settings.notificationSoundSource
+            notificationSoundSource: config.ui.notification_sound_source || state.settings.notificationSoundSource,
+            showFooter: config.ui.show_footer !== false,
+            lastUpdateDisplayMode: config.ui.last_update_display_mode || state.settings.lastUpdateDisplayMode,
+            enableRowColoring: config.ui.enable_row_coloring !== false,
+            rowColorGroup: config.ui.row_color_group || state.settings.rowColorGroup,
+            rowColorSubgroup: config.ui.row_color_subgroup || state.settings.rowColorSubgroup,
+            rowColorNoStock: config.ui.row_color_no_stock || state.settings.rowColorNoStock,
+            rowColorHasStock: config.ui.row_color_has_stock || state.settings.rowColorHasStock
         };
         localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify(state.settings));
         applySettings();
@@ -273,7 +301,14 @@ function syncSettingsToConfig() {
         enable_pagination: state.settings.enablePagination,
         page_size: state.settings.pageSize,
         play_notification_sound: state.settings.playNotificationSound,
-        notification_sound_source: state.settings.notificationSoundSource
+        notification_sound_source: state.settings.notificationSoundSource,
+        show_footer: state.settings.showFooter,
+        last_update_display_mode: state.settings.lastUpdateDisplayMode,
+        enable_row_coloring: state.settings.enableRowColoring,
+        row_color_group: state.settings.rowColorGroup,
+        row_color_subgroup: state.settings.rowColorSubgroup,
+        row_color_no_stock: state.settings.rowColorNoStock,
+        row_color_has_stock: state.settings.rowColorHasStock
     };
     saveConfigToServer(state.config);
 }
@@ -315,7 +350,19 @@ function saveHiddenColumns(options = {}) {
     localStorage.setItem('patris-hidden-columns', JSON.stringify([...state.hiddenColumns]));
     if (options.broadcast !== false) {
         publishFrontendBroadcast('columns:update', {
-            hiddenColumns: [...state.hiddenColumns]
+            hiddenColumns: [...state.hiddenColumns],
+            columnOrder: state.columnOrder
+        });
+    }
+}
+
+function saveColumnOrder(options = {}) {
+    state.columnOrder = state.fields.slice();
+    localStorage.setItem('patris-column-order', JSON.stringify(state.columnOrder));
+    if (options.broadcast !== false) {
+        publishFrontendBroadcast('columns:update', {
+            hiddenColumns: [...state.hiddenColumns],
+            columnOrder: state.columnOrder
         });
     }
 }
@@ -367,6 +414,10 @@ function applyRemoteSort(payload = {}) {
 function applyRemoteColumns(payload = {}) {
     const hiddenColumns = Array.isArray(payload.hiddenColumns) ? payload.hiddenColumns : [];
     state.hiddenColumns = new Set(hiddenColumns);
+    if (Array.isArray(payload.columnOrder)) {
+        state.columnOrder = payload.columnOrder.filter(Boolean);
+        applyColumnOrder();
+    }
     saveHiddenColumns({ broadcast: false });
     removeHiddenColumnFilters({ broadcast: false });
     renderColumnManager();
@@ -599,6 +650,13 @@ function displayFieldName(field) {
     return labels[field] || labels[field.replace(/[0-9]+$/, '')] || field;
 }
 
+function displayStockGroupName() {
+    const labels = state.config?.column_labels || {};
+    if (labels.Stock || labels.stock) return labels.Stock || labels.stock;
+    if (labels.ANBAR && !/^warehouse$/i.test(String(labels.ANBAR).trim())) return labels.ANBAR;
+    return Object.keys(labels).length ? 'Stock' : 'ANBAR';
+}
+
 function parsePatrisCode(code) {
     const raw = String(code ?? '').replace(/\D/g, '');
     const groups = raw.match(/.{1,3}/g) || [];
@@ -617,6 +675,7 @@ function anbarTotal(record) {
 
 // Apply settings to UI
 function applySettings() {
+    setChecked('showFooter', state.settings.showFooter);
     setChecked('autoScrollToChanged', state.settings.autoScrollToChanged);
     setChecked('highlightChanges', state.settings.highlightChanges);
     setChecked('rtlTextDirection', state.settings.rtlTextDirection);
@@ -624,8 +683,17 @@ function applySettings() {
     setValue('pageSize', state.settings.pageSize);
     setChecked('playNotificationSound', state.settings.playNotificationSound);
     setValue('notificationSoundSource', state.settings.notificationSoundSource || 'external');
+    setValue('lastUpdateDisplayMode', state.settings.lastUpdateDisplayMode || 'both');
+    setChecked('enableRowColoring', state.settings.enableRowColoring);
+    setValue('rowColorGroup', state.settings.rowColorGroup || '#6366f1');
+    setValue('rowColorSubgroup', state.settings.rowColorSubgroup || '#0ea5e9');
+    setValue('rowColorNoStock', state.settings.rowColorNoStock || '#6b7280');
+    setValue('rowColorHasStock', state.settings.rowColorHasStock || '#10b981');
     applyConfigToSettingsForm();
     document.body.classList.toggle('rtl-text-mode', !!state.settings.rtlTextDirection);
+    applyFooterVisibility();
+    applyRowColorSettings();
+    updateLastUpdateDisplay();
 }
 
 function setValue(id, value) {
@@ -636,6 +704,135 @@ function setValue(id, value) {
 function setChecked(id, value) {
     const el = document.getElementById(id);
     if (el) el.checked = !!value;
+}
+
+function hexToRgba(hex, alpha) {
+    const normalized = String(hex || '').replace('#', '');
+    if (!/^[0-9a-f]{6}$/i.test(normalized)) return `rgba(99, 102, 241, ${alpha})`;
+    const value = parseInt(normalized, 16);
+    const r = (value >> 16) & 255;
+    const g = (value >> 8) & 255;
+    const b = value & 255;
+    return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+}
+
+function applyRowColorSettings() {
+    const root = document.documentElement;
+    root.style.setProperty('--row-group-bg', hexToRgba(state.settings.rowColorGroup, 0.12));
+    root.style.setProperty('--row-subgroup-bg', hexToRgba(state.settings.rowColorSubgroup, 0.1));
+    root.style.setProperty('--row-no-stock-color', hexToRgba(state.settings.rowColorNoStock, 0.9));
+    root.style.setProperty('--row-stock-accent', state.settings.rowColorHasStock || '#10b981');
+    document.body.classList.toggle('row-coloring-disabled', !state.settings.enableRowColoring);
+}
+
+function applyFooterVisibility() {
+    const showFooter = state.settings.showFooter !== false;
+    document.body.classList.toggle('footer-hidden', !showFooter);
+    const footer = document.getElementById('appFooter');
+    if (footer) footer.hidden = !showFooter;
+    const footerToggleBtn = document.getElementById('footerToggleBtn');
+    if (footerToggleBtn) {
+        footerToggleBtn.title = showFooter ? 'Hide footer' : 'Show footer';
+    }
+}
+
+function toggleFooterVisibility() {
+    state.settings.showFooter = state.settings.showFooter === false;
+    applySettings();
+    saveSettings();
+}
+
+function formatRelativeTime(date) {
+    if (!date) return 'never';
+    const diffMs = Date.now() - date.getTime();
+    const future = diffMs < 0;
+    const abs = Math.abs(diffMs);
+    const units = [
+        ['day', 86400000],
+        ['hour', 3600000],
+        ['minute', 60000],
+        ['second', 1000]
+    ];
+    const [unit, size] = units.find(([, ms]) => abs >= ms) || units[units.length - 1];
+    const count = Math.max(1, Math.round(abs / size));
+    return future ? `in ${count} ${unit}${count === 1 ? '' : 's'}` : `${count} ${unit}${count === 1 ? '' : 's'} ago`;
+}
+
+function updateLastUpdateDisplay() {
+    const el = document.getElementById('footerLastUpdate');
+    if (!el) return;
+    const date = state.lastUpdateAt || new Date();
+    const absolute = formatDateTime(date);
+    const relative = formatRelativeTime(date);
+    const mode = state.settings.lastUpdateDisplayMode || 'both';
+    el.textContent = mode === 'absolute' ? absolute : mode === 'relative' ? relative : `${absolute} (${relative})`;
+    el.title = `${absolute} · ${relative}`;
+}
+
+function cycleLastUpdateMode() {
+    const modes = ['absolute', 'relative', 'both'];
+    const current = state.settings.lastUpdateDisplayMode || 'both';
+    state.settings.lastUpdateDisplayMode = modes[(modes.indexOf(current) + 1) % modes.length];
+    applySettings();
+    saveSettings();
+}
+
+function syncProcessStatusMirror() {
+    const source = document.getElementById('processStatus');
+    const target = document.getElementById('footerProcessStatus');
+    if (!source || !target) return;
+    target.textContent = source.textContent;
+    target.className = source.className + ' footer-process-status';
+}
+
+function initChromeMirrors() {
+    syncProcessStatusMirror();
+    const processStatus = document.getElementById('processStatus');
+    if (processStatus) {
+        new MutationObserver(syncProcessStatusMirror).observe(processStatus, {
+            childList: true,
+            characterData: true,
+            subtree: true,
+            attributes: true,
+            attributeFilter: ['class']
+        });
+    }
+}
+
+function initTableWheelScroll() {
+    const tableContainer = document.querySelector('.table-container');
+    if (!tableContainer) return;
+    tableContainer.addEventListener('wheel', event => {
+        const canScrollX = tableContainer.scrollWidth > tableContainer.clientWidth;
+        if (!canScrollX) return;
+        if (Math.abs(event.deltaX) > Math.abs(event.deltaY) && event.deltaX !== 0) {
+            tableContainer.scrollLeft += event.deltaX;
+            event.preventDefault();
+        } else if (event.shiftKey && event.deltaY !== 0) {
+            tableContainer.scrollLeft += event.deltaY;
+            event.preventDefault();
+        }
+    }, { passive: false });
+}
+
+function initDialogActionButtons() {
+    [
+        ['settingsPanel', 'closeSettings'],
+        ['inspectorPanel', 'closeInspector']
+    ].forEach(([panelId, closeId]) => {
+        const closeButton = document.getElementById(closeId);
+        if (!closeButton || closeButton.dataset.normalizedDialogActions) return;
+        closeButton.classList.add('dialog-close-btn');
+        closeButton.innerHTML = '&times;';
+        const menuButton = document.createElement('button');
+        menuButton.type = 'button';
+        menuButton.className = 'btn btn-icon dialog-menu-btn';
+        menuButton.title = 'More actions';
+        menuButton.dataset.dialogMenu = panelId;
+        menuButton.innerHTML = '&hellip;';
+        closeButton.parentElement?.insertBefore(menuButton, closeButton);
+        closeButton.dataset.normalizedDialogActions = '1';
+    });
 }
 
 function applyConfigToSettingsForm() {
@@ -1051,7 +1248,7 @@ function openPanel(panelId) {
 }
 
 function closePanels() {
-    ['settingsPanel', 'columnsPanel'].forEach(id => {
+    ['settingsPanel', 'columnsPanel', 'connectionPanel'].forEach(id => {
         const panel = document.getElementById(id);
         if (panel) panel.classList.remove('open');
     });
@@ -1415,12 +1612,16 @@ function handleWebSocketMessage(data) {
 function updateStatus(status, text) {
     const indicator = document.getElementById('statusIndicator');
     const statusText = document.getElementById('statusText');
+    const footerIndicator = document.getElementById('footerStatusIndicator');
     
-    indicator.className = 'status-indicator ' + status;
-    statusText.textContent = text;
+    state.connectionStatus = { state: status, text };
+    if (indicator) indicator.className = 'status-indicator ' + status;
+    if (footerIndicator) footerIndicator.className = 'status-indicator ' + status;
+    if (statusText) statusText.textContent = text;
     
     // Update footer connection status
     updateFooterConnection(text);
+    addConnectionLog(status, text);
 }
 
 // Update footer information
@@ -1437,14 +1638,30 @@ function updateFooter() {
 
 function updateFooterFileName() {
     const footerFile = document.getElementById('footerFile');
+    const headerFile = document.getElementById('headerFile');
+    const headerFileChip = document.getElementById('headerFileChip');
     // Use basename of the file (just the file name, not full path)
     if (state.fileName) {
         const baseName = state.fileName.split('/').pop().split('\\').pop();
-        footerFile.textContent = baseName;
-        footerFile.title = state.fileName;
+        if (footerFile) {
+            footerFile.textContent = baseName;
+            footerFile.title = state.fileName;
+        }
+        if (headerFile) {
+            headerFile.textContent = baseName;
+            headerFile.title = state.fileName;
+        }
+        if (headerFileChip) headerFileChip.title = state.fileName;
     } else {
-        footerFile.textContent = 'Unknown';
-        footerFile.removeAttribute('title');
+        if (footerFile) {
+            footerFile.textContent = 'Unknown';
+            footerFile.removeAttribute('title');
+        }
+        if (headerFile) {
+            headerFile.textContent = 'Unknown';
+            headerFile.removeAttribute('title');
+        }
+        if (headerFileChip) headerFileChip.title = 'Current source file';
     }
 }
 
@@ -1459,15 +1676,18 @@ function formatDateTime(date) {
     return `${year}/${month}/${day} ${hours}:${minutes}:${seconds}`;
 }
 
+function escapeHtml(value) {
+    return String(value ?? '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+}
+
 function updateFooterLastUpdate(timestamp) {
-    const footerLastUpdate = document.getElementById('footerLastUpdate');
-    if (timestamp) {
-        const date = new Date(timestamp);
-        footerLastUpdate.textContent = formatDateTime(date);
-    } else {
-        const now = new Date();
-        footerLastUpdate.textContent = formatDateTime(now);
-    }
+    state.lastUpdateAt = timestamp ? new Date(timestamp) : new Date();
+    updateLastUpdateDisplay();
 }
 
 function updateFooterRecordCount() {
@@ -1477,7 +1697,47 @@ function updateFooterRecordCount() {
 
 function updateFooterConnection(status) {
     const footerConnection = document.getElementById('footerConnection');
-    footerConnection.textContent = status;
+    if (footerConnection) footerConnection.textContent = status;
+}
+
+function addConnectionLog(level, message, details = '') {
+    state.connectionLog.unshift({
+        level,
+        message,
+        details,
+        time: new Date().toISOString()
+    });
+    state.connectionLog = state.connectionLog.slice(0, 80);
+    renderConnectionPanel();
+}
+
+function renderConnectionPanel() {
+    const details = document.getElementById('connectionDetails');
+    const log = document.getElementById('connectionLog');
+    if (!details || !log) return;
+    const wsState = state.ws ? ['Connecting', 'Open', 'Closing', 'Closed'][state.ws.readyState] || 'Unknown' : 'Not started';
+    const file = state.fileName || 'Unknown';
+    const patris = state.processStatus?.patris81 || {};
+    const fileAccess = state.processStatus?.file_access || {};
+    details.innerHTML = `
+        <div><span>Status</span><strong>${escapeHtml(state.connectionStatus.text)}</strong></div>
+        <div><span>WebSocket</span><strong>${escapeHtml(wsState)}</strong></div>
+        <div><span>Source</span><strong title="${escapeHtml(file)}">${escapeHtml(file.split('/').pop().split('\\').pop() || file)}</strong></div>
+        <div><span>Patris81</span><strong>${patris.running ? `Running (${patris.count || 1})` : 'Not running'}</strong></div>
+        <div><span>Database lock</span><strong>${fileAccess.in_use ? `Locked (${fileAccess.count || 1})` : 'Unlocked'}</strong></div>
+    `;
+    log.innerHTML = state.connectionLog.map(entry => `
+        <div class="connection-log-entry ${escapeHtml(entry.level)}">
+            <time>${formatDateTime(new Date(entry.time))}</time>
+            <strong>${escapeHtml(entry.message)}</strong>
+            ${entry.details ? `<span>${escapeHtml(entry.details)}</span>` : ''}
+        </div>
+    `).join('');
+}
+
+function openConnectionPanel() {
+    renderConnectionPanel();
+    openPanel('connectionPanel');
 }
 
 // Extract and organize fields from records
@@ -1514,6 +1774,16 @@ function extractFields() {
             state.fields = ['Code', ...otherFields];
         }
     }
+    applyColumnOrder();
+}
+
+function applyColumnOrder() {
+    if (!Array.isArray(state.columnOrder) || state.columnOrder.length === 0 || state.fields.length === 0) return;
+    const available = new Set(state.fields);
+    const ordered = state.columnOrder.filter(field => available.has(field));
+    const missing = state.fields.filter(field => !ordered.includes(field));
+    state.fields = [...ordered, ...missing];
+    ensureCodeFirst();
 }
 
 // Ensure Code column is always first
@@ -1550,7 +1820,7 @@ function renderTableHeader() {
         if (isAnbarField(field) && !processedAnbar) {
             if (visibleAnbarFields.length > 0 && hasAnbarFields) {
                 const groupTh = document.createElement('th');
-                groupTh.textContent = 'ANBAR';
+                groupTh.textContent = displayStockGroupName();
                 groupTh.setAttribute('colspan', visibleAnbarFields.length);
                 groupTh.className = 'anbar-group-header';
                 groupRow.appendChild(groupTh);
@@ -1558,7 +1828,7 @@ function renderTableHeader() {
                 // Create individual ANBAR column headers and filters
                 visibleAnbarFields.forEach(anbarField => {
                     const anbarNum = anbarField.substring(5); // Extract number
-                    const label = displayFieldName(anbarField) === anbarField ? anbarNum : displayFieldName(anbarField);
+                    const label = anbarNum;
                     const th = createHeaderCell(anbarField, { label, className: 'anbar-column' });
                     columnRow.appendChild(th);
                     
@@ -1628,7 +1898,7 @@ function createHeaderCell(field, { label, rowSpan = 1, className = '' } = {}) {
     }
 
     const sortContainer = document.createElement('div');
-    sortContainer.className = 'header-content';
+    sortContainer.className = 'table-header-content';
 
     const fieldName = document.createElement('span');
     fieldName.textContent = label || displayFieldName(field);
@@ -1702,7 +1972,7 @@ function createFilterControl(field) {
         container.appendChild(select);
         
     } else if (fieldType === 'numeric') {
-        container.appendChild(createRangePopover(field, currentFilter, 'numeric'));
+        container.appendChild(createRangePopover2(field, currentFilter, 'numeric'));
         
     } else if (fieldType === 'jalali-date') {
         // Date range for Jalali dates (YY.mm.dd format)
@@ -1785,6 +2055,155 @@ function createFilterControl(field) {
     }
     
     return container;
+}
+
+function createRangePopover2(field, currentFilter, mode) {
+    const wrapper = document.createElement('div');
+    wrapper.className = 'range-popover';
+
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'range-trigger';
+    button.setAttribute('aria-label', `Set ${displayFieldName(field)} range filter`);
+
+    const panel = document.createElement('div');
+    panel.className = 'range-panel';
+    panel.addEventListener('click', event => event.stopPropagation());
+
+    const stats = state.fieldStats[field] || {};
+    const minLimit = Number.isFinite(stats.min) ? stats.min : 0;
+    const maxLimit = Number.isFinite(stats.max) ? stats.max : Math.max(minLimit + 1, 1);
+    const step = Number.isInteger(minLimit) && Number.isInteger(maxLimit) ? 1 : 0.01;
+
+    const minInput = document.createElement('input');
+    minInput.type = 'text';
+    minInput.inputMode = mode === 'numeric' ? 'decimal' : 'text';
+    minInput.className = 'filter-input-small';
+    minInput.placeholder = 'Min';
+    minInput.value = currentFilter?.min ?? '';
+    minInput.setAttribute('aria-label', `Minimum ${displayFieldName(field)}`);
+
+    const maxInput = document.createElement('input');
+    maxInput.type = 'text';
+    maxInput.inputMode = mode === 'numeric' ? 'decimal' : 'text';
+    maxInput.className = 'filter-input-small';
+    maxInput.placeholder = 'Max';
+    maxInput.value = currentFilter?.max ?? '';
+    maxInput.setAttribute('aria-label', `Maximum ${displayFieldName(field)}`);
+
+    const minSlider = document.createElement('input');
+    minSlider.type = 'range';
+    minSlider.className = 'range-slider';
+    minSlider.min = String(minLimit);
+    minSlider.max = String(maxLimit);
+    minSlider.step = String(step);
+    minSlider.value = String(currentFilter?.min ?? minLimit);
+
+    const maxSlider = document.createElement('input');
+    maxSlider.type = 'range';
+    maxSlider.className = 'range-slider';
+    maxSlider.min = String(minLimit);
+    maxSlider.max = String(maxLimit);
+    maxSlider.step = String(step);
+    maxSlider.value = String(currentFilter?.max ?? maxLimit);
+
+    const clearBtn = document.createElement('button');
+    clearBtn.type = 'button';
+    clearBtn.className = 'range-clear';
+    clearBtn.textContent = 'Clear';
+
+    const updateTrigger = () => {
+        const latest = state.columnFilters[field];
+        const active = latest?.min !== undefined && latest?.min !== null || latest?.max !== undefined && latest?.max !== null;
+        button.innerHTML = active ? `<span class="filter-badge">${latest.min ?? 'min'}-${latest.max ?? 'max'}</span>` : '<span class="ellipsis">&bull;&bull;&bull;</span>';
+    };
+
+    const commit = debounce(() => {
+        const rawMin = minInput.value.trim();
+        const rawMax = maxInput.value.trim();
+        let min = rawMin ? parseFloat(rawMin) : null;
+        let max = rawMax ? parseFloat(rawMax) : null;
+        minInput.setCustomValidity(rawMin && !Number.isFinite(min) ? 'Enter a number' : '');
+        maxInput.setCustomValidity(rawMax && !Number.isFinite(max) ? 'Enter a number' : '');
+        if ((rawMin && !Number.isFinite(min)) || (rawMax && !Number.isFinite(max))) return;
+        if (min !== null && max !== null && min > max) {
+            [min, max] = [max, min];
+            minInput.value = String(min);
+            maxInput.value = String(max);
+        }
+        if (min !== null || max !== null) {
+            state.columnFilters[field] = { type: mode, min, max };
+        } else {
+            delete state.columnFilters[field];
+        }
+        saveColumnFilters();
+        updateTrigger();
+        applyFilters();
+    }, 80);
+
+    const syncFromInput = () => {
+        const min = parseFloat(minInput.value);
+        const max = parseFloat(maxInput.value);
+        if (Number.isFinite(min)) minSlider.value = String(Math.min(Math.max(min, minLimit), maxLimit));
+        if (Number.isFinite(max)) maxSlider.value = String(Math.min(Math.max(max, minLimit), maxLimit));
+        commit();
+    };
+
+    const syncFromSlider = () => {
+        let min = parseFloat(minSlider.value);
+        let max = parseFloat(maxSlider.value);
+        if (min > max) [min, max] = [max, min];
+        minInput.value = String(min);
+        maxInput.value = String(max);
+        commit();
+    };
+
+    button.addEventListener('click', event => {
+        event.stopPropagation();
+        if (state.openRangePanel && state.openRangePanel !== panel) {
+            state.openRangePanel.classList.remove('open');
+        }
+        panel.classList.toggle('open');
+        state.openRangePanel = panel.classList.contains('open') ? panel : null;
+        if (panel.classList.contains('open')) {
+            setTimeout(() => minInput.focus({ preventScroll: true }), 20);
+        }
+    });
+
+    minInput.addEventListener('input', syncFromInput);
+    maxInput.addEventListener('input', syncFromInput);
+    minSlider.addEventListener('input', syncFromSlider);
+    maxSlider.addEventListener('input', syncFromSlider);
+    clearBtn.addEventListener('click', () => {
+        delete state.columnFilters[field];
+        minInput.value = '';
+        maxInput.value = '';
+        minSlider.value = String(minLimit);
+        maxSlider.value = String(maxLimit);
+        saveColumnFilters();
+        updateTrigger();
+        applyFilters();
+    });
+
+    panel.appendChild(wrapRangeField('Min', minInput));
+    panel.appendChild(wrapRangeField('Max', maxInput));
+    panel.appendChild(minSlider);
+    panel.appendChild(maxSlider);
+    panel.appendChild(clearBtn);
+    wrapper.appendChild(button);
+    wrapper.appendChild(panel);
+    updateTrigger();
+    return wrapper;
+}
+
+function wrapRangeField(label, input) {
+    const wrapper = document.createElement('label');
+    wrapper.className = 'range-field';
+    const span = document.createElement('span');
+    span.textContent = label;
+    wrapper.appendChild(span);
+    wrapper.appendChild(input);
+    return wrapper;
 }
 
 function createRangePopover(field, currentFilter, mode) {
@@ -2122,37 +2541,136 @@ function exportData(format) {
 function renderColumnManager() {
     const container = document.getElementById('columnCheckboxes');
     container.innerHTML = '';
-    
+
+    getColumnManagerEntries().forEach(entry => {
+        container.appendChild(createColumnManagerRow(entry));
+    });
+}
+
+function getColumnManagerEntries() {
+    const entries = [];
+    const anbarFields = state.fields.filter(isAnbarField);
+    let anbarAdded = false;
     state.fields.forEach(field => {
-        const label = document.createElement('label');
-        label.className = 'checkbox-label';
-        
-        const checkbox = document.createElement('input');
-        checkbox.type = 'checkbox';
-        checkbox.checked = !state.hiddenColumns.has(field);
-        // Disable Code column checkbox (always visible)
-        checkbox.disabled = field === 'Code';
-        
-        checkbox.addEventListener('change', (e) => {
-            if (e.target.checked) {
+        if (isAnbarField(field)) {
+            if (!anbarAdded) {
+                entries.push({ key: 'ANBAR_GROUP', fields: anbarFields, type: 'stock', draggable: true });
+                anbarAdded = true;
+            }
+            return;
+        }
+        entries.push({ key: field, fields: [field], type: field === 'Code' ? 'identity' : state.fieldTypes[field] || 'text', draggable: field !== 'Code' });
+    });
+    return entries;
+}
+
+function createColumnManagerRow(entry) {
+    const row = document.createElement('div');
+    row.className = 'column-manager-row';
+    row.draggable = !!entry.draggable;
+    row.dataset.columnKey = entry.key;
+
+    const visibleCell = document.createElement('label');
+    visibleCell.className = 'checkbox-label column-visible-toggle';
+    const checkbox = document.createElement('input');
+    checkbox.type = 'checkbox';
+    checkbox.checked = entry.fields.some(field => !state.hiddenColumns.has(field));
+    checkbox.disabled = entry.key === 'Code';
+    checkbox.addEventListener('change', event => {
+        entry.fields.forEach(field => {
+            if (event.target.checked) {
                 state.hiddenColumns.delete(field);
             } else {
                 state.hiddenColumns.add(field);
                 delete state.columnFilters[field];
             }
-            saveHiddenColumns();
-            saveColumnFilters();
-            renderTableHeader();
-            applyFilters();
         });
-        
-        const span = document.createElement('span');
-        span.textContent = field + (field === 'Code' ? ' (always visible)' : '');
-        
-        label.appendChild(checkbox);
-        label.appendChild(span);
-        container.appendChild(label);
+        saveHiddenColumns();
+        saveColumnFilters();
+        renderTableHeader();
+        applyFilters();
     });
+    visibleCell.appendChild(checkbox);
+    visibleCell.appendChild(document.createElement('span'));
+
+    const sourceCell = document.createElement('div');
+    sourceCell.className = 'column-source-cell';
+    if (entry.key === 'ANBAR_GROUP') {
+        sourceCell.innerHTML = `<strong>ANBAR</strong><div class="warehouse-chip-grid">${entry.fields.map(field => `<span>${escapeHtml(field.replace('ANBAR', ''))}</span>`).join('')}</div>`;
+    } else {
+        sourceCell.innerHTML = `<strong>${escapeHtml(entry.key)}</strong>${entry.key === 'Code' ? '<small>Always visible</small>' : ''}`;
+    }
+
+    const labelCell = document.createElement('div');
+    labelCell.className = 'column-label-cell';
+    const labelInput = document.createElement('input');
+    labelInput.className = 'text-input';
+    labelInput.type = 'text';
+    labelInput.value = entry.key === 'ANBAR_GROUP' ? displayStockGroupName() : displayFieldName(entry.key);
+    labelInput.placeholder = entry.key === 'ANBAR_GROUP' ? 'Stock' : entry.key;
+    labelInput.addEventListener('input', debounce(() => {
+        state.config = state.config || {};
+        state.config.column_labels = state.config.column_labels || {};
+        if (entry.key === 'ANBAR_GROUP') {
+            state.config.column_labels.ANBAR = labelInput.value.trim() || 'Stock';
+        } else {
+            state.config.column_labels[entry.key] = labelInput.value.trim() || entry.key;
+        }
+        saveConfigToServer(state.config);
+        renderTableHeader();
+    }, 180));
+    labelCell.appendChild(labelInput);
+
+    const typeCell = document.createElement('div');
+    typeCell.className = 'column-type-cell';
+    typeCell.textContent = entry.type;
+
+    row.appendChild(visibleCell);
+    row.appendChild(sourceCell);
+    row.appendChild(labelCell);
+    row.appendChild(typeCell);
+    attachColumnDragHandlers(row);
+    return row;
+}
+
+function attachColumnDragHandlers(row) {
+    row.addEventListener('dragstart', event => {
+        if (!row.draggable) {
+            event.preventDefault();
+            return;
+        }
+        row.classList.add('dragging');
+        event.dataTransfer.setData('text/plain', row.dataset.columnKey);
+        event.dataTransfer.effectAllowed = 'move';
+    });
+    row.addEventListener('dragend', () => row.classList.remove('dragging'));
+    row.addEventListener('dragover', event => {
+        event.preventDefault();
+        row.classList.add('drag-over');
+    });
+    row.addEventListener('dragleave', () => row.classList.remove('drag-over'));
+    row.addEventListener('drop', event => {
+        event.preventDefault();
+        row.classList.remove('drag-over');
+        const draggedKey = event.dataTransfer.getData('text/plain');
+        reorderColumnEntries(draggedKey, row.dataset.columnKey);
+    });
+}
+
+function reorderColumnEntries(draggedKey, targetKey) {
+    if (!draggedKey || !targetKey || draggedKey === targetKey || draggedKey === 'Code') return;
+    const entries = getColumnManagerEntries();
+    const from = entries.findIndex(entry => entry.key === draggedKey);
+    const to = entries.findIndex(entry => entry.key === targetKey);
+    if (from < 0 || to < 0) return;
+    const [entry] = entries.splice(from, 1);
+    entries.splice(to, 0, entry);
+    state.fields = entries.flatMap(item => item.fields);
+    ensureCodeFirst();
+    saveColumnOrder();
+    renderColumnManager();
+    renderTableHeader();
+    applyFilters();
 }
 
 // Transform records to Code-keyed format for export
@@ -2505,6 +3023,10 @@ function init() {
     
     // Initialize footer
     updateFooter();
+    initDialogActionButtons();
+    initChromeMirrors();
+    initTableWheelScroll();
+    setInterval(updateLastUpdateDisplay, 30000);
     
     // Set up event listeners
     document.addEventListener('keydown', handleGlobalKeydown);
@@ -2528,6 +3050,14 @@ function init() {
     });
     
     document.getElementById('themeToggle').addEventListener('click', toggleTheme);
+    document.getElementById('footerToggleBtn')?.addEventListener('click', toggleFooterVisibility);
+    document.getElementById('footerCollapseBtn')?.addEventListener('click', toggleFooterVisibility);
+    document.getElementById('footerLastUpdate')?.addEventListener('click', cycleLastUpdateMode);
+    document.getElementById('headerConnectionButton')?.addEventListener('click', openConnectionPanel);
+    document.getElementById('footerConnectionButton')?.addEventListener('click', openConnectionPanel);
+    document.getElementById('headerFileChip')?.addEventListener('click', () => {
+        if (state.fileName) showInAppToast('Current source file', state.fileName, { broadcastToTabs: true });
+    });
     
     // Export button and dropdown
     document.getElementById('exportBtn').addEventListener('click', () => {
@@ -2544,6 +3074,10 @@ function init() {
         if (!exportBtn.contains(e.target) && !exportDropdown.contains(e.target)) {
             exportDropdown.classList.remove('open');
         }
+        if (state.openRangePanel && !state.openRangePanel.contains(e.target) && !e.target.closest('.range-trigger')) {
+            state.openRangePanel.classList.remove('open');
+            state.openRangePanel = null;
+        }
     });
     
     document.getElementById('settingsBtn').addEventListener('click', () => {
@@ -2554,6 +3088,7 @@ function init() {
     document.getElementById('closeSettings').addEventListener('click', () => {
         closePanels();
     });
+    document.getElementById('closeConnection')?.addEventListener('click', closePanels);
     document.getElementById('panelBackdrop').addEventListener('click', closePanels);
     initSettingsTabs();
     
@@ -2617,6 +3152,18 @@ function init() {
         saveSettings();
     });
 
+    document.getElementById('showFooter').addEventListener('change', (e) => {
+        state.settings.showFooter = e.target.checked;
+        applySettings();
+        saveSettings();
+    });
+
+    document.getElementById('lastUpdateDisplayMode').addEventListener('change', (e) => {
+        state.settings.lastUpdateDisplayMode = e.target.value;
+        applySettings();
+        saveSettings();
+    });
+
     document.getElementById('notificationSoundSource').addEventListener('change', (e) => {
         state.settings.notificationSoundSource = e.target.value;
         saveSettings();
@@ -2675,6 +3222,29 @@ function init() {
         if (state.settings.enablePagination) {
             renderTable();
         }
+    });
+
+    ['enableRowColoring', 'rowColorGroup', 'rowColorSubgroup', 'rowColorNoStock', 'rowColorHasStock'].forEach(id => {
+        const el = document.getElementById(id);
+        if (!el) return;
+        el.addEventListener('input', () => {
+            if (id === 'enableRowColoring') {
+                state.settings.enableRowColoring = el.checked;
+            } else {
+                state.settings[id] = el.value;
+            }
+            applySettings();
+            saveSettings();
+        });
+        el.addEventListener('change', () => {
+            if (id === 'enableRowColoring') {
+                state.settings.enableRowColoring = el.checked;
+            } else {
+                state.settings[id] = el.value;
+            }
+            applySettings();
+            saveSettings();
+        });
     });
     
     // Initialize notification audio
