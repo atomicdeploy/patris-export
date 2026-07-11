@@ -62,6 +62,7 @@ const state = {
     tabId: '',
     broadcastChannel: null,
     seenBroadcastMessages: new Set(),
+    revealedSettingsTabs: new Set(),
     dragDepth: 0,
     isUploadingSource: false
 };
@@ -1392,6 +1393,7 @@ function closeRouteDialog() {
 
 function applyConfigToSettingsForm() {
     const cfg = state.config || {};
+    updateSettingsTabVisibility();
     setValue('settingsTheme', cfg.ui?.theme || localStorage.getItem('theme') || 'system');
     setValue('serverHost', cfg.server?.host || '');
     setValue('serverPort', cfg.server?.port || '');
@@ -1950,10 +1952,18 @@ function initSettingsTabs() {
             setActiveSettingsTab(tab.dataset.settingsTab);
         });
     });
+    updateSettingsTabVisibility();
 }
 
 function setActiveSettingsTab(target) {
-    const tab = document.querySelector(`[data-settings-tab="${target}"]`) || document.querySelector('[data-settings-tab="ui"]');
+    if (!target) target = 'ui';
+    const requestedTab = document.querySelector(`[data-settings-tab="${target}"]`);
+    if (requestedTab?.hidden) {
+        state.revealedSettingsTabs.add(target);
+        updateSettingsTabVisibility({ preserveActive: true });
+    }
+    const tab = document.querySelector(`[data-settings-tab="${target}"]:not([hidden])`)
+        || document.querySelector('[data-settings-tab="ui"]');
     const paneName = tab?.dataset.settingsTab || 'ui';
     document.querySelectorAll('[data-settings-tab]').forEach(item => {
         item.classList.toggle('active', item === tab);
@@ -1961,6 +1971,58 @@ function setActiveSettingsTab(target) {
     document.querySelectorAll('[data-settings-pane]').forEach(pane => {
         pane.classList.toggle('active', pane.dataset.settingsPane === paneName);
     });
+}
+
+function updateSettingsTabVisibility(options = {}) {
+    const cfg = state.config || {};
+    const visibleTabs = new Set(['ui']);
+    const isCustomized = (section, key, defaultValue) => {
+        const value = cfg[section]?.[key];
+        return typeof value !== 'undefined' && value !== defaultValue;
+    };
+
+    if (state.fileName || cfg.database?.path || cfg.database?.charmap || cfg.database?.direct_access || cfg.database?.rtl_conversion || cfg.database?.raw) {
+        visibleTabs.add('database');
+    }
+    if (
+        cfg.notifications?.enabled ||
+        cfg.notifications?.client_connected ||
+        cfg.notifications?.client_disconnected ||
+        cfg.notifications?.file_updated ||
+        cfg.notifications?.row_updated ||
+        cfg.notifications?.include_row_values ||
+        state.settings.playNotificationSound
+    ) {
+        visibleTabs.add('notifications');
+    }
+    if (
+        cfg.runtime?.debug ||
+        isCustomized('runtime', 'temp_dir', 'system') ||
+        isCustomized('runtime', 'temp_strategy', 'auto') ||
+        isCustomized('runtime', 'temp_memory_limit_mb', 100)
+    ) {
+        visibleTabs.add('runtime');
+    }
+    if (cfg.server?.ipc?.enabled || cfg.server?.http === false || state.revealedSettingsTabs.has('server')) {
+        visibleTabs.add('server');
+    }
+    state.revealedSettingsTabs.forEach(tabName => visibleTabs.add(tabName));
+
+    document.querySelectorAll('[data-settings-tab]').forEach(tab => {
+        const show = visibleTabs.has(tab.dataset.settingsTab);
+        tab.hidden = !show;
+        tab.setAttribute('aria-hidden', show ? 'false' : 'true');
+    });
+    document.querySelectorAll('[data-settings-pane]').forEach(pane => {
+        const show = visibleTabs.has(pane.dataset.settingsPane);
+        pane.hidden = !show;
+        pane.setAttribute('aria-hidden', show ? 'false' : 'true');
+    });
+
+    const activeTab = document.querySelector('[data-settings-tab].active');
+    if (!options.preserveActive && activeTab?.hidden) {
+        setActiveSettingsTab('ui');
+    }
 }
 
 function bindConfigField(id, eventName = 'change') {
@@ -4001,7 +4063,12 @@ function init() {
 
     const settingsTarget = new URLSearchParams(window.location.search).get('settings');
     if (settingsTarget) {
-        setActiveSettingsTab(settingsTarget === '1' ? 'ui' : settingsTarget);
+        const targetTab = settingsTarget === '1' ? 'ui' : settingsTarget;
+        if (targetTab) {
+            state.revealedSettingsTabs.add(targetTab);
+        }
+        updateSettingsTabVisibility({ preserveActive: true });
+        setActiveSettingsTab(targetTab);
         applyConfigToSettingsForm();
         openModalRoute('settings', { replace: true });
     }
@@ -4017,9 +4084,11 @@ async function fetchFileInfo() {
         const info = await response.json();
         state.fileName = info.path || info.file || '';
         updateFooterFileName();
+        updateSettingsTabVisibility();
     } catch (error) {
         console.error('Failed to fetch file info:', error);
         updateFooterFileName();
+        updateSettingsTabVisibility();
     }
 }
 

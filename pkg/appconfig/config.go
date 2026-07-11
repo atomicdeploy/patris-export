@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strconv"
 	"strings"
@@ -369,7 +370,7 @@ func (m *Manager) Update(fn func(*Config)) error {
 	if err := os.MkdirAll(filepath.Dir(m.path), 0755); err != nil {
 		return err
 	}
-	return os.WriteFile(m.path, append(data, '\n'), 0644)
+	return os.WriteFile(m.path, data, 0644)
 }
 
 func (m *Manager) Save() error {
@@ -430,22 +431,97 @@ func decodeConfig(path string, data []byte, cfg *Config) error {
 }
 
 func encodeConfig(path string, cfg Config) ([]byte, error) {
+	payload, err := sparseConfigMap(cfg)
+	if err != nil {
+		return nil, err
+	}
 	var (
 		data []byte
-		err  error
 	)
 	switch strings.ToLower(filepath.Ext(path)) {
 	case ".yaml", ".yml":
-		data, err = yaml.Marshal(cfg)
+		data, err = yaml.Marshal(payload)
 	case ".toml":
-		data, err = toml.Marshal(cfg)
+		data, err = toml.Marshal(payload)
 	default:
-		data, err = json.MarshalIndent(cfg, "", "  ")
+		data, err = json.MarshalIndent(payload, "", "  ")
 	}
 	if err != nil {
 		return nil, err
 	}
 	return append(data, '\n'), nil
+}
+
+func sparseConfigMap(cfg Config) (map[string]interface{}, error) {
+	normalize(&cfg)
+	defaults := Default()
+	normalize(&defaults)
+
+	current, err := configToMap(cfg)
+	if err != nil {
+		return nil, err
+	}
+	defaultMap, err := configToMap(defaults)
+	if err != nil {
+		return nil, err
+	}
+	return diffMap(defaultMap, current), nil
+}
+
+func configToMap(cfg Config) (map[string]interface{}, error) {
+	data, err := json.Marshal(cfg)
+	if err != nil {
+		return nil, err
+	}
+	var out map[string]interface{}
+	if err := json.Unmarshal(data, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func diffMap(defaults, current map[string]interface{}) map[string]interface{} {
+	out := map[string]interface{}{}
+	for key, value := range current {
+		defaultValue, ok := defaults[key]
+		if ok {
+			if childCurrent, ok := value.(map[string]interface{}); ok {
+				if childDefault, ok := defaultValue.(map[string]interface{}); ok {
+					childDiff := diffMap(childDefault, childCurrent)
+					if len(childDiff) > 0 {
+						out[key] = childDiff
+					}
+					continue
+				}
+			}
+			if valuesEqual(defaultValue, value) {
+				continue
+			}
+		}
+		if !isEmptyConfigValue(value) {
+			out[key] = value
+		}
+	}
+	return out
+}
+
+func valuesEqual(a, b interface{}) bool {
+	return reflect.DeepEqual(a, b)
+}
+
+func isEmptyConfigValue(value interface{}) bool {
+	switch v := value.(type) {
+	case nil:
+		return true
+	case string:
+		return v == ""
+	case []interface{}:
+		return len(v) == 0
+	case map[string]interface{}:
+		return len(v) == 0
+	default:
+		return false
+	}
 }
 
 func (m *Manager) Watch(onChange func(Config)) (*fsnotify.Watcher, error) {
