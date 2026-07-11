@@ -20,6 +20,7 @@ const state = {
     connectionStatus: { state: 'connecting', text: 'Connecting...' },
     connectionLog: [],
     eventLog: [],
+    configNotificationDedupe: new Map(),
     lastUpdateAt: null,
     isInitialLoad: true,
     columnFilters: {},  // Store active filters per column: { fieldName: { type, value, ... } }
@@ -70,6 +71,8 @@ const SETTINGS_STORAGE_KEY = 'patris-settings';
 const SCROLL_ANCHOR_STORAGE_KEY = 'patris-viewer-scroll-anchor';
 const EVENT_LOG_STORAGE_KEY = 'patris-event-log';
 const MAX_EVENT_LOG_ENTRIES = 200;
+const CONFIG_NOTIFICATION_DEDUPE_STORAGE_KEY = 'patris-config-notification-dedupe';
+const CONFIG_NOTIFICATION_DEDUPE_TTL_MS = 5000;
 const RESOURCE_POLL_INTERVAL_MS = 30000;
 const BROADCAST_CHANNEL_NAME = 'patris-export-frontend';
 const BROADCAST_STORAGE_KEY = 'patris-broadcast-message';
@@ -296,7 +299,8 @@ function saveSettings(options = {}) {
 }
 
 function applyConfig(config, source = 'server') {
-    if (!config) return;
+    if (!config) return null;
+    const diff = buildConfigDiff(state.config, config);
     state.config = config;
     localStorage.setItem(CONFIG_STORAGE_KEY, JSON.stringify(config));
     if (config.ui) {
@@ -326,6 +330,170 @@ function applyConfig(config, source = 'server') {
     }
     if (source !== 'local') {
         console.info('⚙️ Configuration applied from %s', source, config);
+    }
+    return diff;
+}
+
+function buildConfigDiff(previousConfig, nextConfig) {
+    const before = flattenConfigForDiff(previousConfig || {});
+    const after = flattenConfigForDiff(nextConfig || {});
+    const paths = new Set([...Object.keys(before), ...Object.keys(after)]);
+    const changed = [];
+
+    [...paths].sort().forEach(path => {
+        const beforeExists = Object.prototype.hasOwnProperty.call(before, path);
+        const afterExists = Object.prototype.hasOwnProperty.call(after, path);
+        const beforeValue = beforeExists ? before[path] : undefined;
+        const afterValue = afterExists ? after[path] : undefined;
+        if (beforeExists !== afterExists || stableStringify(beforeValue) !== stableStringify(afterValue)) {
+            changed.push({ path, before: beforeValue, after: afterValue });
+        }
+    });
+
+    if (changed.length === 0) {
+        return { changed: [], signature: '', dedupeKey: '', message: '', details: '' };
+    }
+
+    const signature = stableStringify(changed);
+    return {
+        changed,
+        signature,
+        dedupeKey: hashString(signature),
+        message: formatConfigDiffMessage(changed),
+        details: formatConfigDiffDetails(changed)
+    };
+}
+
+function flattenConfigForDiff(value, prefix = '', output = {}) {
+    if (Array.isArray(value)) {
+        output[prefix || '$'] = normalizeConfigValue(value);
+        return output;
+    }
+
+    if (value && typeof value === 'object') {
+        const keys = Object.keys(value).sort();
+        if (keys.length === 0 && prefix) {
+            output[prefix] = {};
+        }
+        keys.forEach(key => {
+            const nextPrefix = prefix ? `${prefix}.${key}` : key;
+            flattenConfigForDiff(value[key], nextPrefix, output);
+        });
+        return output;
+    }
+
+    output[prefix || '$'] = value;
+    return output;
+}
+
+function normalizeConfigValue(value) {
+    if (Array.isArray(value)) {
+        return value.map(normalizeConfigValue);
+    }
+    if (value && typeof value === 'object') {
+        return Object.keys(value).sort().reduce((acc, key) => {
+            acc[key] = normalizeConfigValue(value[key]);
+            return acc;
+        }, {});
+    }
+    return value;
+}
+
+function stableStringify(value) {
+    return JSON.stringify(normalizeConfigValue(value));
+}
+
+function hashString(value) {
+    let hash = 2166136261;
+    for (let i = 0; i < value.length; i += 1) {
+        hash ^= value.charCodeAt(i);
+        hash = Math.imul(hash, 16777619);
+    }
+    return (hash >>> 0).toString(16);
+}
+
+function formatConfigDiffMessage(changed) {
+    if (changed.length === 1) {
+        const change = changed[0];
+        return `${change.path}: ${formatConfigDiffValue(change.before)} -> ${formatConfigDiffValue(change.after)}`;
+    }
+    const names = changed.slice(0, 4).map(change => change.path).join(', ');
+    const suffix = changed.length > 4 ? ', ...' : '';
+    return `${changed.length} settings changed: ${names}${suffix}`;
+}
+
+function formatConfigDiffDetails(changed) {
+    return changed.slice(0, 12)
+        .map(change => `${change.path}: ${formatConfigDiffValue(change.before)} -> ${formatConfigDiffValue(change.after)}`)
+        .join('\n');
+}
+
+function formatConfigDiffValue(value) {
+    if (typeof value === 'undefined') return 'unset';
+    if (value === null) return 'null';
+    if (typeof value === 'string') return value === '' ? 'empty' : value;
+    if (typeof value === 'boolean' || typeof value === 'number') return String(value);
+    const text = stableStringify(value);
+    return text.length > 80 ? `${text.slice(0, 77)}...` : text;
+}
+
+function shouldNotifyConfigReload(diff) {
+    if (!diff || !diff.changed?.length || !diff.dedupeKey) {
+        return false;
+    }
+
+    const now = Date.now();
+    for (const [key, timestamp] of state.configNotificationDedupe) {
+        if (now - timestamp > CONFIG_NOTIFICATION_DEDUPE_TTL_MS) {
+            state.configNotificationDedupe.delete(key);
+        }
+    }
+
+    const localTimestamp = state.configNotificationDedupe.get(diff.dedupeKey);
+    if (localTimestamp && now - localTimestamp <= CONFIG_NOTIFICATION_DEDUPE_TTL_MS) {
+        return false;
+    }
+
+    const sharedCache = loadConfigNotificationDedupeCache(now);
+    const sharedTimestamp = sharedCache[diff.dedupeKey];
+    if (sharedTimestamp && now - sharedTimestamp <= CONFIG_NOTIFICATION_DEDUPE_TTL_MS) {
+        state.configNotificationDedupe.set(diff.dedupeKey, sharedTimestamp);
+        return false;
+    }
+
+    state.configNotificationDedupe.set(diff.dedupeKey, now);
+    sharedCache[diff.dedupeKey] = now;
+    saveConfigNotificationDedupeCache(sharedCache, now);
+    return true;
+}
+
+function loadConfigNotificationDedupeCache(now = Date.now()) {
+    try {
+        const raw = localStorage.getItem(CONFIG_NOTIFICATION_DEDUPE_STORAGE_KEY);
+        const parsed = raw ? JSON.parse(raw) : {};
+        return Object.entries(parsed).reduce((acc, [key, timestamp]) => {
+            if (Number.isFinite(timestamp) && now - timestamp <= CONFIG_NOTIFICATION_DEDUPE_TTL_MS) {
+                acc[key] = timestamp;
+            }
+            return acc;
+        }, {});
+    } catch (error) {
+        console.warn('Failed to read config notification dedupe cache:', error);
+        return {};
+    }
+}
+
+function saveConfigNotificationDedupeCache(cache, now = Date.now()) {
+    try {
+        const compact = Object.entries(cache).reduce((acc, [key, timestamp]) => {
+            if (Number.isFinite(timestamp) && now - timestamp <= CONFIG_NOTIFICATION_DEDUPE_TTL_MS) {
+                acc[key] = timestamp;
+            }
+            return acc;
+        }, {});
+        localStorage.setItem(CONFIG_NOTIFICATION_DEDUPE_STORAGE_KEY, JSON.stringify(compact));
+    } catch (error) {
+        console.warn('Failed to persist config notification dedupe cache:', error);
     }
 }
 
@@ -2090,8 +2258,15 @@ function handleWebSocketMessage(data) {
             console.warn('Native toast failed:', data.native_error);
         }
     } else if (data.type === 'config_update') {
-        applyConfig(data.config, 'file watcher');
-        showInAppToast('Settings reloaded', 'Configuration file changes were applied.', { broadcastToTabs: true, source: 'config_update', eventType: 'config_update', level: 'update' });
+        const diff = applyConfig(data.config, 'file watcher');
+        if (shouldNotifyConfigReload(diff)) {
+            showInAppToast('Settings reloaded', diff.message || 'Configuration file changes were applied.', {
+                source: 'config_update',
+                eventType: 'config_update',
+                level: 'update',
+                details: diff.details
+            });
+        }
     } else if (data.type === 'process_info') {
         applyProcessStatus(data);
     }
