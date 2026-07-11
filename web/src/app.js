@@ -558,6 +558,8 @@ async function saveConfigToServer(config) {
     }
 }
 
+const handledFooterToggleEvents = new WeakSet();
+
 // Save sort preferences to localStorage
 function saveSortPreferences(options = {}) {
     localStorage.setItem('patris-sort', JSON.stringify({
@@ -1017,9 +1019,9 @@ function renderFooterToggleButton(button, showFooter) {
 }
 
 function handleFooterToggleClick(event) {
-    if (event?.__patrisFooterToggleHandled) return;
+    if (event && handledFooterToggleEvents.has(event)) return;
     if (event) {
-        event.__patrisFooterToggleHandled = true;
+        handledFooterToggleEvents.add(event);
         event.preventDefault();
         event.stopPropagation();
     }
