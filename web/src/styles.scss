@@ -1355,6 +1355,179 @@ body.is-loading .data-table {
     }
 }
 
+.event-log-button {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.45rem;
+}
+
+.event-log-count {
+    display: inline-grid;
+    min-width: 1.35rem;
+    height: 1.35rem;
+    padding: 0 0.35rem;
+    place-items: center;
+    border-radius: 999px;
+    background: rgba(99, 102, 241, 0.16);
+    color: $primary-hover;
+    font-size: 0.75rem;
+    font-weight: 800;
+
+    &[hidden] {
+        display: none;
+    }
+}
+
+.event-log-modal {
+    max-width: 860px;
+}
+
+.event-log-summary {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 0.75rem;
+    margin-bottom: 1rem;
+
+    div {
+        display: grid;
+        gap: 0.2rem;
+        padding: 0.75rem;
+        border: 1px solid $border-light;
+        border-radius: 8px;
+        background: $bg-light-secondary;
+
+        .dark-mode & {
+            background: $bg-dark-secondary;
+            border-color: $border-dark;
+        }
+    }
+
+    span {
+        color: $text-light-secondary;
+        font-size: 0.75rem;
+        font-weight: 700;
+        text-transform: uppercase;
+
+        .dark-mode & {
+            color: $text-dark-secondary;
+        }
+    }
+
+    strong {
+        font-family: var(--font-mono);
+        font-size: 1.1rem;
+    }
+}
+
+.event-log-list {
+    display: grid;
+    gap: 0.6rem;
+    max-height: min(58vh, 560px);
+    overflow: auto;
+    padding-right: 0.25rem;
+}
+
+.event-log-empty {
+    padding: 2rem;
+    border: 1px dashed $border-light;
+    border-radius: 8px;
+    color: $text-light-secondary;
+    text-align: center;
+
+    .dark-mode & {
+        border-color: $border-dark;
+        color: $text-dark-secondary;
+    }
+}
+
+.event-log-entry {
+    display: grid;
+    grid-template-columns: 220px minmax(0, 1fr);
+    gap: 0.85rem;
+    padding: 0.8rem;
+    border: 1px solid $border-light;
+    border-left: 4px solid $primary-color;
+    border-radius: 8px;
+    background: $bg-light;
+    box-shadow: $shadow;
+
+    &.warning,
+    &.error {
+        border-left-color: $warning-color;
+    }
+
+    &.success {
+        border-left-color: $success-color;
+    }
+
+    &.update {
+        border-left-color: $primary-color;
+    }
+
+    .dark-mode & {
+        background: $bg-dark;
+        border-color: $border-dark;
+    }
+}
+
+.event-log-entry-meta {
+    display: grid;
+    align-content: start;
+    gap: 0.35rem;
+    font-family: var(--font-mono);
+    font-size: 0.75rem;
+    color: $text-light-secondary;
+
+    span {
+        width: fit-content;
+        max-width: 100%;
+        padding: 0.12rem 0.45rem;
+        border-radius: 999px;
+        background: rgba(99, 102, 241, 0.12);
+        color: $primary-hover;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+    }
+
+    .dark-mode & {
+        color: $text-dark-secondary;
+    }
+}
+
+.event-log-entry-body {
+    min-width: 0;
+
+    strong {
+        display: block;
+        margin-bottom: 0.25rem;
+    }
+
+    p {
+        color: $text-light-secondary;
+        overflow-wrap: anywhere;
+
+        .dark-mode & {
+            color: $text-dark-secondary;
+        }
+    }
+
+    code {
+        display: block;
+        margin-top: 0.5rem;
+        padding: 0.45rem 0.55rem;
+        border-radius: 6px;
+        background: $bg-light-tertiary;
+        color: inherit;
+        font-family: var(--font-mono);
+        overflow-wrap: anywhere;
+
+        .dark-mode & {
+            background: $bg-dark-tertiary;
+        }
+    }
+}
+
 // Inspector panel
 .inspector-panel {
     position: fixed;

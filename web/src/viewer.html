@@ -73,6 +73,9 @@
                 <button class="btn btn-secondary" id="refreshNowBtn" title="Reload data from the source">
                     🔄 Refresh Now
                 </button>
+                <button class="btn btn-secondary event-log-button" id="eventLogBtn" title="Open event log">
+                    Logs <span class="event-log-count" id="eventLogCount">0</span>
+                </button>
                 <div class="record-count">
                     Total: <strong id="totalCount">0</strong> | 
                     Filtered: <strong id="filteredCount">0</strong>
@@ -288,6 +291,24 @@
                 </div>
                 <div class="connection-details" id="connectionDetails"></div>
                 <div class="connection-log" id="connectionLog" aria-live="polite"></div>
+            </div>
+        </div>
+
+        <div class="settings-panel event-log-modal" id="eventLogPanel" role="dialog" aria-modal="true" aria-labelledby="eventLogTitle">
+            <div class="settings-content">
+                <div class="settings-header">
+                    <div>
+                        <h2 id="eventLogTitle">Event Logs</h2>
+                        <p class="settings-path">Notification-capable events received by this viewer.</p>
+                    </div>
+                    <div class="dialog-actions">
+                        <button class="btn btn-secondary" id="clearEventLog" type="button">Clear</button>
+                        <button class="btn btn-icon dialog-menu-btn" type="button" title="More actions" data-dialog-menu="eventLogPanel">&hellip;</button>
+                        <button class="btn btn-icon dialog-close-btn" id="closeEventLog" type="button" title="Close">&times;</button>
+                    </div>
+                </div>
+                <div class="event-log-summary" id="eventLogSummary"></div>
+                <div class="event-log-list" id="eventLogList" aria-live="polite"></div>
             </div>
         </div>
 

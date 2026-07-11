@@ -19,6 +19,7 @@ const state = {
     processStatus: null,
     connectionStatus: { state: 'connecting', text: 'Connecting...' },
     connectionLog: [],
+    eventLog: [],
     lastUpdateAt: null,
     isInitialLoad: true,
     columnFilters: {},  // Store active filters per column: { fieldName: { type, value, ... } }
@@ -67,6 +68,8 @@ const state = {
 const CONFIG_STORAGE_KEY = 'patris-config';
 const SETTINGS_STORAGE_KEY = 'patris-settings';
 const SCROLL_ANCHOR_STORAGE_KEY = 'patris-viewer-scroll-anchor';
+const EVENT_LOG_STORAGE_KEY = 'patris-event-log';
+const MAX_EVENT_LOG_ENTRIES = 200;
 const RESOURCE_POLL_INTERVAL_MS = 30000;
 const BROADCAST_CHANNEL_NAME = 'patris-export-frontend';
 const BROADCAST_STORAGE_KEY = 'patris-broadcast-message';
@@ -197,6 +200,9 @@ function handleFrontendBroadcast(message) {
         case 'toast':
             showInAppToast(message.payload?.title, message.payload?.message, message.payload?.options || {});
             break;
+        case 'event-log:clear':
+            clearEventLog({ broadcast: false });
+            break;
         default:
             console.info('Ignored unknown cross-tab message:', message.type);
     }
@@ -265,6 +271,17 @@ function loadSettings() {
             state.scrollAnchor = JSON.parse(savedScrollAnchor);
         } catch (e) {
             state.scrollAnchor = null;
+        }
+    }
+
+    const savedEventLog = localStorage.getItem(EVENT_LOG_STORAGE_KEY);
+    if (savedEventLog) {
+        try {
+            state.eventLog = JSON.parse(savedEventLog)
+                .filter(entry => entry && entry.title)
+                .slice(0, MAX_EVENT_LOG_ENTRIES);
+        } catch (e) {
+            state.eventLog = [];
         }
     }
 }
@@ -368,7 +385,7 @@ async function saveConfigToServer(config) {
         console.info('💾 Settings synced to config file.');
     } catch (error) {
         console.error('❌ Failed to sync settings to config file:', error);
-        showInAppToast('Settings save failed', error.message, { error: true, broadcastToTabs: true });
+        showInAppToast('Settings save failed', error.message, { error: true, broadcastToTabs: true, source: 'config_update', eventType: 'config_update' });
     }
 }
 
@@ -1000,7 +1017,8 @@ const ROUTES = {
 const MODAL_ROUTES = {
     settings: 'settingsPanel',
     columns: 'columnsPanel',
-    connection: 'connectionPanel'
+    connection: 'connectionPanel',
+    logs: 'eventLogPanel'
 };
 
 function initRouter() {
@@ -1183,6 +1201,7 @@ function applyModalHash() {
         if (panelId === 'columnsPanel') renderColumnManager();
         if (panelId === 'settingsPanel') applyConfigToSettingsForm();
         if (panelId === 'connectionPanel') renderConnectionPanel();
+        if (panelId === 'eventLogPanel') renderEventLogPanel();
         openPanel(panelId);
         return;
     }
@@ -1192,7 +1211,7 @@ function applyModalHash() {
 }
 
 function activePanelId() {
-    return ['settingsPanel', 'columnsPanel', 'connectionPanel']
+    return ['settingsPanel', 'columnsPanel', 'connectionPanel', 'eventLogPanel']
         .find(id => document.getElementById(id)?.classList.contains('open')) || '';
 }
 
@@ -1433,6 +1452,18 @@ function setFavicon(href) {
 }
 
 function showInAppToast(title, message, options = {}) {
+    if (options.log !== false) {
+        recordEventLog({
+            title: title || 'Patris Export',
+            message: message || '',
+            level: options.error || options.nativeError ? 'warning' : (options.level || 'info'),
+            type: options.eventType || options.source || 'toast',
+            source: options.source || 'web-ui',
+            timestamp: options.timestamp,
+            details: options.nativeError || options.details || ''
+        });
+    }
+
     let container = document.getElementById('toastContainer');
     if (!container) {
         container = document.createElement('div');
@@ -1471,6 +1502,93 @@ function showInAppToast(title, message, options = {}) {
             options: { ...options, broadcastToTabs: false }
         });
     }
+}
+
+function recordEventLog(entry = {}) {
+    const logEntry = {
+        id: entry.id || createTabId(),
+        time: entry.timestamp || new Date().toISOString(),
+        level: normalizeEventLevel(entry.level),
+        type: String(entry.type || 'event'),
+        source: String(entry.source || entry.type || 'web-ui'),
+        title: String(entry.title || 'Patris Export event'),
+        message: String(entry.message || ''),
+        details: entry.details ? String(entry.details) : ''
+    };
+    state.eventLog.unshift(logEntry);
+    state.eventLog = state.eventLog.slice(0, MAX_EVENT_LOG_ENTRIES);
+    saveEventLog();
+    renderEventLogCount();
+    renderEventLogPanel();
+}
+
+function normalizeEventLevel(level) {
+    if (['error', 'warning', 'success', 'update', 'info'].includes(level)) {
+        return level;
+    }
+    return 'info';
+}
+
+function saveEventLog() {
+    try {
+        localStorage.setItem(EVENT_LOG_STORAGE_KEY, JSON.stringify(state.eventLog));
+    } catch (error) {
+        console.warn('Failed to persist event log:', error);
+    }
+}
+
+function clearEventLog(options = {}) {
+    state.eventLog = [];
+    saveEventLog();
+    renderEventLogCount();
+    renderEventLogPanel();
+    if (options.broadcast !== false) {
+        publishFrontendBroadcast('event-log:clear');
+    }
+}
+
+function renderEventLogCount() {
+    const count = document.getElementById('eventLogCount');
+    if (count) {
+        count.textContent = state.eventLog.length.toLocaleString();
+        count.hidden = state.eventLog.length === 0;
+    }
+}
+
+function renderEventLogPanel() {
+    const summary = document.getElementById('eventLogSummary');
+    const list = document.getElementById('eventLogList');
+    if (!summary || !list) return;
+
+    const counts = state.eventLog.reduce((acc, entry) => {
+        acc[entry.level] = (acc[entry.level] || 0) + 1;
+        return acc;
+    }, {});
+    summary.innerHTML = `
+        <div><span>Total</span><strong>${state.eventLog.length.toLocaleString()}</strong></div>
+        <div><span>Updates</span><strong>${(counts.update || 0).toLocaleString()}</strong></div>
+        <div><span>Warnings</span><strong>${((counts.warning || 0) + (counts.error || 0)).toLocaleString()}</strong></div>
+    `;
+
+    if (state.eventLog.length === 0) {
+        list.innerHTML = '<div class="event-log-empty">No notification-capable events have been captured yet.</div>';
+        return;
+    }
+
+    list.innerHTML = state.eventLog.map(entry => `
+        <article class="event-log-entry ${escapeHtml(entry.level)}">
+            <div class="event-log-entry-meta">
+                <time>${formatDateTime(new Date(entry.time))}</time>
+                <span>${escapeHtml(entry.type)}</span>
+                <span>${escapeHtml(entry.source)}</span>
+            </div>
+            <div class="event-log-entry-body">
+                <strong>${escapeHtml(entry.title)}</strong>
+                ${entry.message ? `<p>${escapeHtml(entry.message)}</p>` : ''}
+                ${entry.details ? `<code>${escapeHtml(entry.details)}</code>` : ''}
+            </div>
+        </article>
+    `).join('');
 }
 
 function isSupportedSourceFile(file) {
@@ -1512,7 +1630,7 @@ async function uploadDroppedSource(file) {
     }
     if (!isSupportedSourceFile(file)) {
         setDropOverlayVisible(true, 'invalid');
-        showInAppToast('Unsupported file', 'Drop a .db or .json file to switch the active source.', { error: true });
+        showInAppToast('Unsupported file', 'Drop a .db or .json file to switch the active source.', { error: true, source: 'source_drop', eventType: 'source_switch' });
         setTimeout(() => setDropOverlayVisible(false), 1500);
         return;
     }
@@ -1549,7 +1667,7 @@ async function uploadDroppedSource(file) {
 
         state.fileName = payload.path || payload.file || file.name;
         updateFooterFileName();
-        showInAppToast('Source loaded', `${payload.file || file.name} is now active (${payload.records ?? 'unknown'} records).`, { broadcastToTabs: true });
+        showInAppToast('Source loaded', `${payload.file || file.name} is now active (${payload.records ?? 'unknown'} records).`, { broadcastToTabs: true, source: 'source_drop', eventType: 'source_switch', level: 'success' });
 
         if (!state.ws || state.ws.readyState !== WebSocket.OPEN) {
             await fetchInitialData();
@@ -1557,7 +1675,7 @@ async function uploadDroppedSource(file) {
         }
     } catch (error) {
         console.error('Failed to switch dropped source:', error);
-        showInAppToast('Source switch failed', error.message, { error: true });
+        showInAppToast('Source switch failed', error.message, { error: true, source: 'source_drop', eventType: 'source_switch' });
         setLoadingState(false);
     } finally {
         state.isUploadingSource = false;
@@ -1616,7 +1734,7 @@ function openPanel(panelId) {
 }
 
 function closePanels() {
-    ['settingsPanel', 'columnsPanel', 'connectionPanel'].forEach(id => {
+    ['settingsPanel', 'columnsPanel', 'connectionPanel', 'eventLogPanel'].forEach(id => {
         const panel = document.getElementById(id);
         if (panel) panel.classList.remove('open');
     });
@@ -1716,7 +1834,7 @@ function reloadForResourceUpdate(nextResourceVersion, source) {
 
     console.info('🔄 Embedded web resources changed from %s to %s via %s. Reloading viewer...', state.resourceVersion, nextResourceVersion, source);
     updateStatus('connected', 'Updating UI...');
-    showInAppToast('Updating interface', 'A newer embedded web UI is available. Reloading now.');
+    showInAppToast('Updating interface', 'A newer embedded web UI is available. Reloading now.', { source: 'resource_update', eventType: 'resource_update', level: 'update' });
 
     sessionStorage.setItem('patris-resource-reload', JSON.stringify({
         from: state.resourceVersion,
@@ -1774,10 +1892,10 @@ async function sendNativeToast(title, message) {
         });
         const result = await response.json();
         if (result.native_error) {
-            showInAppToast('Native toast unavailable', result.native_error, { error: true });
+            showInAppToast('Native toast unavailable', result.native_error, { error: true, source: 'native_toast', eventType: 'toast', nativeError: result.native_error });
         }
     } catch (error) {
-        showInAppToast('Toast request failed', error.message, { error: true });
+        showInAppToast('Toast request failed', error.message, { error: true, source: 'native_toast', eventType: 'toast' });
     }
 }
 
@@ -1790,14 +1908,14 @@ async function requestSourceRefresh() {
     try {
         if (state.ws && state.ws.readyState === WebSocket.OPEN) {
             state.ws.send(JSON.stringify({ type: 'refresh' }));
-            showInAppToast('Refresh requested', 'The backend is reloading the data source.', { broadcastToTabs: true });
+            showInAppToast('Refresh requested', 'The backend is reloading the data source.', { broadcastToTabs: true, source: 'manual_refresh', eventType: 'refresh', level: 'update' });
         } else {
             await fetchInitialData();
-            showInAppToast('Refreshed', 'Data was reloaded over HTTP.', { broadcastToTabs: true });
+            showInAppToast('Refreshed', 'Data was reloaded over HTTP.', { broadcastToTabs: true, source: 'manual_refresh', eventType: 'refresh', level: 'success' });
         }
     } catch (error) {
         console.error('Failed to refresh data source:', error);
-        showInAppToast('Refresh failed', error.message, { error: true });
+        showInAppToast('Refresh failed', error.message, { error: true, source: 'manual_refresh', eventType: 'refresh' });
     } finally {
         if (button) {
             setTimeout(() => {
@@ -1950,15 +2068,30 @@ function handleWebSocketMessage(data) {
             
             // Flash favicon
             flashFavicon();
+
+            recordEventLog({
+                title: 'Rows changed',
+                message: titleMessage,
+                level: 'update',
+                type: 'row_updated',
+                source: 'websocket',
+                details: `added=${data.added?.length || 0} modified=${data.modified?.length || 0} deleted=${data.deleted?.length || 0}`
+            });
         }
     } else if (data.type === 'toast') {
-        showInAppToast(data.title, data.message, { error: !!data.native_error });
+        showInAppToast(data.title, data.message, {
+            error: !!data.native_error,
+            source: data.source || 'server',
+            eventType: data.source || 'toast',
+            timestamp: data.timestamp,
+            nativeError: data.native_error
+        });
         if (data.native_error) {
             console.warn('Native toast failed:', data.native_error);
         }
     } else if (data.type === 'config_update') {
         applyConfig(data.config, 'file watcher');
-        showInAppToast('Settings reloaded', 'Configuration file changes were applied.', { broadcastToTabs: true });
+        showInAppToast('Settings reloaded', 'Configuration file changes were applied.', { broadcastToTabs: true, source: 'config_update', eventType: 'config_update', level: 'update' });
     } else if (data.type === 'process_info') {
         applyProcessStatus(data);
     }
@@ -3406,6 +3539,7 @@ function init() {
     // Load settings
     loadSettings();
     applySettings();
+    renderEventLogCount();
     
     // Initialize theme
     initTheme();
@@ -3446,8 +3580,11 @@ function init() {
     document.getElementById('footerLastUpdate')?.addEventListener('click', cycleLastUpdateMode);
     document.getElementById('headerConnectionButton')?.addEventListener('click', () => openModalRoute('connection'));
     document.getElementById('footerConnectionButton')?.addEventListener('click', () => openModalRoute('connection'));
+    document.getElementById('eventLogBtn')?.addEventListener('click', () => openModalRoute('logs'));
+    document.getElementById('closeEventLog')?.addEventListener('click', closeRouteDialog);
+    document.getElementById('clearEventLog')?.addEventListener('click', () => clearEventLog());
     document.getElementById('headerFileChip')?.addEventListener('click', () => {
-        if (state.fileName) showInAppToast('Current source file', state.fileName, { broadcastToTabs: true });
+        if (state.fileName) showInAppToast('Current source file', state.fileName, { broadcastToTabs: true, source: 'file_info', eventType: 'source_info' });
     });
     
     // Export button and dropdown
@@ -3592,7 +3729,7 @@ function init() {
 
     document.getElementById('testNotificationSound').addEventListener('click', () => {
         playNotificationSound(true);
-        showInAppToast('Sound test', 'Notification audio was triggered.', { broadcastToTabs: true });
+        showInAppToast('Sound test', 'Notification audio was triggered.', { broadcastToTabs: true, source: 'sound_test', eventType: 'notification_test' });
     });
 
     document.getElementById('testNativeToast').addEventListener('click', () => {
