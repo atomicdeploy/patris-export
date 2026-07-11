@@ -1,4 +1,4 @@
-# <img src="web/assets/patris-api-icon.png" alt="" width="36" height="36" align="absmiddle"> Patris Export
+# <img src="assets/patris-api-icon.png" alt="" width="36" height="36" align="absmiddle"> Patris Export
 
 A fast and performant application for reading, parsing, and converting Paradox/BDE database files (`*.db`) from Patris81 software.
 
