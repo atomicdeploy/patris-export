@@ -634,6 +634,19 @@ body.is-loading .data-table {
     }
 }
 
+.data-table tbody tr.scroll-anchor-restored td {
+    animation: scroll-anchor-restored 0.8s ease-out;
+}
+
+@keyframes scroll-anchor-restored {
+    0% {
+        background-color: rgba(99, 102, 241, 0.2);
+    }
+    100% {
+        background-color: transparent;
+    }
+}
+
 // Buttons
 .btn {
     padding: 0.5rem 1rem;
