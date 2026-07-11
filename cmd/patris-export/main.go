@@ -112,9 +112,9 @@ Supports Persian/Farsi encoding conversion and file watching.
 	rootCmd.SetVersionTemplate(version.Detailed() + "\n")
 
 	// Global flags
-	rootCmd.PersistentFlags().StringArrayVar(&configFiles, "config", nil, "Path to patris-export config file; repeat to layer JSON/YAML/TOML files")
+	rootCmd.PersistentFlags().StringArrayVarP(&configFiles, "config", "c", nil, "Path to patris-export config file; repeat to layer JSON/YAML/TOML files")
 	rootCmd.PersistentFlags().StringVar(&dbFileFlag, "db", "", "Open a database file in one-shot native viewer mode when no subcommand is used")
-	rootCmd.PersistentFlags().StringVarP(&charMapFile, "charmap", "c", "", "Optional custom character mapping file; embedded Patris81 mapping is used by default")
+	rootCmd.PersistentFlags().StringVarP(&charMapFile, "charmap", "m", "", "Optional custom character mapping file; embedded Patris81 mapping is used by default")
 	rootCmd.PersistentFlags().StringVarP(&outputDir, "output", "o", ".", "Output directory for converted files (use '-' for stdout)")
 	rootCmd.PersistentFlags().StringVar(&tempDir, "temp-dir", "", "Temp directory for copied/downloaded database files (default: system temp)")
 	rootCmd.PersistentFlags().StringVar(&tempStrategy, "temp-strategy", "", "Temp storage strategy: auto, system, or memory (auto prefers /dev/shm on Linux for small files)")
@@ -138,7 +138,7 @@ Supports Persian/Farsi encoding conversion and file watching.
 	convertCmd.Flags().StringVar(&exportTable, "table", "", "Destination table name for SQLite/MySQL exports")
 	convertCmd.Flags().StringVar(&sqlitePath, "sqlite-path", "", "SQLite database path for --format sqlite")
 	convertCmd.Flags().StringVar(&sqliteTable, "sqlite-table", "", "SQLite table name for --format sqlite")
-	convertCmd.Flags().StringVar(&mysqlDSN, "mysql-dsn", "", "MySQL DSN for --format mysql (or PATRIS_MYSQL_DSN)")
+	convertCmd.Flags().StringVar(&mysqlDSN, "mysql-dsn", "", "MySQL DSN for --format mysql (or PATRIS_EXPORT_MYSQL_DSN)")
 	convertCmd.Flags().StringVar(&mysqlTable, "mysql-table", "", "MySQL table name for --format mysql")
 	convertCmd.Flags().IntVar(&exportBatchSize, "batch-size", 0, "Batch size hint for SQL exports")
 	convertCmd.Flags().StringVar(&sendURL, "send-url", "", "Webhook/API URL that receives initial and watch update payloads")
@@ -308,8 +308,8 @@ func runUpdate(cmd *cobra.Command, args []string) {
 	fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 	fmt.Println()
 
-	repoOwner := getenvDefault("PATRIS_REPO_OWNER", defaultRepoOwner)
-	repoName := getenvDefault("PATRIS_REPO_NAME", defaultRepoName)
+	repoOwner := getenvDefault("PATRIS_EXPORT_REPO_OWNER", defaultRepoOwner)
+	repoName := getenvDefault("PATRIS_EXPORT_REPO_NAME", defaultRepoName)
 	u := updater.NewUpdater(repoOwner, repoName)
 
 	platformName := u.GetCurrentPlatformArtifactName()
@@ -802,7 +802,7 @@ func writeConvertOutput(dbFile string, result recordpipe.Result, useStdout bool,
 	case "mysql":
 		dsn := firstNonEmpty(cfg.Export.MySQLDSN, mysqlDSN)
 		if dsn == "" {
-			return fmt.Errorf("mysql export requires --mysql-dsn or PATRIS_MYSQL_DSN")
+			return fmt.Errorf("mysql export requires --mysql-dsn or PATRIS_EXPORT_MYSQL_DSN")
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 		defer cancel()

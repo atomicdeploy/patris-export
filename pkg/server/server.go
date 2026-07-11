@@ -732,7 +732,7 @@ func (s *Server) charmapPayload(source, path string, mapping converter.CharMappi
 }
 
 func (s *Server) debugEnabled() bool {
-	if value := strings.TrimSpace(os.Getenv("PATRIS_DEBUG")); value != "" {
+	if value := strings.TrimSpace(os.Getenv("PATRIS_EXPORT_DEBUG")); value != "" {
 		return strings.EqualFold(value, "1") || strings.EqualFold(value, "true") || strings.EqualFold(value, "yes") || strings.EqualFold(value, "on")
 	}
 	return s.config != nil && s.config.Get().Runtime.Debug
@@ -1633,7 +1633,7 @@ func (s *Server) edgeUploadAuthorized(r *http.Request) bool {
 		token = s.config.Get().Edge.Token
 	}
 	if token == "" {
-		token = strings.TrimSpace(os.Getenv("PATRIS_EDGE_TOKEN"))
+		token = strings.TrimSpace(os.Getenv("PATRIS_EXPORT_EDGE_TOKEN"))
 	}
 	if token == "" {
 		return true

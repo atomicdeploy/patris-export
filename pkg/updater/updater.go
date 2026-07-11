@@ -111,11 +111,11 @@ func NewUpdater(repoOwner, repoName string) *Updater {
 
 // NewAPIUpdater creates an updater for manifest-based HTTP APIs. It
 // intentionally does not reuse GITHUB_TOKEN so repository credentials are not
-// sent to arbitrary update servers. Set PATRIS_UPDATE_TOKEN when the remote
+// sent to arbitrary update servers. Set PATRIS_EXPORT_UPDATE_TOKEN when the remote
 // manifest/executable endpoints require bearer authentication.
 func NewAPIUpdater() *Updater {
 	u := NewUpdater("", "patris-export")
-	u.apiToken = strings.TrimSpace(os.Getenv("PATRIS_UPDATE_TOKEN"))
+	u.apiToken = strings.TrimSpace(os.Getenv("PATRIS_EXPORT_UPDATE_TOKEN"))
 	return u
 }
 
@@ -873,8 +873,8 @@ func (u *Updater) FindPlatformArtifact(artifacts []Artifact) *Artifact {
 // repository information should be stored there for easy access and updates.
 func DeriveRepoInfoFromModule() (string, string, error) {
 	// First, try environment variables
-	repoOwner := os.Getenv("PATRIS_REPO_OWNER")
-	repoName := os.Getenv("PATRIS_REPO_NAME")
+	repoOwner := os.Getenv("PATRIS_EXPORT_REPO_OWNER")
+	repoName := os.Getenv("PATRIS_EXPORT_REPO_NAME")
 
 	if repoOwner != "" && repoName != "" {
 		return repoOwner, repoName, nil
@@ -908,7 +908,7 @@ func DeriveRepoInfoFromModule() (string, string, error) {
 		dir = parent
 	}
 
-	return "", "", fmt.Errorf("repository info not found: set PATRIS_REPO_OWNER and PATRIS_REPO_NAME environment variables, or run from within the project directory")
+	return "", "", fmt.Errorf("repository info not found: set PATRIS_EXPORT_REPO_OWNER and PATRIS_EXPORT_REPO_NAME environment variables, or run from within the project directory")
 }
 
 // parseGoMod parses go.mod file and extracts GitHub repository owner and name

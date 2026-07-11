@@ -69,18 +69,52 @@ func TestManagerSavesNativeFormat(t *testing.T) {
 		t.Fatal(err)
 	}
 	text := string(data)
-	if !containsAll(text, "[server]", "port = 18181", "[runtime]") {
+	if !containsAll(text, "[server]", "port = 18181") {
 		t.Fatalf("saved TOML did not contain expected sections:\n%s", text)
+	}
+	if contains(text, "temp_dir") || contains(text, "[runtime]") {
+		t.Fatalf("saved TOML should omit unchanged default runtime values:\n%s", text)
+	}
+}
+
+func TestManagerSavesOnlyChangedValues(t *testing.T) {
+	dir := t.TempDir()
+	jsonPath := filepath.Join(dir, "patris-export.json")
+	mgr, err := LoadFiles([]string{jsonPath})
+	if err != nil {
+		t.Fatalf("LoadFiles failed: %v", err)
+	}
+	if err := mgr.Update(func(cfg *Config) {
+		cfg.UI.Theme = "dark"
+		cfg.UI.PageSize = 100
+		cfg.Notifications.Native = true
+		cfg.Notifications.MaxRows = 3
+		cfg.Database.Path = "C:/Patris/data4/kala.db"
+	}); err != nil {
+		t.Fatalf("Update failed: %v", err)
+	}
+	data, err := os.ReadFile(jsonPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(data)
+	if !containsAll(text, `"ui"`, `"theme": "dark"`, `"database"`, `"path": "C:/Patris/data4/kala.db"`) {
+		t.Fatalf("saved JSON did not contain changed values:\n%s", text)
+	}
+	for _, needle := range []string{`"page_size"`, `"notification_sound_source"`, `"notifications"`, `"column_labels"`, `"schema_version"`} {
+		if contains(text, needle) {
+			t.Fatalf("saved JSON should omit default key %s:\n%s", needle, text)
+		}
 	}
 }
 
 func TestApplyEnvNotificationOptions(t *testing.T) {
-	t.Setenv("PATRIS_NOTIFICATIONS", "true")
-	t.Setenv("PATRIS_NOTIFY_CLIENT_CONNECTED", "true")
-	t.Setenv("PATRIS_NOTIFY_FILE_UPDATED", "true")
-	t.Setenv("PATRIS_NOTIFY_ROW_UPDATED", "true")
-	t.Setenv("PATRIS_NOTIFY_INCLUDE_ROW_VALUES", "true")
-	t.Setenv("PATRIS_NOTIFY_MAX_ROWS", "7")
+	t.Setenv("PATRIS_EXPORT_NOTIFICATIONS", "true")
+	t.Setenv("PATRIS_EXPORT_NOTIFY_CLIENT_CONNECTED", "true")
+	t.Setenv("PATRIS_EXPORT_NOTIFY_FILE_UPDATED", "true")
+	t.Setenv("PATRIS_EXPORT_NOTIFY_ROW_UPDATED", "true")
+	t.Setenv("PATRIS_EXPORT_NOTIFY_INCLUDE_ROW_VALUES", "true")
+	t.Setenv("PATRIS_EXPORT_NOTIFY_MAX_ROWS", "7")
 
 	cfg := Default()
 	ApplyEnv(&cfg)
@@ -93,8 +127,8 @@ func TestApplyEnvNotificationOptions(t *testing.T) {
 }
 
 func TestApplyEnvRuntimeTempPolicy(t *testing.T) {
-	t.Setenv("PATRIS_TEMP_STRATEGY", "tmpfs")
-	t.Setenv("PATRIS_TEMP_MEMORY_LIMIT_MB", "42")
+	t.Setenv("PATRIS_EXPORT_TEMP_STRATEGY", "tmpfs")
+	t.Setenv("PATRIS_EXPORT_TEMP_MEMORY_LIMIT_MB", "42")
 
 	cfg := Default()
 	ApplyEnv(&cfg)

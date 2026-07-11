@@ -19,12 +19,17 @@ const state = {
     processStatus: null,
     connectionStatus: { state: 'connecting', text: 'Connecting...' },
     connectionLog: [],
+    eventLog: [],
+    configNotificationDedupe: new Map(),
     lastUpdateAt: null,
     isInitialLoad: true,
     columnFilters: {},  // Store active filters per column: { fieldName: { type, value, ... } }
     hiddenColumns: new Set(),  // Track hidden columns
     columnOrder: [],
     openRangePanel: null,
+    scrollAnchor: null,
+    isRestoringScroll: false,
+    scrollSaveTimer: null,
     router: {
         route: '/viewer',
         outlet: null,
@@ -57,22 +62,48 @@ const state = {
     tabId: '',
     broadcastChannel: null,
     seenBroadcastMessages: new Set(),
+    revealedSettingsTabs: new Set(),
     dragDepth: 0,
     isUploadingSource: false
 };
 
 const CONFIG_STORAGE_KEY = 'patris-config';
 const SETTINGS_STORAGE_KEY = 'patris-settings';
+const SCROLL_ANCHOR_STORAGE_KEY = 'patris-viewer-scroll-anchor';
+const EVENT_LOG_STORAGE_KEY = 'patris-event-log';
+const MAX_EVENT_LOG_ENTRIES = 200;
+const CONFIG_NOTIFICATION_DEDUPE_STORAGE_KEY = 'patris-config-notification-dedupe';
+const CONFIG_NOTIFICATION_DEDUPE_TTL_MS = 5000;
 const RESOURCE_POLL_INTERVAL_MS = 30000;
 const BROADCAST_CHANNEL_NAME = 'patris-export-frontend';
 const BROADCAST_STORAGE_KEY = 'patris-broadcast-message';
 const BROADCAST_MESSAGE_TTL_MS = 30000;
+const INTERNAL_RELOAD_QUERY_PARAMS = ['resource_version', 'reloaded_at'];
+
+cleanInternalReloadUrl();
 
 function createTabId() {
     if (window.crypto?.randomUUID) {
         return window.crypto.randomUUID();
     }
     return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+}
+
+function cleanInternalReloadUrl() {
+    const cleanUrl = stripInternalReloadParams(new URL(window.location.href));
+    if (cleanUrl.href !== window.location.href) {
+        history.replaceState(history.state, '', cleanUrl.pathname + cleanUrl.search + cleanUrl.hash);
+    }
+}
+
+function stripInternalReloadParams(url) {
+    INTERNAL_RELOAD_QUERY_PARAMS.forEach(param => url.searchParams.delete(param));
+    return url;
+}
+
+function visibleLocationBase() {
+    const url = stripInternalReloadParams(new URL(window.location.href));
+    return url.pathname + url.search;
 }
 
 function initFrontendBroadcast() {
@@ -173,6 +204,9 @@ function handleFrontendBroadcast(message) {
         case 'toast':
             showInAppToast(message.payload?.title, message.payload?.message, message.payload?.options || {});
             break;
+        case 'event-log:clear':
+            clearEventLog({ broadcast: false });
+            break;
         default:
             console.info('Ignored unknown cross-tab message:', message.type);
     }
@@ -234,6 +268,26 @@ function loadSettings() {
             state.columnFilters = {};
         }
     }
+
+    const savedScrollAnchor = localStorage.getItem(SCROLL_ANCHOR_STORAGE_KEY);
+    if (savedScrollAnchor) {
+        try {
+            state.scrollAnchor = JSON.parse(savedScrollAnchor);
+        } catch (e) {
+            state.scrollAnchor = null;
+        }
+    }
+
+    const savedEventLog = localStorage.getItem(EVENT_LOG_STORAGE_KEY);
+    if (savedEventLog) {
+        try {
+            state.eventLog = JSON.parse(savedEventLog)
+                .filter(entry => entry && entry.title)
+                .slice(0, MAX_EVENT_LOG_ENTRIES);
+        } catch (e) {
+            state.eventLog = [];
+        }
+    }
 }
 
 // Save settings to localStorage
@@ -246,7 +300,8 @@ function saveSettings(options = {}) {
 }
 
 function applyConfig(config, source = 'server') {
-    if (!config) return;
+    if (!config) return null;
+    const diff = buildConfigDiff(state.config, config);
     state.config = config;
     localStorage.setItem(CONFIG_STORAGE_KEY, JSON.stringify(config));
     if (config.ui) {
@@ -262,7 +317,7 @@ function applyConfig(config, source = 'server') {
             pageSize: config.ui.page_size || state.settings.pageSize,
             playNotificationSound: !!config.ui.play_notification_sound,
             notificationSoundSource: config.ui.notification_sound_source || state.settings.notificationSoundSource,
-            showFooter: config.ui.show_footer !== false,
+            showFooter: config.ui.show_footer === undefined ? state.settings.showFooter : config.ui.show_footer !== false,
             lastUpdateDisplayMode: config.ui.last_update_display_mode || state.settings.lastUpdateDisplayMode,
             enableRowColoring: config.ui.enable_row_coloring !== false,
             rowColorGroup: config.ui.row_color_group || state.settings.rowColorGroup,
@@ -276,6 +331,170 @@ function applyConfig(config, source = 'server') {
     }
     if (source !== 'local') {
         console.info('⚙️ Configuration applied from %s', source, config);
+    }
+    return diff;
+}
+
+function buildConfigDiff(previousConfig, nextConfig) {
+    const before = flattenConfigForDiff(previousConfig || {});
+    const after = flattenConfigForDiff(nextConfig || {});
+    const paths = new Set([...Object.keys(before), ...Object.keys(after)]);
+    const changed = [];
+
+    [...paths].sort().forEach(path => {
+        const beforeExists = Object.prototype.hasOwnProperty.call(before, path);
+        const afterExists = Object.prototype.hasOwnProperty.call(after, path);
+        const beforeValue = beforeExists ? before[path] : undefined;
+        const afterValue = afterExists ? after[path] : undefined;
+        if (beforeExists !== afterExists || stableStringify(beforeValue) !== stableStringify(afterValue)) {
+            changed.push({ path, before: beforeValue, after: afterValue });
+        }
+    });
+
+    if (changed.length === 0) {
+        return { changed: [], signature: '', dedupeKey: '', message: '', details: '' };
+    }
+
+    const signature = stableStringify(changed);
+    return {
+        changed,
+        signature,
+        dedupeKey: hashString(signature),
+        message: formatConfigDiffMessage(changed),
+        details: formatConfigDiffDetails(changed)
+    };
+}
+
+function flattenConfigForDiff(value, prefix = '', output = {}) {
+    if (Array.isArray(value)) {
+        output[prefix || '$'] = normalizeConfigValue(value);
+        return output;
+    }
+
+    if (value && typeof value === 'object') {
+        const keys = Object.keys(value).sort();
+        if (keys.length === 0 && prefix) {
+            output[prefix] = {};
+        }
+        keys.forEach(key => {
+            const nextPrefix = prefix ? `${prefix}.${key}` : key;
+            flattenConfigForDiff(value[key], nextPrefix, output);
+        });
+        return output;
+    }
+
+    output[prefix || '$'] = value;
+    return output;
+}
+
+function normalizeConfigValue(value) {
+    if (Array.isArray(value)) {
+        return value.map(normalizeConfigValue);
+    }
+    if (value && typeof value === 'object') {
+        return Object.keys(value).sort().reduce((acc, key) => {
+            acc[key] = normalizeConfigValue(value[key]);
+            return acc;
+        }, {});
+    }
+    return value;
+}
+
+function stableStringify(value) {
+    return JSON.stringify(normalizeConfigValue(value));
+}
+
+function hashString(value) {
+    let hash = 2166136261;
+    for (let i = 0; i < value.length; i += 1) {
+        hash ^= value.charCodeAt(i);
+        hash = Math.imul(hash, 16777619);
+    }
+    return (hash >>> 0).toString(16);
+}
+
+function formatConfigDiffMessage(changed) {
+    if (changed.length === 1) {
+        const change = changed[0];
+        return `${change.path}: ${formatConfigDiffValue(change.before)} -> ${formatConfigDiffValue(change.after)}`;
+    }
+    const names = changed.slice(0, 4).map(change => change.path).join(', ');
+    const suffix = changed.length > 4 ? ', ...' : '';
+    return `${changed.length} settings changed: ${names}${suffix}`;
+}
+
+function formatConfigDiffDetails(changed) {
+    return changed.slice(0, 12)
+        .map(change => `${change.path}: ${formatConfigDiffValue(change.before)} -> ${formatConfigDiffValue(change.after)}`)
+        .join('\n');
+}
+
+function formatConfigDiffValue(value) {
+    if (typeof value === 'undefined') return 'unset';
+    if (value === null) return 'null';
+    if (typeof value === 'string') return value === '' ? 'empty' : value;
+    if (typeof value === 'boolean' || typeof value === 'number') return String(value);
+    const text = stableStringify(value);
+    return text.length > 80 ? `${text.slice(0, 77)}...` : text;
+}
+
+function shouldNotifyConfigReload(diff) {
+    if (!diff || !diff.changed?.length || !diff.dedupeKey) {
+        return false;
+    }
+
+    const now = Date.now();
+    for (const [key, timestamp] of state.configNotificationDedupe) {
+        if (now - timestamp > CONFIG_NOTIFICATION_DEDUPE_TTL_MS) {
+            state.configNotificationDedupe.delete(key);
+        }
+    }
+
+    const localTimestamp = state.configNotificationDedupe.get(diff.dedupeKey);
+    if (localTimestamp && now - localTimestamp <= CONFIG_NOTIFICATION_DEDUPE_TTL_MS) {
+        return false;
+    }
+
+    const sharedCache = loadConfigNotificationDedupeCache(now);
+    const sharedTimestamp = sharedCache[diff.dedupeKey];
+    if (sharedTimestamp && now - sharedTimestamp <= CONFIG_NOTIFICATION_DEDUPE_TTL_MS) {
+        state.configNotificationDedupe.set(diff.dedupeKey, sharedTimestamp);
+        return false;
+    }
+
+    state.configNotificationDedupe.set(diff.dedupeKey, now);
+    sharedCache[diff.dedupeKey] = now;
+    saveConfigNotificationDedupeCache(sharedCache, now);
+    return true;
+}
+
+function loadConfigNotificationDedupeCache(now = Date.now()) {
+    try {
+        const raw = localStorage.getItem(CONFIG_NOTIFICATION_DEDUPE_STORAGE_KEY);
+        const parsed = raw ? JSON.parse(raw) : {};
+        return Object.entries(parsed).reduce((acc, [key, timestamp]) => {
+            if (Number.isFinite(timestamp) && now - timestamp <= CONFIG_NOTIFICATION_DEDUPE_TTL_MS) {
+                acc[key] = timestamp;
+            }
+            return acc;
+        }, {});
+    } catch (error) {
+        console.warn('Failed to read config notification dedupe cache:', error);
+        return {};
+    }
+}
+
+function saveConfigNotificationDedupeCache(cache, now = Date.now()) {
+    try {
+        const compact = Object.entries(cache).reduce((acc, [key, timestamp]) => {
+            if (Number.isFinite(timestamp) && now - timestamp <= CONFIG_NOTIFICATION_DEDUPE_TTL_MS) {
+                acc[key] = timestamp;
+            }
+            return acc;
+        }, {});
+        localStorage.setItem(CONFIG_NOTIFICATION_DEDUPE_STORAGE_KEY, JSON.stringify(compact));
+    } catch (error) {
+        console.warn('Failed to persist config notification dedupe cache:', error);
     }
 }
 
@@ -335,7 +554,7 @@ async function saveConfigToServer(config) {
         console.info('💾 Settings synced to config file.');
     } catch (error) {
         console.error('❌ Failed to sync settings to config file:', error);
-        showInAppToast('Settings save failed', error.message, { error: true, broadcastToTabs: true });
+        showInAppToast('Settings save failed', error.message, { error: true, broadcastToTabs: true, source: 'config_update', eventType: 'config_update' });
     }
 }
 
@@ -523,6 +742,37 @@ const JalaliUtils = {
         // Return as object for comparison
         return { year, month, day };
     },
+
+    format(date) {
+        if (!date) return '';
+        return [
+            String(date.year).padStart(2, '0'),
+            String(date.month).padStart(2, '0'),
+            String(date.day).padStart(2, '0')
+        ].join('.');
+    },
+
+    daysInMonth(year, month) {
+        if (month >= 1 && month <= 6) return 31;
+        if (month >= 7 && month <= 11) return 30;
+        return 29;
+    },
+
+    addMonths(date, delta) {
+        if (!date) return { year: 0, month: 1, day: 1 };
+        let year = date.year;
+        let month = date.month + delta;
+        while (month < 1) {
+            month += 12;
+            year -= 1;
+        }
+        while (month > 12) {
+            month -= 12;
+            year += 1;
+        }
+        const day = Math.min(date.day, JalaliUtils.daysInMonth(year, month));
+        return { year, month, day };
+    },
     
     // Compare two Jalali dates (-1 if a < b, 0 if equal, 1 if a > b)
     compare(a, b) {
@@ -535,6 +785,13 @@ const JalaliUtils = {
     // Check if string looks like a Jalali date
     isJalaliDate(str) {
         return JalaliUtils.parse(str) !== null;
+    },
+
+    clamp(date, min, max) {
+        if (!date) return date;
+        if (min && JalaliUtils.compare(date, min) < 0) return min;
+        if (max && JalaliUtils.compare(date, max) > 0) return max;
+        return date;
     }
 };
 
@@ -738,16 +995,39 @@ function applyFooterVisibility() {
     document.body.classList.toggle('footer-hidden', !showFooter);
     const footer = document.getElementById('appFooter');
     if (footer) footer.hidden = !showFooter;
-    const footerToggleBtn = document.getElementById('footerToggleBtn');
-    if (footerToggleBtn) {
-        footerToggleBtn.title = showFooter ? 'Hide footer' : 'Show footer';
-    }
+    renderFooterToggleButton(document.getElementById('footerToggleBtn'), showFooter);
+    renderFooterToggleButton(document.getElementById('footerCollapseBtn'), showFooter);
 }
 
 function toggleFooterVisibility() {
-    state.settings.showFooter = state.settings.showFooter === false;
+    state.settings.showFooter = !(state.settings.showFooter !== false);
     applySettings();
     saveSettings();
+}
+
+function renderFooterToggleButton(button, showFooter) {
+    if (!button) return;
+    if (button.dataset.footerToggleBound !== '1') {
+        const replacement = button.cloneNode(false);
+        replacement.dataset.footerToggleBound = '1';
+        replacement.addEventListener('click', handleFooterToggleClick);
+        button.replaceWith(replacement);
+        button = replacement;
+    }
+    button.title = showFooter ? 'Hide footer' : 'Show footer';
+    button.setAttribute('aria-pressed', String(showFooter));
+    button.setAttribute('aria-label', showFooter ? 'Hide footer' : 'Show footer');
+    button.innerHTML = showFooter
+        ? '<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M6 9l6 6 6-6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>'
+        : '<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M6 15l6-6 6 6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+}
+
+function handleFooterToggleClick(event) {
+    if (event) {
+        event.preventDefault();
+        event.stopPropagation();
+    }
+    toggleFooterVisibility();
 }
 
 function formatRelativeTime(date) {
@@ -823,6 +1103,121 @@ function initTableWheelScroll() {
     }, { passive: false });
 }
 
+function initScrollAnchorTracking() {
+    const tableContainer = document.querySelector('.table-container');
+    if (!tableContainer) return;
+    tableContainer.addEventListener('scroll', () => scheduleSaveScrollAnchor(), { passive: true });
+    window.addEventListener('beforeunload', () => saveScrollAnchorFromViewport({ immediate: true }));
+    document.addEventListener('visibilitychange', () => {
+        if (document.visibilityState === 'hidden') {
+            saveScrollAnchorFromViewport({ immediate: true });
+        }
+    });
+}
+
+function scheduleSaveScrollAnchor() {
+    if (state.isRestoringScroll) return;
+    clearTimeout(state.scrollSaveTimer);
+    state.scrollSaveTimer = setTimeout(() => saveScrollAnchorFromViewport(), 120);
+}
+
+function saveScrollAnchorFromViewport(options = {}) {
+    const anchor = getViewportScrollAnchor();
+    if (!anchor) return;
+    state.scrollAnchor = anchor;
+    try {
+        localStorage.setItem(SCROLL_ANCHOR_STORAGE_KEY, JSON.stringify(anchor));
+    } catch (error) {
+        if (options.immediate) return;
+        console.warn('Failed to save viewer scroll anchor:', error);
+    }
+}
+
+function getViewportScrollAnchor() {
+    const tableContainer = document.querySelector('.table-container');
+    if (!tableContainer || tableContainer.hidden) return null;
+    const rows = [...document.querySelectorAll('#tableBody tr[data-code]')];
+    if (rows.length === 0) return null;
+    const containerRect = tableContainer.getBoundingClientRect();
+    const stickyHeader = document.querySelector('.data-table thead');
+    const headerHeight = stickyHeader?.getBoundingClientRect().height || 0;
+    const targetY = containerRect.top + headerHeight + 2;
+    let best = rows[0];
+    let bestDistance = Number.POSITIVE_INFINITY;
+    for (const row of rows) {
+        const rect = row.getBoundingClientRect();
+        if (rect.bottom < targetY) continue;
+        const distance = Math.abs(rect.top - targetY);
+        if (distance < bestDistance) {
+            best = row;
+            bestDistance = distance;
+        }
+        if (rect.top >= targetY) break;
+    }
+    return {
+        code: best.dataset.code,
+        offset: Math.round(best.getBoundingClientRect().top - targetY),
+        scrollTop: Math.round(tableContainer.scrollTop),
+        scrollLeft: Math.round(tableContainer.scrollLeft),
+        source: state.fileName || '',
+        sortField: state.sortField,
+        sortDirection: state.sortDirection,
+        savedAt: Date.now()
+    };
+}
+
+function persistScrollAnchorForCode(code) {
+    if (!code) return;
+    const tableContainer = document.querySelector('.table-container');
+    const anchor = {
+        code: String(code),
+        offset: 0,
+        scrollTop: Math.round(tableContainer?.scrollTop || 0),
+        scrollLeft: Math.round(tableContainer?.scrollLeft || 0),
+        source: state.fileName || '',
+        sortField: state.sortField,
+        sortDirection: state.sortDirection,
+        savedAt: Date.now()
+    };
+    state.scrollAnchor = anchor;
+    try {
+        localStorage.setItem(SCROLL_ANCHOR_STORAGE_KEY, JSON.stringify(anchor));
+    } catch (error) {
+        console.warn('Failed to save viewer scroll anchor:', error);
+    }
+}
+
+function restoreScrollAnchorAfterRender(options = {}) {
+    const anchor = state.scrollAnchor;
+    if (!anchor?.code) return;
+    if (anchor.source && state.fileName && anchor.source !== state.fileName) return;
+    const tableContainer = document.querySelector('.table-container');
+    if (!tableContainer || tableContainer.hidden) return;
+    requestAnimationFrame(() => {
+        const row = document.querySelector(`#tableBody tr[data-code="${cssEscape(anchor.code)}"]`);
+        if (!row) return;
+        const stickyHeader = document.querySelector('.data-table thead');
+        const headerHeight = stickyHeader?.getBoundingClientRect().height || 0;
+        const currentTop = row.offsetTop;
+        const targetTop = Math.max(0, currentTop - headerHeight - (Number.isFinite(anchor.offset) ? anchor.offset : 0));
+        state.isRestoringScroll = true;
+        tableContainer.scrollTop = targetTop;
+        if (Number.isFinite(anchor.scrollLeft)) {
+            tableContainer.scrollLeft = anchor.scrollLeft;
+        }
+        row.classList.toggle('scroll-anchor-restored', options.flash !== false);
+        setTimeout(() => {
+            row.classList.remove('scroll-anchor-restored');
+            state.isRestoringScroll = false;
+        }, 350);
+    });
+}
+
+function cssEscape(value) {
+    if (window.CSS?.escape) return CSS.escape(String(value));
+    return String(value).replace(/["\\]/g, '\\$&');
+}
+
 function initDialogActionButtons() {
     [
         ['settingsPanel', 'closeSettings'],
@@ -831,7 +1226,7 @@ function initDialogActionButtons() {
         const closeButton = document.getElementById(closeId);
         if (!closeButton || closeButton.dataset.normalizedDialogActions) return;
         closeButton.classList.add('dialog-close-btn');
-        closeButton.innerHTML = '&times;';
+        closeButton.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12" /><path d="M18 6L6 18" /></svg>';
         const menuButton = document.createElement('button');
         menuButton.type = 'button';
         menuButton.className = 'btn btn-icon dialog-menu-btn';
@@ -852,7 +1247,8 @@ const ROUTES = {
 const MODAL_ROUTES = {
     settings: 'settingsPanel',
     columns: 'columnsPanel',
-    connection: 'connectionPanel'
+    connection: 'connectionPanel',
+    logs: 'eventLogPanel'
 };
 
 function initRouter() {
@@ -891,14 +1287,15 @@ function handleRouterClick(event) {
     if (url.pathname.startsWith('/api/') || url.pathname.startsWith('/static/') || url.pathname === '/ws') return;
     if (url.pathname in ROUTES) {
         event.preventDefault();
+        stripInternalReloadParams(url);
         navigateTo(url.pathname + url.search + url.hash);
     }
 }
 
 function navigateTo(url, options = {}) {
     const { replace = false } = options;
-    const next = new URL(url, window.location.href);
-    const current = window.location.pathname + window.location.search + window.location.hash;
+    const next = stripInternalReloadParams(new URL(url, window.location.href));
+    const current = visibleLocationBase() + window.location.hash;
     const target = next.pathname + next.search + next.hash;
     if (current !== target) {
         if (replace) {
@@ -947,6 +1344,7 @@ async function showPartialRoute(route) {
     if (state.router.tableContainer) state.router.tableContainer.hidden = true;
     document.body.classList.add('partial-route-active');
     state.router.outlet.hidden = false;
+    resetPartialRouteScroll();
     state.router.outlet.innerHTML = '<div class="route-loading">Loading...</div>';
     const controller = new AbortController();
     state.router.partialController = controller;
@@ -960,10 +1358,17 @@ async function showPartialRoute(route) {
         const html = await response.text();
         if (state.router.partialController !== controller) return;
         renderPartialHTML(html);
+        resetPartialRouteScroll();
     } catch (error) {
         if (error.name === 'AbortError') return;
         state.router.outlet.innerHTML = `<div class="route-error"><strong>Could not load page.</strong><span>${escapeHtml(error.message)}</span></div>`;
+        resetPartialRouteScroll();
     }
+}
+
+function resetPartialRouteScroll() {
+    document.querySelector('.main-content')?.scrollTo?.({ top: 0, left: 0, behavior: 'auto' });
+    state.router.outlet?.scrollTo?.({ top: 0, left: 0, behavior: 'auto' });
 }
 
 function cancelPartialRoute() {
@@ -1018,10 +1423,11 @@ ${sourceScript.textContent}
 
 function openModalRoute(name, options = {}) {
     if (!(name in MODAL_ROUTES)) return;
+    const base = visibleLocationBase();
     if (options.replace) {
-        history.replaceState(history.state, '', `${window.location.pathname}${window.location.search}#${name}`);
+        history.replaceState(history.state, '', `${base}#${name}`);
     } else if (window.location.hash !== `#${name}`) {
-        history.pushState(history.state, '', `${window.location.pathname}${window.location.search}#${name}`);
+        history.pushState(history.state, '', `${base}#${name}`);
     }
     applyModalHash();
 }
@@ -1033,6 +1439,7 @@ function applyModalHash() {
         if (panelId === 'columnsPanel') renderColumnManager();
         if (panelId === 'settingsPanel') applyConfigToSettingsForm();
         if (panelId === 'connectionPanel') renderConnectionPanel();
+        if (panelId === 'eventLogPanel') renderEventLogPanel();
         openPanel(panelId);
         return;
     }
@@ -1042,19 +1449,20 @@ function applyModalHash() {
 }
 
 function activePanelId() {
-    return ['settingsPanel', 'columnsPanel', 'connectionPanel']
+    return ['settingsPanel', 'columnsPanel', 'connectionPanel', 'eventLogPanel']
         .find(id => document.getElementById(id)?.classList.contains('open')) || '';
 }
 
 function closeRouteDialog() {
     closePanels();
     if (window.location.hash) {
-        history.pushState(history.state, '', `${window.location.pathname}${window.location.search}`);
+        history.pushState(history.state, '', visibleLocationBase());
     }
 }
 
 function applyConfigToSettingsForm() {
     const cfg = state.config || {};
+    updateSettingsTabVisibility();
     setValue('settingsTheme', cfg.ui?.theme || localStorage.getItem('theme') || 'system');
     setValue('serverHost', cfg.server?.host || '');
     setValue('serverPort', cfg.server?.port || '');
@@ -1161,40 +1569,74 @@ function playGeneratedNotificationSound() {
     }
 
     const audioContext = new AudioContextClass();
+    const now = audioContext.currentTime;
     const masterGain = audioContext.createGain();
-    masterGain.gain.setValueAtTime(0.0001, audioContext.currentTime);
-    masterGain.gain.exponentialRampToValueAtTime(0.18, audioContext.currentTime + 0.015);
-    masterGain.gain.exponentialRampToValueAtTime(0.0001, audioContext.currentTime + 0.62);
-    masterGain.connect(audioContext.destination);
+    const compressor = audioContext.createDynamicsCompressor();
+    const softFilter = audioContext.createBiquadFilter();
+    const delay = audioContext.createDelay(0.24);
+    const delayGain = audioContext.createGain();
+    const dryGain = audioContext.createGain();
 
-    const notes = [
-        { frequency: 659.25, start: 0.00, duration: 0.13 },
-        { frequency: 783.99, start: 0.12, duration: 0.13 },
-        { frequency: 987.77, start: 0.24, duration: 0.16 },
-        { frequency: 1318.51, start: 0.40, duration: 0.18 }
+    masterGain.gain.setValueAtTime(0.0001, now);
+    masterGain.gain.linearRampToValueAtTime(0.16, now + 0.035);
+    masterGain.gain.exponentialRampToValueAtTime(0.0001, now + 0.92);
+
+    compressor.threshold.setValueAtTime(-26, now);
+    compressor.knee.setValueAtTime(24, now);
+    compressor.ratio.setValueAtTime(3, now);
+    compressor.attack.setValueAtTime(0.012, now);
+    compressor.release.setValueAtTime(0.18, now);
+
+    softFilter.type = 'lowpass';
+    softFilter.frequency.setValueAtTime(5200, now);
+    softFilter.Q.setValueAtTime(0.35, now);
+
+    delay.delayTime.setValueAtTime(0.085, now);
+    delayGain.gain.setValueAtTime(0.12, now);
+    dryGain.gain.setValueAtTime(0.88, now);
+
+    compressor.connect(softFilter);
+    softFilter.connect(audioContext.destination);
+    masterGain.connect(dryGain);
+    dryGain.connect(compressor);
+    masterGain.connect(delay);
+    delay.connect(delayGain);
+    delayGain.connect(compressor);
+    if (audioContext.state === 'suspended') {
+        audioContext.resume().catch(() => {});
+    }
+
+    const tones = [
+        { frequency: 659.25, start: 0.00, duration: 0.42, peak: 0.34, attack: 0.028 },
+        { frequency: 987.77, start: 0.12, duration: 0.46, peak: 0.28, attack: 0.032 },
+        { frequency: 493.88, start: 0.02, duration: 0.54, peak: 0.075, attack: 0.04 },
+        { frequency: 1318.51, start: 0.03, duration: 0.28, peak: 0.045, attack: 0.02 },
+        { frequency: 1975.53, start: 0.16, duration: 0.24, peak: 0.035, attack: 0.02 }
     ];
 
-    notes.forEach(note => {
+    tones.forEach(tone => {
         const oscillator = audioContext.createOscillator();
         const noteGain = audioContext.createGain();
-        const startTime = audioContext.currentTime + note.start;
-        const endTime = startTime + note.duration;
+        const startTime = now + 0.025 + tone.start;
+        const endTime = startTime + tone.duration;
 
-        oscillator.type = 'triangle';
-        oscillator.frequency.setValueAtTime(note.frequency, startTime);
+        oscillator.type = 'sine';
+        oscillator.frequency.setValueAtTime(tone.frequency, startTime);
+        oscillator.detune.setValueAtTime(tone.detune || 0, startTime);
         noteGain.gain.setValueAtTime(0.0001, startTime);
-        noteGain.gain.exponentialRampToValueAtTime(0.5, startTime + 0.015);
+        noteGain.gain.linearRampToValueAtTime(tone.peak, startTime + tone.attack);
+        noteGain.gain.exponentialRampToValueAtTime(tone.peak * 0.45, startTime + tone.duration * 0.45);
         noteGain.gain.exponentialRampToValueAtTime(0.0001, endTime);
 
         oscillator.connect(noteGain);
         noteGain.connect(masterGain);
         oscillator.start(startTime);
-        oscillator.stop(endTime + 0.02);
+        oscillator.stop(endTime + 0.05);
     });
 
     setTimeout(() => {
         audioContext.close().catch(() => {});
-    }, 800);
+    }, 1100);
 }
 
 // Flash page title with notification info
@@ -1283,6 +1725,18 @@ function setFavicon(href) {
 }
 
 function showInAppToast(title, message, options = {}) {
+    if (options.log !== false) {
+        recordEventLog({
+            title: title || 'Patris Export',
+            message: message || '',
+            level: options.error || options.nativeError ? 'warning' : (options.level || 'info'),
+            type: options.eventType || options.source || 'toast',
+            source: options.source || 'web-ui',
+            timestamp: options.timestamp,
+            details: options.nativeError || options.details || ''
+        });
+    }
+
     let container = document.getElementById('toastContainer');
     if (!container) {
         container = document.createElement('div');
@@ -1321,6 +1775,93 @@ function showInAppToast(title, message, options = {}) {
             options: { ...options, broadcastToTabs: false }
         });
     }
+}
+
+function recordEventLog(entry = {}) {
+    const logEntry = {
+        id: entry.id || createTabId(),
+        time: entry.timestamp || new Date().toISOString(),
+        level: normalizeEventLevel(entry.level),
+        type: String(entry.type || 'event'),
+        source: String(entry.source || entry.type || 'web-ui'),
+        title: String(entry.title || 'Patris Export event'),
+        message: String(entry.message || ''),
+        details: entry.details ? String(entry.details) : ''
+    };
+    state.eventLog.unshift(logEntry);
+    state.eventLog = state.eventLog.slice(0, MAX_EVENT_LOG_ENTRIES);
+    saveEventLog();
+    renderEventLogCount();
+    renderEventLogPanel();
+}
+
+function normalizeEventLevel(level) {
+    if (['error', 'warning', 'success', 'update', 'info'].includes(level)) {
+        return level;
+    }
+    return 'info';
+}
+
+function saveEventLog() {
+    try {
+        localStorage.setItem(EVENT_LOG_STORAGE_KEY, JSON.stringify(state.eventLog));
+    } catch (error) {
+        console.warn('Failed to persist event log:', error);
+    }
+}
+
+function clearEventLog(options = {}) {
+    state.eventLog = [];
+    saveEventLog();
+    renderEventLogCount();
+    renderEventLogPanel();
+    if (options.broadcast !== false) {
+        publishFrontendBroadcast('event-log:clear');
+    }
+}
+
+function renderEventLogCount() {
+    const count = document.getElementById('eventLogCount');
+    if (count) {
+        count.textContent = state.eventLog.length.toLocaleString();
+        count.hidden = state.eventLog.length === 0;
+    }
+}
+
+function renderEventLogPanel() {
+    const summary = document.getElementById('eventLogSummary');
+    const list = document.getElementById('eventLogList');
+    if (!summary || !list) return;
+
+    const counts = state.eventLog.reduce((acc, entry) => {
+        acc[entry.level] = (acc[entry.level] || 0) + 1;
+        return acc;
+    }, {});
+    summary.innerHTML = `
+        <div><span>Total</span><strong>${state.eventLog.length.toLocaleString()}</strong></div>
+        <div><span>Updates</span><strong>${(counts.update || 0).toLocaleString()}</strong></div>
+        <div><span>Warnings</span><strong>${((counts.warning || 0) + (counts.error || 0)).toLocaleString()}</strong></div>
+    `;
+
+    if (state.eventLog.length === 0) {
+        list.innerHTML = '<div class="event-log-empty">No notification-capable events have been captured yet.</div>';
+        return;
+    }
+
+    list.innerHTML = state.eventLog.map(entry => `
+        <article class="event-log-entry ${escapeHtml(entry.level)}">
+            <div class="event-log-entry-meta">
+                <time>${formatDateTime(new Date(entry.time))}</time>
+                <span>${escapeHtml(entry.type)}</span>
+                <span>${escapeHtml(entry.source)}</span>
+            </div>
+            <div class="event-log-entry-body">
+                <strong>${escapeHtml(entry.title)}</strong>
+                ${entry.message ? `<p>${escapeHtml(entry.message)}</p>` : ''}
+                ${entry.details ? `<code>${escapeHtml(entry.details)}</code>` : ''}
+            </div>
+        </article>
+    `).join('');
 }
 
 function isSupportedSourceFile(file) {
@@ -1362,7 +1903,7 @@ async function uploadDroppedSource(file) {
     }
     if (!isSupportedSourceFile(file)) {
         setDropOverlayVisible(true, 'invalid');
-        showInAppToast('Unsupported file', 'Drop a .db or .json file to switch the active source.', { error: true });
+        showInAppToast('Unsupported file', 'Drop a .db or .json file to switch the active source.', { error: true, source: 'source_drop', eventType: 'source_switch' });
         setTimeout(() => setDropOverlayVisible(false), 1500);
         return;
     }
@@ -1399,7 +1940,7 @@ async function uploadDroppedSource(file) {
 
         state.fileName = payload.path || payload.file || file.name;
         updateFooterFileName();
-        showInAppToast('Source loaded', `${payload.file || file.name} is now active (${payload.records ?? 'unknown'} records).`, { broadcastToTabs: true });
+        showInAppToast('Source loaded', `${payload.file || file.name} is now active (${payload.records ?? 'unknown'} records).`, { broadcastToTabs: true, source: 'source_drop', eventType: 'source_switch', level: 'success' });
 
         if (!state.ws || state.ws.readyState !== WebSocket.OPEN) {
             await fetchInitialData();
@@ -1407,7 +1948,7 @@ async function uploadDroppedSource(file) {
         }
     } catch (error) {
         console.error('Failed to switch dropped source:', error);
-        showInAppToast('Source switch failed', error.message, { error: true });
+        showInAppToast('Source switch failed', error.message, { error: true, source: 'source_drop', eventType: 'source_switch' });
         setLoadingState(false);
     } finally {
         state.isUploadingSource = false;
@@ -1466,7 +2007,7 @@ function openPanel(panelId) {
 }
 
 function closePanels() {
-    ['settingsPanel', 'columnsPanel', 'connectionPanel'].forEach(id => {
+    ['settingsPanel', 'columnsPanel', 'connectionPanel', 'eventLogPanel'].forEach(id => {
         const panel = document.getElementById(id);
         if (panel) panel.classList.remove('open');
     });
@@ -1480,10 +2021,18 @@ function initSettingsTabs() {
             setActiveSettingsTab(tab.dataset.settingsTab);
         });
     });
+    updateSettingsTabVisibility();
 }
 
 function setActiveSettingsTab(target) {
-    const tab = document.querySelector(`[data-settings-tab="${target}"]`) || document.querySelector('[data-settings-tab="ui"]');
+    if (!target) target = 'ui';
+    const requestedTab = document.querySelector(`[data-settings-tab="${target}"]`);
+    if (requestedTab?.hidden) {
+        state.revealedSettingsTabs.add(target);
+        updateSettingsTabVisibility({ preserveActive: true });
+    }
+    const tab = document.querySelector(`[data-settings-tab="${target}"]:not([hidden])`)
+        || document.querySelector('[data-settings-tab="ui"]');
     const paneName = tab?.dataset.settingsTab || 'ui';
     document.querySelectorAll('[data-settings-tab]').forEach(item => {
         item.classList.toggle('active', item === tab);
@@ -1491,6 +2040,58 @@ function setActiveSettingsTab(target) {
     document.querySelectorAll('[data-settings-pane]').forEach(pane => {
         pane.classList.toggle('active', pane.dataset.settingsPane === paneName);
     });
+}
+
+function updateSettingsTabVisibility(options = {}) {
+    const cfg = state.config || {};
+    const visibleTabs = new Set(['ui']);
+    const isCustomized = (section, key, defaultValue) => {
+        const value = cfg[section]?.[key];
+        return typeof value !== 'undefined' && value !== defaultValue;
+    };
+
+    if (state.fileName || cfg.database?.path || cfg.database?.charmap || cfg.database?.direct_access || cfg.database?.rtl_conversion || cfg.database?.raw) {
+        visibleTabs.add('database');
+    }
+    if (
+        cfg.notifications?.enabled ||
+        cfg.notifications?.client_connected ||
+        cfg.notifications?.client_disconnected ||
+        cfg.notifications?.file_updated ||
+        cfg.notifications?.row_updated ||
+        cfg.notifications?.include_row_values ||
+        state.settings.playNotificationSound
+    ) {
+        visibleTabs.add('notifications');
+    }
+    if (
+        cfg.runtime?.debug ||
+        isCustomized('runtime', 'temp_dir', 'system') ||
+        isCustomized('runtime', 'temp_strategy', 'auto') ||
+        isCustomized('runtime', 'temp_memory_limit_mb', 100)
+    ) {
+        visibleTabs.add('runtime');
+    }
+    if (cfg.server?.ipc?.enabled || cfg.server?.http === false || state.revealedSettingsTabs.has('server')) {
+        visibleTabs.add('server');
+    }
+    state.revealedSettingsTabs.forEach(tabName => visibleTabs.add(tabName));
+
+    document.querySelectorAll('[data-settings-tab]').forEach(tab => {
+        const show = visibleTabs.has(tab.dataset.settingsTab);
+        tab.hidden = !show;
+        tab.setAttribute('aria-hidden', show ? 'false' : 'true');
+    });
+    document.querySelectorAll('[data-settings-pane]').forEach(pane => {
+        const show = visibleTabs.has(pane.dataset.settingsPane);
+        pane.hidden = !show;
+        pane.setAttribute('aria-hidden', show ? 'false' : 'true');
+    });
+
+    const activeTab = document.querySelector('[data-settings-tab].active');
+    if (!options.preserveActive && activeTab?.hidden) {
+        setActiveSettingsTab('ui');
+    }
 }
 
 function bindConfigField(id, eventName = 'change') {
@@ -1566,14 +2167,17 @@ function reloadForResourceUpdate(nextResourceVersion, source) {
 
     console.info('🔄 Embedded web resources changed from %s to %s via %s. Reloading viewer...', state.resourceVersion, nextResourceVersion, source);
     updateStatus('connected', 'Updating UI...');
-    showInAppToast('Updating interface', 'A newer embedded web UI is available. Reloading now.');
+    showInAppToast('Updating interface', 'A newer embedded web UI is available. Reloading now.', { source: 'resource_update', eventType: 'resource_update', level: 'update' });
 
-    const url = new URL(window.location.href);
-    url.searchParams.set('resource_version', nextResourceVersion);
-    url.searchParams.set('reloaded_at', Date.now().toString());
+    sessionStorage.setItem('patris-resource-reload', JSON.stringify({
+        from: state.resourceVersion,
+        to: nextResourceVersion,
+        source,
+        reloadedAt: new Date().toISOString()
+    }));
 
     setTimeout(() => {
-        window.location.replace(url.toString());
+        window.location.reload();
     }, 350);
 }
 
@@ -1621,10 +2225,10 @@ async function sendNativeToast(title, message) {
         });
         const result = await response.json();
         if (result.native_error) {
-            showInAppToast('Native toast unavailable', result.native_error, { error: true });
+            showInAppToast('Native toast unavailable', result.native_error, { error: true, source: 'native_toast', eventType: 'toast', nativeError: result.native_error });
         }
     } catch (error) {
-        showInAppToast('Toast request failed', error.message, { error: true });
+        showInAppToast('Toast request failed', error.message, { error: true, source: 'native_toast', eventType: 'toast' });
     }
 }
 
@@ -1637,14 +2241,14 @@ async function requestSourceRefresh() {
     try {
         if (state.ws && state.ws.readyState === WebSocket.OPEN) {
             state.ws.send(JSON.stringify({ type: 'refresh' }));
-            showInAppToast('Refresh requested', 'The backend is reloading the data source.', { broadcastToTabs: true });
+            showInAppToast('Refresh requested', 'The backend is reloading the data source.', { broadcastToTabs: true, source: 'manual_refresh', eventType: 'refresh', level: 'update' });
         } else {
             await fetchInitialData();
-            showInAppToast('Refreshed', 'Data was reloaded over HTTP.', { broadcastToTabs: true });
+            showInAppToast('Refreshed', 'Data was reloaded over HTTP.', { broadcastToTabs: true, source: 'manual_refresh', eventType: 'refresh', level: 'success' });
         }
     } catch (error) {
         console.error('Failed to refresh data source:', error);
-        showInAppToast('Refresh failed', error.message, { error: true });
+        showInAppToast('Refresh failed', error.message, { error: true, source: 'manual_refresh', eventType: 'refresh' });
     } finally {
         if (button) {
             setTimeout(() => {
@@ -1797,15 +2401,37 @@ function handleWebSocketMessage(data) {
             
             // Flash favicon
             flashFavicon();
+
+            recordEventLog({
+                title: 'Rows changed',
+                message: titleMessage,
+                level: 'update',
+                type: 'row_updated',
+                source: 'websocket',
+                details: `added=${data.added?.length || 0} modified=${data.modified?.length || 0} deleted=${data.deleted?.length || 0}`
+            });
         }
     } else if (data.type === 'toast') {
-        showInAppToast(data.title, data.message, { error: !!data.native_error });
+        showInAppToast(data.title, data.message, {
+            error: !!data.native_error,
+            source: data.source || 'server',
+            eventType: data.source || 'toast',
+            timestamp: data.timestamp,
+            nativeError: data.native_error
+        });
         if (data.native_error) {
             console.warn('Native toast failed:', data.native_error);
         }
     } else if (data.type === 'config_update') {
-        applyConfig(data.config, 'file watcher');
-        showInAppToast('Settings reloaded', 'Configuration file changes were applied.', { broadcastToTabs: true });
+        const diff = applyConfig(data.config, 'file watcher');
+        if (shouldNotifyConfigReload(diff)) {
+            showInAppToast('Settings reloaded', diff.message || 'Configuration file changes were applied.', {
+                source: 'config_update',
+                eventType: 'config_update',
+                level: 'update',
+                details: diff.details
+            });
+        }
     } else if (data.type === 'process_info') {
         applyProcessStatus(data);
     }
@@ -2091,7 +2717,16 @@ function renderTableHeader() {
     // Add clear all filters button
     const clearBtn = document.createElement('button');
     clearBtn.className = 'btn-clear-filters';
-    clearBtn.textContent = '✕ Clear';
+    clearBtn.innerHTML = `
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M5 7h14" />
+            <path d="M10 11v6" />
+            <path d="M14 11v6" />
+            <path d="M9 7V5h6v2" />
+            <path d="M7 7l1 13h8l1-13" />
+        </svg>
+        <span>Clear</span>
+    `;
     clearBtn.title = 'Clear all filters';
     clearBtn.addEventListener('click', clearAllFilters);
     actionsFilter.appendChild(clearBtn);
@@ -2193,60 +2828,7 @@ function createFilterControl(field) {
         container.appendChild(createRangePopover2(field, currentFilter, 'numeric'));
         
     } else if (fieldType === 'jalali-date') {
-        // Date range for Jalali dates (YY.mm.dd format)
-        const wrapper = document.createElement('div');
-        wrapper.className = 'filter-range';
-        
-        const minInput = document.createElement('input');
-        minInput.type = 'text';
-        minInput.className = 'filter-input-small';
-        minInput.placeholder = 'From';
-        minInput.value = currentFilter?.min ?? '';
-        minInput.title = 'Format: YY.mm.dd';
-        minInput.setAttribute('aria-label', `Minimum ${displayFieldName(field)} date`);
-        
-        const maxInput = document.createElement('input');
-        maxInput.type = 'text';
-        maxInput.className = 'filter-input-small';
-        maxInput.placeholder = 'To';
-        maxInput.value = currentFilter?.max ?? '';
-        maxInput.title = 'Format: YY.mm.dd';
-        maxInput.setAttribute('aria-label', `Maximum ${displayFieldName(field)} date`);
-        
-        const updateFilter = () => {
-            const min = minInput.value.trim();
-            const max = maxInput.value.trim();
-            const validMin = min ? JalaliUtils.parse(min) : null;
-            const validMax = max ? JalaliUtils.parse(max) : null;
-            minInput.setCustomValidity(min && !validMin ? 'Use YY.mm.dd' : '');
-            maxInput.setCustomValidity(max && !validMax ? 'Use YY.mm.dd' : '');
-            if ((min && !validMin) || (max && !validMax)) {
-                return;
-            }
-            let nextMin = min;
-            let nextMax = max;
-            if (validMin && validMax && JalaliUtils.compare(validMin, validMax) > 0) {
-                nextMin = max;
-                nextMax = min;
-                minInput.value = nextMin;
-                maxInput.value = nextMax;
-            }
-            
-            if (nextMin || nextMax) {
-                state.columnFilters[field] = { type: 'jalali-date', min: nextMin, max: nextMax };
-            } else {
-                delete state.columnFilters[field];
-            }
-            saveColumnFilters();
-            applyFilters();
-        };
-        
-        minInput.addEventListener('change', updateFilter);
-        maxInput.addEventListener('change', updateFilter);
-        
-        wrapper.appendChild(minInput);
-        wrapper.appendChild(maxInput);
-        container.appendChild(wrapper);
+        container.appendChild(createJalaliDateFilterControl(field, currentFilter));
         
     } else {
         // Text search for text fields
@@ -2277,21 +2859,39 @@ function createFilterControl(field) {
 
 function createRangePopover2(field, currentFilter, mode) {
     const wrapper = document.createElement('div');
-    wrapper.className = 'range-popover';
+    wrapper.className = 'range-popover range-combo';
+
+    const stats = state.fieldStats[field] || {};
+    const minLimit = Number.isFinite(stats.min) ? stats.min : 0;
+    const maxLimit = Number.isFinite(stats.max) ? stats.max : Math.max(minLimit + 1, 1);
+    const hasUsableRange = Number.isFinite(stats.min) && Number.isFinite(stats.max) && stats.min !== stats.max;
+    const step = Number.isInteger(minLimit) && Number.isInteger(maxLimit) ? 1 : 0.01;
+
+    const exactInput = document.createElement('input');
+    exactInput.type = 'text';
+    exactInput.inputMode = 'decimal';
+    exactInput.className = 'filter-input range-direct-input';
+    exactInput.placeholder = hasUsableRange ? `${formatRangeValue(minLimit)}-${formatRangeValue(maxLimit)}` : formatRangeValue(minLimit);
+    exactInput.title = hasUsableRange
+        ? `Type an exact value, a range like ${formatRangeValue(minLimit)}-${formatRangeValue(maxLimit)}, >=value, or <=value`
+        : `All sampled values are ${formatRangeValue(minLimit)}`;
+    exactInput.setAttribute('aria-label', `${displayFieldName(field)} exact or range filter`);
 
     const button = document.createElement('button');
     button.type = 'button';
-    button.className = 'range-trigger';
-    button.setAttribute('aria-label', `Set ${displayFieldName(field)} range filter`);
+    button.className = 'range-trigger range-trigger-ellipsis';
+    button.innerHTML = '<span aria-hidden="true">&hellip;</span>';
+    button.setAttribute('aria-label', `Open ${displayFieldName(field)} range options`);
 
     const panel = document.createElement('div');
     panel.className = 'range-panel';
     panel.addEventListener('click', event => event.stopPropagation());
 
-    const stats = state.fieldStats[field] || {};
-    const minLimit = Number.isFinite(stats.min) ? stats.min : 0;
-    const maxLimit = Number.isFinite(stats.max) ? stats.max : Math.max(minLimit + 1, 1);
-    const step = Number.isInteger(minLimit) && Number.isInteger(maxLimit) ? 1 : 0.01;
+    const meta = document.createElement('div');
+    meta.className = 'range-meta';
+    meta.innerHTML = hasUsableRange
+        ? `<span>Min <strong>${escapeHtml(formatRangeValue(minLimit))}</strong></span><span>Max <strong>${escapeHtml(formatRangeValue(maxLimit))}</strong></span>`
+        : `<span class="range-meta-note">All sampled values are <strong>${escapeHtml(formatRangeValue(minLimit))}</strong></span>`;
 
     const minInput = document.createElement('input');
     minInput.type = 'text';
@@ -2324,16 +2924,27 @@ function createRangePopover2(field, currentFilter, mode) {
     maxSlider.max = String(maxLimit);
     maxSlider.step = String(step);
     maxSlider.value = String(currentFilter?.max ?? maxLimit);
+    minSlider.disabled = !hasUsableRange;
+    maxSlider.disabled = !hasUsableRange;
 
     const clearBtn = document.createElement('button');
     clearBtn.type = 'button';
     clearBtn.className = 'range-clear';
     clearBtn.textContent = 'Clear';
 
-    const updateTrigger = () => {
+    const updateDirectInput = () => {
         const latest = state.columnFilters[field];
         const active = latest?.min !== undefined && latest?.min !== null || latest?.max !== undefined && latest?.max !== null;
-        button.innerHTML = active ? `<span class="filter-badge">${latest.min ?? 'min'}-${latest.max ?? 'max'}</span>` : '<span class="ellipsis">&bull;&bull;&bull;</span>';
+        if (!active) {
+            exactInput.value = '';
+        } else if (latest.min !== null && latest.min !== undefined && latest.max !== null && latest.max !== undefined) {
+            exactInput.value = latest.min === latest.max ? formatRangeValue(latest.min) : `${formatRangeValue(latest.min)}-${formatRangeValue(latest.max)}`;
+        } else if (latest.min !== null && latest.min !== undefined) {
+            exactInput.value = `>=${formatRangeValue(latest.min)}`;
+        } else {
+            exactInput.value = `<=${formatRangeValue(latest.max)}`;
+        }
+        wrapper.classList.toggle('has-filter', !!active);
     };
 
     const commit = debounce(() => {
@@ -2355,15 +2966,38 @@ function createRangePopover2(field, currentFilter, mode) {
             delete state.columnFilters[field];
         }
         saveColumnFilters();
-        updateTrigger();
+        updateDirectInput();
         applyFilters();
     }, 80);
 
-    const syncFromInput = () => {
+    const commitDirect = debounce(() => {
+        const parsed = parseNumericFilterText(exactInput.value);
+        exactInput.setCustomValidity(parsed.error || '');
+        if (parsed.error) return;
+        if (parsed.empty) {
+            minInput.value = '';
+            maxInput.value = '';
+            delete state.columnFilters[field];
+        } else {
+            minInput.value = parsed.min === null || parsed.min === undefined ? '' : String(parsed.min);
+            maxInput.value = parsed.max === null || parsed.max === undefined ? '' : String(parsed.max);
+            state.columnFilters[field] = { type: mode, min: parsed.min, max: parsed.max };
+        }
+        wrapper.classList.toggle('has-filter', !parsed.empty);
+        syncSlidersFromInputs();
+        saveColumnFilters();
+        applyFilters();
+    }, FILTER_INPUT_DEBOUNCE_MS);
+
+    const syncSlidersFromInputs = () => {
         const min = parseFloat(minInput.value);
         const max = parseFloat(maxInput.value);
         if (Number.isFinite(min)) minSlider.value = String(Math.min(Math.max(min, minLimit), maxLimit));
         if (Number.isFinite(max)) maxSlider.value = String(Math.min(Math.max(max, minLimit), maxLimit));
+    };
+
+    const syncFromInput = () => {
+        syncSlidersFromInputs();
         commit();
     };
 
@@ -2388,6 +3022,13 @@ function createRangePopover2(field, currentFilter, mode) {
         }
     });
 
+    exactInput.addEventListener('input', commitDirect);
+    exactInput.addEventListener('keydown', event => {
+        if (event.key === 'Enter') {
+            event.preventDefault();
+            exactInput.blur();
+        }
+    });
     minInput.addEventListener('input', syncFromInput);
     maxInput.addEventListener('input', syncFromInput);
     minSlider.addEventListener('input', syncFromSlider);
@@ -2399,18 +3040,218 @@ function createRangePopover2(field, currentFilter, mode) {
         minSlider.value = String(minLimit);
         maxSlider.value = String(maxLimit);
         saveColumnFilters();
-        updateTrigger();
+        updateDirectInput();
         applyFilters();
     });
 
+    panel.appendChild(meta);
     panel.appendChild(wrapRangeField('Min', minInput));
     panel.appendChild(wrapRangeField('Max', maxInput));
     panel.appendChild(minSlider);
     panel.appendChild(maxSlider);
     panel.appendChild(clearBtn);
+    wrapper.appendChild(exactInput);
     wrapper.appendChild(button);
     wrapper.appendChild(panel);
-    updateTrigger();
+    updateDirectInput();
+    return wrapper;
+}
+
+function parseNumericFilterText(text) {
+    const value = String(text || '').trim();
+    if (!value) return { empty: true };
+    const compact = value.replace(/\s+/g, '');
+    let match = compact.match(/^>=(-?\d+(?:\.\d+)?)$/);
+    if (match) return { min: parseFloat(match[1]), max: null };
+    match = compact.match(/^<=(-?\d+(?:\.\d+)?)$/);
+    if (match) return { min: null, max: parseFloat(match[1]) };
+    match = compact.match(/^(-?\d+(?:\.\d+)?)(?:\.\.|-|:)(-?\d+(?:\.\d+)?)$/);
+    if (match) {
+        let min = parseFloat(match[1]);
+        let max = parseFloat(match[2]);
+        if (min > max) [min, max] = [max, min];
+        return { min, max };
+    }
+    match = compact.match(/^-?\d+(?:\.\d+)?$/);
+    if (match) {
+        const exact = parseFloat(compact);
+        return { min: exact, max: exact };
+    }
+    return { error: 'Use a number, min-max, >=min, or <=max' };
+}
+
+function formatRangeValue(value) {
+    if (!Number.isFinite(Number(value))) return '';
+    const n = Number(value);
+    return Number.isInteger(n) ? String(n) : String(Number(n.toFixed(2)));
+}
+
+function createJalaliDateFilterControl(field, currentFilter) {
+    const wrapper = document.createElement('div');
+    wrapper.className = 'jalali-filter range-popover';
+    const stats = state.fieldStats[field] || {};
+    const minDate = stats.min || null;
+    const maxDate = stats.max || null;
+
+    const fromInput = document.createElement('input');
+    fromInput.type = 'text';
+    fromInput.inputMode = 'numeric';
+    fromInput.className = 'filter-input jalali-date-input';
+    fromInput.placeholder = minDate ? JalaliUtils.format(minDate) : 'From';
+    fromInput.value = currentFilter?.min ?? '';
+    fromInput.title = 'Jalali date, YY.MM.DD';
+    fromInput.setAttribute('aria-label', `From ${displayFieldName(field)} Jalali date`);
+
+    const toInput = document.createElement('input');
+    toInput.type = 'text';
+    toInput.inputMode = 'numeric';
+    toInput.className = 'filter-input jalali-date-input';
+    toInput.placeholder = maxDate ? JalaliUtils.format(maxDate) : 'To';
+    toInput.value = currentFilter?.max ?? '';
+    toInput.title = 'Jalali date, YY.MM.DD';
+    toInput.setAttribute('aria-label', `To ${displayFieldName(field)} Jalali date`);
+
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'range-trigger range-trigger-ellipsis date-picker-trigger';
+    button.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M7 3v3M17 3v3M4 9h16M6 5h12a2 2 0 0 1 2 2v11a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2Z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>';
+    button.setAttribute('aria-label', `Open ${displayFieldName(field)} Jalali date picker`);
+
+    const panel = document.createElement('div');
+    panel.className = 'range-panel jalali-picker-panel';
+    panel.addEventListener('click', event => event.stopPropagation());
+
+    const meta = document.createElement('div');
+    meta.className = 'range-meta';
+    meta.innerHTML = minDate && maxDate
+        ? `<span>Min <strong>${escapeHtml(JalaliUtils.format(minDate))}</strong></span><span>Max <strong>${escapeHtml(JalaliUtils.format(maxDate))}</strong></span>`
+        : '<span class="range-meta-note">No valid Jalali dates detected</span>';
+
+    const pickerState = {
+        cursor: JalaliUtils.parse(fromInput.value) || minDate || maxDate || { year: 0, month: 1, day: 1 },
+        target: 'min'
+    };
+
+    const commitDateFilter = debounce(() => {
+        const minText = fromInput.value.trim();
+        const maxText = toInput.value.trim();
+        const parsedMin = minText ? JalaliUtils.parse(minText) : null;
+        const parsedMax = maxText ? JalaliUtils.parse(maxText) : null;
+        fromInput.setCustomValidity(minText && !parsedMin ? 'Use YY.MM.DD' : '');
+        toInput.setCustomValidity(maxText && !parsedMax ? 'Use YY.MM.DD' : '');
+        if ((minText && !parsedMin) || (maxText && !parsedMax)) return;
+
+        let nextMin = minText;
+        let nextMax = maxText;
+        if (parsedMin && parsedMax && JalaliUtils.compare(parsedMin, parsedMax) > 0) {
+            nextMin = maxText;
+            nextMax = minText;
+            fromInput.value = nextMin;
+            toInput.value = nextMax;
+        }
+
+        if (nextMin || nextMax) {
+            state.columnFilters[field] = { type: 'jalali-date', min: nextMin, max: nextMax };
+            wrapper.classList.add('has-filter');
+        } else {
+            delete state.columnFilters[field];
+            wrapper.classList.remove('has-filter');
+        }
+        saveColumnFilters();
+        applyFilters();
+    }, FILTER_INPUT_DEBOUNCE_MS);
+
+    const renderPicker = () => {
+        const title = document.createElement('div');
+        title.className = 'jalali-picker-title';
+        const prev = document.createElement('button');
+        prev.type = 'button';
+        prev.className = 'picker-nav';
+        prev.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 6l-6 6 6 6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+        const next = document.createElement('button');
+        next.type = 'button';
+        next.className = 'picker-nav';
+        next.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+        const label = document.createElement('strong');
+        label.textContent = `${String(pickerState.cursor.year).padStart(2, '0')}.${String(pickerState.cursor.month).padStart(2, '0')}`;
+        prev.addEventListener('click', () => {
+            pickerState.cursor = JalaliUtils.addMonths(pickerState.cursor, -1);
+            renderPicker();
+        });
+        next.addEventListener('click', () => {
+            pickerState.cursor = JalaliUtils.addMonths(pickerState.cursor, 1);
+            renderPicker();
+        });
+        title.append(prev, label, next);
+
+        const targetSwitch = document.createElement('div');
+        targetSwitch.className = 'jalali-target-switch';
+        ['min', 'max'].forEach(target => {
+            const targetButton = document.createElement('button');
+            targetButton.type = 'button';
+            targetButton.className = pickerState.target === target ? 'active' : '';
+            targetButton.textContent = target === 'min' ? 'From' : 'To';
+            targetButton.addEventListener('click', () => {
+                pickerState.target = target;
+                renderPicker();
+            });
+            targetSwitch.appendChild(targetButton);
+        });
+
+        const grid = document.createElement('div');
+        grid.className = 'jalali-day-grid';
+        const days = JalaliUtils.daysInMonth(pickerState.cursor.year, pickerState.cursor.month);
+        for (let day = 1; day <= days; day += 1) {
+            const date = { year: pickerState.cursor.year, month: pickerState.cursor.month, day };
+            const dayButton = document.createElement('button');
+            dayButton.type = 'button';
+            dayButton.textContent = String(day);
+            dayButton.disabled = (minDate && JalaliUtils.compare(date, minDate) < 0) || (maxDate && JalaliUtils.compare(date, maxDate) > 0);
+            dayButton.addEventListener('click', () => {
+                const formatted = JalaliUtils.format(date);
+                if (pickerState.target === 'min') {
+                    fromInput.value = formatted;
+                    pickerState.target = 'max';
+                } else {
+                    toInput.value = formatted;
+                }
+                commitDateFilter();
+                renderPicker();
+            });
+            grid.appendChild(dayButton);
+        }
+
+        const clearBtn = document.createElement('button');
+        clearBtn.type = 'button';
+        clearBtn.className = 'range-clear';
+        clearBtn.textContent = 'Clear';
+        clearBtn.addEventListener('click', () => {
+            fromInput.value = '';
+            toInput.value = '';
+            delete state.columnFilters[field];
+            wrapper.classList.remove('has-filter');
+            saveColumnFilters();
+            applyFilters();
+        });
+
+        panel.replaceChildren(meta, targetSwitch, title, grid, clearBtn);
+    };
+
+    fromInput.addEventListener('input', commitDateFilter);
+    toInput.addEventListener('input', commitDateFilter);
+    button.addEventListener('click', event => {
+        event.stopPropagation();
+        if (state.openRangePanel && state.openRangePanel !== panel) {
+            state.openRangePanel.classList.remove('open');
+        }
+        pickerState.cursor = JalaliUtils.parse(fromInput.value) || JalaliUtils.parse(toInput.value) || minDate || maxDate || pickerState.cursor;
+        renderPicker();
+        panel.classList.toggle('open');
+        state.openRangePanel = panel.classList.contains('open') ? panel : null;
+    });
+
+    wrapper.classList.toggle('has-filter', !!(currentFilter?.min || currentFilter?.max));
+    wrapper.append(fromInput, toInput, button, panel);
     return wrapper;
 }
 
@@ -2421,90 +3262,6 @@ function wrapRangeField(label, input) {
     span.textContent = label;
     wrapper.appendChild(span);
     wrapper.appendChild(input);
-    return wrapper;
-}
-
-function createRangePopover(field, currentFilter, mode) {
-    const wrapper = document.createElement('div');
-    wrapper.className = 'range-popover';
-    const button = document.createElement('button');
-    button.type = 'button';
-    button.className = 'range-trigger';
-    button.setAttribute('aria-label', `Set ${displayFieldName(field)} range filter`);
-    const active = currentFilter?.min !== undefined && currentFilter?.min !== null || currentFilter?.max !== undefined && currentFilter?.max !== null;
-    button.innerHTML = active ? `<span class="filter-badge">${currentFilter.min ?? 'min'}–${currentFilter.max ?? 'max'}</span>` : '<span class="ellipsis">•••</span>';
-    const panel = document.createElement('div');
-    panel.className = 'range-panel';
-
-    const minInput = document.createElement('input');
-    minInput.type = mode === 'numeric' ? 'text' : 'text';
-    minInput.inputMode = mode === 'numeric' ? 'decimal' : 'text';
-    minInput.className = 'filter-input-small';
-    minInput.placeholder = mode === 'numeric' ? 'Min' : 'From';
-    minInput.value = currentFilter?.min ?? '';
-    minInput.setAttribute('aria-label', `Minimum ${displayFieldName(field)}`);
-
-    const maxInput = document.createElement('input');
-    maxInput.type = mode === 'numeric' ? 'text' : 'text';
-    maxInput.inputMode = mode === 'numeric' ? 'decimal' : 'text';
-    maxInput.className = 'filter-input-small';
-    maxInput.placeholder = mode === 'numeric' ? 'Max' : 'To';
-    maxInput.value = currentFilter?.max ?? '';
-    maxInput.setAttribute('aria-label', `Maximum ${displayFieldName(field)}`);
-
-    const applyBtn = document.createElement('button');
-    applyBtn.type = 'button';
-    applyBtn.className = 'range-apply';
-    applyBtn.textContent = 'Apply';
-
-    const clearBtn = document.createElement('button');
-    clearBtn.type = 'button';
-    clearBtn.className = 'range-clear';
-    clearBtn.textContent = 'Clear';
-
-    const apply = () => {
-        const rawMin = minInput.value.trim();
-        const rawMax = maxInput.value.trim();
-        let min = mode === 'numeric' && rawMin ? parseFloat(rawMin) : rawMin || null;
-        let max = mode === 'numeric' && rawMax ? parseFloat(rawMax) : rawMax || null;
-        if (mode === 'numeric') {
-            minInput.setCustomValidity(rawMin && !Number.isFinite(min) ? 'Enter a number' : '');
-            maxInput.setCustomValidity(rawMax && !Number.isFinite(max) ? 'Enter a number' : '');
-            if ((rawMin && !Number.isFinite(min)) || (rawMax && !Number.isFinite(max))) {
-                return;
-            }
-            if (min !== null && max !== null && min > max) {
-                [min, max] = [max, min];
-                minInput.value = min;
-                maxInput.value = max;
-            }
-        }
-        if (min !== null || max !== null) {
-            state.columnFilters[field] = { type: mode, min, max };
-        } else {
-            delete state.columnFilters[field];
-        }
-        saveColumnFilters();
-        renderTableHeader();
-        applyFilters();
-    };
-    button.addEventListener('click', (event) => {
-        event.stopPropagation();
-        panel.classList.toggle('open');
-    });
-    applyBtn.addEventListener('click', apply);
-    clearBtn.addEventListener('click', () => {
-        delete state.columnFilters[field];
-        saveColumnFilters();
-        renderTableHeader();
-        applyFilters();
-    });
-    panel.appendChild(minInput);
-    panel.appendChild(maxInput);
-    panel.appendChild(applyBtn);
-    panel.appendChild(clearBtn);
-    wrapper.appendChild(button);
-    wrapper.appendChild(panel);
     return wrapper;
 }
 
@@ -2592,15 +3349,26 @@ function renderTable(changedIndices = new Set()) {
     
     emptyState.style.display = 'none';
     
-    const recordsToShow = state.settings.enablePagination 
+    let recordsToShow = state.settings.enablePagination
         ? state.filteredRecords.slice(0, state.settings.pageSize)
         : state.filteredRecords;
+    const anchorCode = state.scrollAnchor?.code ? String(state.scrollAnchor.code) : '';
+    if (state.settings.enablePagination && anchorCode) {
+        const anchorIndex = state.filteredRecords.findIndex(record => String(record.Code ?? '') === anchorCode);
+        if (anchorIndex >= state.settings.pageSize) {
+            recordsToShow = state.filteredRecords.slice(0, anchorIndex + 1);
+        }
+    }
     
     tbody.innerHTML = '';
     
     recordsToShow.forEach((record, displayIndex) => {
         const row = document.createElement('tr');
         const codeInfo = parsePatrisCode(record.Code);
+        const recordCode = String(record.Code ?? '');
+        if (recordCode) {
+            row.dataset.code = recordCode;
+        }
         row.classList.add(`code-${codeInfo.type}`);
         row.classList.add(anbarTotal(record) > 0 ? 'has-stock' : 'no-stock');
         
@@ -2664,23 +3432,33 @@ function renderTable(changedIndices = new Set()) {
         // Add actions cell
         const actionsCell = document.createElement('td');
         actionsCell.className = 'action-cell';
+        const actionsWrap = document.createElement('div');
+        actionsWrap.className = 'action-cell-content';
         
         const inspectBtn = document.createElement('button');
         inspectBtn.className = 'action-btn';
         inspectBtn.textContent = '🔍 Inspect';
         inspectBtn.onclick = (e) => {
             e.stopPropagation();
+            persistScrollAnchorForCode(recordCode);
             inspectRecord(record);
         };
         
-        actionsCell.appendChild(inspectBtn);
+        actionsWrap.appendChild(inspectBtn);
+        actionsCell.appendChild(actionsWrap);
         row.appendChild(actionsCell);
         
         // Make row clickable to inspect
-        row.onclick = () => inspectRecord(record);
+        row.onclick = () => {
+            persistScrollAnchorForCode(recordCode);
+            inspectRecord(record);
+        };
         
         tbody.appendChild(row);
     });
+    if (!(state.settings.autoScrollToChanged && changedIndices.size > 0)) {
+        restoreScrollAnchorAfterRender();
+    }
 }
 
 // Sort by field
@@ -3235,6 +4013,7 @@ function init() {
     // Load settings
     loadSettings();
     applySettings();
+    renderEventLogCount();
     
     // Initialize theme
     initTheme();
@@ -3244,12 +4023,12 @@ function init() {
     initDialogActionButtons();
     initChromeMirrors();
     initTableWheelScroll();
+    initScrollAnchorTracking();
     initRouter();
     setInterval(updateLastUpdateDisplay, 30000);
     
     // Set up event listeners
     document.addEventListener('keydown', handleGlobalKeydown);
-
     document.getElementById('searchInput').addEventListener('input', (e) => {
         state.searchTerm = e.target.value;
         filterRecords();
@@ -3269,13 +4048,14 @@ function init() {
     });
     
     document.getElementById('themeToggle').addEventListener('click', toggleTheme);
-    document.getElementById('footerToggleBtn')?.addEventListener('click', toggleFooterVisibility);
-    document.getElementById('footerCollapseBtn')?.addEventListener('click', toggleFooterVisibility);
     document.getElementById('footerLastUpdate')?.addEventListener('click', cycleLastUpdateMode);
     document.getElementById('headerConnectionButton')?.addEventListener('click', () => openModalRoute('connection'));
     document.getElementById('footerConnectionButton')?.addEventListener('click', () => openModalRoute('connection'));
+    document.getElementById('eventLogBtn')?.addEventListener('click', () => openModalRoute('logs'));
+    document.getElementById('closeEventLog')?.addEventListener('click', closeRouteDialog);
+    document.getElementById('clearEventLog')?.addEventListener('click', () => clearEventLog());
     document.getElementById('headerFileChip')?.addEventListener('click', () => {
-        if (state.fileName) showInAppToast('Current source file', state.fileName, { broadcastToTabs: true });
+        if (state.fileName) showInAppToast('Current source file', state.fileName, { broadcastToTabs: true, source: 'file_info', eventType: 'source_info' });
     });
     
     // Export button and dropdown
@@ -3420,7 +4200,7 @@ function init() {
 
     document.getElementById('testNotificationSound').addEventListener('click', () => {
         playNotificationSound(true);
-        showInAppToast('Sound test', 'Notification audio was triggered.', { broadcastToTabs: true });
+        showInAppToast('Sound test', 'Notification audio was triggered.', { broadcastToTabs: true, source: 'sound_test', eventType: 'notification_test' });
     });
 
     document.getElementById('testNativeToast').addEventListener('click', () => {
@@ -3483,7 +4263,12 @@ function init() {
 
     const settingsTarget = new URLSearchParams(window.location.search).get('settings');
     if (settingsTarget) {
-        setActiveSettingsTab(settingsTarget === '1' ? 'ui' : settingsTarget);
+        const targetTab = settingsTarget === '1' ? 'ui' : settingsTarget;
+        if (targetTab) {
+            state.revealedSettingsTabs.add(targetTab);
+        }
+        updateSettingsTabVisibility({ preserveActive: true });
+        setActiveSettingsTab(targetTab);
         applyConfigToSettingsForm();
         openModalRoute('settings', { replace: true });
     }
@@ -3499,9 +4284,11 @@ async function fetchFileInfo() {
         const info = await response.json();
         state.fileName = info.path || info.file || '';
         updateFooterFileName();
+        updateSettingsTabVisibility();
     } catch (error) {
         console.error('Failed to fetch file info:', error);
         updateFooterFileName();
+        updateSettingsTabVisibility();
     }
 }
 
