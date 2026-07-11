@@ -25,6 +25,9 @@ const state = {
     hiddenColumns: new Set(),  // Track hidden columns
     columnOrder: [],
     openRangePanel: null,
+    scrollAnchor: null,
+    isRestoringScroll: false,
+    scrollSaveTimer: null,
     router: {
         route: '/viewer',
         outlet: null,
@@ -63,6 +66,7 @@ const state = {
 
 const CONFIG_STORAGE_KEY = 'patris-config';
 const SETTINGS_STORAGE_KEY = 'patris-settings';
+const SCROLL_ANCHOR_STORAGE_KEY = 'patris-viewer-scroll-anchor';
 const RESOURCE_POLL_INTERVAL_MS = 30000;
 const BROADCAST_CHANNEL_NAME = 'patris-export-frontend';
 const BROADCAST_STORAGE_KEY = 'patris-broadcast-message';
@@ -232,6 +236,15 @@ function loadSettings() {
             state.columnFilters = JSON.parse(savedFilters);
         } catch (e) {
             state.columnFilters = {};
+        }
+    }
+
+    const savedScrollAnchor = localStorage.getItem(SCROLL_ANCHOR_STORAGE_KEY);
+    if (savedScrollAnchor) {
+        try {
+            state.scrollAnchor = JSON.parse(savedScrollAnchor);
+        } catch (e) {
+            state.scrollAnchor = null;
         }
     }
 }
@@ -821,6 +834,121 @@ function initTableWheelScroll() {
             event.preventDefault();
         }
     }, { passive: false });
+}
+
+function initScrollAnchorTracking() {
+    const tableContainer = document.querySelector('.table-container');
+    if (!tableContainer) return;
+    tableContainer.addEventListener('scroll', () => scheduleSaveScrollAnchor(), { passive: true });
+    window.addEventListener('beforeunload', () => saveScrollAnchorFromViewport({ immediate: true }));
+    document.addEventListener('visibilitychange', () => {
+        if (document.visibilityState === 'hidden') {
+            saveScrollAnchorFromViewport({ immediate: true });
+        }
+    });
+}
+
+function scheduleSaveScrollAnchor() {
+    if (state.isRestoringScroll) return;
+    clearTimeout(state.scrollSaveTimer);
+    state.scrollSaveTimer = setTimeout(() => saveScrollAnchorFromViewport(), 120);
+}
+
+function saveScrollAnchorFromViewport(options = {}) {
+    const anchor = getViewportScrollAnchor();
+    if (!anchor) return;
+    state.scrollAnchor = anchor;
+    try {
+        localStorage.setItem(SCROLL_ANCHOR_STORAGE_KEY, JSON.stringify(anchor));
+    } catch (error) {
+        if (options.immediate) return;
+        console.warn('Failed to save viewer scroll anchor:', error);
+    }
+}
+
+function getViewportScrollAnchor() {
+    const tableContainer = document.querySelector('.table-container');
+    if (!tableContainer || tableContainer.hidden) return null;
+    const rows = [...document.querySelectorAll('#tableBody tr[data-code]')];
+    if (rows.length === 0) return null;
+    const containerRect = tableContainer.getBoundingClientRect();
+    const stickyHeader = document.querySelector('.data-table thead');
+    const headerHeight = stickyHeader?.getBoundingClientRect().height || 0;
+    const targetY = containerRect.top + headerHeight + 2;
+    let best = rows[0];
+    let bestDistance = Number.POSITIVE_INFINITY;
+    for (const row of rows) {
+        const rect = row.getBoundingClientRect();
+        if (rect.bottom < targetY) continue;
+        const distance = Math.abs(rect.top - targetY);
+        if (distance < bestDistance) {
+            best = row;
+            bestDistance = distance;
+        }
+        if (rect.top >= targetY) break;
+    }
+    return {
+        code: best.dataset.code,
+        offset: Math.round(best.getBoundingClientRect().top - targetY),
+        scrollTop: Math.round(tableContainer.scrollTop),
+        scrollLeft: Math.round(tableContainer.scrollLeft),
+        source: state.fileName || '',
+        sortField: state.sortField,
+        sortDirection: state.sortDirection,
+        savedAt: Date.now()
+    };
+}
+
+function persistScrollAnchorForCode(code) {
+    if (!code) return;
+    const tableContainer = document.querySelector('.table-container');
+    const anchor = {
+        code: String(code),
+        offset: 0,
+        scrollTop: Math.round(tableContainer?.scrollTop || 0),
+        scrollLeft: Math.round(tableContainer?.scrollLeft || 0),
+        source: state.fileName || '',
+        sortField: state.sortField,
+        sortDirection: state.sortDirection,
+        savedAt: Date.now()
+    };
+    state.scrollAnchor = anchor;
+    try {
+        localStorage.setItem(SCROLL_ANCHOR_STORAGE_KEY, JSON.stringify(anchor));
+    } catch (error) {
+        console.warn('Failed to save viewer scroll anchor:', error);
+    }
+}
+
+function restoreScrollAnchorAfterRender(options = {}) {
+    const anchor = state.scrollAnchor;
+    if (!anchor?.code) return;
+    if (anchor.source && state.fileName && anchor.source !== state.fileName) return;
+    const tableContainer = document.querySelector('.table-container');
+    if (!tableContainer || tableContainer.hidden) return;
+    requestAnimationFrame(() => {
+        const row = document.querySelector(`#tableBody tr[data-code="${cssEscape(anchor.code)}"]`);
+        if (!row) return;
+        const stickyHeader = document.querySelector('.data-table thead');
+        const headerHeight = stickyHeader?.getBoundingClientRect().height || 0;
+        const currentTop = row.offsetTop;
+        const targetTop = Math.max(0, currentTop - headerHeight - (Number.isFinite(anchor.offset) ? anchor.offset : 0));
+        state.isRestoringScroll = true;
+        tableContainer.scrollTop = targetTop;
+        if (Number.isFinite(anchor.scrollLeft)) {
+            tableContainer.scrollLeft = anchor.scrollLeft;
+        }
+        row.classList.toggle('scroll-anchor-restored', options.flash !== false);
+        setTimeout(() => {
+            row.classList.remove('scroll-anchor-restored');
+            state.isRestoringScroll = false;
+        }, 350);
+    });
+}
+
+function cssEscape(value) {
+    if (window.CSS?.escape) return CSS.escape(String(value));
+    return String(value).replace(/["\\]/g, '\\$&');
 }
 
 function initDialogActionButtons() {
@@ -2592,15 +2720,26 @@ function renderTable(changedIndices = new Set()) {
     
     emptyState.style.display = 'none';
     
-    const recordsToShow = state.settings.enablePagination 
+    let recordsToShow = state.settings.enablePagination
         ? state.filteredRecords.slice(0, state.settings.pageSize)
         : state.filteredRecords;
+    const anchorCode = state.scrollAnchor?.code ? String(state.scrollAnchor.code) : '';
+    if (state.settings.enablePagination && anchorCode) {
+        const anchorIndex = state.filteredRecords.findIndex(record => String(record.Code ?? '') === anchorCode);
+        if (anchorIndex >= state.settings.pageSize) {
+            recordsToShow = state.filteredRecords.slice(0, anchorIndex + 1);
+        }
+    }
     
     tbody.innerHTML = '';
     
     recordsToShow.forEach((record, displayIndex) => {
         const row = document.createElement('tr');
         const codeInfo = parsePatrisCode(record.Code);
+        const recordCode = String(record.Code ?? '');
+        if (recordCode) {
+            row.dataset.code = recordCode;
+        }
         row.classList.add(`code-${codeInfo.type}`);
         row.classList.add(anbarTotal(record) > 0 ? 'has-stock' : 'no-stock');
         
@@ -2670,6 +2809,7 @@ function renderTable(changedIndices = new Set()) {
         inspectBtn.textContent = '🔍 Inspect';
         inspectBtn.onclick = (e) => {
             e.stopPropagation();
+            persistScrollAnchorForCode(recordCode);
             inspectRecord(record);
         };
         
@@ -2677,10 +2817,16 @@ function renderTable(changedIndices = new Set()) {
         row.appendChild(actionsCell);
         
         // Make row clickable to inspect
-        row.onclick = () => inspectRecord(record);
+        row.onclick = () => {
+            persistScrollAnchorForCode(recordCode);
+            inspectRecord(record);
+        };
         
         tbody.appendChild(row);
     });
+    if (!(state.settings.autoScrollToChanged && changedIndices.size > 0)) {
+        restoreScrollAnchorAfterRender();
+    }
 }
 
 // Sort by field
@@ -3244,6 +3390,7 @@ function init() {
     initDialogActionButtons();
     initChromeMirrors();
     initTableWheelScroll();
+    initScrollAnchorTracking();
     initRouter();
     setInterval(updateLastUpdateDisplay, 30000);
     
