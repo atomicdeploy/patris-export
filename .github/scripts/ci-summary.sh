@@ -24,6 +24,19 @@ commit_url="${server_url}/${repo}/commit/${sha}"
 repo_url="${server_url}/${repo}"
 branch_url="${server_url}/${repo}/tree/${ref_name}"
 artifact_url="${run_url}#artifacts"
+summary_generated_at="$(date -u '+%Y-%m-%d %H:%M:%SZ')"
+
+build_version() {
+  local version="${VERSION:-}"
+  if [[ -z "$version" ]]; then
+    version="$(git describe --tags --abbrev=0 2>/dev/null || printf 'v1.0.0')"
+    version="${version#v}"
+  fi
+  if [[ ! "$version" =~ ^[0-9]+(\.[0-9]+)*(-[a-zA-Z0-9._-]+)?$ ]]; then
+    version="1.0.0"
+  fi
+  printf '%s' "$version"
+}
 
 status_icon() {
   case "$job_status" in
@@ -122,6 +135,113 @@ append_toolchain() {
 EOF
 }
 
+append_build_metadata() {
+  local version build_date source_note
+  version="$(build_version)"
+  build_date="${BUILD_DATE:-${summary_generated_at}}"
+  if [[ -n "${BUILD_DATE:-}" ]]; then
+    source_note="provided by build environment"
+  else
+    source_note="summary generation time"
+  fi
+
+  cat >> "$summary_file" <<EOF
+### 🏷️ Build Metadata
+
+| Property | Value |
+| --- | --- |
+| Version | \`${version}\` |
+| Build date UTC | \`${build_date}\` |
+| Build date source | ${source_note} |
+| Commit | [\`${short_sha}\`](${commit_url}) |
+
+EOF
+}
+
+artifact_retention_estimate() {
+  local days="${ARTIFACT_RETENTION_DAYS:-${GITHUB_RETENTION_DAYS:-}}"
+  if [[ "$days" =~ ^[0-9]+$ ]]; then
+    local expires
+    expires="$(date -u -d "+${days} days" '+%Y-%m-%d %H:%M:%SZ' 2>/dev/null || printf '')"
+    if [[ -n "$expires" ]]; then
+      printf 'Configured retention is `%s` day(s); estimated expiration is `%s` unless the repository or organization policy changes it.' "$days" "$expires"
+    else
+      printf 'Configured retention is `%s` day(s); GitHub computes the exact artifact expiration.' "$days"
+    fi
+  else
+    printf 'Retention is controlled by the repository or organization Actions artifact policy; GitHub reports the exact expiration after upload.'
+  fi
+}
+
+append_uploaded_artifact_metadata() {
+  local artifact_name="$1"
+  local token="${GITHUB_TOKEN:-${GH_TOKEN:-}}"
+
+  cat >> "$summary_file" <<EOF
+### 🗄️ Uploaded Artifact
+
+| Property | Value |
+| --- | --- |
+| Artifact set | [\`${artifact_name}\`](${artifact_url}) |
+EOF
+
+  if [[ -n "$token" && "$run_id" != "local" ]] && command -v python3 >/dev/null 2>&1; then
+    if python3 - "$server_url" "$repo" "$run_id" "$artifact_name" "$token" >> "$summary_file" <<'PY'
+import json
+import sys
+import urllib.request
+
+server_url, repo, run_id, artifact_name, token = sys.argv[1:6]
+api_base = server_url.replace("https://github.com", "https://api.github.com")
+url = f"{api_base}/repos/{repo}/actions/runs/{run_id}/artifacts?per_page=100"
+
+def human_size(size):
+    value = float(size or 0)
+    units = ["B", "KiB", "MiB", "GiB", "TiB"]
+    index = 0
+    while value >= 1024 and index < len(units) - 1:
+        value /= 1024
+        index += 1
+    return f"{int(value)} {units[index]}" if index == 0 else f"{value:.2f} {units[index]}"
+
+request = urllib.request.Request(
+    url,
+    headers={
+        "Accept": "application/vnd.github+json",
+        "Authorization": f"Bearer {token}",
+        "X-GitHub-Api-Version": "2022-11-28",
+    },
+)
+with urllib.request.urlopen(request, timeout=20) as response:
+    payload = json.load(response)
+
+artifact = next((item for item in payload.get("artifacts", []) if item.get("name") == artifact_name), None)
+if not artifact:
+    print(f"| API lookup | Artifact `{artifact_name}` not found yet; use the run artifact list above. |")
+else:
+    size = artifact.get("size_in_bytes", 0)
+    print(f"| Artifact ID | `{artifact.get('id', 'unknown')}` |")
+    print(f"| Archive size | {human_size(size)} (`{size}` bytes) |")
+    print(f"| Created at | `{artifact.get('created_at', 'unknown')}` |")
+    print(f"| Expires at | `{artifact.get('expires_at', 'unknown')}` |")
+    print(f"| Expired | `{artifact.get('expired', 'unknown')}` |")
+    print(f"| Archive download URL | [GitHub API download]({artifact.get('archive_download_url', '#')}) |")
+PY
+    then
+      :
+    else
+      printf '| API lookup | GitHub artifact metadata lookup failed; use the run artifact list above. |\n' >> "$summary_file"
+    fi
+  else
+    printf '| Archive metadata | GitHub API metadata unavailable in this context. |\n' >> "$summary_file"
+  fi
+
+  cat >> "$summary_file" <<EOF
+| Retention note | $(artifact_retention_estimate) |
+
+EOF
+}
+
 append_artifact_table() {
   local artifact_name="$1"
   shift
@@ -131,7 +251,7 @@ append_artifact_table() {
   cat >> "$summary_file" <<EOF
 ### 📦 Artifact Manifest
 
-Artifact bundle: [\`${artifact_name}\`](${artifact_url})
+Uncompressed files included in artifact bundle [\`${artifact_name}\`](${artifact_url}).
 
 | Type | File | Size | Bytes | SHA-256 | Modified UTC |
 | --- | --- | ---: | ---: | --- | --- |
@@ -239,7 +359,9 @@ ${description}
 
 EOF
     append_context
+    append_build_metadata
     append_toolchain
+    append_uploaded_artifact_metadata "$artifact_name"
     append_artifact_table "$artifact_name" "${files[@]}"
     append_integrity_commands "${files[@]}"
     append_footer
@@ -320,6 +442,7 @@ ${description}
 
 EOF
     append_context
+    append_build_metadata
     append_artifact_table "release-${tag}" "${files[@]}"
     append_integrity_commands "${files[@]}"
     append_footer

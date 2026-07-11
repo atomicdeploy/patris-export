@@ -3,7 +3,7 @@ param(
     [string]$PxlibRepo = $(if ($env:PXLIB_REPO) { $env:PXLIB_REPO } else { "https://github.com/steinm/pxlib.git" }),
     [string]$PxlibRef = $env:PXLIB_REF,
     [string]$PatrisDb = "C:\Patris\data4\kala.db",
-    [string]$Version = $(if ($env:VERSION) { $env:VERSION } else { "1.0.0" }),
+    [string]$Version = $env:VERSION,
     [switch]$SkipPxlibBuild
 )
 
@@ -60,6 +60,23 @@ $deployRoot = Join-Path $AtomicDeployRoot "deploy"
 $vcpkgRoot = $(if ($env:VCPKG_ROOT) { $env:VCPKG_ROOT } else { Join-Path $depsRoot "vcpkg" })
 $vcpkgTriplet = $(if ($env:VCPKG_DEFAULT_TRIPLET) { $env:VCPKG_DEFAULT_TRIPLET } else { "x64-windows" })
 $useVcpkg = $env:USE_VCPKG -match '^(1|true|yes|on)$'
+
+if (-not $Version) {
+    Push-Location $repoRoot
+    try {
+        $Version = (& git describe --tags --abbrev=0 2>$null)
+        if ($LASTEXITCODE -ne 0 -or -not $Version) {
+            $Version = "v1.0.0"
+        }
+    } finally {
+        Pop-Location
+    }
+    $Version = $Version -replace '^v', ''
+}
+if ($Version -notmatch '^[0-9]+(\.[0-9]+)*(-[a-zA-Z0-9._-]+)?$') {
+    Write-Warning "Invalid version '$Version'; using 1.0.0"
+    $Version = "1.0.0"
+}
 
 New-Item -ItemType Directory -Force $depsRoot, $deployRoot | Out-Null
 
