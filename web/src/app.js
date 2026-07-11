@@ -71,12 +71,32 @@ const RESOURCE_POLL_INTERVAL_MS = 30000;
 const BROADCAST_CHANNEL_NAME = 'patris-export-frontend';
 const BROADCAST_STORAGE_KEY = 'patris-broadcast-message';
 const BROADCAST_MESSAGE_TTL_MS = 30000;
+const INTERNAL_RELOAD_QUERY_PARAMS = ['resource_version', 'reloaded_at'];
+
+cleanInternalReloadUrl();
 
 function createTabId() {
     if (window.crypto?.randomUUID) {
         return window.crypto.randomUUID();
     }
     return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+}
+
+function cleanInternalReloadUrl() {
+    const cleanUrl = stripInternalReloadParams(new URL(window.location.href));
+    if (cleanUrl.href !== window.location.href) {
+        history.replaceState(history.state, '', cleanUrl.pathname + cleanUrl.search + cleanUrl.hash);
+    }
+}
+
+function stripInternalReloadParams(url) {
+    INTERNAL_RELOAD_QUERY_PARAMS.forEach(param => url.searchParams.delete(param));
+    return url;
+}
+
+function visibleLocationBase() {
+    const url = stripInternalReloadParams(new URL(window.location.href));
+    return url.pathname + url.search;
 }
 
 function initFrontendBroadcast() {
@@ -1019,14 +1039,15 @@ function handleRouterClick(event) {
     if (url.pathname.startsWith('/api/') || url.pathname.startsWith('/static/') || url.pathname === '/ws') return;
     if (url.pathname in ROUTES) {
         event.preventDefault();
+        stripInternalReloadParams(url);
         navigateTo(url.pathname + url.search + url.hash);
     }
 }
 
 function navigateTo(url, options = {}) {
     const { replace = false } = options;
-    const next = new URL(url, window.location.href);
-    const current = window.location.pathname + window.location.search + window.location.hash;
+    const next = stripInternalReloadParams(new URL(url, window.location.href));
+    const current = visibleLocationBase() + window.location.hash;
     const target = next.pathname + next.search + next.hash;
     if (current !== target) {
         if (replace) {
@@ -1146,10 +1167,11 @@ ${sourceScript.textContent}
 
 function openModalRoute(name, options = {}) {
     if (!(name in MODAL_ROUTES)) return;
+    const base = visibleLocationBase();
     if (options.replace) {
-        history.replaceState(history.state, '', `${window.location.pathname}${window.location.search}#${name}`);
+        history.replaceState(history.state, '', `${base}#${name}`);
     } else if (window.location.hash !== `#${name}`) {
-        history.pushState(history.state, '', `${window.location.pathname}${window.location.search}#${name}`);
+        history.pushState(history.state, '', `${base}#${name}`);
     }
     applyModalHash();
 }
@@ -1177,7 +1199,7 @@ function activePanelId() {
 function closeRouteDialog() {
     closePanels();
     if (window.location.hash) {
-        history.pushState(history.state, '', `${window.location.pathname}${window.location.search}`);
+        history.pushState(history.state, '', visibleLocationBase());
     }
 }
 
@@ -1696,12 +1718,15 @@ function reloadForResourceUpdate(nextResourceVersion, source) {
     updateStatus('connected', 'Updating UI...');
     showInAppToast('Updating interface', 'A newer embedded web UI is available. Reloading now.');
 
-    const url = new URL(window.location.href);
-    url.searchParams.set('resource_version', nextResourceVersion);
-    url.searchParams.set('reloaded_at', Date.now().toString());
+    sessionStorage.setItem('patris-resource-reload', JSON.stringify({
+        from: state.resourceVersion,
+        to: nextResourceVersion,
+        source,
+        reloadedAt: new Date().toISOString()
+    }));
 
     setTimeout(() => {
-        window.location.replace(url.toString());
+        window.location.reload();
     }, 350);
 }
 
