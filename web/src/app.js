@@ -1010,9 +1010,20 @@ function renderFooterToggleButton(button, showFooter) {
     button.title = showFooter ? 'Hide footer' : 'Show footer';
     button.setAttribute('aria-pressed', String(showFooter));
     button.setAttribute('aria-label', showFooter ? 'Hide footer' : 'Show footer');
+    button.onclick = handleFooterToggleClick;
     button.innerHTML = showFooter
         ? '<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M6 9l6 6 6-6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>'
         : '<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M6 15l6-6 6 6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+}
+
+function handleFooterToggleClick(event) {
+    if (event?.__patrisFooterToggleHandled) return;
+    if (event) {
+        event.__patrisFooterToggleHandled = true;
+        event.preventDefault();
+        event.stopPropagation();
+    }
+    toggleFooterVisibility();
 }
 
 function findFooterToggleButton(target) {
@@ -4017,9 +4028,7 @@ function init() {
     document.addEventListener('keydown', handleGlobalKeydown);
     document.addEventListener('click', event => {
         if (findFooterToggleButton(event.target)) {
-            event.preventDefault();
-            event.stopPropagation();
-            toggleFooterVisibility();
+            handleFooterToggleClick(event);
         }
     }, true);
 
