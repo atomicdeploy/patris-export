@@ -1344,6 +1344,7 @@ async function showPartialRoute(route) {
     if (state.router.tableContainer) state.router.tableContainer.hidden = true;
     document.body.classList.add('partial-route-active');
     state.router.outlet.hidden = false;
+    resetPartialRouteScroll();
     state.router.outlet.innerHTML = '<div class="route-loading">Loading...</div>';
     const controller = new AbortController();
     state.router.partialController = controller;
@@ -1357,10 +1358,17 @@ async function showPartialRoute(route) {
         const html = await response.text();
         if (state.router.partialController !== controller) return;
         renderPartialHTML(html);
+        resetPartialRouteScroll();
     } catch (error) {
         if (error.name === 'AbortError') return;
         state.router.outlet.innerHTML = `<div class="route-error"><strong>Could not load page.</strong><span>${escapeHtml(error.message)}</span></div>`;
+        resetPartialRouteScroll();
     }
+}
+
+function resetPartialRouteScroll() {
+    document.querySelector('.main-content')?.scrollTo?.({ top: 0, left: 0, behavior: 'auto' });
+    state.router.outlet?.scrollTo?.({ top: 0, left: 0, behavior: 'auto' });
 }
 
 function cancelPartialRoute() {
