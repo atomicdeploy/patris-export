@@ -7,7 +7,7 @@ import (
 )
 
 // embeddedCharMapText is the built-in Patris81 -> modern text conversion map.
-// It is the default mapping used by the app when the user does not pass -c/--charmap.
+// It is the default mapping used by the app when the user does not pass -m/--charmap.
 //
 //go:embed farsi_chars.txt
 var embeddedCharMapText string

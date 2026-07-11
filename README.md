@@ -309,7 +309,7 @@ patris-export serve kala.db -a :8080 --debounce 1s
 
 ## 🎯 Using Character Mapping
 
-Patris Export embeds the default Patris81 legacy encoding map, so Persian/Farsi text conversion works without passing an external file. Use `-c/--charmap` only when you want to override the built-in map for custom conversion or debugging.
+Patris Export embeds the default Patris81 legacy encoding map, so Persian/Farsi text conversion works without passing an external file. Use `-m/--charmap` only when you want to override the built-in map for custom conversion or debugging.
 
 ```bash
 # Uses the embedded Patris81 character map
@@ -388,7 +388,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\windows\Invoke-CGO
 
 ### Global Flags
 
-- `-c, --charmap` - Optional path to a custom character mapping file. If omitted, the embedded Patris81 mapping is used.
+- `-c, --config` - Path to a patris-export config file. Repeat to layer JSON/YAML/TOML files.
+- `-m, --charmap` - Optional path to a custom character mapping file. If omitted, the embedded Patris81 mapping is used.
 - `-o, --output` - Output directory for converted files, or `-` for stdout (default: current directory)
 - `--temp-dir` - Explicit temp directory for copied/downloaded database files. Overrides automatic temp storage selection.
 - `--temp-strategy` - Temp storage strategy: `auto`, `system`, or `memory`.
