@@ -1498,40 +1498,74 @@ function playGeneratedNotificationSound() {
     }
 
     const audioContext = new AudioContextClass();
+    const now = audioContext.currentTime;
     const masterGain = audioContext.createGain();
-    masterGain.gain.setValueAtTime(0.0001, audioContext.currentTime);
-    masterGain.gain.exponentialRampToValueAtTime(0.18, audioContext.currentTime + 0.015);
-    masterGain.gain.exponentialRampToValueAtTime(0.0001, audioContext.currentTime + 0.62);
-    masterGain.connect(audioContext.destination);
+    const compressor = audioContext.createDynamicsCompressor();
+    const softFilter = audioContext.createBiquadFilter();
+    const delay = audioContext.createDelay(0.24);
+    const delayGain = audioContext.createGain();
+    const dryGain = audioContext.createGain();
 
-    const notes = [
-        { frequency: 659.25, start: 0.00, duration: 0.13 },
-        { frequency: 783.99, start: 0.12, duration: 0.13 },
-        { frequency: 987.77, start: 0.24, duration: 0.16 },
-        { frequency: 1318.51, start: 0.40, duration: 0.18 }
+    masterGain.gain.setValueAtTime(0.0001, now);
+    masterGain.gain.linearRampToValueAtTime(0.16, now + 0.035);
+    masterGain.gain.exponentialRampToValueAtTime(0.0001, now + 0.92);
+
+    compressor.threshold.setValueAtTime(-26, now);
+    compressor.knee.setValueAtTime(24, now);
+    compressor.ratio.setValueAtTime(3, now);
+    compressor.attack.setValueAtTime(0.012, now);
+    compressor.release.setValueAtTime(0.18, now);
+
+    softFilter.type = 'lowpass';
+    softFilter.frequency.setValueAtTime(5200, now);
+    softFilter.Q.setValueAtTime(0.35, now);
+
+    delay.delayTime.setValueAtTime(0.085, now);
+    delayGain.gain.setValueAtTime(0.12, now);
+    dryGain.gain.setValueAtTime(0.88, now);
+
+    compressor.connect(softFilter);
+    softFilter.connect(audioContext.destination);
+    masterGain.connect(dryGain);
+    dryGain.connect(compressor);
+    masterGain.connect(delay);
+    delay.connect(delayGain);
+    delayGain.connect(compressor);
+    if (audioContext.state === 'suspended') {
+        audioContext.resume().catch(() => {});
+    }
+
+    const tones = [
+        { frequency: 659.25, start: 0.00, duration: 0.42, peak: 0.34, attack: 0.028 },
+        { frequency: 987.77, start: 0.12, duration: 0.46, peak: 0.28, attack: 0.032 },
+        { frequency: 493.88, start: 0.02, duration: 0.54, peak: 0.075, attack: 0.04 },
+        { frequency: 1318.51, start: 0.03, duration: 0.28, peak: 0.045, attack: 0.02 },
+        { frequency: 1975.53, start: 0.16, duration: 0.24, peak: 0.035, attack: 0.02 }
     ];
 
-    notes.forEach(note => {
+    tones.forEach(tone => {
         const oscillator = audioContext.createOscillator();
         const noteGain = audioContext.createGain();
-        const startTime = audioContext.currentTime + note.start;
-        const endTime = startTime + note.duration;
+        const startTime = now + 0.025 + tone.start;
+        const endTime = startTime + tone.duration;
 
-        oscillator.type = 'triangle';
-        oscillator.frequency.setValueAtTime(note.frequency, startTime);
+        oscillator.type = 'sine';
+        oscillator.frequency.setValueAtTime(tone.frequency, startTime);
+        oscillator.detune.setValueAtTime(tone.detune || 0, startTime);
         noteGain.gain.setValueAtTime(0.0001, startTime);
-        noteGain.gain.exponentialRampToValueAtTime(0.5, startTime + 0.015);
+        noteGain.gain.linearRampToValueAtTime(tone.peak, startTime + tone.attack);
+        noteGain.gain.exponentialRampToValueAtTime(tone.peak * 0.45, startTime + tone.duration * 0.45);
         noteGain.gain.exponentialRampToValueAtTime(0.0001, endTime);
 
         oscillator.connect(noteGain);
         noteGain.connect(masterGain);
         oscillator.start(startTime);
-        oscillator.stop(endTime + 0.02);
+        oscillator.stop(endTime + 0.05);
     });
 
     setTimeout(() => {
         audioContext.close().catch(() => {});
-    }, 800);
+    }, 1100);
 }
 
 // Flash page title with notification info
