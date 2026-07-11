@@ -17,6 +17,8 @@ import (
 type DataSource interface {
 	// GetRecords returns all records from the data source
 	GetRecords() ([]map[string]interface{}, error)
+	// GetRawRecords returns records before Patris conversion/output shaping.
+	GetRawRecords() ([]map[string]interface{}, error)
 	// GetPath returns the file path of the data source
 	GetPath() string
 	// Close closes the data source
@@ -67,6 +69,35 @@ func sourceExt(path string) string {
 
 // GetRecords implements DataSource for ParadoxDataSource
 func (p *ParadoxDataSource) GetRecords() ([]map[string]interface{}, error) {
+	records, err := p.GetRawRecords()
+	if err != nil {
+		return nil, err
+	}
+
+	// Convert and transform records to match JSON export format.
+	exp := converter.NewExporter(converter.Patris2Fa)
+	transformed := exp.ConvertAndTransformRecords(mapsToParadox(records))
+
+	// Convert keyed output back to ordered records and preserve Code for
+	// WebSocket diffing, CSV export, and downstream sync targets.
+	result := make([]map[string]interface{}, 0, len(transformed))
+	for code, record := range transformed {
+		if recordMap, ok := record.(map[string]interface{}); ok {
+			row := make(map[string]interface{}, len(recordMap)+1)
+			row["Code"] = code
+			for key, value := range recordMap {
+				row[key] = value
+			}
+			result = append(result, row)
+		}
+	}
+
+	return result, nil
+}
+
+// GetRawRecords implements DataSource for ParadoxDataSource without applying
+// encoding conversion, ANBAR compaction, Code-keying, or custom mapping.
+func (p *ParadoxDataSource) GetRawRecords() ([]map[string]interface{}, error) {
 	pathToOpen := p.path
 	cleanup := func() {}
 	if filecopy.IsURL(p.path) {
@@ -101,16 +132,13 @@ func (p *ParadoxDataSource) GetRecords() ([]map[string]interface{}, error) {
 		return nil, fmt.Errorf("failed to read records: %w", err)
 	}
 
-	// Convert and transform records to match JSON export format
-	exp := converter.NewExporter(converter.Patris2Fa)
-	transformed := exp.ConvertAndTransformRecords(records)
-
-	// Convert map to array of records
-	result := make([]map[string]interface{}, 0, len(transformed))
-	for _, record := range transformed {
-		if recordMap, ok := record.(map[string]interface{}); ok {
-			result = append(result, recordMap)
+	result := make([]map[string]interface{}, 0, len(records))
+	for _, record := range records {
+		row := make(map[string]interface{}, len(record))
+		for key, value := range record {
+			row[key] = value
 		}
+		result = append(result, row)
 	}
 
 	return result, nil
@@ -128,6 +156,11 @@ func (p *ParadoxDataSource) Close() error {
 
 // GetRecords implements DataSource for JSONDataSource
 func (j *JSONDataSource) GetRecords() ([]map[string]interface{}, error) {
+	return j.GetRawRecords()
+}
+
+// GetRawRecords implements DataSource for JSONDataSource.
+func (j *JSONDataSource) GetRawRecords() ([]map[string]interface{}, error) {
 	pathToRead := j.path
 	cleanup := func() {}
 	if filecopy.IsURL(j.path) {
@@ -147,6 +180,11 @@ func (j *JSONDataSource) GetRecords() ([]map[string]interface{}, error) {
 		return nil, fmt.Errorf("failed to read JSON file: %w", err)
 	}
 
+	var rows []map[string]interface{}
+	if err := json.Unmarshal(data, &rows); err == nil {
+		return rows, nil
+	}
+
 	var result map[string]interface{}
 	if err := json.Unmarshal(data, &result); err != nil {
 		return nil, fmt.Errorf("failed to parse JSON: %w", err)
@@ -155,9 +193,16 @@ func (j *JSONDataSource) GetRecords() ([]map[string]interface{}, error) {
 	// The JSON file should match the transformed format with Code as keys
 	// Extract records from the map
 	records := make([]map[string]interface{}, 0, len(result))
-	for _, value := range result {
+	for code, value := range result {
 		if recordMap, ok := value.(map[string]interface{}); ok {
-			records = append(records, recordMap)
+			row := make(map[string]interface{}, len(recordMap)+1)
+			if _, hasCode := recordMap["Code"]; !hasCode {
+				row["Code"] = code
+			}
+			for key, fieldValue := range recordMap {
+				row[key] = fieldValue
+			}
+			records = append(records, row)
 		}
 	}
 
@@ -172,4 +217,16 @@ func (j *JSONDataSource) GetPath() string {
 // Close implements DataSource for JSONDataSource
 func (j *JSONDataSource) Close() error {
 	return nil
+}
+
+func mapsToParadox(rows []map[string]interface{}) []paradox.Record {
+	records := make([]paradox.Record, 0, len(rows))
+	for _, row := range rows {
+		record := paradox.Record{}
+		for key, value := range row {
+			record[key] = value
+		}
+		records = append(records, record)
+	}
+	return records
 }

@@ -12,6 +12,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/atomicdeploy/patris-export/pkg/recordmap"
+	"github.com/atomicdeploy/patris-export/pkg/updateout"
 	"github.com/fsnotify/fsnotify"
 	"github.com/pelletier/go-toml/v2"
 	"gopkg.in/yaml.v3"
@@ -32,6 +34,9 @@ type Config struct {
 	Database      DatabaseConfig         `json:"database" yaml:"database" toml:"database"`
 	Runtime       RuntimeConfig          `json:"runtime" yaml:"runtime" toml:"runtime"`
 	Convert       ConvertConfig          `json:"convert" yaml:"convert" toml:"convert"`
+	Transform     recordmap.Config       `json:"transform" yaml:"transform" toml:"transform"`
+	Export        ExportConfig           `json:"export" yaml:"export" toml:"export"`
+	SendUpdates   updateout.Config       `json:"send_updates" yaml:"send_updates" toml:"send_updates"`
 	Edge          EdgeConfig             `json:"edge" yaml:"edge" toml:"edge"`
 	Notifications NotificationsConfig    `json:"notifications" yaml:"notifications" toml:"notifications"`
 	UI            UIConfig               `json:"ui" yaml:"ui" toml:"ui"`
@@ -58,6 +63,7 @@ type DatabaseConfig struct {
 	Charmap       string `json:"charmap" yaml:"charmap" toml:"charmap"`
 	DirectAccess  bool   `json:"direct_access" yaml:"direct_access" toml:"direct_access"`
 	RTLConversion bool   `json:"rtl_conversion" yaml:"rtl_conversion" toml:"rtl_conversion"`
+	Raw           bool   `json:"raw" yaml:"raw" toml:"raw"`
 }
 
 type RuntimeConfig struct {
@@ -72,6 +78,16 @@ type ConvertConfig struct {
 	Format   string `json:"format" yaml:"format" toml:"format"`
 	Watch    bool   `json:"watch" yaml:"watch" toml:"watch"`
 	Debounce string `json:"debounce" yaml:"debounce" toml:"debounce"`
+	Raw      bool   `json:"raw" yaml:"raw" toml:"raw"`
+	Table    string `json:"table,omitempty" yaml:"table,omitempty" toml:"table,omitempty"`
+}
+
+type ExportConfig struct {
+	SQLitePath  string `json:"sqlite_path,omitempty" yaml:"sqlite_path,omitempty" toml:"sqlite_path,omitempty"`
+	SQLiteTable string `json:"sqlite_table,omitempty" yaml:"sqlite_table,omitempty" toml:"sqlite_table,omitempty"`
+	MySQLDSN    string `json:"mysql_dsn,omitempty" yaml:"mysql_dsn,omitempty" toml:"mysql_dsn,omitempty"`
+	MySQLTable  string `json:"mysql_table,omitempty" yaml:"mysql_table,omitempty" toml:"mysql_table,omitempty"`
+	BatchSize   int    `json:"batch_size,omitempty" yaml:"batch_size,omitempty" toml:"batch_size,omitempty"`
 }
 
 type EdgeConfig struct {
@@ -136,6 +152,13 @@ func Default() Config {
 			Output:   ".",
 			Format:   "json",
 			Debounce: "1s",
+		},
+		SendUpdates: updateout.Config{
+			Method:  "POST",
+			Format:  "json",
+			Mode:    "changes",
+			Initial: true,
+			Timeout: "10s",
 		},
 		Edge: EdgeConfig{
 			Debounce:    "1s",
@@ -525,6 +548,14 @@ func ApplyEnv(cfg *Config) {
 	if value := os.Getenv("PATRIS_RTL"); strings.TrimSpace(value) != "" {
 		cfg.Database.RTLConversion = parseBool(value, cfg.Database.RTLConversion)
 	}
+	if value := os.Getenv("PATRIS_RAW"); strings.TrimSpace(value) != "" {
+		cfg.Database.Raw = parseBool(value, cfg.Database.Raw)
+		cfg.Convert.Raw = cfg.Database.Raw
+	}
+	if value := os.Getenv("PATRIS_MAPPING_FILE"); strings.TrimSpace(value) != "" {
+		cfg.Transform.MappingFile = strings.TrimSpace(value)
+		cfg.Transform.Enabled = true
+	}
 	for _, key := range []string{"PATRIS_TEMP_DIR", "PATRIS_TMPDIR"} {
 		if value := os.Getenv(key); strings.TrimSpace(value) != "" {
 			cfg.Runtime.TempDir = strings.TrimSpace(value)
@@ -551,11 +582,57 @@ func ApplyEnv(cfg *Config) {
 	if value := os.Getenv("PATRIS_FORMAT"); strings.TrimSpace(value) != "" {
 		cfg.Convert.Format = strings.TrimSpace(value)
 	}
+	if value := os.Getenv("PATRIS_EXPORT_TABLE"); strings.TrimSpace(value) != "" {
+		cfg.Convert.Table = strings.TrimSpace(value)
+	}
+	if value := os.Getenv("PATRIS_SQLITE_PATH"); strings.TrimSpace(value) != "" {
+		cfg.Export.SQLitePath = strings.TrimSpace(value)
+	}
+	if value := os.Getenv("PATRIS_SQLITE_TABLE"); strings.TrimSpace(value) != "" {
+		cfg.Export.SQLiteTable = strings.TrimSpace(value)
+	}
+	if value := os.Getenv("PATRIS_MYSQL_DSN"); strings.TrimSpace(value) != "" {
+		cfg.Export.MySQLDSN = strings.TrimSpace(value)
+	}
+	if value := os.Getenv("PATRIS_MYSQL_TABLE"); strings.TrimSpace(value) != "" {
+		cfg.Export.MySQLTable = strings.TrimSpace(value)
+	}
+	if value := os.Getenv("PATRIS_EXPORT_BATCH_SIZE"); strings.TrimSpace(value) != "" {
+		if batch, err := strconv.Atoi(strings.TrimSpace(value)); err == nil {
+			cfg.Export.BatchSize = batch
+		}
+	}
 	if value := os.Getenv("PATRIS_CONVERT_WATCH"); strings.TrimSpace(value) != "" {
 		cfg.Convert.Watch = parseBool(value, cfg.Convert.Watch)
 	}
 	if value := os.Getenv("PATRIS_CONVERT_DEBOUNCE"); strings.TrimSpace(value) != "" {
 		cfg.Convert.Debounce = strings.TrimSpace(value)
+	}
+	if value := os.Getenv("PATRIS_SEND_UPDATES"); strings.TrimSpace(value) != "" {
+		cfg.SendUpdates.Enabled = parseBool(value, cfg.SendUpdates.Enabled)
+	}
+	if value := os.Getenv("PATRIS_SEND_URL"); strings.TrimSpace(value) != "" {
+		cfg.SendUpdates.URL = strings.TrimSpace(value)
+		cfg.SendUpdates.Enabled = true
+	}
+	if value := os.Getenv("PATRIS_SEND_METHOD"); strings.TrimSpace(value) != "" {
+		cfg.SendUpdates.Method = strings.TrimSpace(value)
+	}
+	if value := os.Getenv("PATRIS_SEND_FORMAT"); strings.TrimSpace(value) != "" {
+		cfg.SendUpdates.Format = strings.TrimSpace(value)
+	}
+	if value := os.Getenv("PATRIS_SEND_MODE"); strings.TrimSpace(value) != "" {
+		cfg.SendUpdates.Mode = strings.TrimSpace(value)
+	}
+	if value := os.Getenv("PATRIS_SEND_INITIAL"); strings.TrimSpace(value) != "" {
+		cfg.SendUpdates.Initial = parseBool(value, cfg.SendUpdates.Initial)
+	}
+	if value := os.Getenv("PATRIS_SEND_TIMEOUT"); strings.TrimSpace(value) != "" {
+		cfg.SendUpdates.Timeout = strings.TrimSpace(value)
+	}
+	if value := os.Getenv("PATRIS_SEND_COMMAND"); strings.TrimSpace(value) != "" {
+		cfg.SendUpdates.Command = strings.Fields(value)
+		cfg.SendUpdates.Enabled = true
 	}
 	if value := os.Getenv("PATRIS_EDGE_ENABLED"); strings.TrimSpace(value) != "" {
 		cfg.Edge.Enabled = parseBool(value, cfg.Edge.Enabled)
@@ -646,12 +723,21 @@ func normalize(cfg *Config) {
 		cfg.Convert.Format = "json"
 	}
 	cfg.Convert.Format = strings.ToLower(strings.TrimSpace(cfg.Convert.Format))
-	if cfg.Convert.Format != "csv" {
+	switch cfg.Convert.Format {
+	case "json", "csv", "xlsx", "excel", "sqlite", "mysql":
+		if cfg.Convert.Format == "excel" {
+			cfg.Convert.Format = "xlsx"
+		}
+	default:
 		cfg.Convert.Format = "json"
 	}
 	if cfg.Convert.Debounce == "" {
 		cfg.Convert.Debounce = "1s"
 	}
+	if cfg.Export.BatchSize <= 0 {
+		cfg.Export.BatchSize = 500
+	}
+	cfg.SendUpdates = updateout.Normalize(cfg.SendUpdates)
 	cfg.Edge.TargetURL = strings.TrimRight(strings.TrimSpace(cfg.Edge.TargetURL), "/")
 	cfg.Edge.Token = strings.TrimSpace(cfg.Edge.Token)
 	cfg.Edge.SourceID = strings.TrimSpace(cfg.Edge.SourceID)

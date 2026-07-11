@@ -246,7 +246,7 @@ func callServer(ctx context.Context, srv *server.Server, method string, params j
 	case "app.get", "app":
 		return srv.AppMetadata(), nil
 	case "records.list", "records.get", "records":
-		return srv.Records()
+		return srv.RecordsPayload()
 	case "info.get", "info":
 		return srv.Info()
 	case "status.get", "status":

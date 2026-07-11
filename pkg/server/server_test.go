@@ -141,8 +141,24 @@ func TestServerJSON(t *testing.T) {
 		}
 	})
 
-	t.Run("GET /api/records invalid format", func(t *testing.T) {
+	t.Run("GET /api/records.xlsx", func(t *testing.T) {
 		req := httptest.NewRequest("GET", "/api/records?format=xlsx", nil)
+		w := httptest.NewRecorder()
+		srv.router.ServeHTTP(w, req)
+
+		if w.Code != http.StatusOK {
+			t.Fatalf("Expected status 200, got %d", w.Code)
+		}
+		if ct := w.Header().Get("Content-Type"); !strings.HasPrefix(ct, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet") {
+			t.Fatalf("Expected XLSX Content-Type, got %s", ct)
+		}
+		if w.Body.Len() == 0 {
+			t.Fatal("Expected non-empty XLSX body")
+		}
+	})
+
+	t.Run("GET /api/records invalid format", func(t *testing.T) {
+		req := httptest.NewRequest("GET", "/api/records?format=parquet", nil)
 		w := httptest.NewRecorder()
 		srv.router.ServeHTTP(w, req)
 
