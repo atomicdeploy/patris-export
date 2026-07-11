@@ -1,0 +1,71 @@
+version: 2
+
+updates:
+  - package-ecosystem: "gomod"
+    directory: "/"
+    target-branch: "main"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "08:00"
+      timezone: "Asia/Tehran"
+    open-pull-requests-limit: 10
+    rebase-strategy: "auto"
+    labels:
+      - "📌 source: dependabot"
+      - "📦 area: dependencies"
+      - "🏗️ area: build-ci"
+    commit-message:
+      prefix: "deps(go)"
+      include: "scope"
+    groups:
+      go-modules:
+        patterns:
+          - "*"
+
+  - package-ecosystem: "npm"
+    directory: "/web"
+    target-branch: "main"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "08:30"
+      timezone: "Asia/Tehran"
+    open-pull-requests-limit: 10
+    rebase-strategy: "auto"
+    versioning-strategy: "increase"
+    labels:
+      - "📌 source: dependabot"
+      - "📦 area: dependencies"
+      - "🎨 area: frontend"
+      - "🏗️ area: build-ci"
+    commit-message:
+      prefix: "deps(web)"
+      include: "scope"
+    groups:
+      npm-build-tooling:
+        dependency-type: "development"
+        patterns:
+          - "*"
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    target-branch: "main"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+      timezone: "Asia/Tehran"
+    open-pull-requests-limit: 10
+    rebase-strategy: "auto"
+    labels:
+      - "📌 source: dependabot"
+      - "📦 area: dependencies"
+      - "🏗️ area: build-ci"
+    commit-message:
+      prefix: "deps(actions)"
+      include: "scope"
+    groups:
+      github-actions:
+        patterns:
+          - "*"
