@@ -112,9 +112,9 @@ Supports Persian/Farsi encoding conversion and file watching.
 	rootCmd.SetVersionTemplate(version.Detailed() + "\n")
 
 	// Global flags
-	rootCmd.PersistentFlags().StringArrayVar(&configFiles, "config", nil, "Path to patris-export config file; repeat to layer JSON/YAML/TOML files")
+	rootCmd.PersistentFlags().StringArrayVarP(&configFiles, "config", "c", nil, "Path to patris-export config file; repeat to layer JSON/YAML/TOML files")
 	rootCmd.PersistentFlags().StringVar(&dbFileFlag, "db", "", "Open a database file in one-shot native viewer mode when no subcommand is used")
-	rootCmd.PersistentFlags().StringVarP(&charMapFile, "charmap", "c", "", "Optional custom character mapping file; embedded Patris81 mapping is used by default")
+	rootCmd.PersistentFlags().StringVarP(&charMapFile, "charmap", "m", "", "Optional custom character mapping file; embedded Patris81 mapping is used by default")
 	rootCmd.PersistentFlags().StringVarP(&outputDir, "output", "o", ".", "Output directory for converted files (use '-' for stdout)")
 	rootCmd.PersistentFlags().StringVar(&tempDir, "temp-dir", "", "Temp directory for copied/downloaded database files (default: system temp)")
 	rootCmd.PersistentFlags().StringVar(&tempStrategy, "temp-strategy", "", "Temp storage strategy: auto, system, or memory (auto prefers /dev/shm on Linux for small files)")
