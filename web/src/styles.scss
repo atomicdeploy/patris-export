@@ -327,6 +327,58 @@ body.footer-hidden {
     padding: 1.5rem;
 }
 
+.route-outlet {
+    height: 100%;
+    overflow: auto;
+    background: $bg-light;
+    border-radius: 8px;
+    box-shadow: $shadow;
+
+    .dark-mode &,
+    html.dark-mode & {
+        background: $bg-dark;
+    }
+
+    &[hidden] {
+        display: none;
+    }
+}
+
+.partial-route-active {
+    .main-content {
+        overflow: auto;
+    }
+}
+
+.route-loading,
+.route-error {
+    min-height: 280px;
+    display: grid;
+    place-items: center;
+    gap: 0.5rem;
+    padding: 2rem;
+    color: $text-light-secondary;
+
+    .dark-mode &,
+    html.dark-mode & {
+        color: $text-dark-secondary;
+    }
+}
+
+.route-error {
+    place-items: center;
+    text-align: center;
+
+    strong {
+        color: $danger-color;
+        font-size: 1.05rem;
+    }
+
+    span {
+        font-family: var(--font-mono);
+    }
+}
+
 .table-container {
     height: 100%;
     background: $bg-light;

@@ -25,6 +25,14 @@ const state = {
     hiddenColumns: new Set(),  // Track hidden columns
     columnOrder: [],
     openRangePanel: null,
+    router: {
+        route: '/viewer',
+        outlet: null,
+        tableContainer: null,
+        toolbar: null,
+        partialController: null,
+        partialScripts: []
+    },
     settings: {
         autoScrollToChanged: false,
         highlightChanges: true,
@@ -833,6 +841,216 @@ function initDialogActionButtons() {
         closeButton.parentElement?.insertBefore(menuButton, closeButton);
         closeButton.dataset.normalizedDialogActions = '1';
     });
+}
+
+const ROUTES = {
+    '/': { title: 'Patris Export', partial: '/partials/welcome' },
+    '/viewer': { title: 'Patris Export - Live Data Viewer', viewer: true },
+    '/debug/charmap': { title: 'Patris Export - Character Map Viewer', partial: '/partials/charmap' }
+};
+
+const MODAL_ROUTES = {
+    settings: 'settingsPanel',
+    columns: 'columnsPanel',
+    connection: 'connectionPanel'
+};
+
+function initRouter() {
+    state.router.toolbar = document.querySelector('.toolbar');
+    state.router.tableContainer = document.querySelector('.table-container');
+    const main = document.querySelector('.main-content');
+    if (main && !document.getElementById('routeOutlet')) {
+        const outlet = document.createElement('div');
+        outlet.id = 'routeOutlet';
+        outlet.className = 'route-outlet';
+        outlet.hidden = true;
+        main.appendChild(outlet);
+        state.router.outlet = outlet;
+    } else {
+        state.router.outlet = document.getElementById('routeOutlet');
+    }
+
+    document.addEventListener('click', handleRouterClick);
+    window.addEventListener('popstate', () => applyCurrentRoute({ push: false }));
+    window.addEventListener('hashchange', applyModalHash);
+    document.addEventListener('keydown', event => {
+        if (event.key === 'Escape' && activePanelId()) {
+            event.preventDefault();
+            closeRouteDialog();
+        }
+    });
+    applyCurrentRoute({ push: false });
+}
+
+function handleRouterClick(event) {
+    const anchor = event.target.closest('a[href]');
+    if (!anchor || event.defaultPrevented || anchor.target || anchor.hasAttribute('download')) return;
+    if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey || event.button !== 0) return;
+    const url = new URL(anchor.href, window.location.href);
+    if (url.origin !== window.location.origin) return;
+    if (url.pathname.startsWith('/api/') || url.pathname.startsWith('/static/') || url.pathname === '/ws') return;
+    if (url.pathname in ROUTES) {
+        event.preventDefault();
+        navigateTo(url.pathname + url.search + url.hash);
+    }
+}
+
+function navigateTo(url, options = {}) {
+    const { replace = false } = options;
+    const next = new URL(url, window.location.href);
+    const current = window.location.pathname + window.location.search + window.location.hash;
+    const target = next.pathname + next.search + next.hash;
+    if (current !== target) {
+        if (replace) {
+            history.replaceState({ route: next.pathname }, '', target);
+        } else {
+            history.pushState({ route: next.pathname }, '', target);
+        }
+    }
+    applyCurrentRoute({ push: false });
+}
+
+async function applyCurrentRoute() {
+    const path = normalizeRoutePath(window.location.pathname);
+    const route = ROUTES[path] || ROUTES['/viewer'];
+    state.router.route = path;
+    document.title = route.title || state.originalTitle;
+    if (route.viewer) {
+        showViewerRoute();
+    } else {
+        await showPartialRoute(route);
+    }
+    applyModalHash();
+}
+
+function normalizeRoutePath(path) {
+    if (path === '' || path === '/') return '/';
+    if (path.endsWith('/') && path.length > 1) return path.slice(0, -1);
+    return path;
+}
+
+function showViewerRoute() {
+    cancelPartialRoute();
+    if (state.router.toolbar) state.router.toolbar.hidden = false;
+    if (state.router.tableContainer) state.router.tableContainer.hidden = false;
+    if (state.router.outlet) {
+        state.router.outlet.hidden = true;
+        state.router.outlet.innerHTML = '';
+    }
+    document.body.classList.remove('partial-route-active');
+}
+
+async function showPartialRoute(route) {
+    if (!state.router.outlet || !route.partial) return;
+    cancelPartialRoute();
+    if (state.router.toolbar) state.router.toolbar.hidden = true;
+    if (state.router.tableContainer) state.router.tableContainer.hidden = true;
+    document.body.classList.add('partial-route-active');
+    state.router.outlet.hidden = false;
+    state.router.outlet.innerHTML = '<div class="route-loading">Loading...</div>';
+    const controller = new AbortController();
+    state.router.partialController = controller;
+    try {
+        const response = await fetch(route.partial, {
+            headers: { 'X-Patris-Partial': '1' },
+            signal: controller.signal,
+            cache: 'no-store'
+        });
+        if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
+        const html = await response.text();
+        if (state.router.partialController !== controller) return;
+        renderPartialHTML(html);
+    } catch (error) {
+        if (error.name === 'AbortError') return;
+        state.router.outlet.innerHTML = `<div class="route-error"><strong>Could not load page.</strong><span>${escapeHtml(error.message)}</span></div>`;
+    }
+}
+
+function cancelPartialRoute() {
+    if (state.router.partialController) {
+        state.router.partialController.abort();
+        state.router.partialController = null;
+    }
+    state.router.partialScripts = [];
+}
+
+function renderPartialHTML(html) {
+    const template = document.createElement('template');
+    template.innerHTML = html;
+    const scripts = [...template.content.querySelectorAll('script')];
+    scripts.forEach(script => script.remove());
+    state.router.outlet.replaceChildren(template.content.cloneNode(true));
+    scripts.forEach(script => runPartialScript(script));
+}
+
+function runPartialScript(sourceScript) {
+    const script = document.createElement('script');
+    for (const attr of sourceScript.attributes) {
+        script.setAttribute(attr.name, attr.value);
+    }
+    if (!sourceScript.src) {
+        script.textContent = `(() => {
+const __routeOutlet = window.document.currentScript?.closest('#routeOutlet') || window.document;
+const document = new Proxy(window.document, {
+    get(target, prop) {
+        if (prop === 'getElementById') {
+            return id => __routeOutlet.querySelector?.('#' + CSS.escape(id)) || target.getElementById(id);
+        }
+        if (prop === 'querySelector') {
+            return selector => __routeOutlet.querySelector?.(selector) || target.querySelector(selector);
+        }
+        if (prop === 'querySelectorAll') {
+            return selector => {
+                const local = __routeOutlet.querySelectorAll?.(selector);
+                return local && local.length ? local : target.querySelectorAll(selector);
+            };
+        }
+        const value = target[prop];
+        return typeof value === 'function' ? value.bind(target) : value;
+    }
+});
+${sourceScript.textContent}
+})();`;
+    }
+    state.router.outlet.appendChild(script);
+    state.router.partialScripts.push(script);
+}
+
+function openModalRoute(name, options = {}) {
+    if (!(name in MODAL_ROUTES)) return;
+    if (options.replace) {
+        history.replaceState(history.state, '', `${window.location.pathname}${window.location.search}#${name}`);
+    } else if (window.location.hash !== `#${name}`) {
+        history.pushState(history.state, '', `${window.location.pathname}${window.location.search}#${name}`);
+    }
+    applyModalHash();
+}
+
+function applyModalHash() {
+    const name = window.location.hash.replace(/^#/, '').split(/[?&]/)[0];
+    const panelId = MODAL_ROUTES[name];
+    if (panelId) {
+        if (panelId === 'columnsPanel') renderColumnManager();
+        if (panelId === 'settingsPanel') applyConfigToSettingsForm();
+        if (panelId === 'connectionPanel') renderConnectionPanel();
+        openPanel(panelId);
+        return;
+    }
+    if (!window.location.hash) {
+        closePanels();
+    }
+}
+
+function activePanelId() {
+    return ['settingsPanel', 'columnsPanel', 'connectionPanel']
+        .find(id => document.getElementById(id)?.classList.contains('open')) || '';
+}
+
+function closeRouteDialog() {
+    closePanels();
+    if (window.location.hash) {
+        history.pushState(history.state, '', `${window.location.pathname}${window.location.search}`);
+    }
 }
 
 function applyConfigToSettingsForm() {
@@ -3026,6 +3244,7 @@ function init() {
     initDialogActionButtons();
     initChromeMirrors();
     initTableWheelScroll();
+    initRouter();
     setInterval(updateLastUpdateDisplay, 30000);
     
     // Set up event listeners
@@ -3053,8 +3272,8 @@ function init() {
     document.getElementById('footerToggleBtn')?.addEventListener('click', toggleFooterVisibility);
     document.getElementById('footerCollapseBtn')?.addEventListener('click', toggleFooterVisibility);
     document.getElementById('footerLastUpdate')?.addEventListener('click', cycleLastUpdateMode);
-    document.getElementById('headerConnectionButton')?.addEventListener('click', openConnectionPanel);
-    document.getElementById('footerConnectionButton')?.addEventListener('click', openConnectionPanel);
+    document.getElementById('headerConnectionButton')?.addEventListener('click', () => openModalRoute('connection'));
+    document.getElementById('footerConnectionButton')?.addEventListener('click', () => openModalRoute('connection'));
     document.getElementById('headerFileChip')?.addEventListener('click', () => {
         if (state.fileName) showInAppToast('Current source file', state.fileName, { broadcastToTabs: true });
     });
@@ -3081,15 +3300,14 @@ function init() {
     });
     
     document.getElementById('settingsBtn').addEventListener('click', () => {
-        applyConfigToSettingsForm();
-        openPanel('settingsPanel');
+        openModalRoute('settings');
     });
     
     document.getElementById('closeSettings').addEventListener('click', () => {
-        closePanels();
+        closeRouteDialog();
     });
-    document.getElementById('closeConnection')?.addEventListener('click', closePanels);
-    document.getElementById('panelBackdrop').addEventListener('click', closePanels);
+    document.getElementById('closeConnection')?.addEventListener('click', closeRouteDialog);
+    document.getElementById('panelBackdrop').addEventListener('click', closeRouteDialog);
     initSettingsTabs();
     
     document.getElementById('closeInspector').addEventListener('click', () => {
@@ -3098,12 +3316,11 @@ function init() {
     
     // Column manager
     document.getElementById('columnsBtn').addEventListener('click', () => {
-        renderColumnManager();
-        openPanel('columnsPanel');
+        openModalRoute('columns');
     });
     
     document.getElementById('closeColumns').addEventListener('click', () => {
-        closePanels();
+        closeRouteDialog();
     });
 
     document.getElementById('refreshNowBtn').addEventListener('click', requestSourceRefresh);
@@ -3268,7 +3485,7 @@ function init() {
     if (settingsTarget) {
         setActiveSettingsTab(settingsTarget === '1' ? 'ui' : settingsTarget);
         applyConfigToSettingsForm();
-        openPanel('settingsPanel');
+        openModalRoute('settings', { replace: true });
     }
 }
 

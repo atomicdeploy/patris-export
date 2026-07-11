@@ -209,6 +209,8 @@ func (s *Server) setupRoutes() {
 	s.router.HandleFunc("/", s.handleWelcome).Methods("GET")
 	s.router.HandleFunc("/viewer", s.handleViewer).Methods("GET")
 	s.router.HandleFunc("/debug/charmap", s.handleCharmapViewer).Methods("GET")
+	s.router.HandleFunc("/partials/welcome", s.handleWelcomePartial).Methods("GET")
+	s.router.HandleFunc("/partials/charmap", s.handleCharmapPartial).Methods("GET")
 	s.router.HandleFunc("/api/records", s.handleGetRecords).Methods("GET")
 	s.router.HandleFunc("/api/records.{format:json|csv|xlsx}", s.handleGetRecords).Methods("GET")
 	s.router.HandleFunc("/api/info", s.handleGetInfo).Methods("GET")
@@ -474,6 +476,52 @@ func (s *Server) handleCharmapViewer(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Write(web.CharmapHTML)
+}
+
+func (s *Server) handleWelcomePartial(w http.ResponseWriter, r *http.Request) {
+	writeHTMLPartial(w, web.WelcomeHTML)
+}
+
+func (s *Server) handleCharmapPartial(w http.ResponseWriter, r *http.Request) {
+	writeHTMLPartial(w, web.CharmapHTML)
+}
+
+func writeHTMLPartial(w http.ResponseWriter, page []byte) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-cache")
+	html := string(page)
+	lower := strings.ToLower(html)
+	var parts []string
+
+	searchFrom := 0
+	for {
+		start := strings.Index(lower[searchFrom:], "<style")
+		if start < 0 {
+			break
+		}
+		start += searchFrom
+		end := strings.Index(lower[start:], "</style>")
+		if end < 0 {
+			break
+		}
+		end += start + len("</style>")
+		parts = append(parts, html[start:end])
+		searchFrom = end
+	}
+
+	bodyStart := strings.Index(lower, "<body")
+	if bodyStart >= 0 {
+		bodyOpenEnd := strings.Index(lower[bodyStart:], ">")
+		bodyEnd := strings.LastIndex(lower, "</body>")
+		if bodyOpenEnd >= 0 && bodyEnd > bodyStart {
+			bodyOpenEnd += bodyStart + 1
+			parts = append(parts, html[bodyOpenEnd:bodyEnd])
+		}
+	}
+	if len(parts) == 0 {
+		parts = append(parts, html)
+	}
+	_, _ = w.Write([]byte(strings.Join(parts, "\n")))
 }
 
 // handleGetRecords returns all database records as JSON or CSV.
