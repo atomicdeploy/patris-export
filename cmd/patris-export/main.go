@@ -16,6 +16,7 @@ import (
 
 	"github.com/atomicdeploy/patris-export/pkg/appconfig"
 	"github.com/atomicdeploy/patris-export/pkg/converter"
+	"github.com/atomicdeploy/patris-export/pkg/datasource"
 	edgepkg "github.com/atomicdeploy/patris-export/pkg/edge"
 	"github.com/atomicdeploy/patris-export/pkg/embedded"
 	"github.com/atomicdeploy/patris-export/pkg/filecopy"
@@ -23,8 +24,12 @@ import (
 	"github.com/atomicdeploy/patris-export/pkg/oneshot"
 	"github.com/atomicdeploy/patris-export/pkg/paradox"
 	"github.com/atomicdeploy/patris-export/pkg/processmon"
+	"github.com/atomicdeploy/patris-export/pkg/recordmap"
+	"github.com/atomicdeploy/patris-export/pkg/recordpipe"
+	"github.com/atomicdeploy/patris-export/pkg/recordsink"
 	"github.com/atomicdeploy/patris-export/pkg/server"
 	"github.com/atomicdeploy/patris-export/pkg/tui"
+	"github.com/atomicdeploy/patris-export/pkg/updateout"
 	"github.com/atomicdeploy/patris-export/pkg/updater"
 	"github.com/atomicdeploy/patris-export/pkg/version"
 	"github.com/atomicdeploy/patris-export/pkg/watcher"
@@ -51,6 +56,19 @@ var (
 	verbose         bool
 	directAccess    bool
 	rtlMode         bool
+	rawMode         bool
+	mappingFile     string
+	exportTable     string
+	sqlitePath      string
+	sqliteTable     string
+	mysqlDSN        string
+	mysqlTable      string
+	exportBatchSize int
+	sendURL         string
+	sendFormat      string
+	sendMode        string
+	sendCommand     string
+	sendInitial     bool
 	edgeTargetURL   string
 	edgeToken       string
 	edgeSourceID    string
@@ -104,6 +122,8 @@ Supports Persian/Farsi encoding conversion and file watching.
 	rootCmd.PersistentFlags().BoolVarP(&verbose, "verbose", "v", false, "Enable verbose logging")
 	rootCmd.PersistentFlags().BoolVarP(&directAccess, "direct-access", "d", false, "Access database file directly without temp copy (may conflict with BDE writes)")
 	rootCmd.PersistentFlags().BoolVarP(&rtlMode, "rtl", "r", false, "Opt in to RTL logical text conversion for mixed Persian/Latin output")
+	rootCmd.PersistentFlags().BoolVar(&rawMode, "raw", false, "Export/serve raw pxlib rows without character conversion, ANBAR compaction, keying, RTL conversion, or mapping")
+	rootCmd.PersistentFlags().StringVar(&mappingFile, "mapping", "", "Optional JSON transform mapping file for key/value/table-specific output rules")
 
 	// Convert command
 	convertCmd := &cobra.Command{
@@ -112,9 +132,20 @@ Supports Persian/Farsi encoding conversion and file watching.
 		Args:  cobra.ExactArgs(1),
 		Run:   runConvert,
 	}
-	convertCmd.Flags().StringVarP(&outputFormat, "format", "f", "json", "Output format (json or csv)")
+	convertCmd.Flags().StringVarP(&outputFormat, "format", "f", "json", "Output format (json, csv, xlsx, sqlite, or mysql)")
 	convertCmd.Flags().BoolVarP(&watchMode, "watch", "w", false, "Watch file or URL for changes and auto-convert")
 	convertCmd.Flags().String("debounce", "1s", "Debounce duration for local files; polling interval for URLs (e.g., 0s, 500ms, 1s, 5m)")
+	convertCmd.Flags().StringVar(&exportTable, "table", "", "Destination table name for SQLite/MySQL exports")
+	convertCmd.Flags().StringVar(&sqlitePath, "sqlite-path", "", "SQLite database path for --format sqlite")
+	convertCmd.Flags().StringVar(&sqliteTable, "sqlite-table", "", "SQLite table name for --format sqlite")
+	convertCmd.Flags().StringVar(&mysqlDSN, "mysql-dsn", "", "MySQL DSN for --format mysql (or PATRIS_MYSQL_DSN)")
+	convertCmd.Flags().StringVar(&mysqlTable, "mysql-table", "", "MySQL table name for --format mysql")
+	convertCmd.Flags().IntVar(&exportBatchSize, "batch-size", 0, "Batch size hint for SQL exports")
+	convertCmd.Flags().StringVar(&sendURL, "send-url", "", "Webhook/API URL that receives initial and watch update payloads")
+	convertCmd.Flags().StringVar(&sendFormat, "send-format", "", "Send update format: json or csv")
+	convertCmd.Flags().StringVar(&sendMode, "send-mode", "", "Send update mode: changes or full")
+	convertCmd.Flags().StringVar(&sendCommand, "send-command", "", "Command to run for initial/watch updates; payload is written to stdin")
+	convertCmd.Flags().BoolVar(&sendInitial, "send-initial", true, "Send a full initial payload before watch updates")
 
 	// Info command
 	infoCmd := &cobra.Command{
@@ -489,6 +520,28 @@ func effectiveConfig(cmd *cobra.Command) (*appconfig.Manager, appconfig.Config) 
 	if !rootFlags.Changed("rtl") {
 		rtlMode = cfg.Database.RTLConversion
 	}
+	if rootFlags.Changed("raw") {
+		cfg.Database.Raw = rawMode
+		cfg.Convert.Raw = rawMode
+	} else {
+		rawMode = cfg.Database.Raw || cfg.Convert.Raw
+		cfg.Database.Raw = rawMode
+		cfg.Convert.Raw = rawMode
+	}
+	if rootFlags.Changed("mapping") {
+		cfg.Transform.MappingFile = mappingFile
+		cfg.Transform.Enabled = strings.TrimSpace(mappingFile) != ""
+	} else {
+		mappingFile = cfg.Transform.MappingFile
+	}
+	if strings.TrimSpace(cfg.Transform.MappingFile) != "" {
+		loaded, err := recordmap.LoadFile(cfg.Transform.MappingFile)
+		if err != nil {
+			errorColor.Printf("âŒ Failed to load transform mapping: %v\n", err)
+			os.Exit(1)
+		}
+		cfg.Transform = recordmap.Merge(cfg.Transform, loaded)
+	}
 	if !rootFlags.Changed("output") {
 		outputDir = cfg.Convert.Output
 	}
@@ -525,29 +578,28 @@ func runConvert(cmd *cobra.Command, args []string) {
 		outputFormat = cfg.Convert.Format
 	}
 	outputFormat = strings.ToLower(strings.TrimSpace(outputFormat))
-	if outputFormat != "json" && outputFormat != "csv" {
+	if outputFormat == "excel" {
+		outputFormat = "xlsx"
+	}
+	if outputFormat != "json" && outputFormat != "csv" && outputFormat != "xlsx" && outputFormat != "sqlite" && outputFormat != "mysql" {
 		errorColor.Printf("❌ Unsupported output format: %s\n", outputFormat)
-		errorColor.Println("💡 Use --format json or --format csv")
+		errorColor.Println("💡 Use --format json, csv, xlsx, sqlite, or mysql")
 		os.Exit(1)
 	}
 	if !cmd.Flags().Changed("watch") {
 		watchMode = cfg.Convert.Watch
 	}
+	applyConvertFlagOverrides(cmd, &cfg)
 
-	// Check if output is stdout
 	useStdout := outputDir == "-"
-
-	// Validate that watch mode is not used with stdout
 	if watchMode && useStdout {
 		errorColor.Println("❌ Watch mode cannot be used with stdout output")
 		errorColor.Println("💡 Remove -w flag or specify a file/directory for output")
 		os.Exit(1)
 	}
 
-	// Load character mapping if provided, otherwise use embedded default
 	var charMap converter.CharMapping
 	var err error
-
 	if charMapFile != "" {
 		charMap, err = converter.LoadCharMapping(charMapFile)
 		if err != nil {
@@ -558,14 +610,11 @@ func runConvert(cmd *cobra.Command, args []string) {
 		if !useStdout {
 			successColor.Println("✅ Custom character mapping loaded from file")
 		}
-	} else {
-		if !useStdout {
-			infoColor.Println("ℹ️  Using embedded character mapping (Patris81 default)")
-		}
+	} else if !useStdout {
+		infoColor.Println("ℹ️  Using embedded character mapping (Patris81 default)")
 	}
 
-	// Create output directory if it doesn't exist and we're not using stdout
-	if !useStdout {
+	if !useStdout && outputFormat != "mysql" {
 		if err := os.MkdirAll(outputDir, 0755); err != nil {
 			errorColor.Printf("❌ Failed to create output directory: %v\n", err)
 			os.Exit(1)
@@ -573,15 +622,18 @@ func runConvert(cmd *cobra.Command, args []string) {
 	}
 
 	if !useStdout {
-		// Display temp file setting
 		displayFileStatus(dbFile)
-
-		// Check for process conflicts
 		checkProcessConflicts(dbFile)
 	}
 
+	convertAndSend := func(path, eventType string) {
+		result, err := convertFile(path, charMap, useStdout, cfg)
+		if err == nil {
+			sendConvertUpdate(cfg, path, result, eventType, nil)
+		}
+	}
+
 	if watchMode {
-		// Parse debounce duration
 		debounceStr, _ := cmd.Flags().GetString("debounce")
 		if !cmd.Flags().Changed("debounce") {
 			debounceStr = cfg.Convert.Debounce
@@ -590,11 +642,8 @@ func runConvert(cmd *cobra.Command, args []string) {
 
 		infoColor.Printf("👀 Watching file: %s\n", dbFile)
 		infoColor.Println("📝 Press Ctrl+C to stop watching")
+		convertAndSend(dbFile, "initial")
 
-		// Initial conversion
-		convertFile(dbFile, charMap, useStdout)
-
-		// Set up watcher with configured debounce
 		fw, err := watcher.NewFileWatcher()
 		if err != nil {
 			errorColor.Printf("❌ Failed to create file watcher: %v\n", err)
@@ -610,7 +659,7 @@ func runConvert(cmd *cobra.Command, args []string) {
 			infoColor.Printf("🔄 Polling URL every %v\n", pollInterval)
 			if err := fw.Poll(dbFile, func(path string) {
 				infoColor.Printf("🔄 Remote source changed: %s\n", path)
-				convertFile(path, charMap, useStdout)
+				convertAndSend(path, "update")
 			}, pollInterval); err != nil {
 				errorColor.Printf("❌ Failed to poll URL: %v\n", err)
 				os.Exit(1)
@@ -620,105 +669,180 @@ func runConvert(cmd *cobra.Command, args []string) {
 
 		if err := fw.Watch(dbFile, func(path string) {
 			infoColor.Printf("🔄 File changed: %s\n", filepath.Base(path))
-			convertFile(path, charMap, useStdout)
+			convertAndSend(path, "update")
 		}, debounceDuration); err != nil {
 			errorColor.Printf("❌ Failed to watch file: %v\n", err)
 			os.Exit(1)
 		}
-
 		fw.Start()
-
-		// Wait forever
 		select {}
-	} else {
-		convertFile(dbFile, charMap, useStdout)
 	}
+
+	convertAndSend(dbFile, "initial")
 }
-func convertFile(dbFile string, charMap converter.CharMapping, useStdout bool) {
-	fileToOpen, cleanup, err := prepareFileForReading(dbFile, !useStdout)
-	if err != nil {
-		errorColor.Printf("failed to prepare database file: %v\n", err)
-		return
-	}
-	defer cleanup()
 
+func applyConvertFlagOverrides(cmd *cobra.Command, cfg *appconfig.Config) {
+	if cmd.Flags().Changed("table") {
+		cfg.Convert.Table = exportTable
+	}
+	if cmd.Flags().Changed("sqlite-path") {
+		cfg.Export.SQLitePath = sqlitePath
+	}
+	if cmd.Flags().Changed("sqlite-table") {
+		cfg.Export.SQLiteTable = sqliteTable
+	}
+	if cmd.Flags().Changed("mysql-dsn") {
+		cfg.Export.MySQLDSN = mysqlDSN
+	}
+	if cmd.Flags().Changed("mysql-table") {
+		cfg.Export.MySQLTable = mysqlTable
+	}
+	if cmd.Flags().Changed("batch-size") {
+		cfg.Export.BatchSize = exportBatchSize
+	}
+	if cmd.Flags().Changed("send-url") {
+		cfg.SendUpdates.URL = sendURL
+		cfg.SendUpdates.Enabled = strings.TrimSpace(sendURL) != ""
+	}
+	if cmd.Flags().Changed("send-format") {
+		cfg.SendUpdates.Format = sendFormat
+	}
+	if cmd.Flags().Changed("send-mode") {
+		cfg.SendUpdates.Mode = sendMode
+	}
+	if cmd.Flags().Changed("send-command") {
+		cfg.SendUpdates.Command = strings.Fields(sendCommand)
+		cfg.SendUpdates.Enabled = len(cfg.SendUpdates.Command) > 0
+	}
+	if cmd.Flags().Changed("send-initial") {
+		cfg.SendUpdates.Initial = sendInitial
+	}
+	cfg.SendUpdates = updateout.Normalize(cfg.SendUpdates)
+}
+
+func convertFile(dbFile string, charMap converter.CharMapping, useStdout bool, cfg appconfig.Config) (recordpipe.Result, error) {
 	if !useStdout {
-		infoColor.Printf("Opening database: %s\n", filepath.Base(dbFile))
+		infoColor.Printf("📂 Opening database: %s\n", filepath.Base(dbFile))
 	}
-
-	// Open database
-	db, err := paradox.Open(fileToOpen)
+	ds, err := datasource.NewDataSource(dbFile, charMap, !directAccess && !useStdout)
 	if err != nil {
-		errorColor.Printf("❌ Failed to open database: %v\n", err)
-		return
+		errorColor.Printf("❌ Failed to create data source: %v\n", err)
+		return recordpipe.Result{}, err
 	}
-	defer db.Close()
-
-	// Get records
-	records, err := db.GetRecords()
+	defer ds.Close()
+	rawRows, err := ds.GetRawRecords()
 	if err != nil {
 		errorColor.Printf("❌ Failed to read records: %v\n", err)
+		return recordpipe.Result{}, err
+	}
+	result := recordpipe.Build(rawRows, dbFile, recordpipe.Options{Raw: cfg.Convert.Raw || cfg.Database.Raw, Mapping: cfg.Transform})
+	if !useStdout {
+		infoColor.Printf("📊 Found %d records\n", len(result.Rows))
+	}
+	if err := writeConvertOutput(dbFile, result, useStdout, cfg); err != nil {
+		errorColor.Printf("❌ Failed to export: %v\n", err)
+		return result, err
+	}
+	return result, nil
+}
+
+func writeConvertOutput(dbFile string, result recordpipe.Result, useStdout bool, cfg appconfig.Config) error {
+	if useStdout {
+		switch outputFormat {
+		case "csv":
+			return recordsink.WriteCSV(os.Stdout, result.Rows, result.KeyField)
+		case "json":
+			return recordsink.WriteJSON(os.Stdout, result.Payload)
+		default:
+			return fmt.Errorf("stdout output supports json and csv only")
+		}
+	}
+
+	sourceName := sourceBaseName(dbFile)
+	baseName := strings.TrimSuffix(sourceName, filepath.Ext(sourceName))
+	if strings.TrimSpace(baseName) == "" {
+		baseName = "patris-export"
+	}
+	tableName := firstNonEmpty(cfg.Convert.Table, cfg.Export.SQLiteTable, cfg.Export.MySQLTable, recordpipe.SourceTableName(dbFile))
+	var outputFile string
+	switch outputFormat {
+	case "json":
+		outputFile = filepath.Join(outputDir, baseName+".json")
+		file, err := os.Create(outputFile)
+		if err != nil {
+			return err
+		}
+		defer file.Close()
+		if err := recordsink.WriteJSON(file, result.Payload); err != nil {
+			return err
+		}
+	case "csv":
+		outputFile = filepath.Join(outputDir, baseName+".csv")
+		file, err := os.Create(outputFile)
+		if err != nil {
+			return err
+		}
+		defer file.Close()
+		if err := recordsink.WriteCSV(file, result.Rows, result.KeyField); err != nil {
+			return err
+		}
+	case "xlsx":
+		outputFile = filepath.Join(outputDir, baseName+".xlsx")
+		if err := recordsink.WriteXLSX(outputFile, result.Rows, result.KeyField); err != nil {
+			return err
+		}
+	case "sqlite":
+		outputFile = firstNonEmpty(cfg.Export.SQLitePath, sqlitePath)
+		if outputFile == "" {
+			outputFile = filepath.Join(outputDir, baseName+".sqlite")
+		}
+		if err := recordsink.WriteSQLite(outputFile, tableName, result.KeyField, result.Rows); err != nil {
+			return err
+		}
+	case "mysql":
+		dsn := firstNonEmpty(cfg.Export.MySQLDSN, mysqlDSN)
+		if dsn == "" {
+			return fmt.Errorf("mysql export requires --mysql-dsn or PATRIS_MYSQL_DSN")
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer cancel()
+		if err := recordsink.SyncSQL(ctx, recordsink.SQLOptions{Driver: "mysql", DSN: dsn, Table: tableName, KeyField: result.KeyField, Batch: cfg.Export.BatchSize}, result.Rows); err != nil {
+			return err
+		}
+		outputFile = "mysql:" + tableName
+	}
+	successColor.Printf("✅ Successfully exported to: %s\n", outputFile)
+	return nil
+}
+
+func sendConvertUpdate(cfg appconfig.Config, source string, result recordpipe.Result, eventType string, changes map[string]interface{}) {
+	if !cfg.SendUpdates.Enabled {
 		return
 	}
-
-	if !useStdout {
-		infoColor.Printf("📊 Found %d records\n", len(records))
+	if eventType == "initial" && !cfg.SendUpdates.Initial {
+		return
 	}
-
-	// Create exporter
-	exp := converter.NewExporter(converter.Patris2Fa)
-
-	if useStdout {
-		// Export to stdout
-		if outputFormat == "csv" {
-			// Get fields for CSV header
-			fields, err := db.GetFields()
-			if err != nil {
-				errorColor.Printf("❌ Failed to get fields: %v\n", err)
-				return
-			}
-
-			if err := exp.ExportToCSVWriter(records, fields, os.Stdout); err != nil {
-				errorColor.Printf("❌ Failed to export to CSV: %v\n", err)
-				return
-			}
-		} else {
-			if err := exp.ExportToJSONWriter(records, os.Stdout); err != nil {
-				errorColor.Printf("❌ Failed to export to JSON: %v\n", err)
-				return
-			}
-		}
-	} else {
-		// Export to file
-		// Generate output filename
-		sourceName := sourceBaseName(dbFile)
-		baseName := strings.TrimSuffix(sourceName, filepath.Ext(sourceName))
-		var outputFile string
-
-		if outputFormat == "csv" {
-			outputFile = filepath.Join(outputDir, baseName+".csv")
-
-			// Get fields for CSV header
-			fields, err := db.GetFields()
-			if err != nil {
-				errorColor.Printf("❌ Failed to get fields: %v\n", err)
-				return
-			}
-
-			if err := exp.ExportToCSV(records, fields, outputFile); err != nil {
-				errorColor.Printf("❌ Failed to export to CSV: %v\n", err)
-				return
-			}
-		} else {
-			outputFile = filepath.Join(outputDir, baseName+".json")
-			if err := exp.ExportToJSON(records, outputFile); err != nil {
-				errorColor.Printf("❌ Failed to export to JSON: %v\n", err)
-				return
-			}
-		}
-
-		successColor.Printf("✅ Successfully exported to: %s\n", outputFile)
+	event := updateout.Event{
+		Type:      eventType,
+		Timestamp: time.Now().Format(time.RFC3339),
+		Source:    source,
+		Raw:       result.Raw,
+		Records:   result.Rows,
+		Changes:   changes,
+		KeyField:  result.KeyField,
 	}
+	if err := updateout.Dispatch(context.Background(), cfg.SendUpdates, event); err != nil {
+		warningColor.Printf("Send update failed: %v\n", err)
+	}
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
 }
 
 func runInfo(cmd *cobra.Command, args []string) {
@@ -1209,6 +1333,10 @@ func runServe(cmd *cobra.Command, args []string) {
 		os.Exit(1)
 	}
 	addr = cfg.Addr()
+	if err := configManager.Replace(cfg); err != nil {
+		errorColor.Printf("âŒ Failed to save effective config: %v\n", err)
+		os.Exit(1)
+	}
 
 	// Load character mapping if provided, otherwise use embedded default
 	var charMap converter.CharMapping

@@ -87,6 +87,31 @@ patris-export convert kala.db -f json -o output/
 patris-export convert kala.db -f csv -o output/
 ```
 
+### Raw, Mapped, Excel, SQLite, MySQL, and Send Updates
+
+```bash
+# Raw pxlib rows for debugging; no conversion, ANBAR compaction, RTL, or mapping.
+patris-export --raw convert kala.db -f json -o raw-output/
+
+# Excel workbook using the transformed row shape.
+patris-export convert kala.db -f xlsx -o output/
+
+# SQLite export with a table-specific mapping file.
+patris-export --mapping mapping.kala.json convert kala.db \
+  -f sqlite \
+  --sqlite-path output/patris-products.sqlite \
+  --sqlite-table products
+
+# Watch and send JSON changes to a webhook.
+patris-export convert kala.db -f json -w \
+  --send-url https://example.internal/patris-webhook \
+  --send-mode changes
+```
+
+See [docs/examples/export-transform-send.md](docs/examples/export-transform-send.md)
+for the mapping schema, value transforms, SQL/MySQL DSN examples, and command
+delivery mode.
+
 ### Output to STDOUT
 
 You can output directly to stdout by using `-` as the output destination, which allows for piping and redirection:

@@ -2,8 +2,8 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"crypto/subtle"
-	"encoding/csv"
 	"encoding/json"
 	"fmt"
 	"hash/crc32"
@@ -15,7 +15,6 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -28,6 +27,10 @@ import (
 	"github.com/atomicdeploy/patris-export/pkg/notifier"
 	"github.com/atomicdeploy/patris-export/pkg/paradox"
 	"github.com/atomicdeploy/patris-export/pkg/processmon"
+	"github.com/atomicdeploy/patris-export/pkg/recordmap"
+	"github.com/atomicdeploy/patris-export/pkg/recordpipe"
+	"github.com/atomicdeploy/patris-export/pkg/recordsink"
+	"github.com/atomicdeploy/patris-export/pkg/updateout"
 	"github.com/atomicdeploy/patris-export/pkg/updater"
 	"github.com/atomicdeploy/patris-export/pkg/version"
 	"github.com/atomicdeploy/patris-export/pkg/watcher"
@@ -207,7 +210,7 @@ func (s *Server) setupRoutes() {
 	s.router.HandleFunc("/viewer", s.handleViewer).Methods("GET")
 	s.router.HandleFunc("/debug/charmap", s.handleCharmapViewer).Methods("GET")
 	s.router.HandleFunc("/api/records", s.handleGetRecords).Methods("GET")
-	s.router.HandleFunc("/api/records.{format:json|csv}", s.handleGetRecords).Methods("GET")
+	s.router.HandleFunc("/api/records.{format:json|csv|xlsx}", s.handleGetRecords).Methods("GET")
 	s.router.HandleFunc("/api/info", s.handleGetInfo).Methods("GET")
 	s.router.HandleFunc("/api/app", s.handleGetApp).Methods("GET")
 	s.router.HandleFunc("/api/charmap", s.handleGetCharmap).Methods("GET")
@@ -238,12 +241,37 @@ func (s *Server) Router() http.Handler {
 // Records returns the current records using the same transformed shape served
 // by GET /api/records.
 func (s *Server) Records() (map[string]interface{}, error) {
-	records, err := s.recordsRaw()
+	result, err := s.RecordResult()
 	if err != nil {
 		return nil, fmt.Errorf("failed to read records: %w", err)
 	}
-	exporter := converter.NewExporter(nil)
-	return exporter.TransformRecordsMap(records), nil
+	if payload, ok := result.Payload.(map[string]interface{}); ok {
+		return payload, nil
+	}
+	return recordmap.Keyed(result.Rows, result.KeyField, true), nil
+}
+
+func (s *Server) RecordsPayload() (interface{}, error) {
+	result, err := s.RecordResult()
+	if err != nil {
+		return nil, fmt.Errorf("failed to read records: %w", err)
+	}
+	return result.Payload, nil
+}
+
+func (s *Server) RecordResult() (recordpipe.Result, error) {
+	s.dataSourceMu.RLock()
+	ds := s.dataSource
+	dbPath := s.dbPath
+	s.dataSourceMu.RUnlock()
+	if ds == nil {
+		return recordpipe.Result{}, fmt.Errorf("data source is not initialized")
+	}
+	records, err := ds.GetRawRecords()
+	if err != nil {
+		return recordpipe.Result{}, err
+	}
+	return recordpipe.Build(records, dbPath, s.recordOptions()), nil
 }
 
 // Info returns database schema and metadata using the same shape served by
@@ -292,12 +320,19 @@ func (s *Server) currentDBPath() string {
 }
 
 func (s *Server) recordsRaw() ([]map[string]interface{}, error) {
-	s.dataSourceMu.RLock()
-	defer s.dataSourceMu.RUnlock()
-	if s.dataSource == nil {
-		return nil, fmt.Errorf("data source is not initialized")
+	result, err := s.RecordResult()
+	if err != nil {
+		return nil, err
 	}
-	return s.dataSource.GetRecords()
+	return result.Rows, nil
+}
+
+func (s *Server) recordOptions() recordpipe.Options {
+	cfg := s.Config()
+	return recordpipe.Options{
+		Raw:     cfg.Database.Raw,
+		Mapping: cfg.Transform,
+	}
 }
 
 func (s *Server) replaceDataSource(path string, records []map[string]interface{}) error {
@@ -443,7 +478,7 @@ func (s *Server) handleCharmapViewer(w http.ResponseWriter, r *http.Request) {
 
 // handleGetRecords returns all database records as JSON or CSV.
 func (s *Server) handleGetRecords(w http.ResponseWriter, r *http.Request) {
-	transformed, err := s.Records()
+	result, err := s.RecordResult()
 	if err != nil {
 		http.Error(w, fmt.Sprintf("Failed to read records: %v", err), http.StatusInternalServerError)
 		return
@@ -455,12 +490,16 @@ func (s *Server) handleGetRecords(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if format == "csv" {
-		s.writeRecordsCSV(w, r, transformed)
+		s.writeRecordsCSV(w, r, result.Rows, result.KeyField)
+		return
+	}
+	if format == "xlsx" {
+		s.writeRecordsXLSX(w, r, result.Rows, result.KeyField)
 		return
 	}
 
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	if err := json.NewEncoder(w).Encode(transformed); err != nil {
+	if err := json.NewEncoder(w).Encode(result.Payload); err != nil {
 		http.Error(w, fmt.Sprintf("Failed to encode JSON: %v", err), http.StatusInternalServerError)
 	}
 }
@@ -472,7 +511,7 @@ func requestedRecordsFormat(r *http.Request) string {
 	queryFormat := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("format")))
 	if queryFormat != "" {
 		switch queryFormat {
-		case "json", "csv":
+		case "json", "csv", "xlsx":
 			return queryFormat
 		default:
 			return ""
@@ -482,10 +521,13 @@ func requestedRecordsFormat(r *http.Request) string {
 	if strings.Contains(accept, "text/csv") {
 		return "csv"
 	}
+	if strings.Contains(accept, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet") {
+		return "xlsx"
+	}
 	return "json"
 }
 
-func (s *Server) writeRecordsCSV(w http.ResponseWriter, r *http.Request, records map[string]interface{}) {
+func (s *Server) writeRecordsCSV(w http.ResponseWriter, r *http.Request, records []map[string]interface{}, keyField string) {
 	w.Header().Set("Content-Type", "text/csv; charset=utf-8")
 	if wantsDownload(r) {
 		name := strings.TrimSuffix(sourceBaseName(s.currentDBPath()), filepath.Ext(sourceBaseName(s.currentDBPath())))
@@ -495,73 +537,43 @@ func (s *Server) writeRecordsCSV(w http.ResponseWriter, r *http.Request, records
 		w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", name+".csv"))
 	}
 
-	if err := writeRecordsCSV(w, records); err != nil {
+	if err := recordsink.WriteCSV(w, records, keyField); err != nil {
 		http.Error(w, fmt.Sprintf("Failed to encode CSV: %v", err), http.StatusInternalServerError)
 	}
+}
+
+func (s *Server) writeRecordsXLSX(w http.ResponseWriter, r *http.Request, records []map[string]interface{}, keyField string) {
+	temp, err := os.CreateTemp("", "patris-records-*.xlsx")
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Failed to create XLSX: %v", err), http.StatusInternalServerError)
+		return
+	}
+	tempPath := temp.Name()
+	_ = temp.Close()
+	defer os.Remove(tempPath)
+	if err := recordsink.WriteXLSX(tempPath, records, keyField); err != nil {
+		http.Error(w, fmt.Sprintf("Failed to encode XLSX: %v", err), http.StatusInternalServerError)
+		return
+	}
+	file, err := os.Open(tempPath)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Failed to open XLSX: %v", err), http.StatusInternalServerError)
+		return
+	}
+	defer file.Close()
+	stat, _ := file.Stat()
+	name := strings.TrimSuffix(sourceBaseName(s.currentDBPath()), filepath.Ext(sourceBaseName(s.currentDBPath())))
+	if strings.TrimSpace(name) == "" {
+		name = "patris-export"
+	}
+	w.Header().Set("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", name+".xlsx"))
+	http.ServeContent(w, r, name+".xlsx", stat.ModTime(), file)
 }
 
 func wantsDownload(r *http.Request) bool {
 	value := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("download")))
 	return value == "1" || value == "true" || value == "yes"
-}
-
-func writeRecordsCSV(writer io.Writer, records map[string]interface{}) error {
-	keys := make([]string, 0, len(records))
-	fieldSet := map[string]bool{}
-	for code, value := range records {
-		keys = append(keys, code)
-		if record, ok := value.(map[string]interface{}); ok {
-			for field := range record {
-				if field != "Code" {
-					fieldSet[field] = true
-				}
-			}
-		}
-	}
-	sort.Strings(keys)
-
-	fields := make([]string, 0, len(fieldSet))
-	for field := range fieldSet {
-		fields = append(fields, field)
-	}
-	sort.Strings(fields)
-	header := append([]string{"Code"}, fields...)
-
-	cw := csv.NewWriter(writer)
-	if err := cw.Write(header); err != nil {
-		return err
-	}
-	for _, code := range keys {
-		row := make([]string, len(header))
-		row[0] = code
-		record, _ := records[code].(map[string]interface{})
-		for i, field := range fields {
-			row[i+1] = csvCell(record[field])
-		}
-		if err := cw.Write(row); err != nil {
-			return err
-		}
-	}
-	cw.Flush()
-	return cw.Error()
-}
-
-func csvCell(value interface{}) string {
-	if value == nil {
-		return ""
-	}
-	switch v := value.(type) {
-	case string:
-		return v
-	case fmt.Stringer:
-		return v.String()
-	case []interface{}, []string, []int, []float64, map[string]interface{}:
-		data, err := json.Marshal(v)
-		if err == nil {
-			return string(data)
-		}
-	}
-	return fmt.Sprintf("%v", value)
 }
 
 // handleGetInfo returns database schema information
@@ -1066,11 +1078,12 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 
 // sendRecordsToClient sends current database records to a WebSocket client
 func (s *Server) sendRecordsToClient(conn *websocket.Conn, connMu *sync.Mutex) {
-	records, err := s.recordsRaw()
+	result, err := s.RecordResult()
 	if err != nil {
 		log.Printf("Failed to read records: %v", err)
 		return
 	}
+	records := result.Rows
 	dbPath := s.currentDBPath()
 
 	// Send as initial load (all records are "added")
@@ -1083,6 +1096,8 @@ func (s *Server) sendRecordsToClient(conn *websocket.Conn, connMu *sync.Mutex) {
 		"file_path":   dbPath,
 		"version":     s.version,
 		"resources":   web.Resources(),
+		"raw":         result.Raw,
+		"key_field":   result.KeyField,
 	}
 	if s.config != nil {
 		message["config"] = s.config.Get()
@@ -1120,17 +1135,20 @@ func (s *Server) broadcastUpdate() {
 	log.Printf("📡 Broadcasting update to %d clients", clientCount)
 
 	// Get current records
-	records, err := s.recordsRaw()
+	result, err := s.RecordResult()
 	if err != nil {
 		log.Printf("Failed to read records: %v", err)
 		return
 	}
+	records := result.Rows
 
 	// Compute changes
 	s.lastRecordsMu.Lock()
-	changes := s.computeChanges(records)
+	changes := s.computeChangesByKey(records, result.KeyField)
 	s.lastRecords = records
 	s.lastRecordsMu.Unlock()
+	changes["raw"] = result.Raw
+	changes["key_field"] = result.KeyField
 
 	// Log what we're sending
 	added := 0
@@ -1164,8 +1182,48 @@ func (s *Server) broadcastUpdate() {
 	log.Printf("✅ Broadcast complete")
 	if added+modified+deleted > 0 {
 		s.notifyConfigured("row_updated", "Patris rows changed", s.rowChangeMessage(added, modified, deleted, changes))
+		s.dispatchUpdateEvent(updateout.Event{
+			Type:      "update",
+			Timestamp: fmt.Sprintf("%v", changes["timestamp"]),
+			Source:    s.currentDBPath(),
+			Raw:       result.Raw,
+			Records:   records,
+			Changes:   changes,
+			KeyField:  result.KeyField,
+		})
 	}
 	go s.broadcastProcessInfo()
+}
+
+func (s *Server) dispatchInitialUpdate() {
+	result, err := s.RecordResult()
+	if err != nil {
+		log.Printf("Failed to prepare initial send update payload: %v", err)
+		return
+	}
+	s.dispatchUpdateEvent(updateout.Event{
+		Type:      "initial",
+		Timestamp: time.Now().Format(time.RFC3339),
+		Source:    s.currentDBPath(),
+		Raw:       result.Raw,
+		Records:   result.Rows,
+		KeyField:  result.KeyField,
+	})
+}
+
+func (s *Server) dispatchUpdateEvent(event updateout.Event) {
+	cfg := s.Config().SendUpdates
+	if !cfg.Enabled {
+		return
+	}
+	if event.Type == "initial" && !cfg.Initial {
+		return
+	}
+	go func() {
+		if err := updateout.Dispatch(context.Background(), cfg, event); err != nil {
+			log.Printf("Failed to send update event: %v", err)
+		}
+	}()
 }
 
 func (s *Server) processToastRequest(req ToastRequest) error {
@@ -1677,10 +1735,18 @@ func (s *Server) cachedProcessStatus(ttl time.Duration) map[string]interface{} {
 
 // computeChanges computes the difference between old and new records
 func (s *Server) computeChanges(newRecords []map[string]interface{}) map[string]interface{} {
+	return s.computeChangesByKey(newRecords, "Code")
+}
+
+func (s *Server) computeChangesByKey(newRecords []map[string]interface{}, keyField string) map[string]interface{} {
+	if strings.TrimSpace(keyField) == "" {
+		keyField = "Code"
+	}
 	changes := map[string]interface{}{
 		"type":        "update",
 		"timestamp":   time.Now().Format(time.RFC3339),
 		"total_count": len(newRecords),
+		"key_field":   keyField,
 	}
 
 	// If no previous records, all are new
@@ -1693,7 +1759,7 @@ func (s *Server) computeChanges(newRecords []map[string]interface{}) map[string]
 	// Create maps by Code for efficient lookup
 	oldMap := make(map[string]map[string]interface{})
 	for _, record := range s.lastRecords {
-		if code, ok := record["Code"]; ok {
+		if code, ok := record[keyField]; ok {
 			codeStr := fmt.Sprintf("%v", code)
 			oldMap[codeStr] = record
 		}
@@ -1701,7 +1767,7 @@ func (s *Server) computeChanges(newRecords []map[string]interface{}) map[string]
 
 	newMap := make(map[string]map[string]interface{})
 	for _, record := range newRecords {
-		if code, ok := record["Code"]; ok {
+		if code, ok := record[keyField]; ok {
 			codeStr := fmt.Sprintf("%v", code)
 			newMap[codeStr] = record
 		}
@@ -1734,7 +1800,7 @@ func (s *Server) computeChanges(newRecords []map[string]interface{}) map[string]
 
 			// Compare each field
 			for key, newVal := range newRecord {
-				if key == "Code" {
+				if key == keyField {
 					continue // Skip the key field
 				}
 				oldVal, hasOldVal := oldRecord[key]
@@ -1753,7 +1819,7 @@ func (s *Server) computeChanges(newRecords []map[string]interface{}) map[string]
 
 			// Check for fields that existed in old but not in new
 			for key, oldVal := range oldRecord {
-				if key == "Code" {
+				if key == keyField {
 					continue
 				}
 				if _, exists := newRecord[key]; !exists {
@@ -2024,6 +2090,7 @@ func (s *Server) StartWatching(debounceDuration time.Duration) error {
 			return fmt.Errorf("failed to poll URL: %w", err)
 		}
 		log.Printf("👀 Polling remote source: %s (interval: %v)", dbPath, pollInterval)
+		s.dispatchInitialUpdate()
 		return nil
 	}
 
@@ -2043,6 +2110,7 @@ func (s *Server) StartWatching(debounceDuration time.Duration) error {
 	}
 	log.Printf("👀 Watching %s file: %s", fileType, filepath.Base(dbPath))
 
+	s.dispatchInitialUpdate()
 	return nil
 }
 

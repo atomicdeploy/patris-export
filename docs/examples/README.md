@@ -3,6 +3,7 @@
 This directory contains examples and usage demonstrations for Patris Export.
 
 - [WebSocat terminal inspection](websocat.md)
+- [Transform, raw, export, and send update examples](export-transform-send.md)
 
 ## Basic Usage Examples
 
