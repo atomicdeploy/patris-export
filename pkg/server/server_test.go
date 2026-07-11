@@ -201,6 +201,43 @@ func TestServerJSON(t *testing.T) {
 		}
 	})
 
+	t.Run("GET /partials/welcome", func(t *testing.T) {
+		req := httptest.NewRequest("GET", "/partials/welcome", nil)
+		w := httptest.NewRecorder()
+		srv.router.ServeHTTP(w, req)
+
+		if w.Code != http.StatusOK {
+			t.Errorf("Expected status 200, got %d", w.Code)
+		}
+		if ct := w.Header().Get("Content-Type"); ct != "text/html; charset=utf-8" {
+			t.Errorf("Expected Content-Type text/html; charset=utf-8, got %s", ct)
+		}
+		body := w.Body.String()
+		if strings.Contains(strings.ToLower(body), "<html") || strings.Contains(strings.ToLower(body), "<body") {
+			t.Fatalf("Expected partial HTML without document wrapper, got %q", body[:min(80, len(body))])
+		}
+		if !strings.Contains(body, "Launch Visualizer") {
+			t.Fatalf("Expected welcome partial content")
+		}
+	})
+
+	t.Run("GET /partials/charmap", func(t *testing.T) {
+		req := httptest.NewRequest("GET", "/partials/charmap", nil)
+		w := httptest.NewRecorder()
+		srv.router.ServeHTTP(w, req)
+
+		if w.Code != http.StatusOK {
+			t.Errorf("Expected status 200, got %d", w.Code)
+		}
+		body := w.Body.String()
+		if strings.Contains(strings.ToLower(body), "<html") || strings.Contains(strings.ToLower(body), "<body") {
+			t.Fatalf("Expected partial HTML without document wrapper, got %q", body[:min(80, len(body))])
+		}
+		if !strings.Contains(body, "Character Map Viewer") {
+			t.Fatalf("Expected charmap partial content")
+		}
+	})
+
 	t.Run("GET /api/app includes resources", func(t *testing.T) {
 		req := httptest.NewRequest("GET", "/api/app", nil)
 		w := httptest.NewRecorder()
