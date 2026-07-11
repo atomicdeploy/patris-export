@@ -10,6 +10,7 @@ on:
 
 permissions:
   contents: read
+  actions: read
 
 jobs:
   build-linux:
@@ -17,6 +18,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+      actions: read
     
     steps:
     - name: Checkout code
@@ -64,6 +66,8 @@ jobs:
       shell: bash
       env:
         JOB_STATUS: ${{ job.status }}
+        GITHUB_TOKEN: ${{ github.token }}
+        ARTIFACT_RETENTION_DAYS: ${{ github.retention_days }}
       run: |
         bash .github/scripts/ci-summary.sh build \
           "🐧 Linux Build Summary" \
@@ -153,6 +157,8 @@ jobs:
       shell: bash
       env:
         JOB_STATUS: ${{ job.status }}
+        GITHUB_TOKEN: ${{ github.token }}
+        ARTIFACT_RETENTION_DAYS: ${{ github.retention_days }}
       run: |
         bash .github/scripts/ci-summary.sh build \
           "🪟 Windows Cross-Build Summary" \

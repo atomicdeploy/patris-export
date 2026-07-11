@@ -7,6 +7,7 @@ on:
 
 permissions:
   contents: write
+  actions: read
 
 jobs:
   release:
@@ -107,6 +108,8 @@ jobs:
       shell: bash
       env:
         JOB_STATUS: ${{ job.status }}
+        GITHUB_TOKEN: ${{ github.token }}
+        ARTIFACT_RETENTION_DAYS: ${{ github.retention_days }}
       run: |
         bash .github/scripts/ci-summary.sh release \
           "🚀 Release Summary" \

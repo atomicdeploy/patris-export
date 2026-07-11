@@ -4,7 +4,12 @@ set -Eeuo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BUILD_DIR="$ROOT_DIR/build"
 DEPS_DIR="$ROOT_DIR/.deps"
-VERSION="${VERSION:-1.0.0}"
+VERSION="${VERSION:-$(git -C "$ROOT_DIR" describe --tags --abbrev=0 2>/dev/null || echo "v1.0.0")}"
+VERSION="${VERSION#v}"
+if [[ ! "$VERSION" =~ ^[0-9]+(\.[0-9]+)*(-[a-zA-Z0-9._-]+)?$ ]]; then
+    echo "Warning: Invalid VERSION '$VERSION', using 1.0.0" >&2
+    VERSION="1.0.0"
+fi
 VERSION_PKG="github.com/atomicdeploy/patris-export/pkg/version"
 BUILD_DATE="${BUILD_DATE:-$(date -u +'%Y-%m-%dT%H:%M:%SZ')}"
 COMMIT="${COMMIT:-$(git -C "$ROOT_DIR" rev-parse --short=12 HEAD 2>/dev/null || echo unknown)}"
