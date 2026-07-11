@@ -36,7 +36,9 @@ const state = {
     faviconTimeout: null,
     tabId: '',
     broadcastChannel: null,
-    seenBroadcastMessages: new Set()
+    seenBroadcastMessages: new Set(),
+    dragDepth: 0,
+    isUploadingSource: false
 };
 
 const CONFIG_STORAGE_KEY = 'patris-config';
@@ -906,6 +908,142 @@ function showInAppToast(title, message, options = {}) {
     }
 }
 
+function isSupportedSourceFile(file) {
+    return !!file && /\.(db|json)$/i.test(file.name || '');
+}
+
+function supportedSourceFromTransfer(dataTransfer) {
+    const files = Array.from(dataTransfer?.files || []);
+    return files.find(isSupportedSourceFile) || files[0] || null;
+}
+
+function setDropOverlayVisible(visible, mode = 'ready') {
+    const overlay = document.getElementById('dropOverlay');
+    if (!overlay) {
+        return;
+    }
+    overlay.classList.toggle('visible', visible);
+    overlay.classList.toggle('uploading', mode === 'uploading');
+    overlay.setAttribute('aria-hidden', visible ? 'false' : 'true');
+    const title = overlay.querySelector('[data-drop-title]');
+    const message = overlay.querySelector('[data-drop-message]');
+    if (title && message) {
+        if (mode === 'uploading') {
+            title.textContent = 'Loading source...';
+            message.textContent = 'Uploading the file and switching connected viewers.';
+        } else if (mode === 'invalid') {
+            title.textContent = 'Unsupported file';
+            message.textContent = 'Drop a .db or .json file to switch the active source.';
+        } else {
+            title.textContent = 'Drop database file';
+            message.textContent = 'Release a .db or .json file to load it in this viewer.';
+        }
+    }
+}
+
+async function uploadDroppedSource(file) {
+    if (!file) {
+        return;
+    }
+    if (!isSupportedSourceFile(file)) {
+        setDropOverlayVisible(true, 'invalid');
+        showInAppToast('Unsupported file', 'Drop a .db or .json file to switch the active source.', { error: true });
+        setTimeout(() => setDropOverlayVisible(false), 1500);
+        return;
+    }
+    if (state.isUploadingSource) {
+        return;
+    }
+
+    state.isUploadingSource = true;
+    setDropOverlayVisible(true, 'uploading');
+    setLoadingState(true);
+
+    try {
+        const form = new FormData();
+        form.append('source_id', 'viewer-drop');
+        form.append('file_name', file.name);
+        form.append('size', String(file.size));
+        form.append('mod_time', new Date(file.lastModified || Date.now()).toISOString());
+        form.append('file', file, file.name);
+
+        const response = await fetch('/api/edge/upload', {
+            method: 'POST',
+            body: form
+        });
+        const text = await response.text();
+        let payload = {};
+        try {
+            payload = text ? JSON.parse(text) : {};
+        } catch (error) {
+            payload = { message: text };
+        }
+        if (!response.ok || payload.success === false) {
+            throw new Error(payload.message || `Upload failed with HTTP ${response.status}`);
+        }
+
+        state.fileName = payload.path || payload.file || file.name;
+        updateFooterFileName();
+        showInAppToast('Source loaded', `${payload.file || file.name} is now active (${payload.records ?? 'unknown'} records).`, { broadcastToTabs: true });
+
+        if (!state.ws || state.ws.readyState !== WebSocket.OPEN) {
+            await fetchInitialData();
+            await fetchFileInfo();
+        }
+    } catch (error) {
+        console.error('Failed to switch dropped source:', error);
+        showInAppToast('Source switch failed', error.message, { error: true });
+        setLoadingState(false);
+    } finally {
+        state.isUploadingSource = false;
+        state.dragDepth = 0;
+        setDropOverlayVisible(false);
+    }
+}
+
+function initSourceDragDrop() {
+    const hasFiles = event => Array.from(event.dataTransfer?.types || []).includes('Files');
+
+    window.addEventListener('dragenter', event => {
+        if (!hasFiles(event)) {
+            return;
+        }
+        event.preventDefault();
+        state.dragDepth += 1;
+        const file = supportedSourceFromTransfer(event.dataTransfer);
+        setDropOverlayVisible(true, file && !isSupportedSourceFile(file) ? 'invalid' : 'ready');
+    });
+
+    window.addEventListener('dragover', event => {
+        if (!hasFiles(event)) {
+            return;
+        }
+        event.preventDefault();
+        event.dataTransfer.dropEffect = 'copy';
+        const file = supportedSourceFromTransfer(event.dataTransfer);
+        setDropOverlayVisible(true, file && !isSupportedSourceFile(file) ? 'invalid' : 'ready');
+    });
+
+    window.addEventListener('dragleave', event => {
+        if (!hasFiles(event)) {
+            return;
+        }
+        state.dragDepth = Math.max(0, state.dragDepth - 1);
+        if (state.dragDepth === 0 && !state.isUploadingSource) {
+            setDropOverlayVisible(false);
+        }
+    });
+
+    window.addEventListener('drop', event => {
+        if (!hasFiles(event)) {
+            return;
+        }
+        event.preventDefault();
+        state.dragDepth = 0;
+        uploadDroppedSource(supportedSourceFromTransfer(event.dataTransfer));
+    });
+}
+
 function openPanel(panelId) {
     closePanels();
     document.getElementById(panelId).classList.add('open');
@@ -1158,6 +1296,14 @@ function handleWebSocketMessage(data) {
         }
         // Initial load - records are already transformed with ANBAR as array
         state.records = data.added || [];
+        state.filteredRecords = [];
+        state.fields = [];
+        state.fieldTypes = {};
+        state.fieldStats = {};
+        if (data.source_changed) {
+            state.columnFilters = {};
+            localStorage.removeItem('patris-column-filters');
+        }
         
         // Store file name if provided
         if (data.file_path || data.file_name) {
@@ -2348,6 +2494,7 @@ function initTheme() {
 function init() {
     setLoadingState(true);
     initFrontendBroadcast();
+    initSourceDragDrop();
 
     // Load settings
     loadSettings();
@@ -2582,12 +2729,18 @@ async function fetchInitialData() {
         
         const data = await response.json();
         
-        // data is now in transformed format: { "101": {...}, "102": {...}, ... }
-        // Convert to array, adding Code field from the key
-        state.records = Object.entries(data).map(([code, record]) => ({
-            Code: code,
-            ...record
-        }));
+        // data is usually transformed as { "101": {...}, "102": {...}, ... }.
+        // Some API modes can return an array, so handle both shapes.
+        state.records = Array.isArray(data)
+            ? data
+            : Object.entries(data).map(([code, record]) => ({
+                Code: code,
+                ...record
+            }));
+        state.filteredRecords = [];
+        state.fields = [];
+        state.fieldTypes = {};
+        state.fieldStats = {};
         
         if (state.records.length > 0) {
             extractFields();
