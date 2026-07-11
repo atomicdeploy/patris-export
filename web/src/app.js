@@ -1015,6 +1015,15 @@ function renderFooterToggleButton(button, showFooter) {
         : '<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M6 15l6-6 6 6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
 }
 
+function findFooterToggleButton(target) {
+    for (let node = target; node && node !== document; node = node.parentElement || node.parentNode) {
+        if (node.id === 'footerToggleBtn' || node.id === 'footerCollapseBtn') {
+            return node;
+        }
+    }
+    return null;
+}
+
 function formatRelativeTime(date) {
     if (!date) return 'never';
     const diffMs = Date.now() - date.getTime();
@@ -4007,7 +4016,7 @@ function init() {
     // Set up event listeners
     document.addEventListener('keydown', handleGlobalKeydown);
     document.addEventListener('click', event => {
-        if (event.target.closest('#footerToggleBtn, #footerCollapseBtn')) {
+        if (findFooterToggleButton(event.target)) {
             event.preventDefault();
             event.stopPropagation();
             toggleFooterVisibility();
