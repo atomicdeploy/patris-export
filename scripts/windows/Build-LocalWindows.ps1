@@ -64,11 +64,18 @@ $useVcpkg = $env:USE_VCPKG -match '^(1|true|yes|on)$'
 if (-not $Version) {
     Push-Location $repoRoot
     try {
+        $previousErrorActionPreference = $ErrorActionPreference
+        $ErrorActionPreference = "Continue"
         $Version = (& git describe --tags --abbrev=0 2>$null)
-        if ($LASTEXITCODE -ne 0 -or -not $Version) {
+        $describeExitCode = $LASTEXITCODE
+        $ErrorActionPreference = $previousErrorActionPreference
+        if ($describeExitCode -ne 0 -or -not $Version) {
             $Version = "v1.0.0"
         }
     } finally {
+        if ($previousErrorActionPreference) {
+            $ErrorActionPreference = $previousErrorActionPreference
+        }
         Pop-Location
     }
     $Version = $Version -replace '^v', ''
