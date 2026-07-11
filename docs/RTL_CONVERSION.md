@@ -26,7 +26,7 @@ Or use configuration/environment:
 ```
 
 ```bash
-PATRIS_RTL=1 patris-export serve kala.db
+PATRIS_EXPORT_RTL=1 patris-export serve kala.db
 ```
 
 ## Web Display Direction

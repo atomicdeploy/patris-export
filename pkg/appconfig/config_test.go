@@ -75,12 +75,12 @@ func TestManagerSavesNativeFormat(t *testing.T) {
 }
 
 func TestApplyEnvNotificationOptions(t *testing.T) {
-	t.Setenv("PATRIS_NOTIFICATIONS", "true")
-	t.Setenv("PATRIS_NOTIFY_CLIENT_CONNECTED", "true")
-	t.Setenv("PATRIS_NOTIFY_FILE_UPDATED", "true")
-	t.Setenv("PATRIS_NOTIFY_ROW_UPDATED", "true")
-	t.Setenv("PATRIS_NOTIFY_INCLUDE_ROW_VALUES", "true")
-	t.Setenv("PATRIS_NOTIFY_MAX_ROWS", "7")
+	t.Setenv("PATRIS_EXPORT_NOTIFICATIONS", "true")
+	t.Setenv("PATRIS_EXPORT_NOTIFY_CLIENT_CONNECTED", "true")
+	t.Setenv("PATRIS_EXPORT_NOTIFY_FILE_UPDATED", "true")
+	t.Setenv("PATRIS_EXPORT_NOTIFY_ROW_UPDATED", "true")
+	t.Setenv("PATRIS_EXPORT_NOTIFY_INCLUDE_ROW_VALUES", "true")
+	t.Setenv("PATRIS_EXPORT_NOTIFY_MAX_ROWS", "7")
 
 	cfg := Default()
 	ApplyEnv(&cfg)
@@ -93,8 +93,8 @@ func TestApplyEnvNotificationOptions(t *testing.T) {
 }
 
 func TestApplyEnvRuntimeTempPolicy(t *testing.T) {
-	t.Setenv("PATRIS_TEMP_STRATEGY", "tmpfs")
-	t.Setenv("PATRIS_TEMP_MEMORY_LIMIT_MB", "42")
+	t.Setenv("PATRIS_EXPORT_TEMP_STRATEGY", "tmpfs")
+	t.Setenv("PATRIS_EXPORT_TEMP_MEMORY_LIMIT_MB", "42")
 
 	cfg := Default()
 	ApplyEnv(&cfg)
