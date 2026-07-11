@@ -52,75 +52,9 @@ jobs:
       run: |
         "C:\msys64\mingw64\bin" | Out-File -FilePath $env:GITHUB_PATH -Append
 
-    - name: Build web frontend
-      run: |
-        cd web
-        npm install
-        npm run build
-    
-    - name: Generate version resource file
-      shell: bash
-      run: |
-        ${GITHUB_WORKSPACE}/scripts/generate-version-rc.sh cmd/patris-export/patris-export.rc
-        
-    - name: Build upstream pxlib for Windows
-      shell: bash
-      run: |
-        export PATH="/c/msys64/mingw64/bin:$PATH"
-        bash scripts/build-pxlib-mingw.sh /c/pxlib-install
-    
-    - name: Compile resource file for patris-export
-      shell: bash
-      run: |
-        # Use windres to compile the resource file
-        echo "Compiling Windows resource file..."
-        
-        export PATH="/c/msys64/mingw64/bin:$PATH"
-        WINDRES=$(which windres || which x86_64-w64-mingw32-windres)
-        "$WINDRES" \
-          --target=pe-x86-64 \
-          -i cmd/patris-export/patris-export.rc \
-          -o cmd/patris-export/patris-export_windows_amd64.syso \
-          -O coff
-        
-        echo "Resource file compiled successfully:"
-        ls -lh cmd/patris-export/patris-export_windows_amd64.syso
-    
-    - name: Build Windows executable
-      shell: bash
-      run: |
-        mkdir -p build
-        
-        export PATH="/c/msys64/mingw64/bin:$PATH"
-        export CGO_ENABLED=1
-        export CC=gcc
-        export CGO_CFLAGS="-IC:/pxlib-install/include"
-        export CGO_LDFLAGS="-LC:/pxlib-install/lib"
-        
-        # Get version info
-          VERSION="1.0.0"
-          BUILD_DATE=$(date -u +'%Y-%m-%dT%H:%M:%SZ')
-          COMMIT="${GITHUB_SHA::12}"
-          VERSION_PKG="github.com/atomicdeploy/patris-export/pkg/version"
-
-          go build \
-          -ldflags "-X ${VERSION_PKG}.Version=${VERSION} -X ${VERSION_PKG}.BuildDate=${BUILD_DATE} -X ${VERSION_PKG}.Commit=${COMMIT}" \
-          -o build/patris-export-windows-amd64.exe \
-          ./cmd/patris-export
-        
-        echo "Build complete:"
-        ls -lh build/patris-export-windows-amd64.exe
-    
-    - name: Copy pxlib DLL
-      shell: bash
-      run: |
-        # Copy DLL files to build directory
-        if [ -d C:/pxlib-install/bin ]; then
-          cp C:/pxlib-install/bin/*.dll build/ 2>/dev/null || true
-        fi
-        
-        echo "Build directory contents:"
-        ls -la build/
+    - name: Build Windows artifacts
+      shell: cmd
+      run: build.cmd --target windows-native --ci --no-assets
     
     - name: Test Windows executable
       shell: bash
@@ -189,6 +123,8 @@ jobs:
         name: patris-export-windows-mingw-amd64
         path: |
           build/patris-export-windows-amd64.exe
+          build/patris-export.dll
+          build/patris-export.h
           build/*.dll
 
     - name: Generate Windows native build summary
@@ -203,4 +139,5 @@ jobs:
           "patris-export-windows-mingw-amd64" \
           "Native Windows amd64 build with MSYS2 MinGW" \
           build/patris-export-windows-amd64.exe \
+          build/patris-export.h \
           build/*.dll

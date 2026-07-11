@@ -19,6 +19,7 @@ cmd/patris-export/patris-export.rc
 
 # Dependency directories
 vendor/
+.deps/
 
 # Go workspace file
 go.work
