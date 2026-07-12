@@ -27,6 +27,7 @@ const state = {
     hiddenColumns: new Set(),  // Track hidden columns
     columnOrder: [],
     openRangePanel: null,
+    openRangeAnchor: null,
     scrollAnchor: null,
     isRestoringScroll: false,
     scrollSaveTimer: null,
@@ -2857,6 +2858,58 @@ function createFilterControl(field) {
     return container;
 }
 
+function closeOpenRangePanel() {
+    if (!state.openRangePanel) return;
+    state.openRangePanel.classList.remove('open');
+    state.openRangePanel = null;
+    state.openRangeAnchor = null;
+}
+
+function positionFloatingRangePanel(anchor, panel) {
+    if (!anchor || !panel || !anchor.isConnected || !panel.isConnected) {
+        closeOpenRangePanel();
+        return;
+    }
+
+    const viewportPadding = 8;
+    const anchorRect = anchor.getBoundingClientRect();
+    const panelRect = panel.getBoundingClientRect();
+    const panelWidth = Math.max(panelRect.width || 230, 230);
+    const panelHeight = Math.max(panelRect.height || 120, 120);
+    const availableRight = window.innerWidth - viewportPadding - panelWidth;
+    const left = Math.max(viewportPadding, Math.min(anchorRect.left, availableRight));
+    const preferredTop = anchorRect.bottom + 6;
+    const fallbackTop = anchorRect.top - panelHeight - 6;
+    const top = preferredTop + panelHeight <= window.innerHeight - viewportPadding
+        ? preferredTop
+        : Math.max(viewportPadding, fallbackTop);
+
+    panel.style.setProperty('--range-panel-left', `${Math.round(left)}px`);
+    panel.style.setProperty('--range-panel-top', `${Math.round(top)}px`);
+}
+
+function openFloatingRangePanel(anchor, panel) {
+    if (state.openRangePanel && state.openRangePanel !== panel) {
+        closeOpenRangePanel();
+    }
+
+    panel.classList.toggle('open');
+    if (panel.classList.contains('open')) {
+        state.openRangePanel = panel;
+        state.openRangeAnchor = anchor;
+        positionFloatingRangePanel(anchor, panel);
+    } else {
+        state.openRangePanel = null;
+        state.openRangeAnchor = null;
+    }
+}
+
+function repositionOpenRangePanel() {
+    if (state.openRangePanel) {
+        positionFloatingRangePanel(state.openRangeAnchor, state.openRangePanel);
+    }
+}
+
 function createRangePopover2(field, currentFilter, mode) {
     const wrapper = document.createElement('div');
     wrapper.className = 'range-popover range-combo';
@@ -3012,11 +3065,7 @@ function createRangePopover2(field, currentFilter, mode) {
 
     button.addEventListener('click', event => {
         event.stopPropagation();
-        if (state.openRangePanel && state.openRangePanel !== panel) {
-            state.openRangePanel.classList.remove('open');
-        }
-        panel.classList.toggle('open');
-        state.openRangePanel = panel.classList.contains('open') ? panel : null;
+        openFloatingRangePanel(wrapper, panel);
         if (panel.classList.contains('open')) {
             setTimeout(() => minInput.focus({ preventScroll: true }), 20);
         }
@@ -3241,13 +3290,9 @@ function createJalaliDateFilterControl(field, currentFilter) {
     toInput.addEventListener('input', commitDateFilter);
     button.addEventListener('click', event => {
         event.stopPropagation();
-        if (state.openRangePanel && state.openRangePanel !== panel) {
-            state.openRangePanel.classList.remove('open');
-        }
         pickerState.cursor = JalaliUtils.parse(fromInput.value) || JalaliUtils.parse(toInput.value) || minDate || maxDate || pickerState.cursor;
         renderPicker();
-        panel.classList.toggle('open');
-        state.openRangePanel = panel.classList.contains('open') ? panel : null;
+        openFloatingRangePanel(wrapper, panel);
     });
 
     wrapper.classList.toggle('has-filter', !!(currentFilter?.min || currentFilter?.max));
@@ -4073,11 +4118,12 @@ function init() {
         if (!exportBtn.contains(e.target) && !exportDropdown.contains(e.target)) {
             exportDropdown.classList.remove('open');
         }
-        if (state.openRangePanel && !state.openRangePanel.contains(e.target) && !e.target.closest('.range-trigger')) {
-            state.openRangePanel.classList.remove('open');
-            state.openRangePanel = null;
+        if (state.openRangePanel && !state.openRangePanel.contains(e.target) && !e.target.closest('.range-popover')) {
+            closeOpenRangePanel();
         }
     });
+    window.addEventListener('resize', repositionOpenRangePanel);
+    document.addEventListener('scroll', repositionOpenRangePanel, true);
     
     document.getElementById('settingsBtn').addEventListener('click', () => {
         openModalRoute('settings');

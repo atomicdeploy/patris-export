@@ -2038,11 +2038,14 @@ body.is-loading .data-table {
 }
 
 .range-panel {
-    position: absolute;
-    top: calc(100% + 0.35rem);
-    left: 0;
+    position: fixed;
+    top: var(--range-panel-top, 0);
+    left: var(--range-panel-left, 0);
     z-index: 80;
     min-width: 230px;
+    max-width: calc(100vw - 1rem);
+    max-height: min(360px, calc(100vh - 1rem));
+    overflow: auto;
     display: grid;
     grid-template-columns: 1fr 1fr;
     gap: 0.45rem;
