@@ -74,8 +74,33 @@ Digitalogic mode reads, but does not mutate:
 
 - `GET /wp-json/digitalogic/v1/integration/catalog` for FX, selected
   warehouses, and freight methods;
+- `POST /wp-json/digitalogic/v1/pricing-assignments/batch` for ordered,
+  versioned assignment prefetches of at most 500 unique Codes;
 - `GET /wp-json/digitalogic/v1/products/by-code/{code}/import-pricing` for the
-  exact Code/SKU method and percentage markup.
+  exact Code/SKU method and percentage markup when an older compatible provider
+  does not expose the batch contract.
+
+Canonical transform collects unique, non-quarantined Codes before its normal
+per-record resolution, prefetches them in bounded request-order chunks, and
+stores results in the existing bounded assignment LRU. A transform-scoped
+result barrier also retains only that run's unique Codes and releases each
+outcome as the row resolves, so a deliberately small `max_entries` cannot evict
+current-run successes or diagnostics and recreate single-Code N+1 requests. It
+does not create a second pricing client or transformation path. With the
+default `batch_size: 500` and `max_entries: 2048`, a cold 1,002-Code catalog
+performs exactly three batch POSTs plus one catalog GET, and performs zero
+single-Code requests. Duplicate source Codes remain quarantined before
+prefetch.
+
+All chunks are staged before one atomic cache commit. Every chunk must carry
+the same non-empty default-markup revision and the same schema, configured
+state, source, type, and exact value; a mismatch discards every staged result.
+Batch successes consume the minimal assignment projection and preserve the
+exact decimal together with its `profit_percent_source`. Pricing decimals must
+be quoted, canonical base-10 strings with at most 12 fractional digits;
+unquoted numbers, exponent notation, redundant formatting, and over-scale
+values fail closed. A `global_default` value must exactly match the shared
+default snapshot.
 
 Live outbound delivery to the current Digitalogic `/patris/push` receiver must
 remain disabled; this branch does not enable or deploy it. That receiver must first
@@ -96,13 +121,14 @@ stored in the Patris config:
       "mode": "digitalogic",
       "digitalogic": {
         "base_url": "https://digitalogic.ir/wp-json/digitalogic/v1",
-        "username_env": "DIGITALOGIC_CONSUMER_KEY",
-        "password_env": "DIGITALOGIC_CONSUMER_SECRET",
+        "bearer_token_env": "DIGITALOGIC_PRICING_READ_TOKEN",
+        "batch_assignment_path": "pricing-assignments/batch",
+        "batch_size": 500,
         "fresh_for": "5m",
         "max_stale": "1h",
         "timeout": "5s",
-        "max_entries": 1000,
-		"max_concurrency": 8,
+        "max_entries": 2048,
+        "max_concurrency": 8,
         "max_response_bytes": 2097152
       }
     }
@@ -111,16 +137,46 @@ stored in the Patris config:
 ```
 
 ```powershell
-$env:DIGITALOGIC_CONSUMER_KEY = "ck_..."
-$env:DIGITALOGIC_CONSUMER_SECRET = "cs_..."
+$env:DIGITALOGIC_PRICING_READ_TOKEN = "..."
 patris-export serve C:\Patris\data4\kala.db
 ```
 
 Only HTTPS is accepted remotely; plain HTTP is limited to loopback. Provider
 paths must stay relative and on the configured origin, redirects are refused,
-responses and the per-Code LRU are bounded, and cached values are usable only
-inside `max_stale`. Patris continues emitting canonical rows with null pricing
-and warnings when the provider is unavailable.
+request/response bodies, assignment LRU, and diagnostic LRU are bounded,
+configured credential environment variables must be populated, and cached
+values are usable only inside `max_stale`. One `bearer_token_env` supplies the
+same read token to the exact integration-catalog GET and assignment-batch POST;
+the batch request otherwise reuses the existing HTTP client, timeout, TLS
+rules, redirect policy, and response limit. Basic authentication and the
+single-Code route remain compatibility options for replaceable older providers,
+not the production least-privilege path.
+
+HTTP 404, 405, or 501 from the batch route means a replaceable/older provider
+does not support prefetch; Patris safely falls back to existing bounded
+single-Code resolution and emits `pricing_assignment_batch_unsupported`.
+Authentication failures, other HTTP/transport failures, oversized responses,
+malformed schemas, changed result order/Codes, and inconsistent result counts
+fail closed for that freshness window. Fresh fail-closed diagnostics are
+honored by later prefetch runs, including when the per-Code diagnostic LRU is
+smaller than a transform, so repeated transforms do not hammer a failing batch
+route. Typed not-found and ambiguous-Code results are cached as authoritative
+empty assignments, never retried through a different lookup path. Only a
+per-Code server error explicitly marked `retryable: true` with a 5xx status may
+fall back to the existing single-Code resolver. Cached stale assignments may
+still be used only within `max_stale`, with explicit warnings; recent catalog
+failures are also backed off for the freshness window so an outage cannot
+recreate an N+1 catalog storm.
+Static/standalone mode implements no prefetch capability and makes no remote
+requests.
+
+Production rollout depends on the pending Digitalogic least-privilege
+credential work in issue #60. Once implemented and deployed, its dedicated
+pricing-input bearer must authorize exactly the integration-catalog GET and
+assignment-batch POST, not the legacy single-Code route or any write route. Do
+not reuse Patris push or product-sync write secrets. Deploy the compatible
+Digitalogic endpoint and that read credential before enabling production
+prefetch, then reference the one credential through `bearer_token_env`.
 
 Patris calculates only when the catalog is
 `digitalogic.integration-catalog` major version 1, `currency.local` is `IRT`,

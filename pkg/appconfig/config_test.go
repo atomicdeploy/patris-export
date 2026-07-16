@@ -159,10 +159,12 @@ func TestApplyEnvConfiguresDigitalogicWithoutStoringCredentials(t *testing.T) {
 	t.Setenv("PATRIS_EXPORT_DIGITALOGIC_URL", "https://digitalogic.example/wp-json/digitalogic/v1/")
 	t.Setenv("PATRIS_EXPORT_DIGITALOGIC_USERNAME_ENV", "DIGITALOGIC_KEY")
 	t.Setenv("PATRIS_EXPORT_DIGITALOGIC_PASSWORD_ENV", "DIGITALOGIC_SECRET")
+	t.Setenv("PATRIS_EXPORT_DIGITALOGIC_BEARER_ENV", "DIGITALOGIC_PRICING_READ_TOKEN")
 	t.Setenv("PATRIS_EXPORT_PRICING_FRESH_FOR", "2m")
 	t.Setenv("PATRIS_EXPORT_PRICING_MAX_STALE", "30m")
 	t.Setenv("DIGITALOGIC_KEY", "must-not-be-copied")
 	t.Setenv("DIGITALOGIC_SECRET", "must-not-be-copied")
+	t.Setenv("DIGITALOGIC_PRICING_READ_TOKEN", "must-not-be-copied-bearer")
 
 	cfg := Default()
 	ApplyEnv(&cfg)
@@ -170,7 +172,7 @@ func TestApplyEnvConfiguresDigitalogicWithoutStoringCredentials(t *testing.T) {
 	if cfg.Canonical.Pricing.Mode != "digitalogic" || digitalogic.BaseURL != "https://digitalogic.example/wp-json/digitalogic/v1" {
 		t.Fatalf("Digitalogic pricing provider was not selected: %+v", cfg.Canonical.Pricing)
 	}
-	if digitalogic.UsernameEnv != "DIGITALOGIC_KEY" || digitalogic.PasswordEnv != "DIGITALOGIC_SECRET" || digitalogic.FreshFor != "2m" || digitalogic.MaxStale != "30m" {
+	if digitalogic.UsernameEnv != "DIGITALOGIC_KEY" || digitalogic.PasswordEnv != "DIGITALOGIC_SECRET" || digitalogic.BearerTokenEnv != "DIGITALOGIC_PRICING_READ_TOKEN" || digitalogic.FreshFor != "2m" || digitalogic.MaxStale != "30m" {
 		t.Fatalf("Digitalogic provider environment references were not normalized: %+v", digitalogic)
 	}
 	encoded, err := json.Marshal(cfg)
