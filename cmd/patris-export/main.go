@@ -67,6 +67,8 @@ var (
 	mysqlDSN        string
 	mysqlTable      string
 	exportBatchSize int
+	exportReconcile string
+	exportDryRun    bool
 	sendURL         string
 	sendFormat      string
 	sendMode        string
@@ -146,7 +148,9 @@ Supports Persian/Farsi encoding conversion and file watching.
 	convertCmd.Flags().StringVar(&sqliteTable, "sqlite-table", "", "SQLite table name for --format sqlite")
 	convertCmd.Flags().StringVar(&mysqlDSN, "mysql-dsn", "", "MySQL DSN for --format mysql (or PATRIS_EXPORT_MYSQL_DSN)")
 	convertCmd.Flags().StringVar(&mysqlTable, "mysql-table", "", "MySQL table name for --format mysql")
-	convertCmd.Flags().IntVar(&exportBatchSize, "batch-size", 0, "Batch size hint for SQL exports")
+	convertCmd.Flags().IntVar(&exportBatchSize, "batch-size", 0, "Maximum rows per prepared SQL batch")
+	convertCmd.Flags().StringVar(&exportReconcile, "reconciliation", "", "SQL reconciliation mode: upsert_only (safe default) or delete_missing")
+	convertCmd.Flags().BoolVar(&exportDryRun, "dry-run", false, "Preview SQL insert/update/delete counts without changing the destination")
 	convertCmd.Flags().StringVar(&sendURL, "send-url", "", "Webhook/API URL that receives initial and watch update payloads")
 	convertCmd.Flags().StringVar(&sendFormat, "send-format", "", "Send update format: json or csv")
 	convertCmd.Flags().StringVar(&sendMode, "send-mode", "", "Send update mode: changes or full")
@@ -623,7 +627,7 @@ func runConvert(cmd *cobra.Command, args []string) {
 		infoColor.Println("ℹ️  Using embedded character mapping (Patris81 default)")
 	}
 
-	if !useStdout && outputFormat != "mysql" {
+	if !useStdout && outputFormat != "mysql" && !(outputFormat == "sqlite" && cfg.Export.DryRun) {
 		if err := os.MkdirAll(outputDir, 0755); err != nil {
 			errorColor.Printf("❌ Failed to create output directory: %v\n", err)
 			os.Exit(1)
@@ -718,6 +722,12 @@ func applyConvertFlagOverrides(cmd *cobra.Command, cfg *appconfig.Config) {
 	if cmd.Flags().Changed("batch-size") {
 		cfg.Export.BatchSize = exportBatchSize
 	}
+	if cmd.Flags().Changed("reconciliation") {
+		cfg.Export.Reconciliation = exportReconcile
+	}
+	if cmd.Flags().Changed("dry-run") {
+		cfg.Export.DryRun = exportDryRun
+	}
 	if cmd.Flags().Changed("send-url") {
 		cfg.SendUpdates.URL = sendURL
 		cfg.SendUpdates.Enabled = strings.TrimSpace(sendURL) != ""
@@ -798,6 +808,7 @@ func writeConvertOutput(dbFile string, result recordpipe.Result, useStdout bool,
 	}
 	tableName := firstNonEmpty(cfg.Convert.Table, cfg.Export.SQLiteTable, cfg.Export.MySQLTable, recordpipe.SourceTableName(dbFile))
 	var outputFile string
+	var sqlResult *recordsink.SQLResult
 	switch outputFormat {
 	case "json":
 		outputFile = filepath.Join(outputDir, baseName+".json")
@@ -830,9 +841,18 @@ func writeConvertOutput(dbFile string, result recordpipe.Result, useStdout bool,
 		if outputFile == "" {
 			outputFile = filepath.Join(outputDir, baseName+".sqlite")
 		}
-		if err := recordsink.WriteSQLite(outputFile, tableName, result.KeyField, result.Rows, recordsink.SnapshotOptions{ProtectedKeys: quarantinedCodes(result)}); err != nil {
+		syncResult, err := recordsink.SyncSQLite(context.Background(), outputFile, recordsink.SQLOptions{
+			Table:          tableName,
+			KeyField:       result.KeyField,
+			Batch:          cfg.Export.BatchSize,
+			Reconciliation: recordsink.ReconciliationMode(cfg.Export.Reconciliation),
+			DryRun:         cfg.Export.DryRun,
+			ProtectedKeys:  quarantinedCodes(result),
+		}, result.Rows)
+		if err != nil {
 			return err
 		}
+		sqlResult = &syncResult
 	case "mysql":
 		dsn := firstNonEmpty(cfg.Export.MySQLDSN, mysqlDSN)
 		if dsn == "" {
@@ -840,10 +860,38 @@ func writeConvertOutput(dbFile string, result recordpipe.Result, useStdout bool,
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 		defer cancel()
-		if err := recordsink.SyncSQL(ctx, recordsink.SQLOptions{Driver: "mysql", DSN: dsn, Table: tableName, KeyField: result.KeyField, Batch: cfg.Export.BatchSize, ProtectedKeys: quarantinedCodes(result)}, result.Rows); err != nil {
+		syncResult, err := recordsink.SyncSQLWithResult(ctx, recordsink.SQLOptions{
+			Driver:         "mysql",
+			DSN:            dsn,
+			Table:          tableName,
+			KeyField:       result.KeyField,
+			Batch:          cfg.Export.BatchSize,
+			Reconciliation: recordsink.ReconciliationMode(cfg.Export.Reconciliation),
+			DryRun:         cfg.Export.DryRun,
+			ProtectedKeys:  quarantinedCodes(result),
+		}, result.Rows)
+		if err != nil {
 			return err
 		}
+		sqlResult = &syncResult
 		outputFile = "mysql:" + tableName
+	}
+	if sqlResult != nil {
+		infoColor.Printf(
+			"SQL result: inserted=%d updated=%d unchanged=%d deleted=%d failed=%d elapsed=%dms reconciliation=%s dry_run=%t\n",
+			sqlResult.Inserted,
+			sqlResult.Updated,
+			sqlResult.Unchanged,
+			sqlResult.Deleted,
+			sqlResult.Failed,
+			sqlResult.ElapsedMS,
+			sqlResult.Reconciliation,
+			sqlResult.DryRun,
+		)
+		if sqlResult.DryRun {
+			successColor.Printf("SQL dry-run preview completed for: %s\n", outputFile)
+			return nil
+		}
 	}
 	successColor.Printf("✅ Successfully exported to: %s\n", outputFile)
 	return nil

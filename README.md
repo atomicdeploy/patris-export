@@ -100,7 +100,16 @@ patris-export convert kala.db -f xlsx -o output/
 patris-export convert kala.db \
   -f sqlite \
   --sqlite-path output/patris-products.sqlite \
-  --sqlite-table products
+  --sqlite-table products \
+  --batch-size 250
+
+# Preview authoritative reconciliation; upsert_only is the safe default.
+patris-export convert kala.db \
+  -f sqlite \
+  --sqlite-path output/patris-products.sqlite \
+  --sqlite-table products \
+  --reconciliation delete_missing \
+  --dry-run
 
 # Watch and send canonical JSON changes to the Digitalogic v1 receiver.
 # DIGITALOGIC_PRODUCT_SYNC_SECRET is injected into the process environment by

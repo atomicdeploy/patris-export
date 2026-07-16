@@ -69,17 +69,77 @@ patris-export convert C:\Patris\data4\kala.db -f xlsx -o exports
 patris-export --mapping .\mapping.kala.json convert C:\Patris\data4\kala.db `
   -f sqlite `
   --sqlite-path .\exports\patris-products.sqlite `
-  --sqlite-table products
+  --sqlite-table products `
+  --batch-size 250
 
-$env:PATRIS_EXPORT_MYSQL_DSN = "user:password@tcp(127.0.0.1:3306)/shop?parseTime=true"
+# Keep credentials in the process secret environment, not a committed config.
+# The timeout parameters bound connection and I/O waits; tls=true verifies the
+# server with the system trust store.
+$env:PATRIS_EXPORT_MYSQL_DSN = "user:password@tcp(db.example:3306)/shop?parseTime=true&timeout=5s&readTimeout=30s&writeTimeout=30s&tls=true"
 patris-export --mapping .\mapping.kala.json convert C:\Patris\data4\kala.db `
   -f mysql `
-  --mysql-table products
+  --mysql-table products `
+  --batch-size 250
 ```
 
 SQLite and MySQL exports create the destination table when needed, add new
 columns on later exports, preserve canonical numeric types, and upsert by the
-configured key field.
+configured key field. `batch_size` is the maximum number of rows in each
+prepared multi-row statement (and is reduced only when required by the
+driver's parameter limit).
+
+SQL reconciliation is explicit and non-destructive by default:
+
+```yaml
+export:
+  batch_size: 250
+  reconciliation: upsert_only
+  dry_run: false
+```
+
+`upsert_only` inserts and updates supplied Codes but preserves destination rows
+that are absent from the current input. Use `delete_missing` only for a known
+complete authoritative snapshot. Canonical quarantine/protected Codes remain
+preserved even in `delete_missing` mode.
+
+Preview the exact operation counts without changing the destination:
+
+```powershell
+patris-export convert C:\Patris\data4\kala.db -f sqlite `
+  --sqlite-path .\exports\patris-products.sqlite `
+  --sqlite-table products `
+  --reconciliation delete_missing `
+  --dry-run
+```
+
+The result line reports `inserted`, `updated`, `unchanged`, `deleted`, `failed`,
+and `elapsed` milliseconds; it never includes the DSN. A dry run against a
+missing SQLite path does not create the file or its parent directory.
+
+Watch mode uses this same `recordpipe` -> `recordsink` route for its initial
+write and every debounced update; there is no separate live SQL implementation:
+
+```powershell
+patris-export convert C:\Patris\data4\kala.db -f sqlite -w `
+  --sqlite-path .\exports\patris-products.sqlite `
+  --sqlite-table products
+```
+
+Reproduce the SQLite initial-write/update proof locally, and optionally run the
+same proof against a disposable MariaDB/MySQL database:
+
+```powershell
+go test ./pkg/recordsink -run TestSQLiteSyncInitialUpdateDryRunAndProtectedDelete -v
+
+$env:PATRIS_EXPORT_TEST_MYSQL_DSN = "test_user:test_password@tcp(127.0.0.1:3306)/patris_test?parseTime=true&timeout=5s&readTimeout=30s&writeTimeout=30s"
+go test ./pkg/recordsink -run TestMariaDBSyncInitialWriteAndUpdate -v
+Remove-Item Env:PATRIS_EXPORT_TEST_MYSQL_DSN
+```
+
+The MariaDB test is skipped unless its dedicated test DSN is present and drops
+only the uniquely named table it creates. A browser connection test, manual UI
+sync controls, custom-CA TLS registration, and `soft_delete_missing` remain
+separate follow-up work.
 
 ## Watch and Send Updates
 
