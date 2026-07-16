@@ -33,6 +33,10 @@ func TestExactDecimalTokenSurvivesCSVXLSXAndSQLiteBoundaries(t *testing.T) {
 	if err != nil || cellValue != exact {
 		t.Fatalf("XLSX lost exact decimal token: value=%q err=%v", cellValue, err)
 	}
+	cellType, err := book.GetCellType("Records", "B2")
+	if err != nil || cellType != excelize.CellTypeSharedString {
+		t.Fatalf("unsafe Excel decimal must be exact text, type=%v err=%v", cellType, err)
+	}
 
 	sqlitePath := filepath.Join(t.TempDir(), "exact.sqlite")
 	if err := WriteSQLite(sqlitePath, "products", "product_code", rows); err != nil {

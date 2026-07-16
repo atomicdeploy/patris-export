@@ -532,7 +532,7 @@ func writeHTMLPartial(w http.ResponseWriter, page []byte) {
 	_, _ = w.Write([]byte(strings.Join(parts, "\n")))
 }
 
-// handleGetRecords returns all database records as JSON or CSV.
+// handleGetRecords returns all database records as JSON, CSV, or XLSX.
 func (s *Server) handleGetRecords(w http.ResponseWriter, r *http.Request) {
 	result, err := s.RecordResult()
 	if err != nil {
@@ -542,7 +542,7 @@ func (s *Server) handleGetRecords(w http.ResponseWriter, r *http.Request) {
 
 	format := requestedRecordsFormat(r)
 	if format == "" {
-		http.Error(w, "unsupported records format; use json or csv", http.StatusBadRequest)
+		http.Error(w, "unsupported records format; use json, csv, or xlsx", http.StatusBadRequest)
 		return
 	}
 	if format == "csv" {
@@ -550,7 +550,7 @@ func (s *Server) handleGetRecords(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if format == "xlsx" {
-		s.writeRecordsXLSX(w, r, result.Rows, result.KeyField)
+		s.writeRecordsXLSX(w, r, result)
 		return
 	}
 
@@ -616,7 +616,7 @@ func (s *Server) writeRecordsCSV(w http.ResponseWriter, r *http.Request, records
 	}
 }
 
-func (s *Server) writeRecordsXLSX(w http.ResponseWriter, r *http.Request, records []map[string]interface{}, keyField string) {
+func (s *Server) writeRecordsXLSX(w http.ResponseWriter, r *http.Request, result recordpipe.Result) {
 	temp, err := os.CreateTemp("", "patris-records-*.xlsx")
 	if err != nil {
 		http.Error(w, fmt.Sprintf("Failed to create XLSX: %v", err), http.StatusInternalServerError)
@@ -625,7 +625,21 @@ func (s *Server) writeRecordsXLSX(w http.ResponseWriter, r *http.Request, record
 	tempPath := temp.Name()
 	_ = temp.Close()
 	defer os.Remove(tempPath)
-	if err := recordsink.WriteXLSX(tempPath, records, keyField); err != nil {
+	dataset := sourceBaseName(s.currentDBPath())
+	rtl := false
+	if s.config != nil {
+		rtl = s.config.Get().UI.RTLTextDirection
+	}
+	if value, exists := r.URL.Query()["rtl"]; exists && len(value) > 0 {
+		switch strings.ToLower(strings.TrimSpace(value[len(value)-1])) {
+		case "1", "true", "yes", "rtl":
+			rtl = true
+		case "0", "false", "no", "ltr":
+			rtl = false
+		}
+	}
+	options := result.XLSXOptions(dataset, rtl)
+	if err := recordsink.WriteXLSX(tempPath, result.Rows, result.KeyField, options); err != nil {
 		http.Error(w, fmt.Sprintf("Failed to encode XLSX: %v", err), http.StatusInternalServerError)
 		return
 	}

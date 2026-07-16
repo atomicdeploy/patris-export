@@ -821,7 +821,8 @@ func writeConvertOutput(dbFile string, result recordpipe.Result, useStdout bool,
 		}
 	case "xlsx":
 		outputFile = filepath.Join(outputDir, baseName+".xlsx")
-		if err := recordsink.WriteXLSX(outputFile, result.Rows, result.KeyField); err != nil {
+		xlsxOptions := result.XLSXOptions(sourceName, cfg.UI.RTLTextDirection)
+		if err := recordsink.WriteXLSX(outputFile, result.Rows, result.KeyField, xlsxOptions); err != nil {
 			return err
 		}
 	case "sqlite":

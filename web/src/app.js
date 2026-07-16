@@ -3559,7 +3559,36 @@ function sortRecords() {
     });
 }
 
-// Export data
+function setExportMenuOpen(open, options = {}) {
+    const button = document.getElementById('exportBtn');
+    const dropdown = document.getElementById('exportDropdown');
+    if (!button || !dropdown) return;
+    dropdown.classList.toggle('open', !!open);
+    button.setAttribute('aria-expanded', open ? 'true' : 'false');
+    if (open && options.focusFirst) {
+        dropdown.querySelector('.export-option')?.focus();
+    }
+}
+
+function downloadCanonicalWorkbook() {
+    const url = new URL('/api/records.xlsx', window.location.origin);
+    url.searchParams.set('download', '1');
+    url.searchParams.set('rtl', state.settings.rtlTextDirection ? '1' : '0');
+    const link = document.createElement('a');
+    link.href = `${url.pathname}${url.search}`;
+    link.download = 'patris-export.xlsx';
+    link.hidden = true;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    showInAppToast('Excel export started', 'The canonical workbook includes records and non-secret provenance metadata.', {
+        source: 'xlsx_export',
+        eventType: 'xlsx_export'
+    });
+}
+
+// Export data. XLSX intentionally uses the Go endpoint so it shares the
+// canonical projection and workbook writer with CLI/configured exports.
 function exportData(format) {
     const data = state.filteredRecords.length > 0 ? state.filteredRecords : state.records;
     
@@ -3574,10 +3603,12 @@ function exportData(format) {
         const csv = convertToCSV(data);
         const blob = new Blob([csv], { type: 'text/csv' });
         downloadFile(blob, 'patris-export.csv');
+    } else if (format === 'xlsx') {
+        downloadCanonicalWorkbook();
     }
     
     // Close export dropdown
-    document.getElementById('exportDropdown').classList.remove('open');
+    setExportMenuOpen(false);
 }
 
 // Render column manager with checkboxes for each column
@@ -4107,18 +4138,45 @@ function init() {
     
     // Export button and dropdown
     document.getElementById('exportBtn').addEventListener('click', () => {
-        document.getElementById('exportDropdown').classList.toggle('open');
+        const dropdown = document.getElementById('exportDropdown');
+        setExportMenuOpen(!dropdown.classList.contains('open'));
+    });
+
+    document.getElementById('exportBtn').addEventListener('keydown', (event) => {
+        if (event.key === 'ArrowDown') {
+            event.preventDefault();
+            setExportMenuOpen(true, { focusFirst: true });
+        }
     });
     
     document.getElementById('exportJSON').addEventListener('click', () => exportData('json'));
     document.getElementById('exportCSV').addEventListener('click', () => exportData('csv'));
+    document.getElementById('exportXLSX').addEventListener('click', () => exportData('xlsx'));
+
+    document.getElementById('exportDropdown').addEventListener('keydown', (event) => {
+        const options = [...event.currentTarget.querySelectorAll('.export-option')];
+        const current = options.indexOf(document.activeElement);
+        if (event.key === 'Escape') {
+            event.preventDefault();
+            setExportMenuOpen(false);
+            document.getElementById('exportBtn').focus();
+        } else if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+            event.preventDefault();
+            const direction = event.key === 'ArrowDown' ? 1 : -1;
+            const next = (current + direction + options.length) % options.length;
+            options[next]?.focus();
+        } else if (event.key === 'Home' || event.key === 'End') {
+            event.preventDefault();
+            options[event.key === 'Home' ? 0 : options.length - 1]?.focus();
+        }
+    });
     
     // Close export dropdown when clicking outside
     document.addEventListener('click', (e) => {
         const exportBtn = document.getElementById('exportBtn');
         const exportDropdown = document.getElementById('exportDropdown');
         if (!exportBtn.contains(e.target) && !exportDropdown.contains(e.target)) {
-            exportDropdown.classList.remove('open');
+            setExportMenuOpen(false);
         }
         if (state.openRangePanel && !state.openRangePanel.contains(e.target) && !e.target.closest('.range-popover')) {
             closeOpenRangePanel();

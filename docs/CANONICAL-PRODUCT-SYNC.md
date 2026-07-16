@@ -195,10 +195,18 @@ is resolved.
 
 WebSocket messages retain their existing `added`/`modified`/`deleted` fields
 and include the same versioned contract under `contract`. CSV and XLSX preserve
-exact decimal lexemes. MySQL uses exact `DECIMAL` columns; SQLite declares
+exact decimal lexemes. XLSX writes decimals that round-trip through Excel's
+numeric representation as numeric cells and keeps longer precision as text
+rather than silently changing it. Code is always text. Its frozen, filtered
+Records sheet uses deterministic canonical columns, and its allowlisted
+Metadata sheet carries the schema/formula/source revision/generated time and
+normalized warnings without credentials, local paths, or raw Patris fields.
+MySQL uses exact `DECIMAL` columns; SQLite declares
 canonical decimal inputs as `DECIMAL_TEXT` so its numeric affinity cannot
 silently coerce them through binary floating point. Final IRT prices remain
 integers. Both SQL sinks add newly introduced columns on later exports.
+
+![Accessible canonical XLSX download action](screenshots/canonical-xlsx-export-menu.png)
 
 For direct delivery to Digitalogic, use the existing HTTP update sink with
 `require_contract: true`, the dedicated `/patris/product-sync` endpoint, and a

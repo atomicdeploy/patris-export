@@ -126,6 +126,18 @@ curl -H 'Accept: text/csv' http://localhost:8080/api/records -o records.csv
 CSV responses include `Code` as the first column, followed by the detected
 record fields.
 
+#### Download Records as Excel
+
+```bash
+curl 'http://localhost:8080/api/records.xlsx?download=1' -o records.xlsx
+curl -H 'Accept: application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' \
+  http://localhost:8080/api/records -o records.xlsx
+```
+
+Use `rtl=1` for a right-to-left workbook view. The workbook uses the same
+transformed records as the other sinks and includes a non-secret Metadata
+sheet; no workbook transformation runs in the browser.
+
 #### Get Database Info
 
 ```bash
