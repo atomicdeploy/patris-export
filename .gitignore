@@ -47,6 +47,7 @@ Thumbs.db
 !testdata/*.db
 !testdata/*.inf
 !testdata/*.txt
+!testdata/canonical-static-config.json
 !testdata/digitalogic-product-sync-v1.synthetic.json
 
 # Web/Node.js

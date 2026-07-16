@@ -2,7 +2,7 @@ package canonical
 
 import (
 	"net/url"
-	"path/filepath"
+	"path"
 	"strings"
 
 	"github.com/atomicdeploy/patris-export/pkg/pricingcatalog"
@@ -36,7 +36,7 @@ func NormalizeConfig(cfg Config) Config {
 	cfg.SourceID = strings.TrimSpace(cfg.SourceID)
 	profiles := make(map[string]ProfileConfig, len(cfg.Profiles))
 	for source, profile := range cfg.Profiles {
-		source = strings.ToLower(strings.TrimSpace(filepath.Base(source)))
+		source = sourceBaseName(source)
 		profile.Type = strings.ToLower(strings.TrimSpace(profile.Type))
 		if source != "" && profile.Type != "" {
 			profiles[source] = profile
@@ -68,7 +68,10 @@ func sourceBaseName(source string) string {
 	if parsed, err := url.Parse(trimmed); err == nil && parsed.Scheme != "" && strings.Contains(trimmed, "://") {
 		trimmed = parsed.Path
 	}
-	base := strings.ToLower(filepath.Base(trimmed))
+	// Configuration may be authored on a different operating system than the
+	// current process. Treat both slash styles as separators so a Windows path
+	// keeps the same dataset identity on Linux CI and vice versa.
+	base := strings.ToLower(path.Base(strings.ReplaceAll(trimmed, `\`, "/")))
 	if base == "" || base == "." {
 		return "patris-export"
 	}
