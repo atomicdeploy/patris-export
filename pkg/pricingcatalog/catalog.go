@@ -84,6 +84,7 @@ type Resolution struct {
 	MethodID              string
 	FreightCNYPerKg       *Decimal
 	MarkupPercent         *Decimal
+	MarkupPercentSource   string
 	IRTPerCNY             *Decimal
 	Warnings              []string
 }

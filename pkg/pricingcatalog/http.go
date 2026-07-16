@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/big"
 	"net/http"
 	"net/url"
 	"os"
@@ -27,9 +28,10 @@ type catalogSnapshot struct {
 }
 
 type assignmentSnapshot struct {
-	assignment Assignment
-	warnings   []string
-	fetchedAt  time.Time
+	assignment   Assignment
+	profitSource string
+	warnings     []string
+	fetchedAt    time.Time
 }
 
 type assignmentEntry struct {
@@ -41,6 +43,11 @@ type prefetchDiagnostic struct {
 	warnings    []string
 	fetchedAt   time.Time
 	allowSingle bool
+}
+
+type prefetchDiagnosticEntry struct {
+	code       string
+	diagnostic prefetchDiagnostic
 }
 
 type assignmentWire struct {
@@ -55,10 +62,20 @@ type assignmentWire struct {
 	} `json:"markup"`
 }
 
+type batchAssignmentWire struct {
+	Code            string          `json:"code"`
+	MethodID        string          `json:"import_freight_method_id"`
+	ProfitPercent   *Decimal        `json:"profit_percent"`
+	ProfitSource    string          `json:"profit_percent_source"`
+	PricingWarnings []string        `json:"pricing_warnings"`
+	LegacyMarkup    json.RawMessage `json:"markup"`
+}
+
 type batchAssignmentResult struct {
-	code     string
-	snapshot *assignmentSnapshot
-	warnings []string
+	code        string
+	snapshot    *assignmentSnapshot
+	warnings    []string
+	allowSingle bool
 }
 
 type remoteStatusError struct {
@@ -78,8 +95,9 @@ func (e *contractError) Error() string {
 }
 
 var (
-	errRequestTooLarge  = errors.New("request exceeds configured limit")
-	errResponseTooLarge = errors.New("response exceeds configured limit")
+	errCredentialUnavailable = errors.New("configured credential is unavailable")
+	errRequestTooLarge       = errors.New("request exceeds configured limit")
+	errResponseTooLarge      = errors.New("response exceeds configured limit")
 )
 
 type httpProvider struct {
@@ -93,9 +111,11 @@ type httpProvider struct {
 	catalogFetchMu sync.Mutex
 	prefetchMu     sync.Mutex
 	catalog        *catalogSnapshot
+	catalogFailure time.Time
 	assignments    map[string]*list.Element
-	diagnostics    map[string]prefetchDiagnostic
+	diagnostics    map[string]*list.Element
 	lru            *list.List
+	diagnosticLRU  *list.List
 	configError    string
 }
 
@@ -113,14 +133,15 @@ func newHTTPProvider(cfg DigitalogicConfig, client *http.Client, now func() time
 		}
 	}
 	provider := &httpProvider{
-		config:      normalized,
-		client:      client,
-		now:         now,
-		freshFor:    parseDuration(normalized.FreshFor, defaultFreshFor),
-		maxStale:    parseDuration(normalized.MaxStale, defaultMaxStale),
-		assignments: make(map[string]*list.Element),
-		diagnostics: make(map[string]prefetchDiagnostic),
-		lru:         list.New(),
+		config:        normalized,
+		client:        client,
+		now:           now,
+		freshFor:      parseDuration(normalized.FreshFor, defaultFreshFor),
+		maxStale:      parseDuration(normalized.MaxStale, defaultMaxStale),
+		assignments:   make(map[string]*list.Element),
+		diagnostics:   make(map[string]*list.Element),
+		lru:           list.New(),
+		diagnosticLRU: list.New(),
 	}
 	provider.configError = validateBaseURL(normalized.BaseURL)
 	if provider.configError == "" {
@@ -212,7 +233,7 @@ func (p *httpProvider) Prefetch(ctx context.Context, codes []string) {
 				p.storeAssignment(result.code, snapshot)
 				continue
 			}
-			p.storePrefetchDiagnostic([]string{result.code}, result.warnings, now, false)
+			p.storePrefetchDiagnostic([]string{result.code}, result.warnings, now, result.allowSingle)
 		}
 	}
 }
@@ -248,6 +269,7 @@ func (p *httpProvider) Resolve(ctx context.Context, code string) Resolution {
 
 	resolution.MethodID = strings.TrimSpace(assignment.assignment.MethodID)
 	resolution.MarkupPercent = cloneDecimal(assignment.assignment.ProfitPercent)
+	resolution.MarkupPercentSource = assignment.profitSource
 	method, exists := catalog.methods[resolution.MethodID]
 	if !exists {
 		resolution.Warnings = append(resolution.Warnings, "import_freight_method_unknown")
@@ -269,6 +291,15 @@ func (p *httpProvider) resolveCatalog(ctx context.Context) (*catalogSnapshot, st
 		p.mu.Unlock()
 		return copy, "fresh", nil
 	}
+	if withinAge(now, p.catalogFailure, p.freshFor) {
+		if cached != nil && withinAge(now, cached.fetchedAt, p.maxStale) {
+			copy := cloneCatalog(cached)
+			p.mu.Unlock()
+			return copy, "stale", []string{"pricing_catalog_stale"}
+		}
+		p.mu.Unlock()
+		return nil, "unavailable", []string{"pricing_catalog_fetch_failed"}
+	}
 	p.mu.Unlock()
 	p.catalogFetchMu.Lock()
 	defer p.catalogFetchMu.Unlock()
@@ -282,6 +313,15 @@ func (p *httpProvider) resolveCatalog(ctx context.Context) (*catalogSnapshot, st
 		p.mu.Unlock()
 		return copy, "fresh", nil
 	}
+	if withinAge(now, p.catalogFailure, p.freshFor) {
+		if cached != nil && withinAge(now, cached.fetchedAt, p.maxStale) {
+			copy := cloneCatalog(cached)
+			p.mu.Unlock()
+			return copy, "stale", []string{"pricing_catalog_stale"}
+		}
+		p.mu.Unlock()
+		return nil, "unavailable", []string{"pricing_catalog_fetch_failed"}
+	}
 	p.mu.Unlock()
 
 	fetched, err := p.fetchCatalog(ctx)
@@ -289,10 +329,15 @@ func (p *httpProvider) resolveCatalog(ctx context.Context) (*catalogSnapshot, st
 		fetched.fetchedAt = now
 		p.mu.Lock()
 		p.catalog = cloneCatalog(fetched)
+		p.catalogFailure = time.Time{}
 		p.mu.Unlock()
 		return fetched, "fresh", nil
 	}
 
+	p.mu.Lock()
+	p.catalogFailure = now
+	cached = p.catalog
+	p.mu.Unlock()
 	if cached != nil && withinAge(now, cached.fetchedAt, p.maxStale) {
 		return cloneCatalog(cached), "stale", []string{"pricing_catalog_stale"}
 	}
@@ -303,8 +348,10 @@ func (p *httpProvider) resolveAssignment(ctx context.Context, code string) (*ass
 	now := p.now().UTC()
 	prefetchWarnings := []string(nil)
 	p.mu.Lock()
-	if diagnostic, ok := p.diagnostics[code]; ok {
+	if diagnosticElement, ok := p.diagnostics[code]; ok {
+		diagnostic := diagnosticElement.Value.(*prefetchDiagnosticEntry).diagnostic
 		if withinAge(now, diagnostic.fetchedAt, p.freshFor) {
+			p.diagnosticLRU.MoveToFront(diagnosticElement)
 			prefetchWarnings = append(prefetchWarnings, diagnostic.warnings...)
 			if !diagnostic.allowSingle {
 				if element := p.assignments[code]; element != nil {
@@ -321,7 +368,7 @@ func (p *httpProvider) resolveAssignment(ctx context.Context, code string) (*ass
 				return nil, "unavailable", normalizedStrings(prefetchWarnings)
 			}
 		} else {
-			delete(p.diagnostics, code)
+			p.removeDiagnosticLocked(code)
 		}
 	}
 	if element, ok := p.assignments[code]; ok {
@@ -366,7 +413,7 @@ func (p *httpProvider) resolveAssignment(ctx context.Context, code string) (*ass
 func (p *httpProvider) storeAssignment(code string, snapshot assignmentSnapshot) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	delete(p.diagnostics, code)
+	p.removeDiagnosticLocked(code)
 	if element, exists := p.assignments[code]; exists {
 		element.Value.(*assignmentEntry).snapshot = snapshot
 		p.lru.MoveToFront(element)
@@ -389,12 +436,36 @@ func (p *httpProvider) storePrefetchDiagnostic(codes, warnings []string, fetched
 	defer p.mu.Unlock()
 	warnings = normalizedStrings(warnings)
 	for _, code := range codes {
-		p.diagnostics[code] = prefetchDiagnostic{
+		diagnostic := prefetchDiagnostic{
 			warnings:    append([]string(nil), warnings...),
 			fetchedAt:   fetchedAt,
 			allowSingle: allowSingle,
 		}
+		if element := p.diagnostics[code]; element != nil {
+			element.Value.(*prefetchDiagnosticEntry).diagnostic = diagnostic
+			p.diagnosticLRU.MoveToFront(element)
+			continue
+		}
+		element := p.diagnosticLRU.PushFront(&prefetchDiagnosticEntry{code: code, diagnostic: diagnostic})
+		p.diagnostics[code] = element
+		for p.diagnosticLRU.Len() > p.config.MaxEntries {
+			oldest := p.diagnosticLRU.Back()
+			if oldest == nil {
+				break
+			}
+			delete(p.diagnostics, oldest.Value.(*prefetchDiagnosticEntry).code)
+			p.diagnosticLRU.Remove(oldest)
+		}
 	}
+}
+
+func (p *httpProvider) removeDiagnosticLocked(code string) {
+	element := p.diagnostics[code]
+	if element == nil {
+		return
+	}
+	delete(p.diagnostics, code)
+	p.diagnosticLRU.Remove(element)
 }
 
 func (p *httpProvider) fetchCatalog(ctx context.Context) (*catalogSnapshot, error) {
@@ -500,8 +571,9 @@ func assignmentSnapshotFromWire(wire assignmentWire) assignmentSnapshot {
 		warnings = append(warnings, wire.Markup.Warning)
 	}
 	return assignmentSnapshot{
-		assignment: Assignment{MethodID: strings.TrimSpace(wire.MethodID), ProfitPercent: cloneDecimal(profit)},
-		warnings:   normalizedStrings(warnings),
+		assignment:   Assignment{MethodID: strings.TrimSpace(wire.MethodID), ProfitPercent: cloneDecimal(profit)},
+		profitSource: strings.TrimSpace(wire.ProfitSource),
+		warnings:     normalizedStrings(warnings),
 	}
 }
 
@@ -518,6 +590,7 @@ func (p *httpProvider) fetchAssignmentBatch(ctx context.Context, codes []string)
 			SchemaVersion string   `json:"schema_version"`
 			Configured    bool     `json:"configured"`
 			ProfitPercent *Decimal `json:"profit_percent"`
+			Source        string   `json:"source"`
 		} `json:"default_percentage_markup"`
 		Results []struct {
 			Code       string          `json:"code"`
@@ -541,8 +614,8 @@ func (p *httpProvider) fetchAssignmentBatch(ctx context.Context, codes []string)
 	if wire.DefaultMarkup.Schema != "digitalogic.default-percentage-markup" || majorVersion(wire.DefaultMarkup.SchemaVersion) != "1" {
 		return nil, &contractError{reason: "incompatible default-markup schema"}
 	}
-	if wire.DefaultMarkup.Configured && wire.DefaultMarkup.ProfitPercent == nil {
-		return nil, &contractError{reason: "configured default markup is missing its decimal"}
+	if err := validateBatchDefaultMarkup(wire.DefaultMarkup.Configured, wire.DefaultMarkup.ProfitPercent, wire.DefaultMarkup.Source); err != nil {
+		return nil, err
 	}
 	if wire.RequestedCount != len(codes) || len(wire.Results) != len(codes) || wire.MaximumCodes < len(codes) || wire.MaximumCodes > maximumBatchSize {
 		return nil, &contractError{reason: "batch cardinality does not match the request"}
@@ -564,27 +637,64 @@ func (p *httpProvider) fetchAssignmentBatch(ctx context.Context, codes []string)
 			if len(result.Assignment) == 0 || bytes.Equal(bytes.TrimSpace(result.Assignment), []byte("null")) {
 				return nil, &contractError{reason: "successful batch result omitted its assignment"}
 			}
-			var assignment assignmentWire
+			var assignment batchAssignmentWire
 			if err := json.Unmarshal(result.Assignment, &assignment); err != nil {
 				return nil, &contractError{reason: "successful batch assignment is malformed"}
 			}
 			if strings.TrimSpace(assignment.Code) != result.Code {
 				return nil, &contractError{reason: "successful batch assignment Code mismatch"}
 			}
-			snapshot := assignmentSnapshotFromWire(assignment)
+			if len(assignment.LegacyMarkup) > 0 && !bytes.Equal(bytes.TrimSpace(assignment.LegacyMarkup), []byte("null")) {
+				return nil, &contractError{reason: "successful batch assignment used the legacy nested markup projection"}
+			}
+			if err := validateBatchAssignmentMarkup(assignment, wire.DefaultMarkup.Configured, wire.DefaultMarkup.ProfitPercent); err != nil {
+				return nil, err
+			}
+			snapshot := assignmentSnapshot{
+				assignment: Assignment{
+					MethodID:      strings.TrimSpace(assignment.MethodID),
+					ProfitPercent: cloneDecimal(assignment.ProfitPercent),
+				},
+				profitSource: strings.TrimSpace(assignment.ProfitSource),
+				warnings:     normalizedStrings(assignment.PricingWarnings),
+			}
 			results = append(results, batchAssignmentResult{code: result.Code, snapshot: &snapshot})
 		case "error":
 			errorCount++
+			if len(result.Assignment) > 0 && !bytes.Equal(bytes.TrimSpace(result.Assignment), []byte("null")) {
+				return nil, &contractError{reason: "failed batch result included an assignment"}
+			}
+			result.Error.Code = strings.TrimSpace(result.Error.Code)
+			if result.Error.Code == "" || result.Error.HTTPStatus < 100 || result.Error.HTTPStatus > 599 {
+				return nil, &contractError{reason: "failed batch result omitted its typed error"}
+			}
 			warning := "product_pricing_assignment_batch_result_failed"
 			switch result.Error.Code {
 			case "digitalogic_product_code_not_found":
+				if result.Error.Retryable || result.Error.HTTPStatus != http.StatusNotFound {
+					return nil, &contractError{reason: "not-found batch result changed its error semantics"}
+				}
 				warning = "product_pricing_assignment_not_found"
 			case "digitalogic_product_code_ambiguous":
+				if result.Error.Retryable || result.Error.HTTPStatus != http.StatusConflict {
+					return nil, &contractError{reason: "ambiguous batch result changed its error semantics"}
+				}
 				warning = "product_pricing_assignment_ambiguous"
 			case "digitalogic_invalid_product_code":
+				if result.Error.Retryable || result.Error.HTTPStatus != http.StatusBadRequest {
+					return nil, &contractError{reason: "invalid-Code batch result changed its error semantics"}
+				}
 				warning = "product_pricing_assignment_invalid"
 			default:
-				results = append(results, batchAssignmentResult{code: result.Code, warnings: []string{warning}})
+				if result.Error.Retryable {
+					if result.Error.HTTPStatus < 500 {
+						return nil, &contractError{reason: "retryable batch result used a non-server error status"}
+					}
+					warning = "product_pricing_assignment_batch_result_retryable"
+				}
+				results = append(results, batchAssignmentResult{
+					code: result.Code, warnings: []string{warning}, allowSingle: result.Error.Retryable,
+				})
 				continue
 			}
 			snapshot := assignmentSnapshot{warnings: []string{warning}}
@@ -597,6 +707,51 @@ func (p *httpProvider) fetchAssignmentBatch(ctx context.Context, codes []string)
 		return nil, &contractError{reason: "batch status counts do not match the envelope"}
 	}
 	return results, nil
+}
+
+func validateBatchDefaultMarkup(configured bool, profit *Decimal, source string) error {
+	source = strings.TrimSpace(source)
+	if configured {
+		if source != "global_default" || !validBatchPercentage(profit) {
+			return &contractError{reason: "configured default markup has inconsistent decimal/source semantics"}
+		}
+		return nil
+	}
+	if profit != nil || (source != "unset" && source != "invalid_storage") {
+		return &contractError{reason: "unconfigured default markup has inconsistent decimal/source semantics"}
+	}
+	return nil
+}
+
+func validateBatchAssignmentMarkup(assignment batchAssignmentWire, defaultConfigured bool, defaultProfit *Decimal) error {
+	source := strings.TrimSpace(assignment.ProfitSource)
+	warnings := normalizedStrings(assignment.PricingWarnings)
+	switch source {
+	case "global_default":
+		if !defaultConfigured || !validBatchPercentage(assignment.ProfitPercent) || !decimalEqual(assignment.ProfitPercent, defaultProfit) {
+			return &contractError{reason: "global-default assignment does not match the shared default decimal"}
+		}
+	case "product_override":
+		if !validBatchPercentage(assignment.ProfitPercent) {
+			return &contractError{reason: "product override has an invalid exact percentage"}
+		}
+	case "unset":
+		if assignment.ProfitPercent != nil || len(warnings) == 0 {
+			return &contractError{reason: "unset assignment omitted its diagnostic or included a decimal"}
+		}
+	case "":
+		if assignment.ProfitPercent != nil || len(warnings) == 0 {
+			return &contractError{reason: "invalid assignment markup omitted its diagnostic or included a decimal"}
+		}
+	default:
+		return &contractError{reason: "assignment markup source is unsupported"}
+	}
+	return nil
+}
+
+func validBatchPercentage(value *Decimal) bool {
+	parsed, ok := decimalRat(value)
+	return ok && parsed.Sign() >= 0 && parsed.Cmp(big.NewRat(1000, 1)) <= 0
 }
 
 func (p *httpProvider) getJSON(ctx context.Context, path string, target interface{}) error {
@@ -635,14 +790,14 @@ func (p *httpProvider) doJSON(ctx context.Context, method, path string, body []b
 	if p.config.BearerTokenEnv != "" {
 		token := strings.TrimSpace(os.Getenv(p.config.BearerTokenEnv))
 		if token == "" {
-			return errors.New("configured bearer credential is unavailable")
+			return errCredentialUnavailable
 		}
 		req.Header.Set("Authorization", "Bearer "+token)
 	} else if p.config.UsernameEnv != "" || p.config.PasswordEnv != "" {
 		username := os.Getenv(p.config.UsernameEnv)
 		password := os.Getenv(p.config.PasswordEnv)
 		if p.config.UsernameEnv == "" || p.config.PasswordEnv == "" || username == "" || password == "" {
-			return errors.New("configured basic credential is unavailable")
+			return errCredentialUnavailable
 		}
 		req.SetBasicAuth(username, password)
 	}
@@ -689,6 +844,8 @@ func batchFailureWarning(err error) string {
 	var contract *contractError
 	switch {
 	case errors.As(err, &status) && (status.status == http.StatusUnauthorized || status.status == http.StatusForbidden):
+		return "pricing_assignment_batch_auth_failed"
+	case errors.Is(err, errCredentialUnavailable):
 		return "pricing_assignment_batch_auth_failed"
 	case errors.As(err, &status):
 		return "pricing_assignment_batch_http_failed"

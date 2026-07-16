@@ -344,7 +344,7 @@ func TestDigitalogicProfilePrefetches1002CodesInThreeBatchRequests(t *testing.T)
 			for _, code := range request.Codes {
 				results = append(results, map[string]interface{}{
 					"code": code, "status": "ok", "assignment": map[string]interface{}{
-						"code": code, "import_freight_method_id": "air", "profit_percent": "30", "pricing_warnings": []string{},
+						"code": code, "import_freight_method_id": "air", "profit_percent": "30", "profit_percent_source": "global_default", "pricing_warnings": []string{},
 					},
 				})
 			}
@@ -352,7 +352,7 @@ func TestDigitalogicProfilePrefetches1002CodesInThreeBatchRequests(t *testing.T)
 				"schema": "digitalogic.pricing-assignment-batch", "schema_version": "1.0.0",
 				"requested_count": len(request.Codes), "resolved_count": len(request.Codes), "error_count": 0, "maximum_codes": 500,
 				"default_percentage_markup": map[string]interface{}{
-					"schema": "digitalogic.default-percentage-markup", "schema_version": "1.0.0", "configured": true, "profit_percent": "30",
+					"schema": "digitalogic.default-percentage-markup", "schema_version": "1.0.0", "configured": true, "profit_percent": "30", "source": "global_default",
 				},
 				"results": results,
 			}})

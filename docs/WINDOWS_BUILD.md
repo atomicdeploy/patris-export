@@ -24,7 +24,8 @@ The CI/CD builds in that repository produce Windows DLLs that can be used direct
 ### Prerequisites
 - CMake 3.12 or later
 - Visual Studio 2019 or later (or MinGW-w64)
-- Go 1.23 or later
+- Go 1.25 or later (Go's automatic toolchain selection can download the
+  required toolchain when `GOTOOLCHAIN=auto` is enabled)
 
 ### Build Steps
 
