@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -56,6 +57,17 @@ func TestStaticProviderResolvesExactCodeAndDefaults(t *testing.T) {
 	for _, expected := range []string{"freight_rate_missing", "import_freight_method_missing", "markup_percent_missing"} {
 		if !strings.Contains(warnings, expected) {
 			t.Fatalf("missing warning %q in %v", expected, missing.Warnings)
+		}
+	}
+}
+
+func TestStaticAndDisabledProvidersDoNotExposeRemotePrefetch(t *testing.T) {
+	for name, provider := range map[string]Provider{
+		"static":   NewProvider(Config{Mode: ModeStatic}),
+		"disabled": NewProvider(Config{Mode: ModeNone}),
+	} {
+		if _, ok := provider.(Prefetcher); ok {
+			t.Fatalf("%s provider unexpectedly exposes a remote prefetch capability", name)
 		}
 	}
 }
@@ -175,6 +187,124 @@ func TestHTTPProviderBoundsAssignmentCache(t *testing.T) {
 	}
 }
 
+func TestHTTPProviderBatchPrefetchUsesGoldenContractAndSharedAuth(t *testing.T) {
+	fixture, err := os.ReadFile("../../testdata/digitalogic-pricing-assignment-batch-v1.golden.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var batchRequests, singleRequests int
+	var authHeaders []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		authHeaders = append(authHeaders, r.Header.Get("Authorization"))
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/integration/catalog":
+			fmt.Fprint(w, `{"data":{"schema":"digitalogic.integration-catalog","schema_version":"1.0.0","revision":"r1","currency":{"local":"IRT","cny_to_local":29000,"cny_to_irt":29000},"pricing":{"formula_id":"landed_price_v1","formula_revision":"1.0.0"},"import_freight_methods":[{"id":"air_express","price_per_kg_cny":120}]}}`)
+		case "/pricing-assignments/batch":
+			batchRequests++
+			fmt.Fprintf(w, `{"success":true,"data":%s}`, fixture)
+		default:
+			singleRequests++
+			fmt.Fprint(w, `{"data":{"code":"unexpected","import_freight_method_id":"air_express","profit_percent":"30"}}`)
+		}
+	}))
+	defer server.Close()
+	t.Setenv("PATRIS_BATCH_TEST_TOKEN", "read-only-token")
+
+	provider := newHTTPProvider(DigitalogicConfig{
+		BaseURL: server.URL, BearerTokenEnv: "PATRIS_BATCH_TEST_TOKEN", FreshFor: "1m", MaxStale: "1h",
+	}, server.Client(), time.Now)
+	provider.Prefetch(context.Background(), []string{"113007045", "MISSING"})
+	resolved := provider.Resolve(context.Background(), "113007045")
+	missing := provider.Resolve(context.Background(), "MISSING")
+
+	if batchRequests != 1 || singleRequests != 0 {
+		t.Fatalf("requests: batch=%d single=%d, want 1/0", batchRequests, singleRequests)
+	}
+	if resolved.MethodID != "air_express" || decimalText(resolved.MarkupPercent) != "30" || decimalText(resolved.FreightCNYPerKg) != "120" {
+		t.Fatalf("golden assignment did not resolve exactly: %+v", resolved)
+	}
+	if !contains(missing.Warnings, "product_pricing_assignment_not_found") {
+		t.Fatalf("typed not-found result was lost: %+v", missing)
+	}
+	for _, header := range authHeaders {
+		if header != "Bearer read-only-token" {
+			t.Fatalf("shared auth header = %q", header)
+		}
+	}
+}
+
+func TestHTTPProviderBatchUnsupportedFallsBackWithDiagnostic(t *testing.T) {
+	var singleRequests int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/integration/catalog":
+			fmt.Fprint(w, `{"data":{"schema":"digitalogic.integration-catalog","schema_version":"1.0.0","revision":"r1","currency":{"local":"IRT","cny_to_local":1,"cny_to_irt":1},"pricing":{"formula_id":"landed_price_v1","formula_revision":"1.0.0"},"import_freight_methods":[{"id":"air","price_per_kg_cny":1}]}}`)
+		case "/pricing-assignments/batch":
+			http.NotFound(w, r)
+		default:
+			singleRequests++
+			fmt.Fprint(w, `{"data":{"import_freight_method_id":"air","profit_percent":"0"}}`)
+		}
+	}))
+	defer server.Close()
+
+	provider := newHTTPProvider(DigitalogicConfig{BaseURL: server.URL}, server.Client(), time.Now)
+	provider.Prefetch(context.Background(), []string{"A"})
+	resolved := provider.Resolve(context.Background(), "A")
+	if singleRequests != 1 || !contains(resolved.Warnings, "pricing_assignment_batch_unsupported") {
+		t.Fatalf("unsupported batch fallback was not explicit and safe: requests=%d resolution=%+v", singleRequests, resolved)
+	}
+}
+
+func TestHTTPProviderMalformedBatchFailsClosedWithoutSingleRequests(t *testing.T) {
+	var singleRequests int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/integration/catalog":
+			fmt.Fprint(w, `{"data":{"schema":"digitalogic.integration-catalog","schema_version":"1.0.0","revision":"r1","currency":{"local":"IRT","cny_to_local":1,"cny_to_irt":1},"pricing":{"formula_id":"landed_price_v1","formula_revision":"1.0.0"},"import_freight_methods":[{"id":"air","price_per_kg_cny":1}]}}`)
+		case "/pricing-assignments/batch":
+			fmt.Fprint(w, `{"data":{"schema":"wrong","schema_version":"1.0.0","results":[]}}`)
+		default:
+			singleRequests++
+			fmt.Fprint(w, `{"data":{"import_freight_method_id":"air","profit_percent":"0"}}`)
+		}
+	}))
+	defer server.Close()
+
+	provider := newHTTPProvider(DigitalogicConfig{BaseURL: server.URL}, server.Client(), time.Now)
+	provider.Prefetch(context.Background(), []string{"A"})
+	resolved := provider.Resolve(context.Background(), "A")
+	if singleRequests != 0 || !contains(resolved.Warnings, "pricing_assignment_batch_contract_invalid") {
+		t.Fatalf("malformed batch did not fail closed: requests=%d resolution=%+v", singleRequests, resolved)
+	}
+}
+
+func TestHTTPProviderBatchAmbiguityIsAuthoritative(t *testing.T) {
+	var singleRequests int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/integration/catalog":
+			fmt.Fprint(w, `{"data":{"schema":"digitalogic.integration-catalog","schema_version":"1.0.0","revision":"r1","currency":{"local":"IRT","cny_to_local":1,"cny_to_irt":1},"pricing":{"formula_id":"landed_price_v1","formula_revision":"1.0.0"},"import_freight_methods":[]}}`)
+		case "/pricing-assignments/batch":
+			fmt.Fprint(w, `{"data":{"schema":"digitalogic.pricing-assignment-batch","schema_version":"1.0.0","requested_count":1,"resolved_count":0,"error_count":1,"maximum_codes":500,"default_percentage_markup":{"schema":"digitalogic.default-percentage-markup","schema_version":"1.0.0","configured":false},"results":[{"code":"COLLISION","status":"error","error":{"code":"digitalogic_product_code_ambiguous","http_status":409,"retryable":false}}]}}`)
+		default:
+			singleRequests++
+		}
+	}))
+	defer server.Close()
+
+	provider := newHTTPProvider(DigitalogicConfig{BaseURL: server.URL}, server.Client(), time.Now)
+	provider.Prefetch(context.Background(), []string{"COLLISION"})
+	resolved := provider.Resolve(context.Background(), "COLLISION")
+	if singleRequests != 0 || !contains(resolved.Warnings, "product_pricing_assignment_ambiguous") {
+		t.Fatalf("ambiguous Code was retried or lost: requests=%d resolution=%+v", singleRequests, resolved)
+	}
+}
+
 func TestJoinURLRejectsOriginChangesAndAbsolutePaths(t *testing.T) {
 	base := "https://example.test/wp-json/digitalogic/v1"
 	for _, path := range []string{
@@ -202,10 +332,11 @@ func TestHTTPProviderRejectsUntrustedConfiguredPathsBeforeRequest(t *testing.T) 
 		"scheme relative catalog": {BaseURL: "https://example.test/wp-json/digitalogic/v1", CatalogPath: "//evil.test/catalog"},
 		"assignment without Code": {BaseURL: "https://example.test/wp-json/digitalogic/v1", AssignmentPath: "products/import-pricing"},
 		"absolute assignment":     {BaseURL: "https://example.test/wp-json/digitalogic/v1", AssignmentPath: "https://evil.test/{code}"},
+		"absolute batch":          {BaseURL: "https://example.test/wp-json/digitalogic/v1", BatchAssignmentPath: "https://evil.test/batch"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			resolution := newHTTPProvider(cfg, nil, time.Now).Resolve(context.Background(), "A")
-			if !contains(resolution.Warnings, "pricing_catalog_path_invalid") && !contains(resolution.Warnings, "pricing_assignment_path_invalid") {
+			if !contains(resolution.Warnings, "pricing_catalog_path_invalid") && !contains(resolution.Warnings, "pricing_assignment_path_invalid") && !contains(resolution.Warnings, "pricing_assignment_batch_path_invalid") {
 				t.Fatalf("unsafe configured path was not rejected: %+v", resolution)
 			}
 		})

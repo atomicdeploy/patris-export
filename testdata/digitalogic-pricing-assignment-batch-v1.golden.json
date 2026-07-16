@@ -1,0 +1,52 @@
+{
+  "schema": "digitalogic.pricing-assignment-batch",
+  "schema_version": "1.0.0",
+  "requested_count": 2,
+  "resolved_count": 1,
+  "error_count": 1,
+  "maximum_codes": 500,
+  "default_percentage_markup": {
+    "schema": "digitalogic.default-percentage-markup",
+    "schema_version": "1.0.0",
+    "configured": true,
+    "type": "percentage",
+    "profit_percent": "30",
+    "source": "global_default",
+    "revision": "sha256:fixture-default-markup",
+    "updated_at": "2026-07-16 12:00:00",
+    "updated_by": 1,
+    "storage_present": true,
+    "bounds": {
+      "minimum": "0",
+      "maximum": "1000",
+      "maximum_fraction_digits": 12
+    },
+    "warnings": []
+  },
+  "results": [
+    {
+      "code": "113007045",
+      "status": "ok",
+      "assignment": {
+        "code": "113007045",
+        "import_freight_method_id": "air_express",
+        "profit_percent": "30",
+        "pricing_warnings": [],
+        "markup": {
+          "profit_percent": "30",
+          "warning": null
+        }
+      }
+    },
+    {
+      "code": "MISSING",
+      "status": "error",
+      "error": {
+        "code": "digitalogic_product_code_not_found",
+        "message": "No product has that exact Patris Code or SKU.",
+        "http_status": 404,
+        "retryable": false
+      }
+    }
+  ]
+}

@@ -84,6 +84,13 @@ func Transform(ctx context.Context, rows []map[string]interface{}, source string
 			eligible = append(eligible, index)
 		}
 	}
+	if prefetcher, ok := provider.(pricingcatalog.Prefetcher); ok && len(eligible) > 0 {
+		codes := make([]string, 0, len(eligible))
+		for _, index := range eligible {
+			codes = append(codes, codeString(firstValue(rows[index], "product_code", "code", "Code")))
+		}
+		prefetcher.Prefetch(ctx, codes)
+	}
 	parsedProducts := make([]Product, len(rows))
 	workers := 1
 	normalizedPricing := pricingcatalog.Normalize(cfg.Pricing)

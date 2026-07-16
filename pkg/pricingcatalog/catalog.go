@@ -18,9 +18,11 @@ const (
 	defaultFreshFor    = 5 * time.Minute
 	defaultMaxStale    = time.Hour
 	defaultTimeout     = 5 * time.Second
-	defaultMaxEntries  = 1000
+	defaultMaxEntries  = 2048
 	defaultMaxBytes    = int64(2 << 20)
 	defaultConcurrency = 8
+	defaultBatchSize   = 500
+	maximumBatchSize   = 500
 )
 
 // Config selects a replaceable pricing-catalog provider. Static is suitable
@@ -43,18 +45,20 @@ type StaticConfig struct {
 }
 
 type DigitalogicConfig struct {
-	BaseURL          string `json:"base_url,omitempty" yaml:"base_url,omitempty" toml:"base_url,omitempty"`
-	CatalogPath      string `json:"catalog_path,omitempty" yaml:"catalog_path,omitempty" toml:"catalog_path,omitempty"`
-	AssignmentPath   string `json:"assignment_path,omitempty" yaml:"assignment_path,omitempty" toml:"assignment_path,omitempty"`
-	UsernameEnv      string `json:"username_env,omitempty" yaml:"username_env,omitempty" toml:"username_env,omitempty"`
-	PasswordEnv      string `json:"password_env,omitempty" yaml:"password_env,omitempty" toml:"password_env,omitempty"`
-	BearerTokenEnv   string `json:"bearer_token_env,omitempty" yaml:"bearer_token_env,omitempty" toml:"bearer_token_env,omitempty"`
-	FreshFor         string `json:"fresh_for,omitempty" yaml:"fresh_for,omitempty" toml:"fresh_for,omitempty"`
-	MaxStale         string `json:"max_stale,omitempty" yaml:"max_stale,omitempty" toml:"max_stale,omitempty"`
-	Timeout          string `json:"timeout,omitempty" yaml:"timeout,omitempty" toml:"timeout,omitempty"`
-	MaxEntries       int    `json:"max_entries,omitempty" yaml:"max_entries,omitempty" toml:"max_entries,omitempty"`
-	MaxConcurrency   int    `json:"max_concurrency,omitempty" yaml:"max_concurrency,omitempty" toml:"max_concurrency,omitempty"`
-	MaxResponseBytes int64  `json:"max_response_bytes,omitempty" yaml:"max_response_bytes,omitempty" toml:"max_response_bytes,omitempty"`
+	BaseURL             string `json:"base_url,omitempty" yaml:"base_url,omitempty" toml:"base_url,omitempty"`
+	CatalogPath         string `json:"catalog_path,omitempty" yaml:"catalog_path,omitempty" toml:"catalog_path,omitempty"`
+	AssignmentPath      string `json:"assignment_path,omitempty" yaml:"assignment_path,omitempty" toml:"assignment_path,omitempty"`
+	BatchAssignmentPath string `json:"batch_assignment_path,omitempty" yaml:"batch_assignment_path,omitempty" toml:"batch_assignment_path,omitempty"`
+	BatchSize           int    `json:"batch_size,omitempty" yaml:"batch_size,omitempty" toml:"batch_size,omitempty"`
+	UsernameEnv         string `json:"username_env,omitempty" yaml:"username_env,omitempty" toml:"username_env,omitempty"`
+	PasswordEnv         string `json:"password_env,omitempty" yaml:"password_env,omitempty" toml:"password_env,omitempty"`
+	BearerTokenEnv      string `json:"bearer_token_env,omitempty" yaml:"bearer_token_env,omitempty" toml:"bearer_token_env,omitempty"`
+	FreshFor            string `json:"fresh_for,omitempty" yaml:"fresh_for,omitempty" toml:"fresh_for,omitempty"`
+	MaxStale            string `json:"max_stale,omitempty" yaml:"max_stale,omitempty" toml:"max_stale,omitempty"`
+	Timeout             string `json:"timeout,omitempty" yaml:"timeout,omitempty" toml:"timeout,omitempty"`
+	MaxEntries          int    `json:"max_entries,omitempty" yaml:"max_entries,omitempty" toml:"max_entries,omitempty"`
+	MaxConcurrency      int    `json:"max_concurrency,omitempty" yaml:"max_concurrency,omitempty" toml:"max_concurrency,omitempty"`
+	MaxResponseBytes    int64  `json:"max_response_bytes,omitempty" yaml:"max_response_bytes,omitempty" toml:"max_response_bytes,omitempty"`
 }
 
 type Method struct {
@@ -88,6 +92,13 @@ type Provider interface {
 	Resolve(context.Context, string) Resolution
 }
 
+// Prefetcher is an optional provider capability used by canonical transforms.
+// Providers that do not implement it retain the existing per-record Resolve
+// behavior, which keeps static and independently replaceable providers simple.
+type Prefetcher interface {
+	Prefetch(context.Context, []string)
+}
+
 func DefaultConfig() Config {
 	return Config{Mode: ModeStatic}
 }
@@ -113,6 +124,15 @@ func Normalize(cfg Config) Config {
 	}
 	if strings.TrimSpace(d.AssignmentPath) == "" {
 		d.AssignmentPath = "products/by-code/{code}/import-pricing"
+	}
+	if strings.TrimSpace(d.BatchAssignmentPath) == "" {
+		d.BatchAssignmentPath = "pricing-assignments/batch"
+	}
+	if d.BatchSize <= 0 {
+		d.BatchSize = defaultBatchSize
+	}
+	if d.BatchSize > maximumBatchSize {
+		d.BatchSize = maximumBatchSize
 	}
 	if parseDuration(d.FreshFor, 0) <= 0 {
 		d.FreshFor = defaultFreshFor.String()

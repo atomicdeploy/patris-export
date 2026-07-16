@@ -280,6 +280,10 @@ func TestDigitalogicProfileBoundsConcurrentAssignmentReads(t *testing.T) {
 			fmt.Fprint(w, `{"data":{"schema":"digitalogic.integration-catalog","schema_version":"1.0.0","revision":"r1","currency":{"local":"IRT","cny_to_local":29000,"cny_to_irt":29000},"pricing":{"formula_id":"landed_price_v1","formula_revision":"1.0.0"},"import_freight_methods":[{"id":"air","price_per_kg_cny":120}]}}`)
 			return
 		}
+		if r.URL.Path == "/pricing-assignments/batch" {
+			http.NotFound(w, r)
+			return
+		}
 		current := atomic.AddInt32(&active, 1)
 		for {
 			seen := atomic.LoadInt32(&maximum)
@@ -315,5 +319,74 @@ func TestDigitalogicProfileBoundsConcurrentAssignmentReads(t *testing.T) {
 	}
 	if got := atomic.LoadInt32(&maximum); got < 2 || got > 3 {
 		t.Fatalf("assignment concurrency = %d, want 2..3", got)
+	}
+}
+
+func TestDigitalogicProfilePrefetches1002CodesInThreeBatchRequests(t *testing.T) {
+	var catalogRequests int32
+	var batchRequests int32
+	var singleRequests int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/integration/catalog":
+			atomic.AddInt32(&catalogRequests, 1)
+			fmt.Fprint(w, `{"data":{"schema":"digitalogic.integration-catalog","schema_version":"1.0.0","revision":"r1","currency":{"local":"IRT","cny_to_local":29000,"cny_to_irt":29000},"pricing":{"formula_id":"landed_price_v1","formula_revision":"1.0.0"},"import_freight_methods":[{"id":"air","price_per_kg_cny":120}]}}`)
+		case "/pricing-assignments/batch":
+			atomic.AddInt32(&batchRequests, 1)
+			var request struct {
+				Codes []string `json:"codes"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+				t.Fatalf("decode batch request: %v", err)
+			}
+			results := make([]map[string]interface{}, 0, len(request.Codes))
+			for _, code := range request.Codes {
+				results = append(results, map[string]interface{}{
+					"code": code, "status": "ok", "assignment": map[string]interface{}{
+						"code": code, "import_freight_method_id": "air", "profit_percent": "30", "pricing_warnings": []string{},
+					},
+				})
+			}
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "data": map[string]interface{}{
+				"schema": "digitalogic.pricing-assignment-batch", "schema_version": "1.0.0",
+				"requested_count": len(request.Codes), "resolved_count": len(request.Codes), "error_count": 0, "maximum_codes": 500,
+				"default_percentage_markup": map[string]interface{}{
+					"schema": "digitalogic.default-percentage-markup", "schema_version": "1.0.0", "configured": true, "profit_percent": "30",
+				},
+				"results": results,
+			}})
+		default:
+			atomic.AddInt32(&singleRequests, 1)
+			fmt.Fprint(w, `{"data":{"import_freight_method_id":"air","profit_percent":30}}`)
+		}
+	}))
+	defer server.Close()
+
+	cfg := DefaultConfig()
+	cfg.Pricing = pricingcatalog.Config{
+		Mode: pricingcatalog.ModeDigitalogic,
+		Digitalogic: pricingcatalog.DigitalogicConfig{
+			BaseURL: server.URL, FreshFor: "1m", MaxStale: "1h",
+		},
+	}
+	rows := make([]map[string]interface{}, 1002)
+	for index := range rows {
+		rows[index] = map[string]interface{}{
+			"Code": fmt.Sprintf("P-%04d", index), "Sharh1": "0 0 0 24.5", "Sharh2": "240 Ú¯Ø±Ù…", "ALLANBAR": 1,
+		}
+	}
+	products, _ := Transform(context.Background(), rows, "kala.db", cfg, pricingcatalog.NewProvider(cfg.Pricing), time.Now())
+	if len(products) != len(rows) {
+		t.Fatalf("products = %d, want %d", len(products), len(rows))
+	}
+	if got := atomic.LoadInt32(&catalogRequests); got != 1 {
+		t.Fatalf("catalog requests = %d, want 1", got)
+	}
+	if got := atomic.LoadInt32(&batchRequests); got != 3 {
+		t.Fatalf("batch requests = %d, want exactly 3 for 1,002 Codes at 500/request", got)
+	}
+	if got := atomic.LoadInt32(&singleRequests); got != 0 {
+		t.Fatalf("single-Code requests = %d, want 0", got)
 	}
 }
