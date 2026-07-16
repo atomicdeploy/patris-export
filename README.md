@@ -520,6 +520,13 @@ the header, and include an allowlisted Metadata sheet with schema, formula,
 source revision, generated time, and warnings. Add `rtl=1` or enable the UI RTL
 text-direction setting to open worksheets in right-to-left mode.
 
+The viewer data grid keeps selection keyed by `Code` across sorting and
+filtering, exposes the same accessible command menu from row right-click and the
+ellipsis action, and supports pointer or keyboard column resizing. Language,
+canonical-key conditional row-icon rules, fallback icon metadata, column
+widths, and the independent row-coloring toggle are persisted under `ui` in the
+normal Patris Export config file rather than in a separate table-settings file.
+
 For a configured canonical dataset, `GET /api/product-sync` returns the full
 versioned `digitalogic.product-sync` envelope. `/api/records` deliberately
 remains the Code-keyed product-row collection used by the viewer and embedded
