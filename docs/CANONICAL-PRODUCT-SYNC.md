@@ -86,7 +86,10 @@ stores results in the existing assignment LRU. It does not create a second
 pricing client or transformation path. With the default `batch_size: 500` and
 `max_entries: 2048`, a cold 1,002-Code catalog performs exactly three batch
 POSTs plus one catalog GET, and performs zero single-Code requests. Duplicate
-source Codes remain quarantined before prefetch.
+source Codes remain quarantined before prefetch. Batch successes consume the
+minimal assignment projection and preserve the exact decimal together with its
+`profit_percent_source`. A `global_default` value must exactly match the one
+shared default snapshot; inconsistent source/value pairs fail closed.
 
 Live outbound delivery to the current Digitalogic `/patris/push` receiver must
 remain disabled; this branch does not enable or deploy it. That receiver must first
@@ -107,8 +110,7 @@ stored in the Patris config:
       "mode": "digitalogic",
       "digitalogic": {
         "base_url": "https://digitalogic.ir/wp-json/digitalogic/v1",
-        "username_env": "DIGITALOGIC_CONSUMER_KEY",
-        "password_env": "DIGITALOGIC_CONSUMER_SECRET",
+        "bearer_token_env": "DIGITALOGIC_PRICING_READ_TOKEN",
         "batch_assignment_path": "pricing-assignments/batch",
         "batch_size": 500,
         "fresh_for": "5m",
@@ -124,18 +126,20 @@ stored in the Patris config:
 ```
 
 ```powershell
-$env:DIGITALOGIC_CONSUMER_KEY = "ck_..."
-$env:DIGITALOGIC_CONSUMER_SECRET = "cs_..."
+$env:DIGITALOGIC_PRICING_READ_TOKEN = "..."
 patris-export serve C:\Patris\data4\kala.db
 ```
 
 Only HTTPS is accepted remotely; plain HTTP is limited to loopback. Provider
 paths must stay relative and on the configured origin, redirects are refused,
-request/response bodies and the per-Code LRU are bounded, configured credential
-environment variables must be populated, and cached values are usable only
-inside `max_stale`. The batch POST reuses the same Basic or Bearer auth path,
-HTTP client, timeout, TLS rules, redirect policy, and response limit as catalog
-and single-Code reads.
+request/response bodies, assignment LRU, and diagnostic LRU are bounded,
+configured credential environment variables must be populated, and cached
+values are usable only inside `max_stale`. One `bearer_token_env` supplies the
+same read token to the exact integration-catalog GET and assignment-batch POST;
+the batch request otherwise reuses the existing HTTP client, timeout, TLS
+rules, redirect policy, and response limit. Basic authentication and the
+single-Code route remain compatibility options for replaceable older providers,
+not the production least-privilege path.
 
 HTTP 404, 405, or 501 from the batch route means a replaceable/older provider
 does not support prefetch; Patris safely falls back to existing bounded
@@ -144,17 +148,20 @@ Authentication failures, other HTTP/transport failures, oversized responses,
 malformed schemas, changed result order/Codes, and inconsistent result counts
 fail closed for that freshness window. Typed not-found and ambiguous-Code
 results are cached as authoritative empty assignments, never retried through a
-different lookup path. Cached stale assignments may still be used only within
-`max_stale`, with explicit warnings. Static/standalone mode implements no
-prefetch capability and makes no remote requests.
+different lookup path. Only a per-Code server error explicitly marked
+`retryable: true` with a 5xx status may fall back to the existing single-Code
+resolver. Cached stale assignments may still be used only within `max_stale`,
+with explicit warnings; recent catalog failures are also backed off for the
+freshness window so an outage cannot recreate an N+1 catalog storm.
+Static/standalone mode implements no prefetch capability and makes no remote
+requests.
 
-Digitalogic currently gates the batch route through its existing read scope:
-`manage_woocommerce` or an exact boolean grant from
-`digitalogic_rest_api_permission` for `scope=read`. Do not reuse Patris push or
-product-sync write secrets. Deployments that need a least-privilege machine
-identity should add a separate header-only credential scoped to this read route
-before enabling production prefetch, then reference it through
-`bearer_token_env`.
+Digitalogic's dedicated pricing-input bearer credential authorizes exactly the
+integration-catalog GET and assignment-batch POST. It does not authorize the
+legacy single-Code route or any write route. Do not reuse Patris push or
+product-sync write secrets. Deploy the compatible Digitalogic endpoint and its
+read credential before enabling production prefetch, then reference that one
+credential through `bearer_token_env`.
 
 Patris calculates only when the catalog is
 `digitalogic.integration-catalog` major version 1, `currency.local` is `IRT`,

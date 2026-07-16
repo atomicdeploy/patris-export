@@ -232,12 +232,14 @@ func (p *staticProvider) Resolve(_ context.Context, code string) Resolution {
 }
 
 func finishResolution(value Resolution) Resolution {
+	value.MarkupPercentSource = strings.TrimSpace(value.MarkupPercentSource)
 	if !validPositive(value.FreightCNYPerKg) {
 		value.FreightCNYPerKg = nil
 		value.Warnings = append(value.Warnings, "freight_rate_missing")
 	}
 	if !validNonNegative(value.MarkupPercent) {
 		value.MarkupPercent = nil
+		value.MarkupPercentSource = ""
 		value.Warnings = append(value.Warnings, "markup_percent_missing")
 	}
 	if !validPositive(value.IRTPerCNY) {

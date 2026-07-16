@@ -641,7 +641,7 @@ func (p *httpProvider) fetchAssignmentBatch(ctx context.Context, codes []string)
 			if err := json.Unmarshal(result.Assignment, &assignment); err != nil {
 				return nil, &contractError{reason: "successful batch assignment is malformed"}
 			}
-			if strings.TrimSpace(assignment.Code) != result.Code {
+			if assignment.Code != result.Code {
 				return nil, &contractError{reason: "successful batch assignment Code mismatch"}
 			}
 			if len(assignment.LegacyMarkup) > 0 && !bytes.Equal(bytes.TrimSpace(assignment.LegacyMarkup), []byte("null")) {

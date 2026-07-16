@@ -261,10 +261,27 @@ func TestHTTPProviderBatchPrefetchUsesGoldenContractAndSharedAuth(t *testing.T) 
 	if !contains(missing.Warnings, "product_pricing_assignment_not_found") {
 		t.Fatalf("typed not-found result was lost: %+v", missing)
 	}
+	if len(authHeaders) != 2 {
+		t.Fatalf("shared token covered %d requests, want catalog GET plus batch POST", len(authHeaders))
+	}
 	for _, header := range authHeaders {
 		if header != "Bearer read-only-token" {
 			t.Fatalf("shared auth header = %q", header)
 		}
+	}
+}
+
+func TestHTTPProviderMissingConfiguredBearerMakesNoNetworkRequest(t *testing.T) {
+	var requests int
+	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		requests++
+	}))
+	defer server.Close()
+
+	provider := newHTTPProvider(DigitalogicConfig{BaseURL: server.URL, BearerTokenEnv: "PATRIS_MISSING_PRICING_TOKEN"}, server.Client(), time.Now)
+	resolved := provider.Resolve(context.Background(), "A")
+	if requests != 0 || !contains(resolved.Warnings, "pricing_catalog_fetch_failed") || !contains(resolved.Warnings, "pricing_catalog_unavailable") {
+		t.Fatalf("missing configured bearer was not rejected before transport: requests=%d resolution=%+v", requests, resolved)
 	}
 }
 
@@ -405,6 +422,85 @@ func TestHTTPProviderBatchAmbiguityIsAuthoritative(t *testing.T) {
 	resolved := provider.Resolve(context.Background(), "COLLISION")
 	if singleRequests != 0 || !contains(resolved.Warnings, "product_pricing_assignment_ambiguous") {
 		t.Fatalf("ambiguous Code was retried or lost: requests=%d resolution=%+v", singleRequests, resolved)
+	}
+}
+
+func TestHTTPProviderBatchFailureUsesOnlyBoundedStaleAssignment(t *testing.T) {
+	var batchRequests, singleRequests int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/integration/catalog":
+			fmt.Fprint(w, `{"data":{"schema":"digitalogic.integration-catalog","schema_version":"1.0.0","revision":"r1","currency":{"local":"IRT","cny_to_local":1,"cny_to_irt":1},"pricing":{"formula_id":"landed_price_v1","formula_revision":"1.0.0"},"import_freight_methods":[{"id":"air","price_per_kg_cny":1}]}}`)
+		case "/pricing-assignments/batch":
+			batchRequests++
+			http.Error(w, "offline", http.StatusServiceUnavailable)
+		default:
+			singleRequests++
+			fmt.Fprint(w, `{"data":{"code":"A","import_freight_method_id":"air","profit_percent":"5","profit_percent_source":"product_override","pricing_warnings":[]}}`)
+		}
+	}))
+	defer server.Close()
+
+	now := time.Date(2026, 7, 16, 0, 0, 0, 0, time.UTC)
+	provider := newHTTPProvider(DigitalogicConfig{BaseURL: server.URL, FreshFor: "1m", MaxStale: "10m"}, server.Client(), func() time.Time { return now })
+	if initial := provider.Resolve(context.Background(), "A"); decimalText(initial.MarkupPercent) != "5" {
+		t.Fatalf("initial assignment did not seed the cache: %+v", initial)
+	}
+
+	now = now.Add(2 * time.Minute)
+	provider.Prefetch(context.Background(), []string{"A"})
+	stale := provider.Resolve(context.Background(), "A")
+	if batchRequests != 1 || singleRequests != 1 || decimalText(stale.MarkupPercent) != "5" || !contains(stale.Warnings, "pricing_assignment_batch_http_failed") || !contains(stale.Warnings, "product_pricing_assignment_stale") {
+		t.Fatalf("batch failure did not use one bounded stale value: batch=%d single=%d resolution=%+v", batchRequests, singleRequests, stale)
+	}
+}
+
+func TestHTTPProviderBatchAuthAndBodyLimitsFailClosed(t *testing.T) {
+	tests := []struct {
+		name          string
+		code          string
+		batchResponse func(http.ResponseWriter)
+		warning       string
+		batchRequests int
+	}{
+		{
+			name: "auth", code: "A", warning: "pricing_assignment_batch_auth_failed", batchRequests: 1,
+			batchResponse: func(w http.ResponseWriter) { http.Error(w, "forbidden", http.StatusForbidden) },
+		},
+		{
+			name: "response limit", code: "A", warning: "pricing_assignment_batch_response_too_large", batchRequests: 1,
+			batchResponse: func(w http.ResponseWriter) { fmt.Fprint(w, strings.Repeat("x", 1024)) },
+		},
+		{
+			name: "request limit", code: strings.Repeat("A", 600), warning: "pricing_assignment_batch_request_too_large", batchRequests: 0,
+			batchResponse: func(w http.ResponseWriter) { t.Error("oversized request reached the server") },
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var batchRequests, singleRequests int
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				switch r.URL.Path {
+				case "/integration/catalog":
+					fmt.Fprint(w, `{"data":{"schema":"digitalogic.integration-catalog","schema_version":"1.0.0","revision":"r1","currency":{"local":"IRT","cny_to_local":1,"cny_to_irt":1},"pricing":{"formula_id":"landed_price_v1","formula_revision":"1.0.0"},"import_freight_methods":[]}}`)
+				case "/pricing-assignments/batch":
+					batchRequests++
+					test.batchResponse(w)
+				default:
+					singleRequests++
+				}
+			}))
+			defer server.Close()
+
+			provider := newHTTPProvider(DigitalogicConfig{BaseURL: server.URL, MaxResponseBytes: 512}, server.Client(), time.Now)
+			provider.Prefetch(context.Background(), []string{test.code})
+			resolved := provider.Resolve(context.Background(), test.code)
+			if batchRequests != test.batchRequests || singleRequests != 0 || !contains(resolved.Warnings, test.warning) {
+				t.Fatalf("batch guard mismatch: batch=%d single=%d resolution=%+v", batchRequests, singleRequests, resolved)
+			}
+		})
 	}
 }
 
