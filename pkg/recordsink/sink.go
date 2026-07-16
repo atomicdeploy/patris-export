@@ -8,10 +8,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math/big"
 	"os"
 	"path/filepath"
 	"reflect"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -22,19 +24,47 @@ import (
 )
 
 type SQLOptions struct {
-	Driver        string
-	DSN           string
-	Table         string
-	KeyField      string
-	Batch         int
-	ProtectedKeys []string
+	Driver         string
+	DSN            string
+	Table          string
+	KeyField       string
+	Batch          int
+	Reconciliation ReconciliationMode
+	DryRun         bool
+	ProtectedKeys  []string
 }
 
-// SnapshotOptions controls authoritative snapshot reconciliation. ProtectedKeys
-// are retained when absent from rows, which lets callers quarantine uncertain
-// records without turning them into destructive deletions.
+// ReconciliationMode controls what happens to destination rows that are not
+// present in the supplied records. UpsertOnly is intentionally the zero-value
+// behavior so a missing or newly introduced setting cannot delete user data.
+type ReconciliationMode string
+
+const (
+	UpsertOnly    ReconciliationMode = "upsert_only"
+	DeleteMissing ReconciliationMode = "delete_missing"
+)
+
+// SQLResult is safe to return to callers and UI layers: it contains operation
+// diagnostics only and never includes the destination DSN.
+type SQLResult struct {
+	Inserted       int                `json:"inserted"`
+	Updated        int                `json:"updated"`
+	Unchanged      int                `json:"unchanged"`
+	Deleted        int                `json:"deleted"`
+	Failed         int                `json:"failed"`
+	ElapsedMS      int64              `json:"elapsed_ms"`
+	DryRun         bool               `json:"dry_run"`
+	Reconciliation ReconciliationMode `json:"reconciliation"`
+}
+
+// SnapshotOptions configures the compatibility WriteSQLite/SyncSnapshotSQL
+// wrappers. WriteSQLite remains upsert_only unless Reconciliation is explicitly
+// DeleteMissing. ProtectedKeys are retained during that opt-in reconciliation.
 type SnapshotOptions struct {
-	ProtectedKeys []string
+	ProtectedKeys  []string
+	Batch          int
+	DryRun         bool
+	Reconciliation ReconciliationMode
 }
 
 func WriteJSON(writer io.Writer, payload interface{}) error {
@@ -74,165 +104,251 @@ func CSVBytes(rows []map[string]interface{}, keyField string) ([]byte, error) {
 }
 
 func WriteSQLite(path, table, keyField string, rows []map[string]interface{}, options ...SnapshotOptions) error {
+	snapshot := mergeSnapshotOptions(options)
+	_, err := SyncSQLite(context.Background(), path, SQLOptions{
+		Table:          table,
+		KeyField:       keyField,
+		Batch:          snapshot.Batch,
+		DryRun:         snapshot.DryRun,
+		Reconciliation: snapshot.Reconciliation,
+		ProtectedKeys:  snapshot.ProtectedKeys,
+	}, rows)
+	return err
+}
+
+// SyncSQLite runs the shared SQL sink against a SQLite file and returns
+// operation counts. It is used by both one-shot and watch conversions.
+func SyncSQLite(ctx context.Context, path string, options SQLOptions, rows []map[string]interface{}) (SQLResult, error) {
 	if path == "" {
-		return fmt.Errorf("sqlite output path is required")
+		return SQLResult{}, fmt.Errorf("sqlite output path is required")
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil && filepath.Dir(path) != "." {
-		return err
+	dsn := path
+	if options.DryRun {
+		if _, err := os.Stat(path); os.IsNotExist(err) {
+			dsn = ":memory:"
+		} else if err != nil {
+			return SQLResult{}, err
+		}
+	} else {
+		if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil && filepath.Dir(path) != "." {
+			return SQLResult{}, err
+		}
 	}
-	db, err := sql.Open("sqlite3", path)
+	db, err := sql.Open("sqlite3", dsn)
 	if err != nil {
-		return err
+		return SQLResult{}, err
 	}
 	defer db.Close()
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	return SyncSnapshotSQL(ctx, db, "sqlite", table, keyField, rows, options...)
+	if _, hasDeadline := ctx.Deadline(); !hasDeadline {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, 30*time.Second)
+		defer cancel()
+	}
+	options.Driver = "sqlite"
+	return SyncSQLDB(ctx, db, options, rows)
 }
 
 func SyncSQL(ctx context.Context, options SQLOptions, rows []map[string]interface{}) error {
+	_, err := SyncSQLWithResult(ctx, options, rows)
+	return err
+}
+
+// SyncSQLWithResult opens a configured SQL destination and reports the shared
+// sink result. The returned value deliberately has no connection fields.
+func SyncSQLWithResult(ctx context.Context, options SQLOptions, rows []map[string]interface{}) (SQLResult, error) {
 	driver := strings.ToLower(strings.TrimSpace(options.Driver))
 	if driver == "" {
 		driver = "mysql"
 	}
 	if options.DSN == "" {
-		return fmt.Errorf("%s DSN is required", driver)
+		return SQLResult{}, fmt.Errorf("%s DSN is required", driver)
 	}
 	db, err := sql.Open(driver, options.DSN)
 	if err != nil {
-		return err
+		return SQLResult{}, err
 	}
 	defer db.Close()
-	if options.Batch <= 0 {
-		options.Batch = 500
+	if err := db.PingContext(ctx); err != nil {
+		return SQLResult{}, fmt.Errorf("connect to %s destination: %w", driver, err)
 	}
-	return SyncSnapshotSQL(ctx, db, driver, options.Table, options.KeyField, rows, SnapshotOptions{ProtectedKeys: options.ProtectedKeys})
+	options.Driver = driver
+	return SyncSQLDB(ctx, db, options, rows)
 }
 
 // UpsertSQL writes a partial set of rows without deleting records that are not
 // present in the supplied slice. Use SyncSnapshotSQL only when rows represent a
 // complete authoritative snapshot.
 func UpsertSQL(ctx context.Context, db *sql.DB, driver, table, keyField string, rows []map[string]interface{}) error {
-	return writeSQL(ctx, db, driver, table, keyField, rows, false, SnapshotOptions{})
+	_, err := SyncSQLDB(ctx, db, SQLOptions{
+		Driver: driver, Table: table, KeyField: keyField, Reconciliation: UpsertOnly,
+	}, rows)
+	return err
 }
 
 // SyncSnapshotSQL writes a complete authoritative snapshot. Row upserts and
 // removal of keys absent from the snapshot share one transaction. An empty
 // snapshot clears an existing table but does not create a table by itself.
 func SyncSnapshotSQL(ctx context.Context, db *sql.DB, driver, table, keyField string, rows []map[string]interface{}, options ...SnapshotOptions) error {
-	return writeSQL(ctx, db, driver, table, keyField, rows, true, mergeSnapshotOptions(options))
+	snapshot := mergeSnapshotOptions(options)
+	_, err := SyncSQLDB(ctx, db, SQLOptions{
+		Driver:         driver,
+		Table:          table,
+		KeyField:       keyField,
+		Batch:          snapshot.Batch,
+		DryRun:         snapshot.DryRun,
+		Reconciliation: DeleteMissing,
+		ProtectedKeys:  snapshot.ProtectedKeys,
+	}, rows)
+	return err
 }
 
-func writeSQL(ctx context.Context, db *sql.DB, driver, table, keyField string, rows []map[string]interface{}, reconcile bool, snapshot SnapshotOptions) error {
-	table = sanitizeIdentifier(table)
+// SyncSQLDB executes the common SQLite/MySQL sink against an already-open
+// database. Data writes and delete_missing reconciliation share one
+// transaction; schema evolution remains additive and is performed before it.
+func SyncSQLDB(ctx context.Context, db *sql.DB, options SQLOptions, rows []map[string]interface{}) (result SQLResult, err error) {
+	started := time.Now()
+	result.DryRun = options.DryRun
+	result.Reconciliation, err = normalizeReconciliation(options.Reconciliation)
+	defer func() {
+		result.ElapsedMS = time.Since(started).Milliseconds()
+		if err != nil {
+			// Inserted/updated/unchanged/deleted are committed-result counts, not
+			// a plan. Never report successes for an operation that rolled back or
+			// whose commit outcome was not confirmed.
+			result.Inserted = 0
+			result.Updated = 0
+			result.Unchanged = 0
+			result.Deleted = 0
+			result.Failed = len(rows)
+		}
+	}()
+	if err != nil {
+		return result, err
+	}
+
+	driver := strings.ToLower(strings.TrimSpace(options.Driver))
+	if driver == "" {
+		driver = "mysql"
+	}
+	table := sanitizeIdentifier(options.Table)
 	if table == "" {
 		table = "patris_export"
 	}
-	if len(rows) == 0 {
-		if reconcile {
-			if len(snapshot.ProtectedKeys) == 0 {
-				return clearSnapshotTable(ctx, db, driver, table)
-			}
-			return reconcileProtectedOnlySnapshot(ctx, db, driver, table, keyField, snapshot.ProtectedKeys)
-		}
-		return nil
+	batch := effectiveBatchSize(driver, options.Batch, 1)
+	tableExists, err := sqlTableExists(ctx, db, driver, table)
+	if err != nil {
+		return result, err
 	}
-	fields := recordmap.Fields(rows, keyField)
-	if len(fields) == 0 {
-		return nil
-	}
+
+	fields := recordmap.Fields(rows, options.KeyField)
+	keyField := strings.TrimSpace(options.KeyField)
 	if keyField == "" {
-		keyField = fields[0]
-	}
-	if reconcile {
-		if _, err := snapshotKeys(rows, keyField, snapshot.ProtectedKeys); err != nil {
-			return err
+		if len(fields) > 0 {
+			keyField = fields[0]
+		} else if len(options.ProtectedKeys) > 0 || result.Reconciliation == DeleteMissing {
+			return result, fmt.Errorf("SQL key field is required for reconciliation")
 		}
 	}
-	if err := createTable(ctx, db, driver, table, fields, keyField, rows); err != nil {
-		return err
-	}
-	if err := ensureColumns(ctx, db, driver, table, fields, keyField, rows); err != nil {
-		return err
-	}
-	tx, err := db.BeginTx(ctx, nil)
+	keys, err := snapshotKeys(rows, keyField, nil)
 	if err != nil {
-		return err
+		return result, err
 	}
-	stmtText := upsertStatement(driver, table, fields, keyField)
-	stmt, err := tx.PrepareContext(ctx, stmtText)
-	if err != nil {
-		_ = tx.Rollback()
-		return err
+	if result.Reconciliation == UpsertOnly && len(rows) == 0 {
+		return result, nil
 	}
-	defer stmt.Close()
-	for _, row := range rows {
-		values := make([]interface{}, len(fields))
-		for i, field := range fields {
-			values[i] = sqlValue(row[field])
+	if !tableExists && len(rows) == 0 {
+		return result, nil
+	}
+
+	var beforeColumns map[string]bool
+	if tableExists {
+		if err := requireTransactionalTable(ctx, db, driver, table); err != nil {
+			return result, err
 		}
-		if _, err := stmt.ExecContext(ctx, values...); err != nil {
-			_ = tx.Rollback()
-			return err
-		}
-	}
-	if reconcile {
-		keys, err := snapshotKeys(rows, keyField, snapshot.ProtectedKeys)
+		beforeColumns, err = existingColumns(ctx, db, driver, table)
 		if err != nil {
-			_ = tx.Rollback()
-			return err
+			return result, err
 		}
-		if err := deleteRowsAbsentFromSnapshot(ctx, tx, driver, table, keyField, keys); err != nil {
-			_ = tx.Rollback()
-			return err
+		if keyField != "" && !beforeColumns[strings.ToLower(keyField)] {
+			return result, fmt.Errorf("existing table %q has no key column %q", table, keyField)
 		}
 	}
-	return tx.Commit()
-}
 
-func clearSnapshotTable(ctx context.Context, db *sql.DB, driver, table string) error {
-	exists, err := sqlTableExists(ctx, db, driver, table)
-	if err != nil {
-		return err
+	if !options.DryRun && len(rows) > 0 {
+		if err := createTable(ctx, db, driver, table, fields, keyField, rows); err != nil {
+			return result, err
+		}
+		// Re-check after CREATE IF NOT EXISTS so a concurrently created or
+		// pre-existing non-transactional table cannot bypass the earlier probe.
+		if err := requireTransactionalTable(ctx, db, driver, table); err != nil {
+			return result, err
+		}
+		if err := ensureColumns(ctx, db, driver, table, fields, keyField, rows); err != nil {
+			return result, err
+		}
+		tableExists = true
+		beforeColumns = make(map[string]bool, len(fields))
+		for _, field := range fields {
+			beforeColumns[strings.ToLower(field)] = true
+		}
 	}
-	if !exists {
-		return nil
+	if !tableExists {
+		result.Inserted = len(rows)
+		return result, nil
 	}
+
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
-		return err
+		return result, err
 	}
-	if _, err := tx.ExecContext(ctx, fmt.Sprintf("DELETE FROM %s", quoteIdent(driver, table))); err != nil {
-		_ = tx.Rollback()
-		return err
-	}
-	return tx.Commit()
-}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
 
-func reconcileProtectedOnlySnapshot(ctx context.Context, db *sql.DB, driver, table, keyField string, protected []string) error {
-	if strings.TrimSpace(keyField) == "" {
-		return fmt.Errorf("snapshot key field is required when protected keys are present")
-	}
-	keys, err := snapshotKeys(nil, keyField, protected)
+	toWrite, counts, err := classifyRows(ctx, tx, driver, table, keyField, fields, rows, beforeColumns, batch)
 	if err != nil {
-		return err
+		return result, err
 	}
-	exists, err := sqlTableExists(ctx, db, driver, table)
-	if err != nil {
-		return err
+	result.Inserted = counts.Inserted
+	result.Updated = counts.Updated
+	result.Unchanged = counts.Unchanged
+
+	keepKeys := keys
+	if result.Reconciliation == DeleteMissing {
+		keepKeys, err = appendProtectedKeys(keys, options.ProtectedKeys)
+		if err != nil {
+			return result, err
+		}
+		if options.DryRun {
+			result.Deleted, err = countRowsAbsentFromSnapshot(ctx, tx, driver, table, keyField, keepKeys)
+			if err != nil {
+				return result, err
+			}
+		}
 	}
-	if !exists {
-		return nil
+	if options.DryRun {
+		return result, nil
 	}
-	tx, err := db.BeginTx(ctx, nil)
-	if err != nil {
-		return err
+
+	if len(toWrite) > 0 {
+		if err := upsertRows(ctx, tx, driver, table, keyField, fields, toWrite, options.Batch); err != nil {
+			return result, err
+		}
 	}
-	if err := deleteRowsAbsentFromSnapshot(ctx, tx, driver, table, keyField, keys); err != nil {
-		_ = tx.Rollback()
-		return err
+	if result.Reconciliation == DeleteMissing {
+		result.Deleted, err = deleteRowsAbsentFromSnapshot(ctx, tx, driver, table, keyField, keepKeys, options.Batch)
+		if err != nil {
+			return result, err
+		}
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return result, err
+	}
+	committed = true
+	return result, nil
 }
 
 func sqlTableExists(ctx context.Context, db *sql.DB, driver, table string) (bool, error) {
@@ -251,10 +367,338 @@ func sqlTableExists(ctx context.Context, db *sql.DB, driver, table string) (bool
 	return exists == 1, nil
 }
 
+func requireTransactionalTable(ctx context.Context, db *sql.DB, driver, table string) error {
+	if isSQLite(driver) {
+		return nil
+	}
+	query := "SELECT ENGINE FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = ? LIMIT 1"
+	var engine sql.NullString
+	if err := db.QueryRowContext(ctx, query, table).Scan(&engine); err != nil {
+		if err == sql.ErrNoRows {
+			return fmt.Errorf("SQL table %q disappeared before synchronization", table)
+		}
+		return fmt.Errorf("inspect %s storage engine: %w", table, err)
+	}
+	if !engine.Valid || !strings.EqualFold(strings.TrimSpace(engine.String), "InnoDB") {
+		name := strings.TrimSpace(engine.String)
+		if name == "" {
+			name = "unknown"
+		}
+		return fmt.Errorf("existing table %q uses non-transactional or unsupported engine %q; InnoDB is required", table, name)
+	}
+	return nil
+}
+
+func normalizeReconciliation(value ReconciliationMode) (ReconciliationMode, error) {
+	switch ReconciliationMode(strings.ToLower(strings.TrimSpace(string(value)))) {
+	case "", UpsertOnly:
+		return UpsertOnly, nil
+	case DeleteMissing:
+		return DeleteMissing, nil
+	default:
+		return UpsertOnly, fmt.Errorf("unsupported SQL reconciliation mode %q", value)
+	}
+}
+
+func effectiveBatchSize(driver string, requested, fieldCount int) int {
+	if requested <= 0 {
+		requested = 500
+	}
+	if fieldCount <= 0 {
+		fieldCount = 1
+	}
+	parameterLimit := 65535
+	if isSQLite(driver) {
+		// Stay compatible with SQLite builds that retain the traditional 999
+		// host-parameter limit rather than assuming a newer compile-time value.
+		parameterLimit = 999
+	}
+	if maxRows := parameterLimit / fieldCount; requested > maxRows {
+		requested = maxRows
+	}
+	if requested < 1 {
+		return 1
+	}
+	return requested
+}
+
+func appendProtectedKeys(keys, protected []string) ([]string, error) {
+	seen := make(map[string]struct{}, len(keys)+len(protected))
+	result := append([]string(nil), keys...)
+	for _, key := range result {
+		seen[key] = struct{}{}
+	}
+	for index, value := range protected {
+		key := strings.TrimSpace(value)
+		if key == "" {
+			return nil, fmt.Errorf("protected snapshot key %d is empty", index)
+		}
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+		result = append(result, key)
+	}
+	return result, nil
+}
+
+type sqlCounts struct {
+	Inserted  int
+	Updated   int
+	Unchanged int
+}
+
+func classifyRows(
+	ctx context.Context,
+	tx *sql.Tx,
+	driver, table, keyField string,
+	fields []string,
+	rows []map[string]interface{},
+	existingColumns map[string]bool,
+	batch int,
+) ([]map[string]interface{}, sqlCounts, error) {
+	counts := sqlCounts{}
+	if len(rows) == 0 {
+		return nil, counts, nil
+	}
+	queryFields := make([]string, 0, len(fields))
+	for _, field := range fields {
+		if existingColumns[strings.ToLower(field)] {
+			queryFields = append(queryFields, field)
+		}
+	}
+	if len(queryFields) == 0 || !existingColumns[strings.ToLower(keyField)] {
+		counts.Inserted = len(rows)
+		return append([]map[string]interface{}(nil), rows...), counts, nil
+	}
+
+	batch = effectiveBatchSize(driver, batch, 1)
+	toWrite := make([]map[string]interface{}, 0, len(rows))
+	for start := 0; start < len(rows); start += batch {
+		end := start + batch
+		if end > len(rows) {
+			end = len(rows)
+		}
+		chunk := rows[start:end]
+		placeholders := strings.TrimSuffix(strings.Repeat("?,", len(chunk)), ",")
+		quotedFields := make([]string, len(queryFields))
+		for i, field := range queryFields {
+			quotedFields[i] = quoteIdent(driver, field)
+		}
+		query := fmt.Sprintf(
+			"SELECT %s FROM %s WHERE %s IN (%s)",
+			strings.Join(quotedFields, ", "),
+			quoteIdent(driver, table),
+			quoteIdent(driver, keyField),
+			placeholders,
+		)
+		args := make([]interface{}, len(chunk))
+		for i, row := range chunk {
+			args[i] = sqlValue(row[keyField])
+		}
+		found, err := queryExistingRows(ctx, tx, query, queryFields, keyField, args)
+		if err != nil {
+			return nil, counts, err
+		}
+		for _, row := range chunk {
+			key := databaseKey(row[keyField])
+			existing, exists := found[key]
+			if !exists {
+				counts.Inserted++
+				toWrite = append(toWrite, row)
+				continue
+			}
+			if rowMatchesExisting(row, existing, fields, existingColumns) {
+				counts.Unchanged++
+				continue
+			}
+			counts.Updated++
+			toWrite = append(toWrite, row)
+		}
+	}
+	return toWrite, counts, nil
+}
+
+func queryExistingRows(ctx context.Context, tx *sql.Tx, query string, fields []string, keyField string, args []interface{}) (map[string]map[string]interface{}, error) {
+	rows, err := tx.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := make(map[string]map[string]interface{})
+	for rows.Next() {
+		values := make([]interface{}, len(fields))
+		destinations := make([]interface{}, len(fields))
+		for i := range values {
+			destinations[i] = &values[i]
+		}
+		if err := rows.Scan(destinations...); err != nil {
+			return nil, err
+		}
+		record := make(map[string]interface{}, len(fields))
+		for i, field := range fields {
+			record[field] = values[i]
+		}
+		result[databaseKey(record[keyField])] = record
+	}
+	return result, rows.Err()
+}
+
+func rowMatchesExisting(row, existing map[string]interface{}, fields []string, existingColumns map[string]bool) bool {
+	for _, field := range fields {
+		if !existingColumns[strings.ToLower(field)] {
+			if row[field] != nil {
+				return false
+			}
+			continue
+		}
+		if !sqlValuesEquivalent(field, row[field], existing[field]) {
+			return false
+		}
+	}
+	return true
+}
+
+func sqlValuesEquivalent(field string, expected, actual interface{}) bool {
+	if expected == nil || actual == nil {
+		return expected == nil && actual == nil
+	}
+	kind := mergeValueKind(canonicalFieldKind(field), classifyValue(expected))
+	if kind == valueKindBoolean {
+		return booleanText(expected) == booleanText(actual)
+	}
+	if kind == valueKindInteger || kind == valueKindReal || kind == valueKindDecimal {
+		expectedNumber, expectedOK := rationalValue(expected)
+		actualNumber, actualOK := rationalValue(actual)
+		if expectedOK && actualOK {
+			return expectedNumber.Cmp(actualNumber) == 0
+		}
+	}
+	return databaseText(expected) == databaseText(actual)
+}
+
+func rationalValue(value interface{}) (*big.Rat, bool) {
+	text := databaseText(value)
+	if text == "" {
+		return nil, false
+	}
+	result := new(big.Rat)
+	if _, ok := result.SetString(text); ok {
+		return result, true
+	}
+	// big.Rat does not accept every exponent spelling used by float drivers.
+	parsed, err := strconv.ParseFloat(text, 64)
+	if err != nil {
+		return nil, false
+	}
+	result.SetFloat64(parsed)
+	return result, true
+}
+
+func booleanText(value interface{}) string {
+	switch typed := value.(type) {
+	case bool:
+		if typed {
+			return "1"
+		}
+		return "0"
+	}
+	text := strings.ToLower(strings.TrimSpace(databaseText(value)))
+	if text == "true" {
+		return "1"
+	}
+	if text == "false" {
+		return "0"
+	}
+	return text
+}
+
+func databaseText(value interface{}) string {
+	switch typed := value.(type) {
+	case []byte:
+		return string(typed)
+	case float32:
+		return strconv.FormatFloat(float64(typed), 'g', -1, 32)
+	case float64:
+		return strconv.FormatFloat(typed, 'g', -1, 64)
+	case json.Number:
+		return typed.String()
+	default:
+		return cell(value)
+	}
+}
+
+func databaseKey(value interface{}) string {
+	return databaseText(value)
+}
+
+func upsertRows(ctx context.Context, tx *sql.Tx, driver, table, keyField string, fields []string, rows []map[string]interface{}, requestedBatch int) error {
+	batch := effectiveBatchSize(driver, requestedBatch, len(fields))
+	for start := 0; start < len(rows); start += batch {
+		end := start + batch
+		if end > len(rows) {
+			end = len(rows)
+		}
+		chunk := rows[start:end]
+		stmt, err := tx.PrepareContext(ctx, upsertStatement(driver, table, fields, keyField, len(chunk)))
+		if err != nil {
+			return err
+		}
+		values := make([]interface{}, 0, len(fields)*len(chunk))
+		for _, row := range chunk {
+			for _, field := range fields {
+				values = append(values, sqlValue(row[field]))
+			}
+		}
+		_, execErr := stmt.ExecContext(ctx, values...)
+		closeErr := stmt.Close()
+		if execErr != nil {
+			return execErr
+		}
+		if closeErr != nil {
+			return closeErr
+		}
+	}
+	return nil
+}
+
+func countRowsAbsentFromSnapshot(ctx context.Context, tx *sql.Tx, driver, table, keyField string, keys []string) (int, error) {
+	keep := make(map[string]struct{}, len(keys))
+	for _, key := range keys {
+		keep[key] = struct{}{}
+	}
+	query := fmt.Sprintf("SELECT %s FROM %s", quoteIdent(driver, keyField), quoteIdent(driver, table))
+	rows, err := tx.QueryContext(ctx, query)
+	if err != nil {
+		return 0, err
+	}
+	defer rows.Close()
+	count := 0
+	for rows.Next() {
+		var value interface{}
+		if err := rows.Scan(&value); err != nil {
+			return 0, err
+		}
+		if _, exists := keep[databaseKey(value)]; !exists {
+			count++
+		}
+	}
+	return count, rows.Err()
+}
+
 func mergeSnapshotOptions(values []SnapshotOptions) SnapshotOptions {
 	merged := SnapshotOptions{}
 	for _, value := range values {
 		merged.ProtectedKeys = append(merged.ProtectedKeys, value.ProtectedKeys...)
+		if value.Batch != 0 {
+			merged.Batch = value.Batch
+		}
+		if value.DryRun {
+			merged.DryRun = true
+		}
+		if value.Reconciliation != "" {
+			merged.Reconciliation = value.Reconciliation
+		}
 	}
 	return merged
 }
@@ -288,14 +732,22 @@ func snapshotKeys(rows []map[string]interface{}, keyField string, protected []st
 	return keys, nil
 }
 
-func deleteRowsAbsentFromSnapshot(ctx context.Context, tx *sql.Tx, driver, table, keyField string, keys []string) error {
+func deleteRowsAbsentFromSnapshot(ctx context.Context, tx *sql.Tx, driver, table, keyField string, keys []string, requestedBatch int) (int, error) {
+	if len(keys) == 0 {
+		result, err := tx.ExecContext(ctx, fmt.Sprintf("DELETE FROM %s", quoteIdent(driver, table)))
+		if err != nil {
+			return 0, err
+		}
+		count, err := result.RowsAffected()
+		return int(count), err
+	}
 	tempTable := "_patris_snapshot_keys"
 	drop := fmt.Sprintf("DROP TEMPORARY TABLE IF EXISTS %s", quoteIdent(driver, tempTable))
 	if isSQLite(driver) {
 		drop = fmt.Sprintf("DROP TABLE IF EXISTS temp.%s", quoteIdent(driver, tempTable))
 	}
 	if _, err := tx.ExecContext(ctx, drop); err != nil {
-		return err
+		return 0, err
 	}
 	createPrefix := "CREATE TEMP TABLE"
 	if !isSQLite(driver) {
@@ -309,27 +761,40 @@ func deleteRowsAbsentFromSnapshot(ctx context.Context, tx *sql.Tx, driver, table
 		columnType(driver, keyField, keyField, nil),
 	)
 	if _, err := tx.ExecContext(ctx, create); err != nil {
-		return err
+		return 0, err
 	}
 	defer func() { _, _ = tx.ExecContext(context.Background(), drop) }()
 
-	insert := fmt.Sprintf(
-		"INSERT INTO %s (%s) VALUES (?)",
-		quoteIdent(driver, tempTable),
-		quoteIdent(driver, "snapshot_key"),
-	)
-	stmt, err := tx.PrepareContext(ctx, insert)
-	if err != nil {
-		return err
-	}
-	for _, key := range keys {
-		if _, err := stmt.ExecContext(ctx, key); err != nil {
-			_ = stmt.Close()
-			return err
+	batch := effectiveBatchSize(driver, requestedBatch, 1)
+	for start := 0; start < len(keys); start += batch {
+		end := start + batch
+		if end > len(keys) {
+			end = len(keys)
 		}
-	}
-	if err := stmt.Close(); err != nil {
-		return err
+		chunk := keys[start:end]
+		placeholders := strings.TrimSuffix(strings.Repeat("(?),", len(chunk)), ",")
+		insert := fmt.Sprintf(
+			"INSERT INTO %s (%s) VALUES %s",
+			quoteIdent(driver, tempTable),
+			quoteIdent(driver, "snapshot_key"),
+			placeholders,
+		)
+		stmt, err := tx.PrepareContext(ctx, insert)
+		if err != nil {
+			return 0, err
+		}
+		values := make([]interface{}, len(chunk))
+		for i, key := range chunk {
+			values[i] = key
+		}
+		_, execErr := stmt.ExecContext(ctx, values...)
+		closeErr := stmt.Close()
+		if execErr != nil {
+			return 0, execErr
+		}
+		if closeErr != nil {
+			return 0, closeErr
+		}
 	}
 
 	target := quoteIdent(driver, table)
@@ -340,10 +805,12 @@ func deleteRowsAbsentFromSnapshot(ctx context.Context, tx *sql.Tx, driver, table
 		"DELETE FROM %s WHERE NOT EXISTS (SELECT 1 FROM %s WHERE %s.%s = %s.%s)",
 		target, temp, temp, tempKey, target, targetKey,
 	)
-	if _, err := tx.ExecContext(ctx, remove); err != nil {
-		return err
+	result, err := tx.ExecContext(ctx, remove)
+	if err != nil {
+		return 0, err
 	}
-	return nil
+	count, err := result.RowsAffected()
+	return int(count), err
 }
 
 func createTable(ctx context.Context, db *sql.DB, driver, table string, fields []string, keyField string, rows []map[string]interface{}) error {
@@ -356,6 +823,9 @@ func createTable(ctx context.Context, db *sql.DB, driver, table string, fields [
 		cols = append(cols, def)
 	}
 	query := fmt.Sprintf("CREATE TABLE IF NOT EXISTS %s (%s)", quoteIdent(driver, table), strings.Join(cols, ", "))
+	if !isSQLite(driver) {
+		query += " ENGINE=InnoDB"
+	}
 	_, err := db.ExecContext(ctx, query)
 	return err
 }
@@ -519,20 +989,19 @@ func isSQLite(driver string) bool {
 	return driver == "sqlite3" || driver == "sqlite"
 }
 
-func upsertStatement(driver, table string, fields []string, keyField string) string {
+func upsertStatement(driver, table string, fields []string, keyField string, rowCount int) string {
 	quoted := make([]string, len(fields))
-	placeholders := make([]string, len(fields))
+	rowPlaceholders := make([]string, len(fields))
 	for i, field := range fields {
 		quoted[i] = quoteIdent(driver, field)
-		placeholders[i] = "?"
+		rowPlaceholders[i] = "?"
 	}
-	if isSQLite(driver) {
-		return fmt.Sprintf(
-			"INSERT OR REPLACE INTO %s (%s) VALUES (%s)",
-			quoteIdent(driver, table),
-			strings.Join(quoted, ", "),
-			strings.Join(placeholders, ", "),
-		)
+	if rowCount < 1 {
+		rowCount = 1
+	}
+	valueGroups := make([]string, rowCount)
+	for i := range valueGroups {
+		valueGroups[i] = "(" + strings.Join(rowPlaceholders, ", ") + ")"
 	}
 	updates := []string{}
 	for _, field := range fields {
@@ -540,16 +1009,34 @@ func upsertStatement(driver, table string, fields []string, keyField string) str
 			continue
 		}
 		q := quoteIdent(driver, field)
-		updates = append(updates, fmt.Sprintf("%s=VALUES(%s)", q, q))
+		if isSQLite(driver) {
+			updates = append(updates, fmt.Sprintf("%s=excluded.%s", q, q))
+		} else {
+			updates = append(updates, fmt.Sprintf("%s=VALUES(%s)", q, q))
+		}
+	}
+	if isSQLite(driver) {
+		conflictAction := "DO NOTHING"
+		if len(updates) > 0 {
+			conflictAction = "DO UPDATE SET " + strings.Join(updates, ", ")
+		}
+		return fmt.Sprintf(
+			"INSERT INTO %s (%s) VALUES %s ON CONFLICT (%s) %s",
+			quoteIdent(driver, table),
+			strings.Join(quoted, ", "),
+			strings.Join(valueGroups, ", "),
+			quoteIdent(driver, keyField),
+			conflictAction,
+		)
 	}
 	if len(updates) == 0 {
 		updates = append(updates, fmt.Sprintf("%s=VALUES(%s)", quoteIdent(driver, keyField), quoteIdent(driver, keyField)))
 	}
 	return fmt.Sprintf(
-		"INSERT INTO %s (%s) VALUES (%s) ON DUPLICATE KEY UPDATE %s",
+		"INSERT INTO %s (%s) VALUES %s ON DUPLICATE KEY UPDATE %s",
 		quoteIdent(driver, table),
 		strings.Join(quoted, ", "),
-		strings.Join(placeholders, ", "),
+		strings.Join(valueGroups, ", "),
 		strings.Join(updates, ", "),
 	)
 }

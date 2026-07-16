@@ -45,7 +45,7 @@ func TestWriteSQLiteReconcilesFullSnapshotAndClearsExistingTable(t *testing.T) {
 	}
 	if err := WriteSQLite(path, "products", "product_code", []map[string]interface{}{
 		{"product_code": "B", "final_price": int64(250)},
-	}); err != nil {
+	}, SnapshotOptions{Reconciliation: DeleteMissing}); err != nil {
 		t.Fatalf("replacement snapshot failed: %v", err)
 	}
 
@@ -63,7 +63,7 @@ func TestWriteSQLiteReconcilesFullSnapshotAndClearsExistingTable(t *testing.T) {
 		t.Fatalf("snapshot reconciliation left stale data: count=%d price=%d", count, price)
 	}
 
-	if err := WriteSQLite(path, "products", "product_code", nil); err != nil {
+	if err := WriteSQLite(path, "products", "product_code", nil, SnapshotOptions{Reconciliation: DeleteMissing}); err != nil {
 		t.Fatalf("empty snapshot failed: %v", err)
 	}
 	if err := db.QueryRow(`SELECT COUNT(*) FROM products`).Scan(&count); err != nil {
@@ -86,7 +86,7 @@ func TestWriteSQLiteSnapshotRetainsProtectedKeys(t *testing.T) {
 	}
 	if err := WriteSQLite(path, "products", "product_code", []map[string]interface{}{
 		{"product_code": "B", "final_price": int64(250)},
-	}, SnapshotOptions{ProtectedKeys: []string{"A"}}); err != nil {
+	}, SnapshotOptions{Reconciliation: DeleteMissing, ProtectedKeys: []string{"A"}}); err != nil {
 		t.Fatalf("protected replacement snapshot failed: %v", err)
 	}
 
@@ -97,7 +97,7 @@ func TestWriteSQLiteSnapshotRetainsProtectedKeys(t *testing.T) {
 	defer db.Close()
 	assertSQLiteCodes(t, db, []string{"A", "B"})
 
-	if err := WriteSQLite(path, "products", "product_code", nil, SnapshotOptions{ProtectedKeys: []string{"A"}}); err != nil {
+	if err := WriteSQLite(path, "products", "product_code", nil, SnapshotOptions{Reconciliation: DeleteMissing, ProtectedKeys: []string{"A"}}); err != nil {
 		t.Fatalf("all-quarantined snapshot failed: %v", err)
 	}
 	assertSQLiteCodes(t, db, []string{"A"})
@@ -244,6 +244,20 @@ func TestMySQLCanonicalColumnTypes(t *testing.T) {
 	}
 }
 
+func TestMySQLCreatesTransactionalTable(t *testing.T) {
+	state := &schemaDriverState{}
+	db := sql.OpenDB(schemaConnector{state: state})
+	defer db.Close()
+	if err := createTable(context.Background(), db, "mysql", "products", []string{"product_code", "final_price"}, "product_code", []map[string]interface{}{{
+		"product_code": "001", "final_price": int64(100),
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if len(state.execs) != 1 || !strings.HasSuffix(state.execs[0], " ENGINE=InnoDB") {
+		t.Fatalf("MySQL create is not explicitly transactional: %#v", state.execs)
+	}
+}
+
 func TestMySQLSchemaEvolutionAddsTypedCanonicalColumns(t *testing.T) {
 	state := &schemaDriverState{}
 	db := sql.OpenDB(schemaConnector{state: state})
@@ -297,14 +311,11 @@ func TestMySQLSnapshotPreservesTypedNullValuesAndDeletesAbsentRows(t *testing.T)
 			productWrites = append(productWrites, execution)
 		}
 	}
-	if len(productWrites) != 2 {
-		t.Fatalf("product writes = %d, want 2 (all=%#v)", len(productWrites), state.prepared)
+	if len(productWrites) != 1 {
+		t.Fatalf("product batch writes = %d, want 1 (all=%#v)", len(productWrites), state.prepared)
 	}
-	if got := productWrites[0].args; len(got) != 3 || got[0] != "001" || got[1] != nil || got[2] != float64(24.5) {
-		t.Fatalf("first typed MySQL row = %#v", got)
-	}
-	if got := productWrites[1].args; len(got) != 3 || got[0] != "002" || got[1] != int64(2009410) || got[2] != nil {
-		t.Fatalf("second typed MySQL row = %#v", got)
+	if got := productWrites[0].args; len(got) != 6 || got[0] != "001" || got[1] != nil || got[2] != float64(24.5) || got[3] != "002" || got[4] != int64(2009410) || got[5] != nil {
+		t.Fatalf("typed MySQL batch = %#v", got)
 	}
 	joined := strings.Join(state.execs, "\n")
 	if !strings.Contains(joined, "DELETE FROM `products` WHERE NOT EXISTS") {
@@ -373,12 +384,15 @@ func containsExact(values []string, expected string) bool {
 }
 
 type schemaDriverState struct {
-	execs       []string
-	prepared    []preparedExecution
-	columns     [][]driver.Value
-	tableExists bool
-	commits     int
-	rollbacks   int
+	execs             []string
+	prepared          []preparedExecution
+	columns           [][]driver.Value
+	tableExists       bool
+	engine            string
+	commits           int
+	rollbacks         int
+	productExecs      int
+	failProductExecAt int
 }
 
 type preparedExecution struct {
@@ -411,6 +425,17 @@ func (conn *schemaConn) Close() error              { return nil }
 func (conn *schemaConn) Begin() (driver.Tx, error) { return &schemaTx{state: conn.state}, nil }
 
 func (conn *schemaConn) QueryContext(_ context.Context, query string, _ []driver.NamedValue) (driver.Rows, error) {
+	if strings.HasPrefix(query, "SELECT ENGINE FROM information_schema.tables") {
+		values := [][]driver.Value{}
+		if conn.state.tableExists {
+			engine := conn.state.engine
+			if engine == "" {
+				engine = "InnoDB"
+			}
+			values = append(values, []driver.Value{engine})
+		}
+		return &schemaRows{columns: []string{"ENGINE"}, values: values}, nil
+	}
 	if strings.Contains(query, "information_schema.tables") {
 		values := [][]driver.Value{}
 		if conn.state.tableExists {
@@ -419,6 +444,11 @@ func (conn *schemaConn) QueryContext(_ context.Context, query string, _ []driver
 		return &schemaRows{columns: []string{"exists"}, values: values}, nil
 	}
 	if !strings.HasPrefix(query, "SHOW COLUMNS FROM") {
+		if strings.HasPrefix(query, "SELECT ") && strings.Contains(query, " FROM `products` WHERE ") {
+			columnsPart := strings.TrimPrefix(strings.SplitN(query, " FROM ", 2)[0], "SELECT ")
+			columns := strings.Split(strings.ReplaceAll(columnsPart, "`", ""), ", ")
+			return &schemaRows{columns: columns}, nil
+		}
 		return nil, errors.New("unexpected query: " + query)
 	}
 	columns := conn.state.columns
@@ -433,6 +463,12 @@ func (conn *schemaConn) QueryContext(_ context.Context, query string, _ []driver
 
 func (conn *schemaConn) ExecContext(_ context.Context, query string, _ []driver.NamedValue) (driver.Result, error) {
 	conn.state.execs = append(conn.state.execs, query)
+	if strings.HasPrefix(query, "CREATE TABLE IF NOT EXISTS ") {
+		conn.state.tableExists = true
+		if conn.state.engine == "" {
+			conn.state.engine = "InnoDB"
+		}
+	}
 	return driver.RowsAffected(1), nil
 }
 
@@ -466,6 +502,12 @@ func (stmt *schemaStmt) Close() error  { return nil }
 func (stmt *schemaStmt) NumInput() int { return -1 }
 func (stmt *schemaStmt) Exec(args []driver.Value) (driver.Result, error) {
 	stmt.state.prepared = append(stmt.state.prepared, preparedExecution{query: stmt.query, args: append([]driver.Value(nil), args...)})
+	if strings.HasPrefix(stmt.query, "INSERT INTO `products`") {
+		stmt.state.productExecs++
+		if stmt.state.failProductExecAt > 0 && stmt.state.productExecs == stmt.state.failProductExecAt {
+			return nil, errInjectedProductWrite
+		}
+	}
 	return driver.RowsAffected(1), nil
 }
 func (stmt *schemaStmt) Query([]driver.Value) (driver.Rows, error) {

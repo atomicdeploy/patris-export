@@ -86,11 +86,13 @@ type ConvertConfig struct {
 }
 
 type ExportConfig struct {
-	SQLitePath  string `json:"sqlite_path,omitempty" yaml:"sqlite_path,omitempty" toml:"sqlite_path,omitempty"`
-	SQLiteTable string `json:"sqlite_table,omitempty" yaml:"sqlite_table,omitempty" toml:"sqlite_table,omitempty"`
-	MySQLDSN    string `json:"mysql_dsn,omitempty" yaml:"mysql_dsn,omitempty" toml:"mysql_dsn,omitempty"`
-	MySQLTable  string `json:"mysql_table,omitempty" yaml:"mysql_table,omitempty" toml:"mysql_table,omitempty"`
-	BatchSize   int    `json:"batch_size,omitempty" yaml:"batch_size,omitempty" toml:"batch_size,omitempty"`
+	SQLitePath     string `json:"sqlite_path,omitempty" yaml:"sqlite_path,omitempty" toml:"sqlite_path,omitempty"`
+	SQLiteTable    string `json:"sqlite_table,omitempty" yaml:"sqlite_table,omitempty" toml:"sqlite_table,omitempty"`
+	MySQLDSN       string `json:"mysql_dsn,omitempty" yaml:"mysql_dsn,omitempty" toml:"mysql_dsn,omitempty"`
+	MySQLTable     string `json:"mysql_table,omitempty" yaml:"mysql_table,omitempty" toml:"mysql_table,omitempty"`
+	BatchSize      int    `json:"batch_size,omitempty" yaml:"batch_size,omitempty" toml:"batch_size,omitempty"`
+	Reconciliation string `json:"reconciliation,omitempty" yaml:"reconciliation,omitempty" toml:"reconciliation,omitempty"`
+	DryRun         bool   `json:"dry_run,omitempty" yaml:"dry_run,omitempty" toml:"dry_run,omitempty"`
 }
 
 type EdgeConfig struct {
@@ -186,6 +188,10 @@ func Default() Config {
 			Output:   ".",
 			Format:   "json",
 			Debounce: "1s",
+		},
+		Export: ExportConfig{
+			BatchSize:      500,
+			Reconciliation: "upsert_only",
 		},
 		Canonical: canonical.DefaultConfig(),
 		SendUpdates: updateout.Config{
@@ -777,6 +783,12 @@ func ApplyEnv(cfg *Config) {
 			cfg.Export.BatchSize = batch
 		}
 	}
+	if value := os.Getenv("PATRIS_EXPORT_SQL_RECONCILIATION"); strings.TrimSpace(value) != "" {
+		cfg.Export.Reconciliation = strings.TrimSpace(value)
+	}
+	if value := os.Getenv("PATRIS_EXPORT_SQL_DRY_RUN"); strings.TrimSpace(value) != "" {
+		cfg.Export.DryRun = parseBool(value, cfg.Export.DryRun)
+	}
 	if value := os.Getenv("PATRIS_EXPORT_CONVERT_WATCH"); strings.TrimSpace(value) != "" {
 		cfg.Convert.Watch = parseBool(value, cfg.Convert.Watch)
 	}
@@ -928,6 +940,16 @@ func normalize(cfg *Config) {
 	}
 	if cfg.Export.BatchSize <= 0 {
 		cfg.Export.BatchSize = 500
+	}
+	cfg.Export.Reconciliation = strings.ToLower(strings.TrimSpace(cfg.Export.Reconciliation))
+	switch cfg.Export.Reconciliation {
+	case "", "upsert_only":
+		cfg.Export.Reconciliation = "upsert_only"
+	case "delete_missing":
+	default:
+		// Unknown modes fail toward the non-destructive behavior. The sink also
+		// validates direct API use rather than silently deleting records.
+		cfg.Export.Reconciliation = "upsert_only"
 	}
 	cfg.Canonical = canonical.NormalizeConfig(cfg.Canonical)
 	cfg.SendUpdates = updateout.Normalize(cfg.SendUpdates)

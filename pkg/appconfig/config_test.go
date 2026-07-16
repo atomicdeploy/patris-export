@@ -187,6 +187,27 @@ func TestApplyEnvRuntimeTempPolicy(t *testing.T) {
 	}
 }
 
+func TestSQLExportDefaultsAndEnvironmentOverrides(t *testing.T) {
+	cfg := Default()
+	if cfg.Export.BatchSize != 500 || cfg.Export.Reconciliation != "upsert_only" || cfg.Export.DryRun {
+		t.Fatalf("unsafe SQL export defaults: %+v", cfg.Export)
+	}
+
+	t.Setenv("PATRIS_EXPORT_BATCH_SIZE", "17")
+	t.Setenv("PATRIS_EXPORT_SQL_RECONCILIATION", "DELETE_MISSING")
+	t.Setenv("PATRIS_EXPORT_SQL_DRY_RUN", "true")
+	ApplyEnv(&cfg)
+	if cfg.Export.BatchSize != 17 || cfg.Export.Reconciliation != "delete_missing" || !cfg.Export.DryRun {
+		t.Fatalf("SQL export environment was not applied: %+v", cfg.Export)
+	}
+
+	cfg.Export.Reconciliation = "typo_that_must_not_delete"
+	normalize(&cfg)
+	if cfg.Export.Reconciliation != "upsert_only" {
+		t.Fatalf("invalid reconciliation did not fail safe: %q", cfg.Export.Reconciliation)
+	}
+}
+
 func TestCanonicalKalaProfileAndPricingProviderDefaults(t *testing.T) {
 	cfg := Default()
 	profile, exists := cfg.Canonical.Profiles["kala.db"]
