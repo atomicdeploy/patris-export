@@ -136,6 +136,8 @@ The server exposes this envelope at `GET /api/product-sync`. The viewer-facing
 `GET /api/records` endpoint remains a Code-keyed collection of canonical
 product rows; envelope metadata never appears as table rows.
 
+![Canonical landed-pricing row in the records viewer](screenshots/canonical-product-sync-viewer.png)
+
 Cross-project contract verification uses the entirely synthetic two-product
 fixture at `testdata/digitalogic-product-sync-v1.synthetic.json`; production
 exports and catalog values must never be committed as golden fixtures.
