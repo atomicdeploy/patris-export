@@ -9,7 +9,7 @@
     "test": "node --test test/*.test.mjs"
   },
   "devDependencies": {
-    "esbuild": "^0.27.1",
-    "sass": "^1.83.0"
+    "esbuild": "^0.28.1",
+    "sass": "^1.101.0"
   }
 }
