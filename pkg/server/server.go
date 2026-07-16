@@ -14,7 +14,6 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
-	"reflect"
 	"strconv"
 	"strings"
 	"sync"
@@ -27,6 +26,7 @@ import (
 	"github.com/atomicdeploy/patris-export/pkg/notifier"
 	"github.com/atomicdeploy/patris-export/pkg/paradox"
 	"github.com/atomicdeploy/patris-export/pkg/processmon"
+	"github.com/atomicdeploy/patris-export/pkg/recorddiff"
 	"github.com/atomicdeploy/patris-export/pkg/recordmap"
 	"github.com/atomicdeploy/patris-export/pkg/recordpipe"
 	"github.com/atomicdeploy/patris-export/pkg/recordsink"
@@ -73,24 +73,10 @@ type Options struct {
 	Version version.Info
 }
 
-// RecordChange represents a change to a specific record
-type RecordChange struct {
-	Code          string                 `json:"code"`
-	ChangeType    string                 `json:"change_type"` // "added", "deleted", "modified"
-	OldValues     map[string]interface{} `json:"old_values,omitempty"`
-	NewValues     map[string]interface{} `json:"new_values,omitempty"`
-	ChangedFields []string               `json:"changed_fields,omitempty"`
-}
-
-// ChangeSet represents incremental changes to the database
-type ChangeSet struct {
-	Type       string                   `json:"type"`
-	Timestamp  string                   `json:"timestamp"`
-	Added      []map[string]interface{} `json:"added,omitempty"`
-	Deleted    []string                 `json:"deleted,omitempty"`
-	Modified   []RecordChange           `json:"modified,omitempty"`
-	TotalCount int                      `json:"total_count"`
-}
+// Compatibility aliases keep the existing server API while sharing one diff
+// implementation with CLI watch-mode webhooks.
+type RecordChange = recorddiff.RecordChange
+type ChangeSet = recorddiff.ChangeSet
 
 // ToastRequest represents a desktop/browser notification request.
 type ToastRequest struct {
@@ -1239,25 +1225,14 @@ func (s *Server) broadcastUpdate() {
 
 	// Compute changes
 	s.lastRecordsMu.Lock()
-	changes := s.computeChangesByKey(records, result.KeyField)
+	changeSet := s.computeChangeSetByKey(records, result.KeyField)
 	s.lastRecords = records
 	s.lastRecordsMu.Unlock()
-	changes["raw"] = result.Raw
-	changes["key_field"] = result.KeyField
+	changeSet.Raw = result.Raw
+	changes := changeSet.Map()
 
 	// Log what we're sending
-	added := 0
-	deleted := 0
-	modified := 0
-	if a, ok := changes["added"].([]map[string]interface{}); ok {
-		added = len(a)
-	}
-	if d, ok := changes["deleted"].([]string); ok {
-		deleted = len(d)
-	}
-	if m, ok := changes["modified"].([]RecordChange); ok {
-		modified = len(m)
-	}
+	added, modified, deleted := changeSet.Counts()
 	log.Printf("📊 Broadcasting: %d added, %d modified, %d deleted", added, modified, deleted)
 
 	// Broadcast to all clients
@@ -1279,11 +1254,11 @@ func (s *Server) broadcastUpdate() {
 		s.notifyConfigured("row_updated", "Patris rows changed", s.rowChangeMessage(added, modified, deleted, changes))
 		s.dispatchUpdateEvent(updateout.Event{
 			Type:      "update",
-			Timestamp: fmt.Sprintf("%v", changes["timestamp"]),
+			Timestamp: changeSet.Timestamp,
 			Source:    s.currentDBPath(),
 			Raw:       result.Raw,
 			Records:   records,
-			Changes:   changes,
+			Changes:   &changeSet,
 			KeyField:  result.KeyField,
 		})
 	}
@@ -1834,121 +1809,16 @@ func (s *Server) computeChanges(newRecords []map[string]interface{}) map[string]
 }
 
 func (s *Server) computeChangesByKey(newRecords []map[string]interface{}, keyField string) map[string]interface{} {
-	if strings.TrimSpace(keyField) == "" {
-		keyField = "Code"
-	}
-	changes := map[string]interface{}{
-		"type":        "update",
-		"timestamp":   time.Now().Format(time.RFC3339),
-		"total_count": len(newRecords),
-		"key_field":   keyField,
-	}
+	return s.computeChangeSetByKey(newRecords, keyField).Map()
+}
 
-	// If no previous records, all are new
+func (s *Server) computeChangeSetByKey(newRecords []map[string]interface{}, keyField string) recorddiff.ChangeSet {
+	changes := recorddiff.Between(s.lastRecords, newRecords, keyField, time.Now())
 	if len(s.lastRecords) == 0 {
-		changes["added"] = newRecords
 		log.Printf("🆕 First load: all %d records are new", len(newRecords))
 		return changes
 	}
-
-	// Create maps by Code for efficient lookup
-	oldMap := make(map[string]map[string]interface{})
-	for _, record := range s.lastRecords {
-		if code, ok := record[keyField]; ok {
-			codeStr := fmt.Sprintf("%v", code)
-			oldMap[codeStr] = record
-		}
-	}
-
-	newMap := make(map[string]map[string]interface{})
-	for _, record := range newRecords {
-		if code, ok := record[keyField]; ok {
-			codeStr := fmt.Sprintf("%v", code)
-			newMap[codeStr] = record
-		}
-	}
-
-	added := []map[string]interface{}{}
-	deleted := []string{}
-	modified := []RecordChange{}
-
-	// Find added records
-	for code, record := range newMap {
-		if _, exists := oldMap[code]; !exists {
-			added = append(added, record)
-		}
-	}
-
-	// Find deleted records
-	for code := range oldMap {
-		if _, exists := newMap[code]; !exists {
-			deleted = append(deleted, code)
-		}
-	}
-
-	// Find modified records (records that exist in both but have different values)
-	for code, newRecord := range newMap {
-		if oldRecord, exists := oldMap[code]; exists {
-			changedFields := []string{}
-			oldValues := make(map[string]interface{})
-			newValues := make(map[string]interface{})
-
-			// Compare each field
-			for key, newVal := range newRecord {
-				if key == keyField {
-					continue // Skip the key field
-				}
-				oldVal, hasOldVal := oldRecord[key]
-
-				// Check if values differ
-				if !hasOldVal || !reflect.DeepEqual(oldVal, newVal) {
-					changedFields = append(changedFields, key)
-					if hasOldVal {
-						oldValues[key] = oldVal
-					} else {
-						oldValues[key] = nil
-					}
-					newValues[key] = newVal
-				}
-			}
-
-			// Check for fields that existed in old but not in new
-			for key, oldVal := range oldRecord {
-				if key == keyField {
-					continue
-				}
-				if _, exists := newRecord[key]; !exists {
-					changedFields = append(changedFields, key)
-					oldValues[key] = oldVal
-					newValues[key] = nil
-				}
-			}
-
-			if len(changedFields) > 0 {
-				modified = append(modified, RecordChange{
-					Code:          code,
-					ChangeType:    "modified",
-					OldValues:     oldValues,
-					NewValues:     newValues,
-					ChangedFields: changedFields,
-				})
-			}
-		}
-	}
-
-	// Log detailed change information
-	s.logDetailedChanges(added, deleted, modified)
-
-	if len(added) > 0 {
-		changes["added"] = added
-	}
-	if len(deleted) > 0 {
-		changes["deleted"] = deleted
-	}
-	if len(modified) > 0 {
-		changes["modified"] = modified
-	}
-
+	s.logDetailedChanges(changes.Added, changes.Deleted, changes.Modified)
 	return changes
 }
 

@@ -81,7 +81,12 @@ the configured key field.
 
 When watch mode is enabled, the initial payload can be sent once and later file
 changes can be sent as either a changeset or a full snapshot. Payloads can go to
-an HTTP endpoint, a command on stdin, or both.
+an HTTP endpoint, a command on stdin, or both. The initial event contains the
+complete transformed snapshot. Later `changes` events use the same key-aware
+diff implementation as the WebSocket server and contain `added`, `modified`,
+and `deleted` entries. Modified entries include both the changed field values
+and the complete transformed `record`, so downstream upserts do not need to
+reconstruct unchanged fields.
 
 ```powershell
 patris-export convert C:\Patris\data4\kala.db -f json -w `
@@ -114,3 +119,9 @@ Config equivalent:
   }
 }
 ```
+
+In CSV `changes` mode, each row includes `_change_type` with `added`,
+`modified`, or `deleted`. Modified rows contain the complete transformed row
+and `_changed_fields`; deleted rows are tombstones containing the configured
+key field. This makes the CSV stream actionable without exposing raw Patris
+fields when transform mapping is enabled.
