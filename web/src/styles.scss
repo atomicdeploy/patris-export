@@ -1800,6 +1800,17 @@ body.is-loading .data-table {
     flex-shrink: 0;
 }
 
+.export-svg {
+    width: 24px;
+    height: 24px;
+    display: block;
+    fill: none;
+    stroke: #217346;
+    stroke-width: 1.8;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+}
+
 .mini-logo {
     width: 24px;
     height: 24px;

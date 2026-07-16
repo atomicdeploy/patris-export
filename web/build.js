@@ -72,7 +72,7 @@ build().catch(err => {
 if (watch) {
   console.log('Watching for changes...');
   // Simple file watcher
-  const watchFiles = ['src/viewer.html', 'src/welcome.html', 'src/charmap.html', 'src/styles.scss', 'src/app.js', 'src/records.js'];
+  const watchFiles = ['src/viewer.html', 'src/welcome.html', 'src/charmap.html', 'src/styles.scss', 'src/app.js', 'src/records.js', 'src/export-menu.js'];
   watchFiles.forEach(file => {
     fs.watch(file, (eventType) => {
       if (eventType === 'change') {

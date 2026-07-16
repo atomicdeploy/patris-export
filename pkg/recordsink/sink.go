@@ -17,7 +17,6 @@ import (
 
 	_ "github.com/go-sql-driver/mysql"
 	_ "github.com/mattn/go-sqlite3"
-	"github.com/xuri/excelize/v2"
 
 	"github.com/atomicdeploy/patris-export/pkg/recordmap"
 )
@@ -72,38 +71,6 @@ func CSVBytes(rows []map[string]interface{}, keyField string) ([]byte, error) {
 		return nil, err
 	}
 	return buf.Bytes(), nil
-}
-
-func WriteXLSX(path string, rows []map[string]interface{}, keyField string) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil && filepath.Dir(path) != "." {
-		return err
-	}
-	f := excelize.NewFile()
-	sheet := "Records"
-	defaultSheet := f.GetSheetName(0)
-	f.SetSheetName(defaultSheet, sheet)
-	fields := recordmap.Fields(rows, keyField)
-	for i, field := range fields {
-		cellName, _ := excelize.CoordinatesToCellName(i+1, 1)
-		_ = f.SetCellValue(sheet, cellName, field)
-	}
-	for rowIndex, row := range rows {
-		for colIndex, field := range fields {
-			cellName, _ := excelize.CoordinatesToCellName(colIndex+1, rowIndex+2)
-			_ = f.SetCellValue(sheet, cellName, row[field])
-		}
-	}
-	if len(fields) > 0 {
-		lastCol, _ := excelize.ColumnNumberToName(len(fields))
-		_ = f.SetColWidth(sheet, "A", lastCol, 18)
-		_ = f.AutoFilter(sheet, fmt.Sprintf("A1:%s1", lastCol), nil)
-	}
-	style, _ := f.NewStyle(&excelize.Style{Font: &excelize.Font{Bold: true}})
-	if len(fields) > 0 {
-		lastCol, _ := excelize.ColumnNumberToName(len(fields))
-		_ = f.SetCellStyle(sheet, "A1", fmt.Sprintf("%s1", lastCol), style)
-	}
-	return f.SaveAs(path)
 }
 
 func WriteSQLite(path, table, keyField string, rows []map[string]interface{}, options ...SnapshotOptions) error {

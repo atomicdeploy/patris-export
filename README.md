@@ -500,18 +500,25 @@ watched file.
 Web interface with API documentation.
 
 #### `GET /api/records`
-Returns all database records in JSON format by default. CSV is available through
-either content negotiation, a query parameter, or a file-style route:
+Returns all database records in JSON format by default. CSV and XLSX are
+available through content negotiation, a query parameter, or a file-style
+route:
 
 ```bash
 curl http://localhost:8080/api/records
 curl http://localhost:8080/api/records?format=csv -o kala.csv
 curl http://localhost:8080/api/records.csv -o kala.csv
 curl -H "Accept: text/csv" http://localhost:8080/api/records -o kala.csv
+curl 'http://localhost:8080/api/records.xlsx?download=1' -o kala.xlsx
 ```
 
 Add `download=1` to ask the API for an attachment filename, for example
-`/api/records.csv?download=1`.
+`/api/records.csv?download=1`. The viewer's Excel action calls this same Go
+endpoint rather than rebuilding the workbook in JavaScript. XLSX workbooks keep
+Code as text, preserve safe numeric values as numeric cells, freeze and filter
+the header, and include an allowlisted Metadata sheet with schema, formula,
+source revision, generated time, and warnings. Add `rtl=1` or enable the UI RTL
+text-direction setting to open worksheets in right-to-left mode.
 
 For a configured canonical dataset, `GET /api/product-sync` returns the full
 versioned `digitalogic.product-sync` envelope. `/api/records` deliberately

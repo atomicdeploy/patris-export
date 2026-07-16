@@ -212,6 +212,12 @@ func TestServerJSON(t *testing.T) {
 		if cc := w.Header().Get("Cache-Control"); cc != "no-cache" {
 			t.Errorf("Expected Cache-Control no-cache, got %s", cc)
 		}
+		body := w.Body.String()
+		for _, marker := range []string{`id="exportXLSX"`, `role="menuitem"`, `/api/records.xlsx`} {
+			if !strings.Contains(body, marker) {
+				t.Errorf("viewer is missing accessible XLSX export marker %q", marker)
+			}
+		}
 	})
 
 	t.Run("GET /partials/welcome", func(t *testing.T) {
@@ -552,19 +558,63 @@ func TestCanonicalKalaParityAcrossRESTCSVXLSXAndWebSocket(t *testing.T) {
 	}
 	assertTabularCanonicalFixture(t, "CSV", csvRows)
 
-	xlsxRequest := httptest.NewRequest(http.MethodGet, "/api/records.xlsx", nil)
+	xlsxRequest := httptest.NewRequest(http.MethodGet, "/api/records.xlsx?download=1&rtl=1", nil)
 	xlsxRecorder := httptest.NewRecorder()
 	srv.router.ServeHTTP(xlsxRecorder, xlsxRequest)
+	if contentDisposition := xlsxRecorder.Header().Get("Content-Disposition"); !strings.Contains(contentDisposition, "kala.xlsx") {
+		t.Fatalf("canonical XLSX attachment filename = %q", contentDisposition)
+	}
 	book, err := excelize.OpenReader(bytes.NewReader(xlsxRecorder.Body.Bytes()))
 	if err != nil {
 		t.Fatalf("open canonical XLSX: %v", err)
 	}
-	xlsxRows, err := book.GetRows("Records")
-	_ = book.Close()
+	xlsxRows, err := book.GetRows("Records", excelize.Options{RawCellValue: true})
 	if err != nil {
+		_ = book.Close()
 		t.Fatalf("read canonical XLSX: %v", err)
 	}
 	assertTabularCanonicalFixture(t, "XLSX", xlsxRows)
+	metadataRows, err := book.GetRows("Metadata")
+	if err != nil {
+		_ = book.Close()
+		t.Fatalf("read canonical XLSX metadata: %v", err)
+	}
+	metadata := map[string]string{}
+	for _, row := range metadataRows[1:] {
+		if len(row) >= 2 {
+			metadata[row[0]] = row[1]
+		}
+	}
+	for key, want := range map[string]string{
+		"schema":           envelope.Schema,
+		"schema_version":   envelope.SchemaVersion,
+		"formula_id":       envelope.FormulaID,
+		"formula_revision": envelope.FormulaRevision,
+		"source_dataset":   envelope.Source.Dataset,
+		"source_revision":  envelope.Source.Revision,
+	} {
+		if metadata[key] != want {
+			_ = book.Close()
+			t.Fatalf("canonical XLSX metadata[%s] = %q, want %q", key, metadata[key], want)
+		}
+	}
+	if _, err := time.Parse(time.RFC3339Nano, metadata["generated_at"]); err != nil {
+		_ = book.Close()
+		t.Fatalf("canonical XLSX generated_at = %q: %v", metadata["generated_at"], err)
+	}
+	view, err := book.GetSheetView("Records", 0)
+	if err != nil || view.RightToLeft == nil || !*view.RightToLeft {
+		_ = book.Close()
+		t.Fatalf("canonical XLSX RTL view = %+v, err=%v", view.RightToLeft, err)
+	}
+	metadataJSON, _ := json.Marshal(metadata)
+	for _, forbidden := range []string{"mysql_dsn", "password", "secret", "Sharh1", "Sharh2", `C:\\Patris`} {
+		if strings.Contains(strings.ToLower(string(metadataJSON)), strings.ToLower(forbidden)) {
+			_ = book.Close()
+			t.Fatalf("canonical XLSX metadata leaked %q: %s", forbidden, metadataJSON)
+		}
+	}
+	_ = book.Close()
 
 	httpServer := httptest.NewServer(srv.router)
 	defer httpServer.Close()

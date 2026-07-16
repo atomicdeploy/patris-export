@@ -53,22 +53,31 @@
             </div>
             <div class="toolbar-section">
                 <div class="export-container">
-                    <button class="btn btn-primary" id="exportBtn" title="Export data">
+                    <button class="btn btn-primary" id="exportBtn" type="button" title="Export data" aria-haspopup="menu" aria-controls="exportDropdown" aria-expanded="false">
                         📥 Export
                     </button>
-                    <div class="export-dropdown" id="exportDropdown">
-                        <button class="export-option" id="exportJSON">
+                    <div class="export-dropdown" id="exportDropdown" role="menu" aria-label="Export formats">
+                        <button class="export-option" id="exportJSON" type="button" role="menuitem" data-export-format="json">
                             <span class="export-icon">📄</span>
                             <div class="export-details">
                                 <div class="export-title">Export as JSON</div>
                                 <div class="export-desc">JavaScript Object Notation</div>
                             </div>
                         </button>
-                        <button class="export-option" id="exportCSV">
+                        <button class="export-option" id="exportCSV" type="button" role="menuitem" data-export-format="csv">
                             <span class="export-icon"><img class="mini-logo" src="/static/patris-api-icon.png" alt=""></span>
                             <div class="export-details">
                                 <div class="export-title">Export as CSV</div>
                                 <div class="export-desc">Comma-Separated Values</div>
+                            </div>
+                        </button>
+                        <button class="export-option" id="exportXLSX" type="button" role="menuitem" data-export-format="xlsx" aria-label="Download canonical Excel workbook">
+                            <span class="export-icon" aria-hidden="true">
+                                <svg class="export-svg" viewBox="0 0 24 24"><path d="M5 3h10l4 4v14H5z"/><path d="M15 3v5h5M8 12l5 6m0-6-5 6"/></svg>
+                            </span>
+                            <div class="export-details">
+                                <div class="export-title">Download Excel workbook</div>
+                                <div class="export-desc">Canonical XLSX with provenance</div>
                             </div>
                         </button>
                     </div>
