@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -43,6 +44,7 @@ var (
 	errReceiverHTTPStatus       = errors.New("receiver returned non-success HTTP status")
 	errReceiverIdentityMismatch = errors.New("receiver event identity mismatch")
 	errReceiverStateMissing     = errors.New("receiver response is missing product-sync delivery state")
+	errReceiverStateInvalid     = errors.New("receiver response has inconsistent product-sync delivery state")
 	errInvalidDestination       = errors.New("invalid destination URL")
 	errRequestFailed            = errors.New("request failed")
 	errResponseReadFailed       = errors.New("response read failed")
@@ -325,7 +327,18 @@ func validateSecretConfig(cfg Config, event Event) error {
 	if endpoint.User != nil || endpoint.RawQuery != "" {
 		return fmt.Errorf("product-sync destination must not contain user info or query parameters; authentication is header-only")
 	}
+	if endpoint.Scheme != "https" && !isLoopbackHost(endpoint.Hostname()) {
+		return fmt.Errorf("product-sync destination requires HTTPS except for loopback test or development hosts")
+	}
 	return nil
+}
+
+func isLoopbackHost(host string) bool {
+	if strings.EqualFold(strings.TrimSpace(host), "localhost") {
+		return true
+	}
+	address := net.ParseIP(strings.TrimSpace(host))
+	return address != nil && address.IsLoopback()
 }
 
 func validEnvName(value string) bool {
@@ -373,13 +386,19 @@ func classifyHTTPResponse(result DeliveryResult, body []byte, contract *canonica
 		result.Status = safeToken(decoded.Data.Status)
 		result.EventID = safeToken(decoded.Data.EventID)
 		result.PendingProducts = decoded.Data.PendingProducts
-		result.Retryable = decoded.Data.Retryable || decoded.Details.Retryable || result.Status == "partially_applied" || result.Status == "retry_pending"
+		result.Retryable = decoded.Data.Retryable
 		if contract != nil && result.EventID != "" && result.EventID != contract.EventID {
 			result.Retryable = false
 			return result, errReceiverIdentityMismatch
 		}
-		if !*decoded.Success {
+		if *decoded.Success {
+			if err := validateReceiverState(result); err != nil {
+				result.Retryable = false
+				return result, err
+			}
+		} else {
 			receiverRejected = true
+			result.Retryable = decoded.Data.Retryable || decoded.Details.Retryable
 			if result.Status == "" {
 				result.Status = safeToken(decoded.Code)
 			}
@@ -403,6 +422,22 @@ func classifyHTTPResponse(result DeliveryResult, body []byte, contract *canonica
 	return result, nil
 }
 
+func validateReceiverState(result DeliveryResult) error {
+	switch result.Status {
+	case "accepted", "already_current", "replayed", "recovered":
+		if result.Retryable || result.PendingProducts != 0 {
+			return errReceiverStateInvalid
+		}
+	case "partially_applied", "retry_pending":
+		if !result.Retryable || result.PendingProducts <= 0 {
+			return errReceiverStateInvalid
+		}
+	default:
+		return errReceiverStateInvalid
+	}
+	return nil
+}
+
 func deliveryReason(err error, result DeliveryResult) string {
 	if err == nil && result.Retryable {
 		return "receiver has pending work"
@@ -412,6 +447,8 @@ func deliveryReason(err error, result DeliveryResult) string {
 		return errReceiverIdentityMismatch.Error()
 	case errors.Is(err, errReceiverStateMissing):
 		return errReceiverStateMissing.Error()
+	case errors.Is(err, errReceiverStateInvalid):
+		return errReceiverStateInvalid.Error()
 	case errors.Is(err, errReceiverHTTPStatus):
 		return errReceiverHTTPStatus.Error()
 	case errors.Is(err, errInvalidDestination):
@@ -501,7 +538,7 @@ func runCommand(ctx context.Context, cfg Config, event Event) error {
 		return err
 	}
 	cmd.Stdin = bytes.NewReader(body)
-	cmd.Env = append(os.Environ(),
+	cmd.Env = append(environmentWithout(os.Environ(), cfg.ProductSyncSecretEnv),
 		"PATRIS_EXPORT_EVENT_TYPE="+event.Type,
 		"PATRIS_EXPORT_EVENT_SOURCE="+event.Source,
 		"PATRIS_EXPORT_EVENT_TIMESTAMP="+event.Timestamp,
@@ -512,6 +549,21 @@ func runCommand(ctx context.Context, cfg Config, event Event) error {
 		return fmt.Errorf("send update command failed: %w: %s", err, strings.TrimSpace(string(out)))
 	}
 	return nil
+}
+
+func environmentWithout(environ []string, key string) []string {
+	if strings.TrimSpace(key) == "" {
+		return environ
+	}
+	filtered := make([]string, 0, len(environ))
+	for _, entry := range environ {
+		name, _, found := strings.Cut(entry, "=")
+		if found && strings.EqualFold(name, key) {
+			continue
+		}
+		filtered = append(filtered, entry)
+	}
+	return filtered
 }
 
 func encode(cfg Config, event Event) ([]byte, string, error) {

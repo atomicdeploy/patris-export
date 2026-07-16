@@ -113,7 +113,10 @@ service/process secret manager. Never put the value in the config `headers`
 map, URL/query string, command line, or repository. A configured but missing or
 empty secret fails closed before any request is made. Product-sync URLs with
 userinfo or query parameters are rejected, and redirects are not followed when
-the secret header is active.
+the secret header is active. Remote destinations must use HTTPS; plain HTTP is
+accepted only for loopback test/development hosts. If the optional command sink
+is also enabled, the HTTP receiver secret is removed from that child process's
+environment.
 
 Patris writes `X-Patris-Event`, `X-Patris-Source`, `X-Patris-Contract`,
 `X-Patris-Contract-Version`, and `X-Patris-Event-ID` after custom headers, so
@@ -178,6 +181,12 @@ selected 5xx transients, and receiver responses with `retryable: true`,
 the CLI/server log. Exhaustion reports only sanitized endpoint and structured
 status/attempt/pending counts; query strings, response bodies, request headers,
 and credential values are never included.
+
+Typed receiver responses fail closed unless their state is internally
+consistent: terminal states require zero pending products and
+`retryable: false`; partial/pending states require a positive pending count and
+`retryable: true`. Unknown states and a mismatched or missing event ID are not
+treated as delivery success.
 
 Equivalent environment-only configuration uses
 `PATRIS_EXPORT_SEND_PRODUCT_SYNC_SECRET_ENV`,
