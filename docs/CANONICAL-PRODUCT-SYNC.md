@@ -126,7 +126,7 @@ stored in the Patris config:
         "batch_size": 500,
         "fresh_for": "5m",
         "max_stale": "1h",
-        "timeout": "5s",
+        "timeout": "15s",
         "max_entries": 2048,
         "max_concurrency": 8,
         "max_response_bytes": 2097152
@@ -138,8 +138,16 @@ stored in the Patris config:
 
 ```powershell
 $env:DIGITALOGIC_PRICING_READ_TOKEN = "..."
+$env:PATRIS_EXPORT_PRICING_TIMEOUT = "15s"
+$env:PATRIS_EXPORT_PRICING_BATCH_SIZE = "500"
 patris-export serve C:\Patris\data4\kala.db
 ```
+
+`PATRIS_EXPORT_PRICING_TIMEOUT` and `PATRIS_EXPORT_PRICING_BATCH_SIZE` override
+the same normalized Digitalogic provider used by file configuration. Batch
+size is capped at the remote contract maximum of 500. The 15-second timeout
+default leaves headroom for a production 500-Code response without changing
+the bounded request count or enabling single-Code fallback.
 
 Only HTTPS is accepted remotely; plain HTTP is limited to loopback. Provider
 paths must stay relative and on the configured origin, redirects are refused,

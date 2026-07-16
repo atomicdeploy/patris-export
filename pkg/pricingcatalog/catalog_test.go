@@ -915,6 +915,43 @@ func TestHTTPProviderRequiresConsistentNonNullCNYToIRT(t *testing.T) {
 	}
 }
 
+func TestHTTPProviderConfiguredTimeoutAllowsSlowBatch(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/integration/catalog":
+			fmt.Fprint(w, `{"data":{"schema":"digitalogic.integration-catalog","schema_version":"1.0.0","revision":"r1","currency":{"local":"IRT","cny_to_local":25300,"cny_to_irt":25300},"pricing":{"formula_id":"landed_price_v1","formula_revision":"1.0.0"},"import_freight_methods":[{"id":"air","price_per_kg_cny":85}]}}`)
+		case "/pricing-assignments/batch":
+			time.Sleep(75 * time.Millisecond)
+			fmt.Fprint(w, `{"data":{"schema":"digitalogic.pricing-assignment-batch","schema_version":"1.0.0","requested_count":1,"resolved_count":1,"error_count":0,"maximum_codes":500,"default_percentage_markup":{"schema":"digitalogic.default-percentage-markup","schema_version":"1.0.0","configured":true,"type":"percentage","profit_percent":"30","source":"global_default","revision":"rev-30"},"results":[{"code":"A","status":"ok","assignment":{"code":"A","import_freight_method_id":"air","profit_percent":"30","profit_percent_source":"global_default","pricing_warnings":[]}}]}}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	provider := newHTTPProvider(DigitalogicConfig{
+		BaseURL: server.URL, Timeout: "250ms", BatchSize: 1,
+	}, nil, time.Now)
+	resolution := provider.Prefetch(context.Background(), []string{"A"}).Resolve(context.Background(), "A")
+	if resolution.MethodID != "air" || decimalText(resolution.MarkupPercent) != "30" {
+		t.Fatalf("configured timeout did not retain the slow batch result: %+v", resolution)
+	}
+	if contains(resolution.Warnings, "pricing_assignment_batch_transport_failed") {
+		t.Fatalf("slow batch was misclassified as a transport failure: %+v", resolution)
+	}
+	if provider.client.Timeout != 250*time.Millisecond {
+		t.Fatalf("provider client timeout = %s", provider.client.Timeout)
+	}
+}
+
+func TestDigitalogicProviderDefaultsLeaveProductionBatchHeadroom(t *testing.T) {
+	digitalogic := Normalize(Config{Mode: ModeDigitalogic}).Digitalogic
+	if digitalogic.Timeout != "15s" || digitalogic.BatchSize != 500 {
+		t.Fatalf("unexpected production batch defaults: %+v", digitalogic)
+	}
+}
+
 func contains(values []string, expected string) bool {
 	for _, value := range values {
 		if value == expected {
