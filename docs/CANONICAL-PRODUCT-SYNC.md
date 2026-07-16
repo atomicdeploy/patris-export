@@ -184,8 +184,10 @@ exports and catalog values must never be committed as golden fixtures.
 ```
 
 Record hashes and source revisions are stable over unchanged values. Event IDs
-are deterministic and exclude the volatile generation timestamp. Incremental
-events contain complete changed products and deleted-Code tombstones such as
+are deterministic for one occurrence and include its validated `generated_at`
+wire value. Retries therefore reuse one envelope byte-for-byte, while a later
+same-content occurrence receives a new ordered identity. Incremental events
+contain complete changed products and deleted-Code tombstones such as
 `{"product_code":"113007045","deleted":true}`.
 Quarantined duplicate Codes are never tombstones: update diffs and SQL snapshot
 reconciliation preserve the last known good downstream value until ambiguity
@@ -197,6 +199,17 @@ exact decimal lexemes. MySQL uses exact `DECIMAL` columns; SQLite declares
 canonical decimal inputs as `DECIMAL_TEXT` so its numeric affinity cannot
 silently coerce them through binary floating point. Final IRT prices remain
 integers. Both SQL sinks add newly introduced columns on later exports.
+
+For direct delivery to Digitalogic, use the existing HTTP update sink with
+`require_contract: true`, the dedicated `/patris/product-sync` endpoint, and a
+`product_sync_secret_env` reference. The secret value is read from that named
+environment variable at request time and sent only in
+`X-Digitalogic-Product-Sync-Secret`; it is not copied into persisted config or
+delivery logs. The sink preserves the canonical `X-Patris-*` identity headers,
+parses the WordPress REST response, surfaces apply state, and can retry the
+identical event when the receiver reports partial/pending work. See
+[`docs/examples/export-transform-send.md`](examples/export-transform-send.md)
+for the complete configuration and retry policy.
 
 The generic mapping pipeline remains available for datasets without a selected
 profile. The canonical contract intentionally has fixed field names. To inspect

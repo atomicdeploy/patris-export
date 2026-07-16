@@ -102,10 +102,15 @@ patris-export convert kala.db \
   --sqlite-path output/patris-products.sqlite \
   --sqlite-table products
 
-# Watch and send JSON changes to a webhook.
+# Watch and send canonical JSON changes to the Digitalogic v1 receiver.
+# DIGITALOGIC_PRODUCT_SYNC_SECRET is injected into the process environment by
+# the deployment secret manager; only its variable name appears here.
 patris-export convert kala.db -f json -w \
-  --send-url https://example.internal/patris-webhook \
-  --send-mode changes
+  --send-url https://digitalogic.example/wp-json/digitalogic/v1/patris/product-sync \
+  --send-mode changes \
+  --send-product-sync-secret-env DIGITALOGIC_PRODUCT_SYNC_SECRET \
+  --send-retry-attempts 3 \
+  --send-retry-backoff 2s
 ```
 
 See [the canonical product-sync contract](docs/CANONICAL-PRODUCT-SYNC.md) for

@@ -158,11 +158,13 @@ func Default() Config {
 		},
 		Canonical: canonical.DefaultConfig(),
 		SendUpdates: updateout.Config{
-			Method:  "POST",
-			Format:  "json",
-			Mode:    "changes",
-			Initial: true,
-			Timeout: "10s",
+			Method:        "POST",
+			Format:        "json",
+			Mode:          "changes",
+			Initial:       true,
+			Timeout:       "10s",
+			RetryAttempts: 1,
+			RetryBackoff:  "1s",
 		},
 		Edge: EdgeConfig{
 			Debounce:    "1s",
@@ -742,6 +744,17 @@ func ApplyEnv(cfg *Config) {
 	}
 	if value := os.Getenv("PATRIS_EXPORT_SEND_TIMEOUT"); strings.TrimSpace(value) != "" {
 		cfg.SendUpdates.Timeout = strings.TrimSpace(value)
+	}
+	if value := os.Getenv("PATRIS_EXPORT_SEND_RETRY_ATTEMPTS"); strings.TrimSpace(value) != "" {
+		if attempts, err := strconv.Atoi(strings.TrimSpace(value)); err == nil {
+			cfg.SendUpdates.RetryAttempts = attempts
+		}
+	}
+	if value := os.Getenv("PATRIS_EXPORT_SEND_RETRY_BACKOFF"); strings.TrimSpace(value) != "" {
+		cfg.SendUpdates.RetryBackoff = strings.TrimSpace(value)
+	}
+	if value := os.Getenv("PATRIS_EXPORT_SEND_PRODUCT_SYNC_SECRET_ENV"); strings.TrimSpace(value) != "" {
+		cfg.SendUpdates.ProductSyncSecretEnv = strings.TrimSpace(value)
 	}
 	if value := os.Getenv("PATRIS_EXPORT_SEND_COMMAND"); strings.TrimSpace(value) != "" {
 		cfg.SendUpdates.Command = strings.Fields(value)

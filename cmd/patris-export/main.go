@@ -72,6 +72,9 @@ var (
 	sendMode        string
 	sendCommand     string
 	sendInitial     bool
+	sendSecretEnv   string
+	sendAttempts    int
+	sendBackoff     string
 	edgeTargetURL   string
 	edgeToken       string
 	edgeSourceID    string
@@ -149,6 +152,9 @@ Supports Persian/Farsi encoding conversion and file watching.
 	convertCmd.Flags().StringVar(&sendMode, "send-mode", "", "Send update mode: changes or full")
 	convertCmd.Flags().StringVar(&sendCommand, "send-command", "", "Command to run for initial/watch updates; payload is written to stdin")
 	convertCmd.Flags().BoolVar(&sendInitial, "send-initial", true, "Send a full initial payload before watch updates")
+	convertCmd.Flags().StringVar(&sendSecretEnv, "send-product-sync-secret-env", "", "Environment-variable name containing the header-only Digitalogic product-sync secret")
+	convertCmd.Flags().IntVar(&sendAttempts, "send-retry-attempts", 0, "Total HTTP delivery attempts (default 1; use retries only with idempotent receivers)")
+	convertCmd.Flags().StringVar(&sendBackoff, "send-retry-backoff", "", "Delay between retryable HTTP delivery attempts (for example 1s)")
 
 	// Info command
 	infoCmd := &cobra.Command{
@@ -729,6 +735,15 @@ func applyConvertFlagOverrides(cmd *cobra.Command, cfg *appconfig.Config) {
 	if cmd.Flags().Changed("send-initial") {
 		cfg.SendUpdates.Initial = sendInitial
 	}
+	if cmd.Flags().Changed("send-product-sync-secret-env") {
+		cfg.SendUpdates.ProductSyncSecretEnv = sendSecretEnv
+	}
+	if cmd.Flags().Changed("send-retry-attempts") {
+		cfg.SendUpdates.RetryAttempts = sendAttempts
+	}
+	if cmd.Flags().Changed("send-retry-backoff") {
+		cfg.SendUpdates.RetryBackoff = sendBackoff
+	}
 	cfg.SendUpdates = updateout.Normalize(cfg.SendUpdates)
 }
 
@@ -862,8 +877,13 @@ func sendConvertUpdate(cfg appconfig.Config, source string, result recordpipe.Re
 		Contract:         result.SyncEnvelope(changes),
 		SnapshotContract: result.SyncEnvelope(nil),
 	}
-	if err := updateout.Dispatch(context.Background(), cfg.SendUpdates, event); err != nil {
+	delivery, err := updateout.DispatchWithResult(context.Background(), cfg.SendUpdates, event)
+	if err != nil {
 		warningColor.Printf("Send update failed: %v\n", err)
+		return
+	}
+	if delivery.Status != "" {
+		infoColor.Printf("Send update delivered: status=%s event_id=%s attempts=%d pending_products=%d\n", delivery.Status, delivery.EventID, delivery.Attempts, delivery.PendingProducts)
 	}
 }
 

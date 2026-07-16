@@ -1344,8 +1344,13 @@ func (s *Server) dispatchUpdateEvent(event updateout.Event) {
 		return
 	}
 	go func() {
-		if err := updateout.Dispatch(context.Background(), cfg, event); err != nil {
+		result, err := updateout.DispatchWithResult(context.Background(), cfg, event)
+		if err != nil {
 			log.Printf("Failed to send update event: %v", err)
+			return
+		}
+		if result.Status != "" {
+			log.Printf("Sent update event: status=%s event_id=%s attempts=%d pending_products=%d", result.Status, result.EventID, result.Attempts, result.PendingProducts)
 		}
 	}()
 }
