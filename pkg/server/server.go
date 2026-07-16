@@ -1368,7 +1368,7 @@ func (s *Server) dispatchUpdateEvent(event updateout.Event) {
 			return
 		}
 		if result.Status != "" {
-			log.Printf("Sent update event: status=%s event_id=%s attempts=%d pending_products=%d", result.Status, result.EventID, result.Attempts, result.PendingProducts)
+			log.Printf("Sent update event: %s", result.DiagnosticSummary())
 		}
 	}()
 }

@@ -884,7 +884,7 @@ func sendConvertUpdate(cfg appconfig.Config, source string, result recordpipe.Re
 		return
 	}
 	if delivery.Status != "" {
-		infoColor.Printf("Send update delivered: status=%s event_id=%s attempts=%d pending_products=%d\n", delivery.Status, delivery.EventID, delivery.Attempts, delivery.PendingProducts)
+		infoColor.Printf("Send update delivered: %s\n", delivery.DiagnosticSummary())
 	}
 }
 
