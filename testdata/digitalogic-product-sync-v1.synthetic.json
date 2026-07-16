@@ -1,0 +1,86 @@
+{
+  "schema": "digitalogic.product-sync",
+  "schema_version": "1.0",
+  "event": "digitalogic.product-sync",
+  "event_type": "snapshot",
+  "event_id": "sha256:25d5afce95dfdcf598c28f9c9639cbd54ed7f2e838a6c285844eee75d972ef06",
+  "local_currency": "IRT",
+  "formula_id": "landed_price_v1",
+  "formula_revision": "1.0.0",
+  "formula_version": "landed_price_v1",
+  "source": {
+    "id": "synthetic-fixture",
+    "dataset": "synthetic-kala.db",
+    "revision": "sha256:eec5251e15aa8d8d29736650afdc0edfa9d2576fe60427af22afe5d7119f7294"
+  },
+  "generated_at": "2026-01-02T03:04:05Z",
+  "products": [
+    {
+      "product_code": "SYNTH-NULL-002",
+      "name": "Synthetic incomplete product",
+      "serial": "SYNTH-PN-002",
+      "unit": "unit",
+      "sale_price_source": null,
+      "purchase_price_source": null,
+      "warehouse_stock": {
+        "1": 0,
+        "2": 0
+      },
+      "total_stock": 0,
+      "minimum_stock": null,
+      "foreign_currency": "CNY",
+      "foreign_price": null,
+      "weight_grams": null,
+      "location": "weight unavailable",
+      "import_freight_method_id": "",
+      "freight_cny_per_kg": null,
+      "markup_percent": null,
+      "irt_per_cny": 29000,
+      "pricing_catalog_revision": "synthetic-catalog-v1",
+      "pricing_catalog_status": "static",
+      "currency_effective_date": "2026-01-01",
+      "final_price": null,
+      "formula_version": "landed_price_v1",
+      "source_updated_at": "",
+      "warnings": [
+        "final_price_unavailable",
+        "foreign_price_missing",
+        "freight_rate_missing",
+        "import_freight_method_missing",
+        "markup_percent_missing",
+        "weight_missing"
+      ],
+      "record_hash": "sha256:d031b2316e7963976b994301033f1fe4c4ba29a744c221ec0117cd6170344ca8"
+    },
+    {
+      "product_code": "SYNTH-PRICED-001",
+      "name": "Synthetic priced product",
+      "serial": "SYNTH-PN-001",
+      "unit": "unit",
+      "sale_price_source": 100000,
+      "purchase_price_source": 90000,
+      "warehouse_stock": {
+        "1": 3,
+        "2": 2
+      },
+      "total_stock": 5,
+      "minimum_stock": 1,
+      "foreign_currency": "CNY",
+      "foreign_price": 24.5,
+      "weight_grams": 240,
+      "location": "TEST-A",
+      "import_freight_method_id": "synthetic-air",
+      "freight_cny_per_kg": 120,
+      "markup_percent": 30,
+      "irt_per_cny": 29000,
+      "pricing_catalog_revision": "synthetic-catalog-v1",
+      "pricing_catalog_status": "static",
+      "currency_effective_date": "2026-01-01",
+      "final_price": 2009410,
+      "formula_version": "landed_price_v1",
+      "source_updated_at": "2026-01-01T00:00:00Z",
+      "warnings": [],
+      "record_hash": "sha256:fb1fc9e10312f7aaa4659550525a0f9b4536f375e4d005ee1f2e1658a90e4976"
+    }
+  ]
+}

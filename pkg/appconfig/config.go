@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/atomicdeploy/patris-export/pkg/canonical"
 	"github.com/atomicdeploy/patris-export/pkg/recordmap"
 	"github.com/atomicdeploy/patris-export/pkg/updateout"
 	"github.com/fsnotify/fsnotify"
@@ -36,6 +37,7 @@ type Config struct {
 	Runtime       RuntimeConfig          `json:"runtime" yaml:"runtime" toml:"runtime"`
 	Convert       ConvertConfig          `json:"convert" yaml:"convert" toml:"convert"`
 	Transform     recordmap.Config       `json:"transform" yaml:"transform" toml:"transform"`
+	Canonical     canonical.Config       `json:"canonical" yaml:"canonical" toml:"canonical"`
 	Export        ExportConfig           `json:"export" yaml:"export" toml:"export"`
 	SendUpdates   updateout.Config       `json:"send_updates" yaml:"send_updates" toml:"send_updates"`
 	Edge          EdgeConfig             `json:"edge" yaml:"edge" toml:"edge"`
@@ -154,12 +156,15 @@ func Default() Config {
 			Format:   "json",
 			Debounce: "1s",
 		},
+		Canonical: canonical.DefaultConfig(),
 		SendUpdates: updateout.Config{
-			Method:  "POST",
-			Format:  "json",
-			Mode:    "changes",
-			Initial: true,
-			Timeout: "10s",
+			Method:        "POST",
+			Format:        "json",
+			Mode:          "changes",
+			Initial:       true,
+			Timeout:       "10s",
+			RetryAttempts: 1,
+			RetryBackoff:  "1s",
 		},
 		Edge: EdgeConfig{
 			Debounce:    "1s",
@@ -632,6 +637,34 @@ func ApplyEnv(cfg *Config) {
 		cfg.Transform.MappingFile = strings.TrimSpace(value)
 		cfg.Transform.Enabled = true
 	}
+	if value := os.Getenv("PATRIS_EXPORT_CANONICAL"); strings.TrimSpace(value) != "" {
+		cfg.Canonical.Enabled = parseBool(value, cfg.Canonical.Enabled)
+	}
+	if value := os.Getenv("PATRIS_EXPORT_CANONICAL_SOURCE_ID"); strings.TrimSpace(value) != "" {
+		cfg.Canonical.SourceID = strings.TrimSpace(value)
+	}
+	if value := os.Getenv("PATRIS_EXPORT_PRICING_MODE"); strings.TrimSpace(value) != "" {
+		cfg.Canonical.Pricing.Mode = strings.TrimSpace(value)
+	}
+	if value := os.Getenv("PATRIS_EXPORT_DIGITALOGIC_URL"); strings.TrimSpace(value) != "" {
+		cfg.Canonical.Pricing.Digitalogic.BaseURL = strings.TrimSpace(value)
+		cfg.Canonical.Pricing.Mode = "digitalogic"
+	}
+	if value := os.Getenv("PATRIS_EXPORT_DIGITALOGIC_USERNAME_ENV"); strings.TrimSpace(value) != "" {
+		cfg.Canonical.Pricing.Digitalogic.UsernameEnv = strings.TrimSpace(value)
+	}
+	if value := os.Getenv("PATRIS_EXPORT_DIGITALOGIC_PASSWORD_ENV"); strings.TrimSpace(value) != "" {
+		cfg.Canonical.Pricing.Digitalogic.PasswordEnv = strings.TrimSpace(value)
+	}
+	if value := os.Getenv("PATRIS_EXPORT_DIGITALOGIC_BEARER_ENV"); strings.TrimSpace(value) != "" {
+		cfg.Canonical.Pricing.Digitalogic.BearerTokenEnv = strings.TrimSpace(value)
+	}
+	if value := os.Getenv("PATRIS_EXPORT_PRICING_FRESH_FOR"); strings.TrimSpace(value) != "" {
+		cfg.Canonical.Pricing.Digitalogic.FreshFor = strings.TrimSpace(value)
+	}
+	if value := os.Getenv("PATRIS_EXPORT_PRICING_MAX_STALE"); strings.TrimSpace(value) != "" {
+		cfg.Canonical.Pricing.Digitalogic.MaxStale = strings.TrimSpace(value)
+	}
 	for _, key := range []string{"PATRIS_EXPORT_TEMP_DIR", "PATRIS_EXPORT_TMPDIR"} {
 		if value := os.Getenv(key); strings.TrimSpace(value) != "" {
 			cfg.Runtime.TempDir = strings.TrimSpace(value)
@@ -703,8 +736,25 @@ func ApplyEnv(cfg *Config) {
 	if value := os.Getenv("PATRIS_EXPORT_SEND_INITIAL"); strings.TrimSpace(value) != "" {
 		cfg.SendUpdates.Initial = parseBool(value, cfg.SendUpdates.Initial)
 	}
+	if value := os.Getenv("PATRIS_EXPORT_SEND_ALLOW_RAW"); strings.TrimSpace(value) != "" {
+		cfg.SendUpdates.AllowRaw = parseBool(value, cfg.SendUpdates.AllowRaw)
+	}
+	if value := os.Getenv("PATRIS_EXPORT_SEND_REQUIRE_CONTRACT"); strings.TrimSpace(value) != "" {
+		cfg.SendUpdates.RequireContract = parseBool(value, cfg.SendUpdates.RequireContract)
+	}
 	if value := os.Getenv("PATRIS_EXPORT_SEND_TIMEOUT"); strings.TrimSpace(value) != "" {
 		cfg.SendUpdates.Timeout = strings.TrimSpace(value)
+	}
+	if value := os.Getenv("PATRIS_EXPORT_SEND_RETRY_ATTEMPTS"); strings.TrimSpace(value) != "" {
+		if attempts, err := strconv.Atoi(strings.TrimSpace(value)); err == nil {
+			cfg.SendUpdates.RetryAttempts = attempts
+		}
+	}
+	if value := os.Getenv("PATRIS_EXPORT_SEND_RETRY_BACKOFF"); strings.TrimSpace(value) != "" {
+		cfg.SendUpdates.RetryBackoff = strings.TrimSpace(value)
+	}
+	if value := os.Getenv("PATRIS_EXPORT_SEND_PRODUCT_SYNC_SECRET_ENV"); strings.TrimSpace(value) != "" {
+		cfg.SendUpdates.ProductSyncSecretEnv = strings.TrimSpace(value)
 	}
 	if value := os.Getenv("PATRIS_EXPORT_SEND_COMMAND"); strings.TrimSpace(value) != "" {
 		cfg.SendUpdates.Command = strings.Fields(value)
@@ -813,6 +863,7 @@ func normalize(cfg *Config) {
 	if cfg.Export.BatchSize <= 0 {
 		cfg.Export.BatchSize = 500
 	}
+	cfg.Canonical = canonical.NormalizeConfig(cfg.Canonical)
 	cfg.SendUpdates = updateout.Normalize(cfg.SendUpdates)
 	cfg.Edge.TargetURL = strings.TrimRight(strings.TrimSpace(cfg.Edge.TargetURL), "/")
 	cfg.Edge.Token = strings.TrimSpace(cfg.Edge.Token)

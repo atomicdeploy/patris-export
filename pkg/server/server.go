@@ -25,6 +25,7 @@ import (
 	"github.com/atomicdeploy/patris-export/pkg/filecopy"
 	"github.com/atomicdeploy/patris-export/pkg/notifier"
 	"github.com/atomicdeploy/patris-export/pkg/paradox"
+	"github.com/atomicdeploy/patris-export/pkg/pricingcatalog"
 	"github.com/atomicdeploy/patris-export/pkg/processmon"
 	"github.com/atomicdeploy/patris-export/pkg/recorddiff"
 	"github.com/atomicdeploy/patris-export/pkg/recordmap"
@@ -53,6 +54,7 @@ type Server struct {
 	upgrader           websocket.Upgrader
 	lastRecords        []map[string]interface{}
 	lastRecordsMu      sync.RWMutex
+	lastRecordsReady   bool
 	lastModTime        time.Time
 	lastModTimeMu      sync.RWMutex
 	useTempFile        bool
@@ -66,6 +68,9 @@ type Server struct {
 	lastSourceHashMu   sync.Mutex
 	eventSubscribers   map[chan map[string]interface{}]struct{}
 	eventSubscribersMu sync.RWMutex
+	catalogProvider    pricingcatalog.Provider
+	catalogProviderKey string
+	catalogProviderMu  sync.Mutex
 }
 
 type Options struct {
@@ -199,6 +204,7 @@ func (s *Server) setupRoutes() {
 	s.router.HandleFunc("/partials/charmap", s.handleCharmapPartial).Methods("GET")
 	s.router.HandleFunc("/api/records", s.handleGetRecords).Methods("GET")
 	s.router.HandleFunc("/api/records.{format:json|csv|xlsx}", s.handleGetRecords).Methods("GET")
+	s.router.HandleFunc("/api/product-sync", s.handleGetProductSyncContract).Methods("GET")
 	s.router.HandleFunc("/api/info", s.handleGetInfo).Methods("GET")
 	s.router.HandleFunc("/api/app", s.handleGetApp).Methods("GET")
 	s.router.HandleFunc("/api/charmap", s.handleGetCharmap).Methods("GET")
@@ -233,10 +239,7 @@ func (s *Server) Records() (map[string]interface{}, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to read records: %w", err)
 	}
-	if payload, ok := result.Payload.(map[string]interface{}); ok {
-		return payload, nil
-	}
-	return recordmap.Keyed(result.Rows, result.KeyField, true), nil
+	return recordsPayload(result), nil
 }
 
 func (s *Server) RecordsPayload() (interface{}, error) {
@@ -244,7 +247,11 @@ func (s *Server) RecordsPayload() (interface{}, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to read records: %w", err)
 	}
-	return result.Payload, nil
+	return recordsPayload(result), nil
+}
+
+func recordsPayload(result recordpipe.Result) map[string]interface{} {
+	return recordmap.Keyed(result.Rows, result.KeyField, true)
 }
 
 func (s *Server) RecordResult() (recordpipe.Result, error) {
@@ -318,9 +325,24 @@ func (s *Server) recordsRaw() ([]map[string]interface{}, error) {
 func (s *Server) recordOptions() recordpipe.Options {
 	cfg := s.Config()
 	return recordpipe.Options{
-		Raw:     cfg.Database.Raw,
-		Mapping: cfg.Transform,
+		Raw:             cfg.Database.Raw,
+		Mapping:         cfg.Transform,
+		Canonical:       cfg.Canonical,
+		CatalogProvider: s.pricingCatalogProvider(cfg),
+		GeneratedAt:     time.Now(),
 	}
+}
+
+func (s *Server) pricingCatalogProvider(cfg appconfig.Config) pricingcatalog.Provider {
+	material, _ := json.Marshal(cfg.Canonical.Pricing)
+	key := string(material)
+	s.catalogProviderMu.Lock()
+	defer s.catalogProviderMu.Unlock()
+	if s.catalogProvider == nil || s.catalogProviderKey != key {
+		s.catalogProvider = pricingcatalog.NewProvider(cfg.Canonical.Pricing)
+		s.catalogProviderKey = key
+	}
+	return s.catalogProvider
 }
 
 func (s *Server) replaceDataSource(path string, records []map[string]interface{}) error {
@@ -533,8 +555,26 @@ func (s *Server) handleGetRecords(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	if err := json.NewEncoder(w).Encode(result.Payload); err != nil {
+	if err := json.NewEncoder(w).Encode(recordsPayload(result)); err != nil {
 		http.Error(w, fmt.Sprintf("Failed to encode JSON: %v", err), http.StatusInternalServerError)
+	}
+}
+
+// handleGetProductSyncContract exposes the versioned integration envelope
+// without changing the long-standing row collection returned by /api/records.
+func (s *Server) handleGetProductSyncContract(w http.ResponseWriter, _ *http.Request) {
+	result, err := s.RecordResult()
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Failed to read records: %v", err), http.StatusInternalServerError)
+		return
+	}
+	if result.Contract == nil {
+		http.Error(w, "canonical product-sync contract is not available for this dataset", http.StatusNotFound)
+		return
+	}
+	w.Header().Set("Content-Type", "application/vnd.digitalogic.product-sync+json; version=1.0")
+	if err := json.NewEncoder(w).Encode(result.Contract); err != nil {
+		http.Error(w, fmt.Sprintf("Failed to encode product-sync contract: %v", err), http.StatusInternalServerError)
 	}
 }
 
@@ -1131,10 +1171,9 @@ func (s *Server) sendRecordsToClient(conn *websocket.Conn, connMu *sync.Mutex) {
 		return
 	}
 
-	// Store current records for future change detection
-	s.lastRecordsMu.Lock()
-	s.lastRecords = records
-	s.lastRecordsMu.Unlock()
+	// Client connections are observational and must not replace a watcher-owned
+	// change baseline.
+	s.seedLastRecords(records)
 
 	log.Printf("📤 Sent initial %d records to client", len(records))
 	go s.broadcastProcessInfo()
@@ -1160,6 +1199,9 @@ func (s *Server) initialSnapshotMessage(result recordpipe.Result, dbPath, reason
 	if s.config != nil {
 		message["config"] = s.config.Get()
 	}
+	if result.Contract != nil {
+		message["contract"] = result.SyncEnvelope(nil)
+	}
 	return message
 }
 
@@ -1175,6 +1217,7 @@ func (s *Server) broadcastInitialSnapshot(reason string) {
 
 	s.lastRecordsMu.Lock()
 	s.lastRecords = records
+	s.lastRecordsReady = true
 	s.lastRecordsMu.Unlock()
 
 	s.wsClientsMu.RLock()
@@ -1192,12 +1235,14 @@ func (s *Server) broadcastInitialSnapshot(reason string) {
 
 	log.Printf("📤 Broadcast initial snapshot (%s): %d records from %s", reason, len(records), sourceBaseName(dbPath))
 	s.dispatchUpdateEvent(updateout.Event{
-		Type:      "initial",
-		Timestamp: fmt.Sprintf("%v", message["timestamp"]),
-		Source:    dbPath,
-		Raw:       result.Raw,
-		Records:   records,
-		KeyField:  result.KeyField,
+		Type:             "initial",
+		Timestamp:        fmt.Sprintf("%v", message["timestamp"]),
+		Source:           dbPath,
+		Raw:              result.Raw,
+		Records:          records,
+		KeyField:         result.KeyField,
+		Contract:         result.SyncEnvelope(nil),
+		SnapshotContract: result.SyncEnvelope(nil),
 	})
 	go s.broadcastProcessInfo()
 }
@@ -1226,10 +1271,15 @@ func (s *Server) broadcastUpdate() {
 	// Compute changes
 	s.lastRecordsMu.Lock()
 	changeSet := s.computeChangeSetByKey(records, result.KeyField)
+	changeSet = result.FilterChanges(changeSet)
 	s.lastRecords = records
+	s.lastRecordsReady = true
 	s.lastRecordsMu.Unlock()
 	changeSet.Raw = result.Raw
 	changes := changeSet.Map()
+	if contract := result.SyncEnvelope(&changeSet); contract != nil {
+		changes["contract"] = contract
+	}
 
 	// Log what we're sending
 	added, modified, deleted := changeSet.Counts()
@@ -1253,13 +1303,15 @@ func (s *Server) broadcastUpdate() {
 	if added+modified+deleted > 0 {
 		s.notifyConfigured("row_updated", "Patris rows changed", s.rowChangeMessage(added, modified, deleted, changes))
 		s.dispatchUpdateEvent(updateout.Event{
-			Type:      "update",
-			Timestamp: changeSet.Timestamp,
-			Source:    s.currentDBPath(),
-			Raw:       result.Raw,
-			Records:   records,
-			Changes:   &changeSet,
-			KeyField:  result.KeyField,
+			Type:             "update",
+			Timestamp:        changeSet.Timestamp,
+			Source:           s.currentDBPath(),
+			Raw:              result.Raw,
+			Records:          records,
+			Changes:          &changeSet,
+			KeyField:         result.KeyField,
+			Contract:         result.SyncEnvelope(&changeSet),
+			SnapshotContract: result.SyncEnvelope(nil),
 		})
 	}
 	go s.broadcastProcessInfo()
@@ -1272,12 +1324,14 @@ func (s *Server) dispatchInitialUpdate() {
 		return
 	}
 	s.dispatchUpdateEvent(updateout.Event{
-		Type:      "initial",
-		Timestamp: time.Now().Format(time.RFC3339),
-		Source:    s.currentDBPath(),
-		Raw:       result.Raw,
-		Records:   result.Rows,
-		KeyField:  result.KeyField,
+		Type:             "initial",
+		Timestamp:        time.Now().Format(time.RFC3339),
+		Source:           s.currentDBPath(),
+		Raw:              result.Raw,
+		Records:          result.Rows,
+		KeyField:         result.KeyField,
+		Contract:         result.SyncEnvelope(nil),
+		SnapshotContract: result.SyncEnvelope(nil),
 	})
 }
 
@@ -1290,8 +1344,13 @@ func (s *Server) dispatchUpdateEvent(event updateout.Event) {
 		return
 	}
 	go func() {
-		if err := updateout.Dispatch(context.Background(), cfg, event); err != nil {
+		result, err := updateout.DispatchWithResult(context.Background(), cfg, event)
+		if err != nil {
 			log.Printf("Failed to send update event: %v", err)
+			return
+		}
+		if result.Status != "" {
+			log.Printf("Sent update event: status=%s event_id=%s attempts=%d pending_products=%d", result.Status, result.EventID, result.Attempts, result.PendingProducts)
 		}
 	}()
 }
@@ -1814,12 +1873,22 @@ func (s *Server) computeChangesByKey(newRecords []map[string]interface{}, keyFie
 
 func (s *Server) computeChangeSetByKey(newRecords []map[string]interface{}, keyField string) recorddiff.ChangeSet {
 	changes := recorddiff.Between(s.lastRecords, newRecords, keyField, time.Now())
-	if len(s.lastRecords) == 0 {
+	if !s.lastRecordsReady {
 		log.Printf("🆕 First load: all %d records are new", len(newRecords))
 		return changes
 	}
 	s.logDetailedChanges(changes.Added, changes.Deleted, changes.Modified)
 	return changes
+}
+
+func (s *Server) seedLastRecords(records []map[string]interface{}) {
+	s.lastRecordsMu.Lock()
+	defer s.lastRecordsMu.Unlock()
+	if s.lastRecordsReady {
+		return
+	}
+	s.lastRecords = recordmap.CopyRows(records)
+	s.lastRecordsReady = true
 }
 
 // logDetailedChanges logs detailed information about what changed

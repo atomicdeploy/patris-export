@@ -96,21 +96,27 @@ patris-export --raw convert kala.db -f json -o raw-output/
 # Excel workbook using the transformed row shape.
 patris-export convert kala.db -f xlsx -o output/
 
-# SQLite export with a table-specific mapping file.
-patris-export --mapping mapping.kala.json convert kala.db \
+# SQLite export using the built-in canonical kala_v1 profile.
+patris-export convert kala.db \
   -f sqlite \
   --sqlite-path output/patris-products.sqlite \
   --sqlite-table products
 
-# Watch and send JSON changes to a webhook.
+# Watch and send canonical JSON changes to the Digitalogic v1 receiver.
+# DIGITALOGIC_PRODUCT_SYNC_SECRET is injected into the process environment by
+# the deployment secret manager; only its variable name appears here.
 patris-export convert kala.db -f json -w \
-  --send-url https://example.internal/patris-webhook \
-  --send-mode changes
+  --send-url https://digitalogic.example/wp-json/digitalogic/v1/patris/product-sync \
+  --send-mode changes \
+  --send-product-sync-secret-env DIGITALOGIC_PRODUCT_SYNC_SECRET \
+  --send-retry-attempts 3 \
+  --send-retry-backoff 2s
 ```
 
-See [docs/examples/export-transform-send.md](docs/examples/export-transform-send.md)
-for the mapping schema, value transforms, SQL/MySQL DSN examples, and command
-delivery mode.
+See [the canonical product-sync contract](docs/CANONICAL-PRODUCT-SYNC.md) for
+`kala.db` pricing, Digitalogic, freshness, and payload details. See
+[docs/examples/export-transform-send.md](docs/examples/export-transform-send.md)
+for generic dataset mapping, SQL/MySQL DSN examples, and command delivery mode.
 
 ### Output to STDOUT
 
@@ -506,6 +512,11 @@ curl -H "Accept: text/csv" http://localhost:8080/api/records -o kala.csv
 
 Add `download=1` to ask the API for an attachment filename, for example
 `/api/records.csv?download=1`.
+
+For a configured canonical dataset, `GET /api/product-sync` returns the full
+versioned `digitalogic.product-sync` envelope. `/api/records` deliberately
+remains the Code-keyed product-row collection used by the viewer and embedded
+records API.
 
 **JSON response:**
 ```json

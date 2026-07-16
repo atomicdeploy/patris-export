@@ -1,7 +1,10 @@
 package updateout
 
 import (
+	"bytes"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -9,7 +12,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/atomicdeploy/patris-export/pkg/canonical"
 	"github.com/atomicdeploy/patris-export/pkg/recorddiff"
 )
 
@@ -167,9 +172,356 @@ func TestDispatchHTTPReportsNonSuccessStatus(t *testing.T) {
 	}))
 	defer server.Close()
 
-	err := Dispatch(t.Context(), Config{Enabled: true, URL: server.URL}, Event{Type: "update"})
-	if err == nil || !strings.Contains(err.Error(), "503 Service Unavailable") {
+	err := Dispatch(t.Context(), Config{Enabled: true, URL: server.URL + "?credential=must-not-be-logged"}, Event{Type: "update"})
+	if err == nil || !strings.Contains(err.Error(), "HTTP 503") || !strings.Contains(err.Error(), "retryable=true") {
 		t.Fatalf("expected non-2xx error, got %v", err)
+	}
+	if strings.Contains(err.Error(), "must-not-be-logged") {
+		t.Fatalf("delivery error leaked endpoint query string: %v", err)
+	}
+}
+
+func TestDispatchCanonicalContractUsesDirectDigitalogicEnvelope(t *testing.T) {
+	var body []byte
+	headers := http.Header{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ = io.ReadAll(r.Body)
+		headers = r.Header.Clone()
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+
+	product := canonical.Product{ProductCode: "113007045", FormulaVersion: canonical.FormulaVersion, RecordHash: "sha256:record"}
+	contract := canonical.NewEnvelope([]canonical.Product{product}, "kala.db", "patris-office", time.Unix(1, 0))
+	err := Dispatch(t.Context(), Config{Enabled: true, URL: server.URL, Format: "json", Mode: "changes"}, Event{
+		Type: "update", Source: "kala.db", KeyField: "product_code",
+		Records:  []map[string]interface{}{{"Code": "113007045", "Sharh1": "must-not-cross"}},
+		Contract: contract,
+	})
+	if err != nil {
+		t.Fatalf("canonical dispatch failed: %v", err)
+	}
+	if headers.Get("X-Patris-Contract") != canonical.ContractName || headers.Get("X-Patris-Contract-Version") != canonical.ContractVersion || headers.Get("X-Patris-Event-ID") != contract.EventID {
+		t.Fatalf("contract identity headers missing: %v", headers)
+	}
+	var decoded canonical.Envelope
+	if err := json.Unmarshal(body, &decoded); err != nil {
+		t.Fatalf("webhook body is not a direct contract: %v\n%s", err, body)
+	}
+	if decoded.Schema != canonical.ContractName || len(decoded.Products) != 1 || decoded.Products[0].ProductCode != "113007045" {
+		t.Fatalf("unexpected webhook contract: %+v", decoded)
+	}
+	text := string(body)
+	for _, forbidden := range []string{"\"records\"", "Sharh1", "must-not-cross", "FOROSH", "KHARYD", "ALLANBAR"} {
+		if strings.Contains(text, forbidden) {
+			t.Fatalf("canonical webhook leaked %q: %s", forbidden, body)
+		}
+	}
+}
+
+func TestDispatchDigitalogicRetriesIdenticalEventAndSurfacesRecovery(t *testing.T) {
+	const secret = "test-product-sync-secret-must-not-be-persisted"
+	t.Setenv("DIGITALOGIC_PRODUCT_SYNC_TEST_SECRET", secret)
+
+	product := canonical.Product{ProductCode: "113007045", FormulaVersion: canonical.FormulaVersion, RecordHash: "sha256:record"}
+	contract := canonical.NewEnvelope([]canonical.Product{product}, "kala.db", "patris-office", time.Unix(1, 0))
+	var bodies [][]byte
+	var attempts int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts++
+		body, _ := io.ReadAll(r.Body)
+		bodies = append(bodies, body)
+		if got := r.Header.Get(productSyncSecretHeader); got != secret {
+			t.Errorf("product-sync secret header = %q", got)
+		}
+		if got := r.Header.Get("X-Patris-Contract"); got != canonical.ContractName {
+			t.Errorf("contract header = %q", got)
+		}
+		if got := r.Header.Get("X-Patris-Contract-Version"); got != canonical.ContractVersion {
+			t.Errorf("contract version header = %q", got)
+		}
+		if got := r.Header.Get("X-Patris-Event-ID"); got != contract.EventID {
+			t.Errorf("event identity header = %q", got)
+		}
+		if got := r.Header.Get("X-Patris-Event"); got != "update" {
+			t.Errorf("event type header = %q", got)
+		}
+		if got := r.Header.Get("X-Patris-Source"); got != "patris-office" {
+			t.Errorf("source header = %q", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		switch attempts {
+		case 1:
+			w.WriteHeader(http.StatusServiceUnavailable)
+			fmt.Fprintf(w, `{"success":false,"code":"digitalogic_product_sync_busy","details":{"retryable":true}}`)
+		case 2:
+			fmt.Fprintf(w, `{"success":true,"data":{"status":"partially_applied","event_id":%q,"retryable":true,"pending_products":1}}`, contract.EventID)
+		default:
+			fmt.Fprintf(w, `{"success":true,"data":{"status":"recovered","event_id":%q,"retryable":false,"pending_products":0}}`, contract.EventID)
+		}
+	}))
+	defer server.Close()
+
+	cfg := Config{
+		Enabled: true, URL: server.URL, Format: "json", Mode: "changes", RequireContract: true,
+		RetryAttempts: 3, RetryBackoff: "1ns", ProductSyncSecretEnv: "DIGITALOGIC_PRODUCT_SYNC_TEST_SECRET",
+		Headers: map[string]string{
+			"X-Patris-Contract":         "spoofed",
+			"X-Patris-Contract-Version": "spoofed",
+			"X-Patris-Event-ID":         "spoofed",
+			"X-Patris-Event":            "spoofed",
+			"X-Patris-Source":           "spoofed",
+		},
+	}
+	result, err := DispatchWithResult(t.Context(), cfg, Event{Type: "update", Source: `C:\Patris\data4\kala.db`, Contract: contract})
+	if err != nil {
+		t.Fatalf("product-sync dispatch failed: %v", err)
+	}
+	if result.Status != "recovered" || result.EventID != contract.EventID || result.Attempts != 3 || result.Retryable || result.PendingProducts != 0 {
+		t.Fatalf("unexpected recovery result: %+v", result)
+	}
+	if attempts != 3 || len(bodies) != 3 || !bytes.Equal(bodies[0], bodies[1]) || !bytes.Equal(bodies[1], bodies[2]) {
+		t.Fatalf("retries did not preserve identical event bytes: attempts=%d bodies=%d", attempts, len(bodies))
+	}
+	encoded, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), secret) {
+		t.Fatalf("secret value entered persisted configuration: %s", encoded)
+	}
+}
+
+func TestDispatchDigitalogicPartialExhaustionIsSafeToLog(t *testing.T) {
+	const secret = "must-never-appear-in-errors"
+	t.Setenv("DIGITALOGIC_PRODUCT_SYNC_TEST_SECRET", secret)
+	contract := canonical.NewEnvelope(nil, "kala.db", "patris-office", time.Unix(1, 0))
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"success":true,"data":{"status":"retry_pending","event_id":%q,"retryable":true,"pending_products":2}}`, contract.EventID)
+	}))
+	defer server.Close()
+
+	result, err := DispatchWithResult(t.Context(), Config{
+		Enabled: true, URL: server.URL, Format: "json", RequireContract: true,
+		RetryAttempts: 2, RetryBackoff: "1ns", ProductSyncSecretEnv: "DIGITALOGIC_PRODUCT_SYNC_TEST_SECRET",
+	}, Event{Type: "initial", Source: "kala.db", Contract: contract})
+	if err == nil {
+		t.Fatal("expected retry exhaustion")
+	}
+	if result.Status != "retry_pending" || result.Attempts != 2 || result.PendingProducts != 2 || !result.Retryable {
+		t.Fatalf("retry state was not surfaced: %+v", result)
+	}
+	text := err.Error()
+	for _, forbidden := range []string{secret, productSyncSecretHeader} {
+		if strings.Contains(text, forbidden) {
+			t.Fatalf("safe delivery error leaked %q: %s", forbidden, text)
+		}
+	}
+	for _, expected := range []string{"status=retry_pending", "pending_products=2", "attempts=2", "retryable=true"} {
+		if !strings.Contains(text, expected) {
+			t.Fatalf("delivery error did not surface %q: %s", expected, text)
+		}
+	}
+}
+
+func TestDispatchDoesNotForwardProductSyncSecretAcrossRedirect(t *testing.T) {
+	const secret = "redirect-sensitive-secret"
+	t.Setenv("DIGITALOGIC_PRODUCT_SYNC_TEST_SECRET", secret)
+	contract := canonical.NewEnvelope(nil, "kala.db", "patris-office", time.Unix(1, 0))
+	var redirectedSecret string
+	var targetCalls int
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		targetCalls++
+		redirectedSecret = r.Header.Get(productSyncSecretHeader)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer target.Close()
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Location", target.URL)
+		w.WriteHeader(http.StatusTemporaryRedirect)
+	}))
+	defer origin.Close()
+
+	err := Dispatch(t.Context(), Config{
+		Enabled: true, URL: origin.URL, Format: "json", RequireContract: true,
+		ProductSyncSecretEnv: "DIGITALOGIC_PRODUCT_SYNC_TEST_SECRET",
+	}, Event{Type: "initial", Contract: contract})
+	if err == nil || !strings.Contains(err.Error(), "HTTP 307") {
+		t.Fatalf("redirect was not rejected: %v", err)
+	}
+	if targetCalls != 0 || redirectedSecret != "" {
+		t.Fatalf("product-sync request followed redirect: calls=%d secret=%q", targetCalls, redirectedSecret)
+	}
+}
+
+func TestDispatchRequiresReceiverEventIdentityInStrictProductSyncResponse(t *testing.T) {
+	t.Setenv("DIGITALOGIC_PRODUCT_SYNC_TEST_SECRET", "strict-response")
+	contract := canonical.NewEnvelope(nil, "kala.db", "patris-office", time.Unix(1, 0))
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"success":true,"data":{"status":"accepted","retryable":false,"pending_products":0}}`)
+	}))
+	defer server.Close()
+
+	err := Dispatch(t.Context(), Config{
+		Enabled: true, URL: server.URL, Format: "json", RequireContract: true,
+		ProductSyncSecretEnv: "DIGITALOGIC_PRODUCT_SYNC_TEST_SECRET",
+	}, Event{Type: "initial", Contract: contract})
+	if err == nil || !strings.Contains(err.Error(), "missing product-sync delivery state") {
+		t.Fatalf("missing receiver event identity was accepted: %v", err)
+	}
+}
+
+func TestClassifyDigitalogicReceiverStateMachine(t *testing.T) {
+	contract := canonical.NewEnvelope(nil, "kala.db", "patris-office", time.Unix(1, 0))
+	tests := []struct {
+		name      string
+		status    string
+		retryable bool
+		pending   int
+		wantError bool
+	}{
+		{name: "accepted", status: "accepted"},
+		{name: "already current", status: "already_current"},
+		{name: "replayed", status: "replayed"},
+		{name: "recovered", status: "recovered"},
+		{name: "partial", status: "partially_applied", retryable: true, pending: 1},
+		{name: "retry pending", status: "retry_pending", retryable: true, pending: 2},
+		{name: "unknown", status: "queued", wantError: true},
+		{name: "terminal retryable", status: "accepted", retryable: true, wantError: true},
+		{name: "terminal pending", status: "recovered", pending: 1, wantError: true},
+		{name: "partial not retryable", status: "partially_applied", pending: 1, wantError: true},
+		{name: "partial without pending", status: "retry_pending", retryable: true, wantError: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			body := fmt.Appendf(nil, `{"success":true,"data":{"status":%q,"event_id":%q,"retryable":%t,"pending_products":%d}}`, test.status, contract.EventID, test.retryable, test.pending)
+			result, err := classifyHTTPResponse(DeliveryResult{HTTPStatus: http.StatusOK, Attempts: 1}, body, contract, true)
+			if test.wantError {
+				if !errors.Is(err, errReceiverStateInvalid) || result.Retryable {
+					t.Fatalf("invalid receiver state was not rejected safely: result=%+v err=%v", result, err)
+				}
+				return
+			}
+			if err != nil || result.Status != test.status || result.Retryable != test.retryable || result.PendingProducts != test.pending {
+				t.Fatalf("valid receiver state changed: result=%+v err=%v", result, err)
+			}
+		})
+	}
+}
+
+func TestDispatchRejectsPersistedProductSyncSecretHeader(t *testing.T) {
+	contract := canonical.NewEnvelope(nil, "kala.db", "patris-office", time.Unix(1, 0))
+	err := Dispatch(t.Context(), Config{
+		Enabled: true, URL: "https://example.invalid", Format: "json",
+		Headers: map[string]string{"x-digitalogic-product-sync-secret": "plaintext"},
+	}, Event{Type: "initial", Contract: contract})
+	if err == nil || !strings.Contains(err.Error(), "product_sync_secret_env") {
+		t.Fatalf("persisted receiver secret was not rejected: %v", err)
+	}
+}
+
+func TestDispatchRequiresConfiguredProductSyncSecretEnvironmentValue(t *testing.T) {
+	contract := canonical.NewEnvelope(nil, "kala.db", "patris-office", time.Unix(1, 0))
+	err := Dispatch(t.Context(), Config{
+		Enabled: true, URL: "https://example.invalid", Format: "json",
+		ProductSyncSecretEnv: "DIGITALOGIC_PRODUCT_SYNC_MISSING_SECRET",
+	}, Event{Type: "initial", Contract: contract})
+	if err == nil || !strings.Contains(err.Error(), "missing or empty") {
+		t.Fatalf("missing receiver secret did not fail closed: %v", err)
+	}
+}
+
+func TestDispatchRejectsProductSyncDestinationQueryAuthentication(t *testing.T) {
+	t.Setenv("DIGITALOGIC_PRODUCT_SYNC_TEST_SECRET", "header-only")
+	contract := canonical.NewEnvelope(nil, "kala.db", "patris-office", time.Unix(1, 0))
+	err := Dispatch(t.Context(), Config{
+		Enabled: true, URL: "https://example.invalid/product-sync?token=legacy", Format: "json",
+		ProductSyncSecretEnv: "DIGITALOGIC_PRODUCT_SYNC_TEST_SECRET",
+	}, Event{Type: "initial", Contract: contract})
+	if err == nil || !strings.Contains(err.Error(), "header-only") {
+		t.Fatalf("query authentication was not rejected: %v", err)
+	}
+}
+
+func TestDispatchRejectsRemotePlainHTTPProductSyncDestination(t *testing.T) {
+	t.Setenv("DIGITALOGIC_PRODUCT_SYNC_TEST_SECRET", "https-only")
+	contract := canonical.NewEnvelope(nil, "kala.db", "patris-office", time.Unix(1, 0))
+	err := Dispatch(t.Context(), Config{
+		Enabled: true, URL: "http://digitalogic.example/wp-json/digitalogic/v1/patris/product-sync", Format: "json",
+		ProductSyncSecretEnv: "DIGITALOGIC_PRODUCT_SYNC_TEST_SECRET",
+	}, Event{Type: "initial", Contract: contract})
+	if err == nil || !strings.Contains(err.Error(), "requires HTTPS") {
+		t.Fatalf("remote plaintext destination was not rejected: %v", err)
+	}
+}
+
+func TestCanonicalFullModeSelectsSnapshotInsteadOfDelta(t *testing.T) {
+	generated := time.Unix(1, 0)
+	snapshot := canonical.NewEnvelope([]canonical.Product{
+		{ProductCode: "A", RecordHash: "sha256:a"},
+		{ProductCode: "B", RecordHash: "sha256:b"},
+	}, "kala.db", "office", generated)
+	delta := canonical.NewEnvelope([]canonical.Product{
+		{ProductCode: "B", RecordHash: "sha256:b"},
+	}, "kala.db", "office", generated)
+	delta.EventType = "update"
+	body, _, err := encode(Config{Format: "json", Mode: "full"}, Event{
+		Type: "update", Contract: delta, SnapshotContract: snapshot,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded canonical.Envelope
+	if err := json.Unmarshal(body, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if len(decoded.Products) != 2 || decoded.EventID != snapshot.EventID {
+		t.Fatalf("full mode did not select the snapshot: %+v", decoded)
+	}
+}
+
+func TestCanonicalChangeModeCarriesDeletedCodeTombstone(t *testing.T) {
+	snapshot := canonical.NewEnvelope([]canonical.Product{
+		{ProductCode: "B", RecordHash: "sha256:b"},
+	}, "kala.db", "office", time.Unix(1, 0))
+	changes := recorddiff.ChangeSet{Type: "update", KeyField: "product_code", Deleted: []string{"A"}}
+	delta := canonical.ChangeEnvelope(snapshot, &changes)
+	body, _, err := encode(Config{Format: "json", Mode: "changes"}, Event{
+		Type: "update", Contract: delta, SnapshotContract: snapshot,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded canonical.Envelope
+	if err := json.Unmarshal(body, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if decoded.EventType != "update" || len(decoded.DeletedCodes) != 1 || decoded.DeletedCodes[0].ProductCode != "A" || !decoded.DeletedCodes[0].Deleted {
+		t.Fatalf("canonical webhook tombstone missing: %+v", decoded)
+	}
+}
+
+func TestDispatchRejectsRawOutboundUnlessExplicitlyAllowed(t *testing.T) {
+	cfg := Config{Enabled: true, Command: []string{"must-not-run"}}
+	err := Dispatch(t.Context(), cfg, Event{Type: "update", Raw: true, Records: []map[string]interface{}{{"Sharh1": "secret"}}})
+	if err == nil || !strings.Contains(err.Error(), "raw outbound updates are disabled") {
+		t.Fatalf("raw outbound event was not rejected: %v", err)
+	}
+}
+
+func TestDispatchRequireContractRejectsGenericNonRawPayload(t *testing.T) {
+	cfg := Config{Enabled: true, RequireContract: true, Command: []string{"must-not-run"}}
+	err := Dispatch(t.Context(), cfg, Event{Type: "update", Records: []map[string]interface{}{{"Sharh1": "must-not-cross"}}})
+	if err == nil || !strings.Contains(err.Error(), "requires a canonical contract") {
+		t.Fatalf("generic payload bypassed require_contract: %v", err)
+	}
+
+	cfg.Format = "csv"
+	err = Dispatch(t.Context(), cfg, Event{Type: "update", Contract: &canonical.Envelope{Schema: canonical.ContractName}})
+	if err == nil || !strings.Contains(err.Error(), "requires JSON") {
+		t.Fatalf("CSV bypassed require_contract: %v", err)
 	}
 }
 
@@ -209,6 +561,36 @@ func TestDispatchCommandReceivesChangePayloadAndMetadata(t *testing.T) {
 	}
 }
 
+func TestCommandSinkDoesNotInheritHTTPProductSyncSecret(t *testing.T) {
+	const secretEnv = "DIGITALOGIC_PRODUCT_SYNC_TEST_SECRET"
+	t.Setenv("GO_WANT_UPDATEOUT_HELPER", "1")
+	t.Setenv(secretEnv, "must-not-reach-command")
+	t.Setenv("UPDATEOUT_FORBIDDEN_ENV_NAME", secretEnv)
+	output := filepath.Join(t.TempDir(), "payload.json")
+	t.Setenv("UPDATEOUT_HELPER_FILE", output)
+	contract := canonical.NewEnvelope(nil, "kala.db", "patris-office", time.Unix(1, 0))
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get(productSyncSecretHeader); got != "must-not-reach-command" {
+			t.Errorf("HTTP sink did not receive its dedicated secret")
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"success":true,"data":{"status":"accepted","event_id":%q,"retryable":false,"pending_products":0}}`, contract.EventID)
+	}))
+	defer server.Close()
+
+	result, err := DispatchWithResult(t.Context(), Config{
+		Enabled: true, URL: server.URL, Format: "json", RequireContract: true,
+		ProductSyncSecretEnv: secretEnv,
+		Command:              []string{os.Args[0], "-test.run=TestUpdateoutHelperProcess", "--"},
+	}, Event{Type: "update", Source: "kala.db", KeyField: "sku", Contract: contract})
+	if err != nil || result.Status != "accepted" {
+		t.Fatalf("combined HTTP/command dispatch failed: result=%+v err=%v", result, err)
+	}
+	if _, err := os.Stat(output); err != nil {
+		t.Fatalf("command helper did not receive the contract body: %v", err)
+	}
+}
+
 func TestUpdateoutHelperProcess(t *testing.T) {
 	if os.Getenv("GO_WANT_UPDATEOUT_HELPER") != "1" {
 		return
@@ -219,6 +601,9 @@ func TestUpdateoutHelperProcess(t *testing.T) {
 	}
 	if os.Getenv("PATRIS_EXPORT_EVENT_TYPE") != "update" || os.Getenv("PATRIS_EXPORT_EVENT_KEY_FIELD") != "sku" {
 		os.Exit(3)
+	}
+	if forbidden := os.Getenv("UPDATEOUT_FORBIDDEN_ENV_NAME"); forbidden != "" && os.Getenv(forbidden) != "" {
+		os.Exit(5)
 	}
 	if err := os.WriteFile(os.Getenv("UPDATEOUT_HELPER_FILE"), payload, 0o600); err != nil {
 		os.Exit(4)

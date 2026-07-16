@@ -1,6 +1,7 @@
 package appconfig
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -140,6 +141,68 @@ func TestApplyEnvRuntimeTempPolicy(t *testing.T) {
 	}
 	if TempMemoryLimitBytes(cfg.Runtime.TempMemoryLimitMB) != 42*1024*1024 {
 		t.Fatalf("unexpected temp memory limit bytes")
+	}
+}
+
+func TestCanonicalKalaProfileAndPricingProviderDefaults(t *testing.T) {
+	cfg := Default()
+	profile, exists := cfg.Canonical.Profiles["kala.db"]
+	if !cfg.Canonical.Enabled || !exists || profile.Type != "kala_v1" {
+		t.Fatalf("kala canonical profile is not enabled by default: %+v", cfg.Canonical)
+	}
+	if cfg.Canonical.Pricing.Mode != "static" {
+		t.Fatalf("offline static pricing must be the standalone default, got %q", cfg.Canonical.Pricing.Mode)
+	}
+}
+
+func TestApplyEnvConfiguresDigitalogicWithoutStoringCredentials(t *testing.T) {
+	t.Setenv("PATRIS_EXPORT_DIGITALOGIC_URL", "https://digitalogic.example/wp-json/digitalogic/v1/")
+	t.Setenv("PATRIS_EXPORT_DIGITALOGIC_USERNAME_ENV", "DIGITALOGIC_KEY")
+	t.Setenv("PATRIS_EXPORT_DIGITALOGIC_PASSWORD_ENV", "DIGITALOGIC_SECRET")
+	t.Setenv("PATRIS_EXPORT_PRICING_FRESH_FOR", "2m")
+	t.Setenv("PATRIS_EXPORT_PRICING_MAX_STALE", "30m")
+	t.Setenv("DIGITALOGIC_KEY", "must-not-be-copied")
+	t.Setenv("DIGITALOGIC_SECRET", "must-not-be-copied")
+
+	cfg := Default()
+	ApplyEnv(&cfg)
+	digitalogic := cfg.Canonical.Pricing.Digitalogic
+	if cfg.Canonical.Pricing.Mode != "digitalogic" || digitalogic.BaseURL != "https://digitalogic.example/wp-json/digitalogic/v1" {
+		t.Fatalf("Digitalogic pricing provider was not selected: %+v", cfg.Canonical.Pricing)
+	}
+	if digitalogic.UsernameEnv != "DIGITALOGIC_KEY" || digitalogic.PasswordEnv != "DIGITALOGIC_SECRET" || digitalogic.FreshFor != "2m" || digitalogic.MaxStale != "30m" {
+		t.Fatalf("Digitalogic provider environment references were not normalized: %+v", digitalogic)
+	}
+	encoded, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), "must-not-be-copied") {
+		t.Fatalf("credential values were persisted in config: %s", encoded)
+	}
+}
+
+func TestEnvironmentCanRequireCanonicalOutboundContract(t *testing.T) {
+	t.Setenv("PATRIS_EXPORT_SEND_REQUIRE_CONTRACT", "true")
+	t.Setenv("PATRIS_EXPORT_SEND_ALLOW_RAW", "false")
+	t.Setenv("PATRIS_EXPORT_SEND_RETRY_ATTEMPTS", "3")
+	t.Setenv("PATRIS_EXPORT_SEND_RETRY_BACKOFF", "250ms")
+	t.Setenv("PATRIS_EXPORT_SEND_PRODUCT_SYNC_SECRET_ENV", "DIGITALOGIC_PRODUCT_SYNC_SECRET")
+	t.Setenv("DIGITALOGIC_PRODUCT_SYNC_SECRET", "must-not-enter-config")
+	cfg := Default()
+	ApplyEnv(&cfg)
+	if !cfg.SendUpdates.RequireContract || cfg.SendUpdates.AllowRaw || cfg.SendUpdates.RetryAttempts != 3 || cfg.SendUpdates.RetryBackoff != "250ms" {
+		t.Fatalf("outbound safety environment overrides were not applied: %+v", cfg.SendUpdates)
+	}
+	if cfg.SendUpdates.ProductSyncSecretEnv != "DIGITALOGIC_PRODUCT_SYNC_SECRET" {
+		t.Fatalf("product-sync secret environment reference was not applied: %+v", cfg.SendUpdates)
+	}
+	encoded, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), "must-not-enter-config") {
+		t.Fatalf("product-sync secret value entered config: %s", encoded)
 	}
 }
 

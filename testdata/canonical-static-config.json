@@ -1,0 +1,33 @@
+{
+  "canonical": {
+    "enabled": true,
+    "source_id": "test-fixture",
+    "profiles": {
+      "kala.db": {
+        "type": "kala_v1"
+      }
+    },
+    "pricing": {
+      "mode": "static",
+      "static": {
+        "revision": "testdata-r1",
+        "cny_to_irt": 29000,
+        "currency_effective_date": "2026-07-16",
+        "selected_warehouses": ["1"],
+        "import_freight_methods": [
+          {
+            "id": "air_express",
+            "enabled": true,
+            "price_per_kg_cny": 120
+          }
+        ],
+        "assignments": {
+          "102001011": {
+            "import_freight_method_id": "air_express",
+            "profit_percent": 30
+          }
+        }
+      }
+    }
+  }
+}

@@ -24,6 +24,7 @@ import (
 	"github.com/atomicdeploy/patris-export/pkg/ipc"
 	"github.com/atomicdeploy/patris-export/pkg/oneshot"
 	"github.com/atomicdeploy/patris-export/pkg/paradox"
+	"github.com/atomicdeploy/patris-export/pkg/pricingcatalog"
 	"github.com/atomicdeploy/patris-export/pkg/processmon"
 	"github.com/atomicdeploy/patris-export/pkg/recorddiff"
 	"github.com/atomicdeploy/patris-export/pkg/recordmap"
@@ -71,6 +72,9 @@ var (
 	sendMode        string
 	sendCommand     string
 	sendInitial     bool
+	sendSecretEnv   string
+	sendAttempts    int
+	sendBackoff     string
 	edgeTargetURL   string
 	edgeToken       string
 	edgeSourceID    string
@@ -148,6 +152,9 @@ Supports Persian/Farsi encoding conversion and file watching.
 	convertCmd.Flags().StringVar(&sendMode, "send-mode", "", "Send update mode: changes or full")
 	convertCmd.Flags().StringVar(&sendCommand, "send-command", "", "Command to run for initial/watch updates; payload is written to stdin")
 	convertCmd.Flags().BoolVar(&sendInitial, "send-initial", true, "Send a full initial payload before watch updates")
+	convertCmd.Flags().StringVar(&sendSecretEnv, "send-product-sync-secret-env", "", "Environment-variable name containing the header-only Digitalogic product-sync secret")
+	convertCmd.Flags().IntVar(&sendAttempts, "send-retry-attempts", 0, "Total HTTP delivery attempts (default 1; use retries only with idempotent receivers)")
+	convertCmd.Flags().StringVar(&sendBackoff, "send-retry-backoff", "", "Delay between retryable HTTP delivery attempts (for example 1s)")
 
 	// Info command
 	infoCmd := &cobra.Command{
@@ -630,11 +637,12 @@ func runConvert(cmd *cobra.Command, args []string) {
 
 	var convertMu sync.Mutex
 	var updateState watchChangeState
+	catalogProvider := pricingcatalog.NewProvider(cfg.Canonical.Pricing)
 	convertAndSend := func(path, eventType string) {
 		convertMu.Lock()
 		defer convertMu.Unlock()
 
-		result, err := convertFile(path, charMap, useStdout, cfg)
+		result, err := convertFile(path, charMap, useStdout, cfg, catalogProvider)
 		if err != nil {
 			return
 		}
@@ -727,10 +735,19 @@ func applyConvertFlagOverrides(cmd *cobra.Command, cfg *appconfig.Config) {
 	if cmd.Flags().Changed("send-initial") {
 		cfg.SendUpdates.Initial = sendInitial
 	}
+	if cmd.Flags().Changed("send-product-sync-secret-env") {
+		cfg.SendUpdates.ProductSyncSecretEnv = sendSecretEnv
+	}
+	if cmd.Flags().Changed("send-retry-attempts") {
+		cfg.SendUpdates.RetryAttempts = sendAttempts
+	}
+	if cmd.Flags().Changed("send-retry-backoff") {
+		cfg.SendUpdates.RetryBackoff = sendBackoff
+	}
 	cfg.SendUpdates = updateout.Normalize(cfg.SendUpdates)
 }
 
-func convertFile(dbFile string, charMap converter.CharMapping, useStdout bool, cfg appconfig.Config) (recordpipe.Result, error) {
+func convertFile(dbFile string, charMap converter.CharMapping, useStdout bool, cfg appconfig.Config, catalogProvider pricingcatalog.Provider) (recordpipe.Result, error) {
 	if !useStdout {
 		infoColor.Printf("📂 Opening database: %s\n", filepath.Base(dbFile))
 	}
@@ -745,7 +762,13 @@ func convertFile(dbFile string, charMap converter.CharMapping, useStdout bool, c
 		errorColor.Printf("❌ Failed to read records: %v\n", err)
 		return recordpipe.Result{}, err
 	}
-	result := recordpipe.Build(rawRows, dbFile, recordpipe.Options{Raw: cfg.Convert.Raw || cfg.Database.Raw, Mapping: cfg.Transform})
+	result := recordpipe.Build(rawRows, dbFile, recordpipe.Options{
+		Raw:             cfg.Convert.Raw || cfg.Database.Raw,
+		Mapping:         cfg.Transform,
+		Canonical:       cfg.Canonical,
+		CatalogProvider: catalogProvider,
+		GeneratedAt:     time.Now(),
+	})
 	if !useStdout {
 		infoColor.Printf("📊 Found %d records\n", len(result.Rows))
 	}
@@ -806,7 +829,7 @@ func writeConvertOutput(dbFile string, result recordpipe.Result, useStdout bool,
 		if outputFile == "" {
 			outputFile = filepath.Join(outputDir, baseName+".sqlite")
 		}
-		if err := recordsink.WriteSQLite(outputFile, tableName, result.KeyField, result.Rows); err != nil {
+		if err := recordsink.WriteSQLite(outputFile, tableName, result.KeyField, result.Rows, recordsink.SnapshotOptions{ProtectedKeys: quarantinedCodes(result)}); err != nil {
 			return err
 		}
 	case "mysql":
@@ -816,13 +839,20 @@ func writeConvertOutput(dbFile string, result recordpipe.Result, useStdout bool,
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 		defer cancel()
-		if err := recordsink.SyncSQL(ctx, recordsink.SQLOptions{Driver: "mysql", DSN: dsn, Table: tableName, KeyField: result.KeyField, Batch: cfg.Export.BatchSize}, result.Rows); err != nil {
+		if err := recordsink.SyncSQL(ctx, recordsink.SQLOptions{Driver: "mysql", DSN: dsn, Table: tableName, KeyField: result.KeyField, Batch: cfg.Export.BatchSize, ProtectedKeys: quarantinedCodes(result)}, result.Rows); err != nil {
 			return err
 		}
 		outputFile = "mysql:" + tableName
 	}
 	successColor.Printf("✅ Successfully exported to: %s\n", outputFile)
 	return nil
+}
+
+func quarantinedCodes(result recordpipe.Result) []string {
+	if result.Contract == nil {
+		return nil
+	}
+	return append([]string(nil), result.Contract.QuarantinedCodes...)
 }
 
 func sendConvertUpdate(cfg appconfig.Config, source string, result recordpipe.Result, eventType string, changes *recorddiff.ChangeSet) {
@@ -837,16 +867,23 @@ func sendConvertUpdate(cfg appconfig.Config, source string, result recordpipe.Re
 		timestamp = changes.Timestamp
 	}
 	event := updateout.Event{
-		Type:      eventType,
-		Timestamp: timestamp,
-		Source:    source,
-		Raw:       result.Raw,
-		Records:   result.Rows,
-		Changes:   changes,
-		KeyField:  result.KeyField,
+		Type:             eventType,
+		Timestamp:        timestamp,
+		Source:           source,
+		Raw:              result.Raw,
+		Records:          result.Rows,
+		Changes:          changes,
+		KeyField:         result.KeyField,
+		Contract:         result.SyncEnvelope(changes),
+		SnapshotContract: result.SyncEnvelope(nil),
 	}
-	if err := updateout.Dispatch(context.Background(), cfg.SendUpdates, event); err != nil {
+	delivery, err := updateout.DispatchWithResult(context.Background(), cfg.SendUpdates, event)
+	if err != nil {
 		warningColor.Printf("Send update failed: %v\n", err)
+		return
+	}
+	if delivery.Status != "" {
+		infoColor.Printf("Send update delivered: status=%s event_id=%s attempts=%d pending_products=%d\n", delivery.Status, delivery.EventID, delivery.Attempts, delivery.PendingProducts)
 	}
 }
 
@@ -859,6 +896,7 @@ func (state *watchChangeState) Next(result recordpipe.Result, eventType string, 
 	if eventType != "initial" {
 		changeSet := recorddiff.Between(state.previousRows, result.Rows, result.KeyField, at)
 		changeSet.Raw = result.Raw
+		changeSet = result.FilterChanges(changeSet)
 		changes = &changeSet
 	}
 	state.previousRows = recordmap.CopyRows(result.Rows)
