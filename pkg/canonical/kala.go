@@ -89,7 +89,7 @@ func Transform(ctx context.Context, rows []map[string]interface{}, source string
 		for _, index := range eligible {
 			codes = append(codes, codeString(firstValue(rows[index], "product_code", "code", "Code")))
 		}
-		prefetcher.Prefetch(ctx, codes)
+		provider = prefetcher.Prefetch(ctx, codes)
 	}
 	parsedProducts := make([]Product, len(rows))
 	workers := 1

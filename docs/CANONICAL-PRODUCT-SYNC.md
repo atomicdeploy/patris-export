@@ -82,14 +82,25 @@ Digitalogic mode reads, but does not mutate:
 
 Canonical transform collects unique, non-quarantined Codes before its normal
 per-record resolution, prefetches them in bounded request-order chunks, and
-stores results in the existing assignment LRU. It does not create a second
-pricing client or transformation path. With the default `batch_size: 500` and
-`max_entries: 2048`, a cold 1,002-Code catalog performs exactly three batch
-POSTs plus one catalog GET, and performs zero single-Code requests. Duplicate
-source Codes remain quarantined before prefetch. Batch successes consume the
-minimal assignment projection and preserve the exact decimal together with its
-`profit_percent_source`. A `global_default` value must exactly match the one
-shared default snapshot; inconsistent source/value pairs fail closed.
+stores results in the existing bounded assignment LRU. A transform-scoped
+result barrier also retains only that run's unique Codes and releases each
+outcome as the row resolves, so a deliberately small `max_entries` cannot evict
+current-run successes or diagnostics and recreate single-Code N+1 requests. It
+does not create a second pricing client or transformation path. With the
+default `batch_size: 500` and `max_entries: 2048`, a cold 1,002-Code catalog
+performs exactly three batch POSTs plus one catalog GET, and performs zero
+single-Code requests. Duplicate source Codes remain quarantined before
+prefetch.
+
+All chunks are staged before one atomic cache commit. Every chunk must carry
+the same non-empty default-markup revision and the same schema, configured
+state, source, type, and exact value; a mismatch discards every staged result.
+Batch successes consume the minimal assignment projection and preserve the
+exact decimal together with its `profit_percent_source`. Pricing decimals must
+be quoted, canonical base-10 strings with at most 12 fractional digits;
+unquoted numbers, exponent notation, redundant formatting, and over-scale
+values fail closed. A `global_default` value must exactly match the shared
+default snapshot.
 
 Live outbound delivery to the current Digitalogic `/patris/push` receiver must
 remain disabled; this branch does not enable or deploy it. That receiver must first
@@ -146,13 +157,16 @@ does not support prefetch; Patris safely falls back to existing bounded
 single-Code resolution and emits `pricing_assignment_batch_unsupported`.
 Authentication failures, other HTTP/transport failures, oversized responses,
 malformed schemas, changed result order/Codes, and inconsistent result counts
-fail closed for that freshness window. Typed not-found and ambiguous-Code
-results are cached as authoritative empty assignments, never retried through a
-different lookup path. Only a per-Code server error explicitly marked
-`retryable: true` with a 5xx status may fall back to the existing single-Code
-resolver. Cached stale assignments may still be used only within `max_stale`,
-with explicit warnings; recent catalog failures are also backed off for the
-freshness window so an outage cannot recreate an N+1 catalog storm.
+fail closed for that freshness window. Fresh fail-closed diagnostics are
+honored by later prefetch runs, including when the per-Code diagnostic LRU is
+smaller than a transform, so repeated transforms do not hammer a failing batch
+route. Typed not-found and ambiguous-Code results are cached as authoritative
+empty assignments, never retried through a different lookup path. Only a
+per-Code server error explicitly marked `retryable: true` with a 5xx status may
+fall back to the existing single-Code resolver. Cached stale assignments may
+still be used only within `max_stale`, with explicit warnings; recent catalog
+failures are also backed off for the freshness window so an outage cannot
+recreate an N+1 catalog storm.
 Static/standalone mode implements no prefetch capability and makes no remote
 requests.
 

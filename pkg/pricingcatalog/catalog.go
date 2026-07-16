@@ -94,10 +94,11 @@ type Provider interface {
 }
 
 // Prefetcher is an optional provider capability used by canonical transforms.
-// Providers that do not implement it retain the existing per-record Resolve
-// behavior, which keeps static and independently replaceable providers simple.
+// It returns a transform-scoped Provider whose bounded result barrier protects
+// the current run from persistent-LRU eviction. Providers that do not implement
+// it retain per-record Resolve behavior, keeping static providers simple.
 type Prefetcher interface {
-	Prefetch(context.Context, []string)
+	Prefetch(context.Context, []string) Provider
 }
 
 func DefaultConfig() Config {

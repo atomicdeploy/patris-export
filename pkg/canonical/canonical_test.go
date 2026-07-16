@@ -352,7 +352,7 @@ func TestDigitalogicProfilePrefetches1002CodesInThreeBatchRequests(t *testing.T)
 				"schema": "digitalogic.pricing-assignment-batch", "schema_version": "1.0.0",
 				"requested_count": len(request.Codes), "resolved_count": len(request.Codes), "error_count": 0, "maximum_codes": 500,
 				"default_percentage_markup": map[string]interface{}{
-					"schema": "digitalogic.default-percentage-markup", "schema_version": "1.0.0", "configured": true, "profit_percent": "30", "source": "global_default",
+					"schema": "digitalogic.default-percentage-markup", "schema_version": "1.0.0", "configured": true, "type": "percentage", "profit_percent": "30", "source": "global_default", "revision": "rev-30",
 				},
 				"results": results,
 			}})
@@ -367,7 +367,7 @@ func TestDigitalogicProfilePrefetches1002CodesInThreeBatchRequests(t *testing.T)
 	cfg.Pricing = pricingcatalog.Config{
 		Mode: pricingcatalog.ModeDigitalogic,
 		Digitalogic: pricingcatalog.DigitalogicConfig{
-			BaseURL: server.URL, FreshFor: "1m", MaxStale: "1h",
+			BaseURL: server.URL, FreshFor: "1m", MaxStale: "1h", MaxEntries: 1,
 		},
 	}
 	rows := make([]map[string]interface{}, 1002)
@@ -379,6 +379,11 @@ func TestDigitalogicProfilePrefetches1002CodesInThreeBatchRequests(t *testing.T)
 	products, _ := Transform(context.Background(), rows, "kala.db", cfg, pricingcatalog.NewProvider(cfg.Pricing), time.Now())
 	if len(products) != len(rows) {
 		t.Fatalf("products = %d, want %d", len(products), len(rows))
+	}
+	for index, product := range products {
+		if got := product["import_freight_method_id"]; got != "air" {
+			t.Fatalf("product %d import_freight_method_id = %v, want air; scoped prefetch result was lost", index, got)
+		}
 	}
 	if got := atomic.LoadInt32(&catalogRequests); got != 1 {
 		t.Fatalf("catalog requests = %d, want 1", got)
