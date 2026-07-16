@@ -1,4 +1,5 @@
 import { normalizeRecordsPayload } from './records.js';
+import { createExportMenuController } from './export-menu.js';
 
 // Application state
 const state = {
@@ -3559,17 +3560,6 @@ function sortRecords() {
     });
 }
 
-function setExportMenuOpen(open, options = {}) {
-    const button = document.getElementById('exportBtn');
-    const dropdown = document.getElementById('exportDropdown');
-    if (!button || !dropdown) return;
-    dropdown.classList.toggle('open', !!open);
-    button.setAttribute('aria-expanded', open ? 'true' : 'false');
-    if (open && options.focusFirst) {
-        dropdown.querySelector('.export-option')?.focus();
-    }
-}
-
 function downloadCanonicalWorkbook() {
     const url = new URL('/api/records.xlsx', window.location.origin);
     url.searchParams.set('download', '1');
@@ -3606,9 +3596,6 @@ function exportData(format) {
     } else if (format === 'xlsx') {
         downloadCanonicalWorkbook();
     }
-    
-    // Close export dropdown
-    setExportMenuOpen(false);
 }
 
 // Render column manager with checkboxes for each column
@@ -4137,38 +4124,11 @@ function init() {
     });
     
     // Export button and dropdown
-    document.getElementById('exportBtn').addEventListener('click', () => {
-        const dropdown = document.getElementById('exportDropdown');
-        setExportMenuOpen(!dropdown.classList.contains('open'));
-    });
-
-    document.getElementById('exportBtn').addEventListener('keydown', (event) => {
-        if (event.key === 'ArrowDown') {
-            event.preventDefault();
-            setExportMenuOpen(true, { focusFirst: true });
-        }
-    });
-    
-    document.getElementById('exportJSON').addEventListener('click', () => exportData('json'));
-    document.getElementById('exportCSV').addEventListener('click', () => exportData('csv'));
-    document.getElementById('exportXLSX').addEventListener('click', () => exportData('xlsx'));
-
-    document.getElementById('exportDropdown').addEventListener('keydown', (event) => {
-        const options = [...event.currentTarget.querySelectorAll('.export-option')];
-        const current = options.indexOf(document.activeElement);
-        if (event.key === 'Escape') {
-            event.preventDefault();
-            setExportMenuOpen(false);
-            document.getElementById('exportBtn').focus();
-        } else if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
-            event.preventDefault();
-            const direction = event.key === 'ArrowDown' ? 1 : -1;
-            const next = (current + direction + options.length) % options.length;
-            options[next]?.focus();
-        } else if (event.key === 'Home' || event.key === 'End') {
-            event.preventDefault();
-            options[event.key === 'Home' ? 0 : options.length - 1]?.focus();
-        }
+    const exportMenuController = createExportMenuController({
+        button: document.getElementById('exportBtn'),
+        menu: document.getElementById('exportDropdown'),
+        nextFocusTarget: document.getElementById('columnsBtn'),
+        onActivate: exportData
     });
     
     // Close export dropdown when clicking outside
@@ -4176,7 +4136,7 @@ function init() {
         const exportBtn = document.getElementById('exportBtn');
         const exportDropdown = document.getElementById('exportDropdown');
         if (!exportBtn.contains(e.target) && !exportDropdown.contains(e.target)) {
-            setExportMenuOpen(false);
+            exportMenuController.setOpen(false);
         }
         if (state.openRangePanel && !state.openRangePanel.contains(e.target) && !e.target.closest('.range-popover')) {
             closeOpenRangePanel();

@@ -649,7 +649,11 @@ func (s *Server) writeRecordsXLSX(w http.ResponseWriter, r *http.Request, result
 		return
 	}
 	defer file.Close()
-	stat, _ := file.Stat()
+	stat, err := file.Stat()
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Failed to stat XLSX: %v", err), http.StatusInternalServerError)
+		return
+	}
 	name := strings.TrimSuffix(sourceBaseName(s.currentDBPath()), filepath.Ext(sourceBaseName(s.currentDBPath())))
 	if strings.TrimSpace(name) == "" {
 		name = "patris-export"
