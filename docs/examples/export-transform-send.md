@@ -181,14 +181,37 @@ headers, and secret for every attempt. Network failures, HTTP 408/425/429 and
 selected 5xx transients, and receiver responses with `retryable: true`,
 `partially_applied`, or `retry_pending` are retried. The receiver's
 `accepted`, `already_current`, `replayed`, or `recovered` state is surfaced in
-the CLI/server log. Exhaustion reports only sanitized endpoint and structured
-status/attempt/pending counts; query strings, response bodies, request headers,
-and credential values are never included.
+the CLI/server log. Those terminal states may also report a bounded,
+non-negative `deferred_products` count for Codes that require later catalog
+reconciliation (for example, a product that does not exist in WooCommerce or
+an exact Code/SKU collision that must not be guessed). Deferred reconciliation
+is durable receiver work, not a delivery failure: it is logged as a count only
+and does not cause another HTTP attempt. A missing `deferred_products` field is
+treated as zero for compatibility with existing receivers.
+
+The receiver may include a sibling `deferred_reconciliation` summary containing
+native integer `missing`, `ambiguous`, and `details_truncated` counts plus at
+most 100 detail objects. Patris validates that missing plus ambiguous, and the
+detail count plus truncated count, both equal `deferred_products`; it then
+discards the detail objects. The summary is optional for replaceable receivers,
+and neither its product Codes nor reason details enter logs or delivery errors.
+
+Only `pending_products` represents transient apply work and causes a retry.
+A mixed response may carry both counts, but it remains partial only while the
+pending count is positive. Once pending work recovers, the receiver returns a
+terminal state with `retryable: false` and `pending_products: 0`, even if a
+nonzero deferred count remains. Exhaustion reports only the sanitized endpoint
+and structured status/attempt/pending/deferred counts; query strings, response
+bodies, product identities, request headers, and credential values are never
+included. This distinction is paired with the bounded reconciliation state in
+`atomicdeploy/digitalogic-wp#64`.
 
 Typed receiver responses fail closed unless their state is internally
 consistent: terminal states require zero pending products and
 `retryable: false`; partial/pending states require a positive pending count and
-`retryable: true`. Unknown states and a mismatched or missing event ID are not
+`retryable: true`. The deferred count must be an integer from zero through
+2,147,483,647; negative, fractional, null, overflowing, or otherwise malformed
+counts fail closed. Unknown states and a mismatched or missing event ID are not
 treated as delivery success.
 
 Equivalent environment-only configuration uses

@@ -255,9 +255,9 @@ func TestDispatchDigitalogicRetriesIdenticalEventAndSurfacesRecovery(t *testing.
 			w.WriteHeader(http.StatusServiceUnavailable)
 			fmt.Fprintf(w, `{"success":false,"code":"digitalogic_product_sync_busy","details":{"retryable":true}}`)
 		case 2:
-			fmt.Fprintf(w, `{"success":true,"data":{"status":"partially_applied","event_id":%q,"retryable":true,"pending_products":1}}`, contract.EventID)
+			fmt.Fprintf(w, `{"success":true,"data":{"status":"partially_applied","event_id":%q,"retryable":true,"pending_products":1,"deferred_products":2}}`, contract.EventID)
 		default:
-			fmt.Fprintf(w, `{"success":true,"data":{"status":"recovered","event_id":%q,"retryable":false,"pending_products":0}}`, contract.EventID)
+			fmt.Fprintf(w, `{"success":true,"data":{"status":"recovered","event_id":%q,"retryable":false,"pending_products":0,"deferred_products":2}}`, contract.EventID)
 		}
 	}))
 	defer server.Close()
@@ -277,7 +277,7 @@ func TestDispatchDigitalogicRetriesIdenticalEventAndSurfacesRecovery(t *testing.
 	if err != nil {
 		t.Fatalf("product-sync dispatch failed: %v", err)
 	}
-	if result.Status != "recovered" || result.EventID != contract.EventID || result.Attempts != 3 || result.Retryable || result.PendingProducts != 0 {
+	if result.Status != "recovered" || result.EventID != contract.EventID || result.Attempts != 3 || result.Retryable || result.PendingProducts != 0 || result.DeferredProducts != 2 {
 		t.Fatalf("unexpected recovery result: %+v", result)
 	}
 	if attempts != 3 || len(bodies) != 3 || !bytes.Equal(bodies[0], bodies[1]) || !bytes.Equal(bodies[1], bodies[2]) {
@@ -292,13 +292,39 @@ func TestDispatchDigitalogicRetriesIdenticalEventAndSurfacesRecovery(t *testing.
 	}
 }
 
+func TestDispatchDigitalogicTerminalDeferredProductsDoNotRetry(t *testing.T) {
+	t.Setenv("DIGITALOGIC_PRODUCT_SYNC_TEST_SECRET", "terminal-deferred")
+	contract := canonical.NewEnvelope(nil, "kala.db", "patris-office", time.Unix(1, 0))
+	var attempts int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		attempts++
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"success":true,"data":{"status":"accepted","event_id":%q,"retryable":false,"pending_products":0,"deferred_products":781,"deferred_reconciliation":{"missing":780,"ambiguous":1,"details":[{"product_code":"MISSING-SENSITIVE","reason":"missing","code":"not_found"},{"product_code":"AMBIGUOUS-SENSITIVE","reason":"ambiguous","code":"collision"}],"details_truncated":779}}}`, contract.EventID)
+	}))
+	defer server.Close()
+
+	result, err := DispatchWithResult(t.Context(), Config{
+		Enabled: true, URL: server.URL, Format: "json", RequireContract: true,
+		RetryAttempts: 3, RetryBackoff: "1ns", ProductSyncSecretEnv: "DIGITALOGIC_PRODUCT_SYNC_TEST_SECRET",
+	}, Event{Type: "initial", Source: "kala.db", Contract: contract})
+	if err != nil {
+		t.Fatalf("terminal deferred reconciliation was rejected: %v", err)
+	}
+	if attempts != 1 || result.Attempts != 1 || result.Retryable || result.PendingProducts != 0 || result.DeferredProducts != 781 {
+		t.Fatalf("terminal deferred reconciliation triggered a retry: attempts=%d result=%+v", attempts, result)
+	}
+	if summary := result.DiagnosticSummary(); !strings.Contains(summary, "deferred_products=781") || strings.Contains(summary, "kala.db") || strings.Contains(summary, "SENSITIVE") {
+		t.Fatalf("diagnostic summary was incomplete or exposed source data: %s", summary)
+	}
+}
+
 func TestDispatchDigitalogicPartialExhaustionIsSafeToLog(t *testing.T) {
 	const secret = "must-never-appear-in-errors"
 	t.Setenv("DIGITALOGIC_PRODUCT_SYNC_TEST_SECRET", secret)
 	contract := canonical.NewEnvelope(nil, "kala.db", "patris-office", time.Unix(1, 0))
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprintf(w, `{"success":true,"data":{"status":"retry_pending","event_id":%q,"retryable":true,"pending_products":2}}`, contract.EventID)
+		fmt.Fprintf(w, `{"success":true,"data":{"status":"retry_pending","event_id":%q,"retryable":true,"pending_products":2,"deferred_products":4,"deferred_product_codes":["SENSITIVE-CODE"]}}`, contract.EventID)
 	}))
 	defer server.Close()
 
@@ -309,16 +335,16 @@ func TestDispatchDigitalogicPartialExhaustionIsSafeToLog(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected retry exhaustion")
 	}
-	if result.Status != "retry_pending" || result.Attempts != 2 || result.PendingProducts != 2 || !result.Retryable {
+	if result.Status != "retry_pending" || result.Attempts != 2 || result.PendingProducts != 2 || result.DeferredProducts != 4 || !result.Retryable {
 		t.Fatalf("retry state was not surfaced: %+v", result)
 	}
 	text := err.Error()
-	for _, forbidden := range []string{secret, productSyncSecretHeader} {
+	for _, forbidden := range []string{secret, productSyncSecretHeader, "SENSITIVE-CODE"} {
 		if strings.Contains(text, forbidden) {
 			t.Fatalf("safe delivery error leaked %q: %s", forbidden, text)
 		}
 	}
-	for _, expected := range []string{"status=retry_pending", "pending_products=2", "attempts=2", "retryable=true"} {
+	for _, expected := range []string{"status=retry_pending", "pending_products=2", "deferred_products=4", "attempts=2", "retryable=true"} {
 		if !strings.Contains(text, expected) {
 			t.Fatalf("delivery error did not surface %q: %s", expected, text)
 		}
@@ -380,14 +406,15 @@ func TestClassifyDigitalogicReceiverStateMachine(t *testing.T) {
 		status    string
 		retryable bool
 		pending   int
+		deferred  int
 		wantError bool
 	}{
-		{name: "accepted", status: "accepted"},
-		{name: "already current", status: "already_current"},
-		{name: "replayed", status: "replayed"},
-		{name: "recovered", status: "recovered"},
-		{name: "partial", status: "partially_applied", retryable: true, pending: 1},
-		{name: "retry pending", status: "retry_pending", retryable: true, pending: 2},
+		{name: "accepted", status: "accepted", deferred: 4},
+		{name: "already current", status: "already_current", deferred: 3},
+		{name: "replayed", status: "replayed", deferred: 2},
+		{name: "recovered", status: "recovered", deferred: 1},
+		{name: "partial", status: "partially_applied", retryable: true, pending: 1, deferred: 4},
+		{name: "retry pending", status: "retry_pending", retryable: true, pending: 2, deferred: 3},
 		{name: "unknown", status: "queued", wantError: true},
 		{name: "terminal retryable", status: "accepted", retryable: true, wantError: true},
 		{name: "terminal pending", status: "recovered", pending: 1, wantError: true},
@@ -396,7 +423,7 @@ func TestClassifyDigitalogicReceiverStateMachine(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			body := fmt.Appendf(nil, `{"success":true,"data":{"status":%q,"event_id":%q,"retryable":%t,"pending_products":%d}}`, test.status, contract.EventID, test.retryable, test.pending)
+			body := fmt.Appendf(nil, `{"success":true,"data":{"status":%q,"event_id":%q,"retryable":%t,"pending_products":%d,"deferred_products":%d}}`, test.status, contract.EventID, test.retryable, test.pending, test.deferred)
 			result, err := classifyHTTPResponse(DeliveryResult{HTTPStatus: http.StatusOK, Attempts: 1}, body, contract, true)
 			if test.wantError {
 				if !errors.Is(err, errReceiverStateInvalid) || result.Retryable {
@@ -404,10 +431,91 @@ func TestClassifyDigitalogicReceiverStateMachine(t *testing.T) {
 				}
 				return
 			}
-			if err != nil || result.Status != test.status || result.Retryable != test.retryable || result.PendingProducts != test.pending {
+			if err != nil || result.Status != test.status || result.Retryable != test.retryable || result.PendingProducts != test.pending || result.DeferredProducts != test.deferred {
 				t.Fatalf("valid receiver state changed: result=%+v err=%v", result, err)
 			}
 		})
+	}
+}
+
+func TestClassifyDigitalogicReceiverDefaultsOmittedDeferredProductsToZero(t *testing.T) {
+	contract := canonical.NewEnvelope(nil, "kala.db", "patris-office", time.Unix(1, 0))
+	body := fmt.Appendf(nil, `{"success":true,"data":{"status":"accepted","event_id":%q,"retryable":false,"pending_products":0}}`, contract.EventID)
+	result, err := classifyHTTPResponse(DeliveryResult{HTTPStatus: http.StatusOK, Attempts: 1}, body, contract, true)
+	if err != nil || result.DeferredProducts != 0 {
+		t.Fatalf("omitted deferred count was not compatible: result=%+v err=%v", result, err)
+	}
+
+	body = fmt.Appendf(nil, `{"success":true,"data":{"status":"accepted","event_id":%q,"retryable":false,"pending_products":0,"deferred_products":%d}}`, contract.EventID, maxReceiverReportedProducts)
+	result, err = classifyHTTPResponse(DeliveryResult{HTTPStatus: http.StatusOK, Attempts: 1}, body, contract, true)
+	if err != nil || uint64(result.DeferredProducts) != maxReceiverReportedProducts {
+		t.Fatalf("maximum bounded deferred count was not accepted: result=%+v err=%v", result, err)
+	}
+}
+
+func TestClassifyDigitalogicReceiverRejectsInvalidDeferredProductCounts(t *testing.T) {
+	contract := canonical.NewEnvelope(nil, "kala.db", "patris-office", time.Unix(1, 0))
+	tests := []struct {
+		name  string
+		value string
+	}{
+		{name: "negative", value: "-1"},
+		{name: "above bound", value: "2147483648"},
+		{name: "uint64 overflow", value: "18446744073709551616"},
+		{name: "fractional", value: "1.5"},
+		{name: "quoted", value: `"1"`},
+		{name: "null", value: "null"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			body := fmt.Appendf(nil, `{"success":true,"data":{"status":"accepted","event_id":%q,"retryable":false,"pending_products":0,"deferred_products":%s}}`, contract.EventID, test.value)
+			result, err := classifyHTTPResponse(DeliveryResult{HTTPStatus: http.StatusOK, Attempts: 1}, body, contract, true)
+			if !errors.Is(err, errReceiverStateInvalid) || result.Retryable || result.DeferredProducts != 0 {
+				t.Fatalf("invalid deferred count was not rejected fail-closed: result=%+v err=%v", result, err)
+			}
+		})
+	}
+}
+
+func TestClassifyDigitalogicReceiverRejectsInconsistentDeferredReconciliation(t *testing.T) {
+	contract := canonical.NewEnvelope(nil, "kala.db", "patris-office", time.Unix(1, 0))
+	detailObjects := strings.TrimSuffix(strings.Repeat(`{},`, maxReceiverDeferredDetails+1), ",")
+	tests := []struct {
+		name    string
+		total   int
+		summary string
+	}{
+		{name: "reason totals", total: 2, summary: `{"missing":1,"ambiguous":0,"details":[],"details_truncated":2}`},
+		{name: "detail totals", total: 2, summary: `{"missing":2,"ambiguous":0,"details":[{}],"details_truncated":0}`},
+		{name: "negative count", total: 1, summary: `{"missing":-1,"ambiguous":2,"details":[],"details_truncated":1}`},
+		{name: "overflowing reason sum", total: 1, summary: `{"missing":2147483647,"ambiguous":1,"details":[],"details_truncated":1}`},
+		{name: "missing typed field", total: 0, summary: `{"missing":0,"ambiguous":0,"details":[]}`},
+		{name: "null summary", total: 0, summary: `null`},
+		{name: "null details", total: 0, summary: `{"missing":0,"ambiguous":0,"details":null,"details_truncated":0}`},
+		{name: "non-object detail", total: 1, summary: `{"missing":1,"ambiguous":0,"details":["CODE-MUST-NOT-BE-RETAINED"],"details_truncated":0}`},
+		{name: "too many details", total: maxReceiverDeferredDetails + 1, summary: fmt.Sprintf(`{"missing":%d,"ambiguous":0,"details":[%s],"details_truncated":0}`, maxReceiverDeferredDetails+1, detailObjects)},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			body := fmt.Appendf(nil, `{"success":true,"data":{"status":"accepted","event_id":%q,"retryable":false,"pending_products":0,"deferred_products":%d,"deferred_reconciliation":%s}}`, contract.EventID, test.total, test.summary)
+			result, err := classifyHTTPResponse(DeliveryResult{HTTPStatus: http.StatusOK, Attempts: 1}, body, contract, true)
+			if !errors.Is(err, errReceiverStateInvalid) || result.Retryable || result.DeferredProducts != 0 {
+				t.Fatalf("inconsistent deferred summary was not rejected fail-closed: result=%+v err=%v", result, err)
+			}
+		})
+	}
+}
+
+func TestDispatchGenericWebhookIgnoresProductSyncReceiverFields(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"success":true,"data":{"status":"accepted","retryable":false,"pending_products":0,"deferred_products":-1}}`)
+	}))
+	defer server.Close()
+
+	result, err := DispatchWithResult(t.Context(), Config{Enabled: true, URL: server.URL, Format: "json"}, Event{Type: "update"})
+	if err != nil || result.Status != "" || result.DeferredProducts != 0 {
+		t.Fatalf("generic webhook semantics changed: result=%+v err=%v", result, err)
 	}
 }
 

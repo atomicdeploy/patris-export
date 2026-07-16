@@ -39,6 +39,13 @@ type Config struct {
 
 const productSyncSecretHeader = "X-Digitalogic-Product-Sync-Secret"
 
+// Receiver-reported product counts use a stable, architecture-independent
+// bound. The Digitalogic receiver may enforce a lower storage bound, but a
+// response above this limit is never safe to accept as delivery state.
+const maxReceiverReportedProducts uint64 = 1<<31 - 1
+
+const maxReceiverDeferredDetails = 100
+
 var (
 	errReceiverRejected         = errors.New("receiver rejected request")
 	errReceiverHTTPStatus       = errors.New("receiver returned non-success HTTP status")
@@ -54,24 +61,37 @@ var (
 // its response body or any credential material. Generic webhooks leave Status
 // and EventID empty.
 type DeliveryResult struct {
-	HTTPStatus      int
-	Status          string
-	EventID         string
-	Retryable       bool
-	PendingProducts int
-	Attempts        int
+	HTTPStatus       int
+	Status           string
+	EventID          string
+	Retryable        bool
+	PendingProducts  int
+	DeferredProducts int
+	Attempts         int
+}
+
+// DiagnosticSummary returns only sanitized receiver state. It deliberately
+// has no access to response bodies, product identities, endpoint query
+// strings, request headers, or credentials.
+func (result DeliveryResult) DiagnosticSummary() string {
+	return fmt.Sprintf(
+		"status=%s event_id=%s attempts=%d pending_products=%d deferred_products=%d",
+		safeToken(result.Status), safeToken(result.EventID), result.Attempts,
+		result.PendingProducts, result.DeferredProducts,
+	)
 }
 
 // DeliveryError is safe to print. Endpoint query strings, response bodies,
 // request headers, and transport error strings are deliberately excluded.
 type DeliveryError struct {
-	Endpoint        string
-	HTTPStatus      int
-	Status          string
-	Attempts        int
-	PendingProducts int
-	Retryable       bool
-	Reason          string
+	Endpoint         string
+	HTTPStatus       int
+	Status           string
+	Attempts         int
+	PendingProducts  int
+	DeferredProducts int
+	Retryable        bool
+	Reason           string
 }
 
 func (e *DeliveryError) Error() string {
@@ -87,6 +107,9 @@ func (e *DeliveryError) Error() string {
 	}
 	if e.PendingProducts > 0 {
 		parts = append(parts, fmt.Sprintf("pending_products=%d", e.PendingProducts))
+	}
+	if e.DeferredProducts > 0 {
+		parts = append(parts, fmt.Sprintf("deferred_products=%d", e.DeferredProducts))
 	}
 	if e.Attempts > 0 {
 		parts = append(parts, fmt.Sprintf("attempts=%d", e.Attempts))
@@ -371,10 +394,12 @@ type receiverResponse struct {
 	Success *bool  `json:"success"`
 	Code    string `json:"code"`
 	Data    struct {
-		Status          string `json:"status"`
-		EventID         string `json:"event_id"`
-		Retryable       bool   `json:"retryable"`
-		PendingProducts int    `json:"pending_products"`
+		Status                 string          `json:"status"`
+		EventID                string          `json:"event_id"`
+		Retryable              bool            `json:"retryable"`
+		PendingProducts        int             `json:"pending_products"`
+		DeferredProducts       json.RawMessage `json:"deferred_products"`
+		DeferredReconciliation json.RawMessage `json:"deferred_reconciliation"`
 	} `json:"data"`
 	Details struct {
 		Retryable bool `json:"retryable"`
@@ -386,25 +411,35 @@ func classifyHTTPResponse(result DeliveryResult, body []byte, contract *canonica
 	isProductSync := contract != nil && contract.Schema == canonical.ContractName
 	decodedOK := isProductSync && len(bytes.TrimSpace(body)) > 0 && json.Unmarshal(body, &decoded) == nil && decoded.Success != nil
 	receiverRejected := false
+	var receiverStateError error
 	if decodedOK {
-		result.Status = safeToken(decoded.Data.Status)
-		result.EventID = safeToken(decoded.Data.EventID)
-		result.PendingProducts = decoded.Data.PendingProducts
-		result.Retryable = decoded.Data.Retryable
-		if contract != nil && result.EventID != "" && result.EventID != contract.EventID {
-			result.Retryable = false
-			return result, errReceiverIdentityMismatch
+		deferredProducts, err := receiverProductCount(decoded.Data.DeferredProducts)
+		if err == nil {
+			err = validateDeferredReconciliation(decoded.Data.DeferredReconciliation, deferredProducts)
 		}
-		if *decoded.Success {
-			if err := validateReceiverState(result); err != nil {
-				result.Retryable = false
-				return result, err
-			}
+		if err != nil {
+			receiverStateError = err
 		} else {
-			receiverRejected = true
-			result.Retryable = decoded.Data.Retryable || decoded.Details.Retryable
-			if result.Status == "" {
-				result.Status = safeToken(decoded.Code)
+			result.Status = safeToken(decoded.Data.Status)
+			result.EventID = safeToken(decoded.Data.EventID)
+			result.PendingProducts = decoded.Data.PendingProducts
+			result.DeferredProducts = deferredProducts
+			result.Retryable = decoded.Data.Retryable
+			if contract != nil && result.EventID != "" && result.EventID != contract.EventID {
+				result.Retryable = false
+				return result, errReceiverIdentityMismatch
+			}
+			if *decoded.Success {
+				if err := validateReceiverState(result); err != nil {
+					result.Retryable = false
+					return result, err
+				}
+			} else {
+				receiverRejected = true
+				result.Retryable = decoded.Data.Retryable || decoded.Details.Retryable
+				if result.Status == "" {
+					result.Status = safeToken(decoded.Code)
+				}
 			}
 		}
 	}
@@ -413,6 +448,10 @@ func classifyHTTPResponse(result DeliveryResult, body []byte, contract *canonica
 			result.Retryable = true
 		}
 		return result, errReceiverHTTPStatus
+	}
+	if receiverStateError != nil {
+		result.Retryable = false
+		return result, receiverStateError
 	}
 	if receiverRejected {
 		return result, errReceiverRejected
@@ -424,6 +463,75 @@ func classifyHTTPResponse(result DeliveryResult, body []byte, contract *canonica
 		}
 	}
 	return result, nil
+}
+
+func receiverProductCount(raw json.RawMessage) (int, error) {
+	raw = bytes.TrimSpace(raw)
+	if len(raw) == 0 {
+		return 0, nil
+	}
+	if bytes.Equal(raw, []byte("null")) {
+		return 0, errReceiverStateInvalid
+	}
+	var count uint64
+	if err := json.Unmarshal(raw, &count); err != nil || count > maxReceiverReportedProducts {
+		return 0, errReceiverStateInvalid
+	}
+	return int(count), nil
+}
+
+type receiverDeferredReconciliation struct {
+	Missing          json.RawMessage   `json:"missing"`
+	Ambiguous        json.RawMessage   `json:"ambiguous"`
+	Details          []json.RawMessage `json:"details"`
+	DetailsTruncated json.RawMessage   `json:"details_truncated"`
+}
+
+func validateDeferredReconciliation(raw json.RawMessage, total int) error {
+	raw = bytes.TrimSpace(raw)
+	if len(raw) == 0 {
+		return nil
+	}
+	if bytes.Equal(raw, []byte("null")) {
+		return errReceiverStateInvalid
+	}
+	var summary receiverDeferredReconciliation
+	if err := json.Unmarshal(raw, &summary); err != nil {
+		return errReceiverStateInvalid
+	}
+	missing, err := requiredReceiverProductCount(summary.Missing)
+	if err != nil {
+		return err
+	}
+	ambiguous, err := requiredReceiverProductCount(summary.Ambiguous)
+	if err != nil {
+		return err
+	}
+	truncated, err := requiredReceiverProductCount(summary.DetailsTruncated)
+	if err != nil {
+		return err
+	}
+	if summary.Details == nil || len(summary.Details) > maxReceiverDeferredDetails {
+		return errReceiverStateInvalid
+	}
+	for _, detail := range summary.Details {
+		detail = bytes.TrimSpace(detail)
+		if len(detail) < 2 || detail[0] != '{' || detail[len(detail)-1] != '}' {
+			return errReceiverStateInvalid
+		}
+	}
+	deferred := uint64(total)
+	if uint64(missing)+uint64(ambiguous) != deferred || uint64(len(summary.Details))+uint64(truncated) != deferred {
+		return errReceiverStateInvalid
+	}
+	return nil
+}
+
+func requiredReceiverProductCount(raw json.RawMessage) (int, error) {
+	if len(bytes.TrimSpace(raw)) == 0 {
+		return 0, errReceiverStateInvalid
+	}
+	return receiverProductCount(raw)
 }
 
 func validateReceiverState(result DeliveryResult) error {
@@ -498,7 +606,7 @@ func waitForRetry(ctx context.Context, delay time.Duration) error {
 func deliveryError(endpoint string, result DeliveryResult, retryable bool, reason string) error {
 	return &DeliveryError{
 		Endpoint: endpoint, HTTPStatus: result.HTTPStatus, Status: result.Status,
-		Attempts: result.Attempts, PendingProducts: result.PendingProducts,
+		Attempts: result.Attempts, PendingProducts: result.PendingProducts, DeferredProducts: result.DeferredProducts,
 		Retryable: retryable, Reason: reason,
 	}
 }
