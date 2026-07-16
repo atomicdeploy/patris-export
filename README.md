@@ -96,8 +96,8 @@ patris-export --raw convert kala.db -f json -o raw-output/
 # Excel workbook using the transformed row shape.
 patris-export convert kala.db -f xlsx -o output/
 
-# SQLite export with a table-specific mapping file.
-patris-export --mapping mapping.kala.json convert kala.db \
+# SQLite export using the built-in canonical kala_v1 profile.
+patris-export convert kala.db \
   -f sqlite \
   --sqlite-path output/patris-products.sqlite \
   --sqlite-table products
@@ -108,9 +108,10 @@ patris-export convert kala.db -f json -w \
   --send-mode changes
 ```
 
-See [docs/examples/export-transform-send.md](docs/examples/export-transform-send.md)
-for the mapping schema, value transforms, SQL/MySQL DSN examples, and command
-delivery mode.
+See [the canonical product-sync contract](docs/CANONICAL-PRODUCT-SYNC.md) for
+`kala.db` pricing, Digitalogic, freshness, and payload details. See
+[docs/examples/export-transform-send.md](docs/examples/export-transform-send.md)
+for generic dataset mapping, SQL/MySQL DSN examples, and command delivery mode.
 
 ### Output to STDOUT
 

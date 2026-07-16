@@ -61,7 +61,7 @@ func (e *Exporter) ExportToCSV(records []paradox.Record, fields []paradox.Field,
 func (e *Exporter) ExportToJSONWriter(records []paradox.Record, writer io.Writer) error {
 	// Convert string fields if converter is set
 	if e.converter != nil {
-		records = e.convertRecords(records)
+		records = e.ConvertRecords(records)
 	}
 
 	// Transform records to use Code as key and optimize structure
@@ -88,7 +88,7 @@ func (e *Exporter) ExportToJSONWriter(records []paradox.Record, writer io.Writer
 func (e *Exporter) ExportToCSVWriter(records []paradox.Record, fields []paradox.Field, writer io.Writer) error {
 	// Convert string fields if converter is set
 	if e.converter != nil {
-		records = e.convertRecords(records)
+		records = e.ConvertRecords(records)
 	}
 
 	csvWriter := csv.NewWriter(writer)
@@ -124,8 +124,10 @@ func (e *Exporter) ExportToCSVWriter(records []paradox.Record, fields []paradox.
 	return nil
 }
 
-// convertRecords converts string fields in records using the converter function
-func (e *Exporter) convertRecords(records []paradox.Record) []paradox.Record {
+// ConvertRecords converts string fields while preserving record cardinality
+// and order. Dataset profiles use it before Code-keyed shaping so duplicate
+// identifiers remain observable and can be quarantined safely.
+func (e *Exporter) ConvertRecords(records []paradox.Record) []paradox.Record {
 	converted := make([]paradox.Record, len(records))
 
 	for i, record := range records {
@@ -152,7 +154,7 @@ func (e *Exporter) convertRecords(records []paradox.Record) []paradox.Record {
 func (e *Exporter) ExportRecordsToString(records []paradox.Record) (string, error) {
 	// Convert string fields if converter is set
 	if e.converter != nil {
-		records = e.convertRecords(records)
+		records = e.ConvertRecords(records)
 	}
 
 	// Transform records to use Code as key and optimize structure
@@ -174,7 +176,7 @@ func (e *Exporter) ExportRecordsToString(records []paradox.Record) (string, erro
 func (e *Exporter) ConvertAndTransformRecords(records []paradox.Record) map[string]interface{} {
 	// Convert string fields if converter is set
 	if e.converter != nil {
-		records = e.convertRecords(records)
+		records = e.ConvertRecords(records)
 	}
 
 	// Transform records to use Code as key and optimize structure

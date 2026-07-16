@@ -4,16 +4,21 @@ import (
 	"bytes"
 	"encoding/csv"
 	"encoding/json"
+	"fmt"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/atomicdeploy/patris-export/pkg/appconfig"
+	"github.com/atomicdeploy/patris-export/pkg/canonical"
 	"github.com/gorilla/websocket"
+	"github.com/xuri/excelize/v2"
 )
 
 // TestServerJSON tests the server with a JSON file
@@ -476,6 +481,145 @@ func TestServerJSON(t *testing.T) {
 	})
 }
 
+func TestCanonicalKalaParityAcrossRESTCSVXLSXAndWebSocket(t *testing.T) {
+	configPath := filepath.Join("..", "..", "testdata", "canonical-static-config.json")
+	manager, err := appconfig.Load(configPath)
+	if err != nil {
+		t.Fatalf("load canonical fixture config: %v", err)
+	}
+	dbPath := filepath.Join("..", "..", "testdata", "kala.db")
+	srv, err := NewServerWithOptions(dbPath, nil, Options{Config: manager}, false)
+	if err != nil {
+		t.Fatalf("create canonical server: %v", err)
+	}
+	defer srv.Close()
+
+	request := httptest.NewRequest(http.MethodGet, "/api/records", nil)
+	recorder := httptest.NewRecorder()
+	srv.router.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("REST status = %d: %s", recorder.Code, recorder.Body.String())
+	}
+	var envelope canonical.Envelope
+	if err := json.NewDecoder(recorder.Body).Decode(&envelope); err != nil {
+		t.Fatalf("decode canonical REST envelope: %v", err)
+	}
+	restProduct := canonicalTypedProductByCode(t, envelope.Products, "102001011")
+	assertCanonicalFixtureValues(t, "REST", restProduct)
+
+	csvRequest := httptest.NewRequest(http.MethodGet, "/api/records.csv", nil)
+	csvRecorder := httptest.NewRecorder()
+	srv.router.ServeHTTP(csvRecorder, csvRequest)
+	csvRows, err := csv.NewReader(strings.NewReader(csvRecorder.Body.String())).ReadAll()
+	if err != nil {
+		t.Fatalf("parse canonical CSV: %v", err)
+	}
+	assertTabularCanonicalFixture(t, "CSV", csvRows)
+
+	xlsxRequest := httptest.NewRequest(http.MethodGet, "/api/records.xlsx", nil)
+	xlsxRecorder := httptest.NewRecorder()
+	srv.router.ServeHTTP(xlsxRecorder, xlsxRequest)
+	book, err := excelize.OpenReader(bytes.NewReader(xlsxRecorder.Body.Bytes()))
+	if err != nil {
+		t.Fatalf("open canonical XLSX: %v", err)
+	}
+	xlsxRows, err := book.GetRows("Records")
+	_ = book.Close()
+	if err != nil {
+		t.Fatalf("read canonical XLSX: %v", err)
+	}
+	assertTabularCanonicalFixture(t, "XLSX", xlsxRows)
+
+	httpServer := httptest.NewServer(srv.router)
+	defer httpServer.Close()
+	wsURL := "ws" + strings.TrimPrefix(httpServer.URL, "http") + "/ws"
+	ws, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial canonical websocket: %v", err)
+	}
+	defer ws.Close()
+	_ = ws.SetReadDeadline(time.Now().Add(10 * time.Second))
+	var message struct {
+		Type     string                   `json:"type"`
+		Added    []map[string]interface{} `json:"added"`
+		Contract canonical.Envelope       `json:"contract"`
+	}
+	if err := ws.ReadJSON(&message); err != nil {
+		t.Fatalf("read canonical websocket snapshot: %v", err)
+	}
+	if message.Type != "initial" || message.Contract.Schema != canonical.ContractName {
+		t.Fatalf("websocket contract metadata missing: %+v", message)
+	}
+	wsProduct := canonicalProductByCode(t, message.Added, "102001011")
+	assertCanonicalFixtureValues(t, "WebSocket", wsProduct)
+	contractProduct := canonicalTypedProductByCode(t, message.Contract.Products, "102001011")
+	if !reflect.DeepEqual(restProduct, contractProduct) {
+		t.Fatalf("REST and WebSocket contract products differ:\nREST=%#v\nWS=%#v", restProduct, contractProduct)
+	}
+}
+
+func canonicalProductByCode(t *testing.T, products []map[string]interface{}, code string) map[string]interface{} {
+	t.Helper()
+	for _, product := range products {
+		if product["product_code"] == code {
+			return product
+		}
+	}
+	t.Fatalf("canonical product %s not found", code)
+	return nil
+}
+
+func canonicalTypedProductByCode(t *testing.T, products []canonical.Product, code string) map[string]interface{} {
+	t.Helper()
+	for _, product := range products {
+		if product.ProductCode == code {
+			return product.Map()
+		}
+	}
+	t.Fatalf("canonical product %s not found", code)
+	return nil
+}
+
+func assertCanonicalFixtureValues(t *testing.T, source string, product map[string]interface{}) {
+	t.Helper()
+	if fmt.Sprint(product["foreign_price"]) != "2.75" || fmt.Sprint(product["weight_grams"]) != "1.84" || fmt.Sprint(product["total_stock"]) != "20" || fmt.Sprint(product["final_price"]) != "111999" {
+		t.Fatalf("%s canonical values differ: %#v", source, product)
+	}
+	for _, raw := range []string{"Sharh1", "Sharh2", "FOROSH", "KHARYD", "ALLANBAR", "ANBAR"} {
+		if _, exists := product[raw]; exists {
+			t.Fatalf("%s leaked raw field %s", source, raw)
+		}
+	}
+}
+
+func assertTabularCanonicalFixture(t *testing.T, source string, rows [][]string) {
+	t.Helper()
+	if len(rows) < 2 {
+		t.Fatalf("%s has no data rows", source)
+	}
+	columns := map[string]int{}
+	for index, field := range rows[0] {
+		columns[field] = index
+	}
+	for _, required := range []string{"product_code", "foreign_price", "weight_grams", "total_stock", "final_price", "record_hash"} {
+		if _, exists := columns[required]; !exists {
+			t.Fatalf("%s missing canonical column %s: %v", source, required, rows[0])
+		}
+	}
+	for _, row := range rows[1:] {
+		if len(row) <= columns["product_code"] || row[columns["product_code"]] != "102001011" {
+			continue
+		}
+		for field, expected := range map[string]string{"foreign_price": "2.75", "weight_grams": "1.84", "total_stock": "20", "final_price": "111999"} {
+			if len(row) <= columns[field] || row[columns[field]] != expected {
+				t.Fatalf("%s %s = %q, want %q", source, field, row[columns[field]], expected)
+			}
+		}
+		return
+	}
+	t.Fatalf("%s did not contain fixture Code", source)
+}
+
 // TestWebSocketUpdates tests WebSocket broadcasting of changes
 func TestWebSocketUpdates(t *testing.T) {
 	// Create a temporary JSON file
@@ -693,6 +837,24 @@ func TestComputeChanges(t *testing.T) {
 		}
 	} else {
 		t.Error("Expected deleted field")
+	}
+}
+
+func TestClientSnapshotSeedDoesNotReplaceWatcherBaseline(t *testing.T) {
+	srv := &Server{
+		lastRecords:      []map[string]interface{}{{"Code": "watcher"}},
+		lastRecordsReady: true,
+	}
+	srv.seedLastRecords([]map[string]interface{}{{"Code": "client"}})
+	if len(srv.lastRecords) != 1 || srv.lastRecords[0]["Code"] != "watcher" {
+		t.Fatalf("client snapshot replaced watcher baseline: %#v", srv.lastRecords)
+	}
+
+	empty := &Server{}
+	empty.seedLastRecords([]map[string]interface{}{})
+	empty.seedLastRecords([]map[string]interface{}{{"Code": "later-client"}})
+	if !empty.lastRecordsReady || len(empty.lastRecords) != 0 {
+		t.Fatalf("initialized empty baseline was replaced: %#v", empty.lastRecords)
 	}
 }
 

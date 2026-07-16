@@ -1,7 +1,10 @@
 # Transform, Raw, Export, and Send Update Examples
 
-`patris-export` can now run one shared record pipeline for CLI exports, the REST API,
-WebSocket updates, watch-mode webhooks, and SQL/Excel outputs.
+`patris-export` runs one shared record pipeline for CLI exports, the REST API,
+WebSocket updates, watch-mode webhooks, and SQL/Excel outputs. `kala.db` selects
+the fixed `kala_v1` canonical contract by default; the mapping examples below
+apply to other datasets, or to `kala.db` after explicitly setting
+`PATRIS_EXPORT_CANONICAL=0`. See [the canonical contract](../CANONICAL-PRODUCT-SYNC.md).
 
 ## Raw Mode
 
@@ -74,8 +77,9 @@ patris-export --mapping .\mapping.kala.json convert C:\Patris\data4\kala.db `
   --mysql-table products
 ```
 
-SQLite and MySQL exports create the destination table when needed and upsert by
-the configured key field.
+SQLite and MySQL exports create the destination table when needed, add new
+columns on later exports, preserve canonical numeric types, and upsert by the
+configured key field.
 
 ## Watch and Send Updates
 
@@ -87,6 +91,15 @@ diff implementation as the WebSocket server and contain `added`, `modified`,
 and `deleted` entries. Modified entries include both the changed field values
 and the complete transformed `record`, so downstream upserts do not need to
 reconstruct unchanged fields.
+
+For a canonical profile and JSON delivery, the webhook body is the direct
+versioned `digitalogic.product-sync` envelope instead of this generic wrapper.
+It carries deterministic event identity, complete changed products, and
+deleted-Code tombstones. CSV delivery retains the generic tabular change form.
+
+Raw-mode outbound delivery fails closed by default. `send_updates.allow_raw`
+must be explicitly enabled for a trusted, non-integration destination; never
+enable it for Digitalogic or another product-sync consumer.
 
 ```powershell
 patris-export convert C:\Patris\data4\kala.db -f json -w `
@@ -111,6 +124,7 @@ Config equivalent:
     "method": "POST",
     "format": "json",
     "mode": "changes",
+    "require_contract": true,
     "initial": true,
     "timeout": "10s",
     "headers": {
@@ -119,6 +133,11 @@ Config equivalent:
   }
 }
 ```
+
+Set `require_contract` for every Digitalogic-compatible integration target.
+It rejects generic transformed rows as well as raw rows, and it also rejects
+CSV, so a missing profile or disabled canonical stage cannot leak legacy Patris
+fields through a seemingly non-raw update.
 
 In CSV `changes` mode, each row includes `_change_type` with `added`,
 `modified`, or `deleted`. Modified rows contain the complete transformed row

@@ -9,7 +9,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/atomicdeploy/patris-export/pkg/canonical"
 	"github.com/atomicdeploy/patris-export/pkg/recorddiff"
 )
 
@@ -170,6 +172,112 @@ func TestDispatchHTTPReportsNonSuccessStatus(t *testing.T) {
 	err := Dispatch(t.Context(), Config{Enabled: true, URL: server.URL}, Event{Type: "update"})
 	if err == nil || !strings.Contains(err.Error(), "503 Service Unavailable") {
 		t.Fatalf("expected non-2xx error, got %v", err)
+	}
+}
+
+func TestDispatchCanonicalContractUsesDirectDigitalogicEnvelope(t *testing.T) {
+	var body []byte
+	headers := http.Header{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ = io.ReadAll(r.Body)
+		headers = r.Header.Clone()
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+
+	product := canonical.Product{ProductCode: "113007045", FormulaVersion: canonical.FormulaVersion, RecordHash: "sha256:record"}
+	contract := canonical.NewEnvelope([]canonical.Product{product}, "kala.db", "patris-office", time.Unix(1, 0))
+	err := Dispatch(t.Context(), Config{Enabled: true, URL: server.URL, Format: "json", Mode: "changes"}, Event{
+		Type: "update", Source: "kala.db", KeyField: "product_code",
+		Records:  []map[string]interface{}{{"Code": "113007045", "Sharh1": "must-not-cross"}},
+		Contract: contract,
+	})
+	if err != nil {
+		t.Fatalf("canonical dispatch failed: %v", err)
+	}
+	if headers.Get("X-Patris-Contract") != canonical.ContractName || headers.Get("X-Patris-Contract-Version") != canonical.ContractVersion || headers.Get("X-Patris-Event-ID") != contract.EventID {
+		t.Fatalf("contract identity headers missing: %v", headers)
+	}
+	var decoded canonical.Envelope
+	if err := json.Unmarshal(body, &decoded); err != nil {
+		t.Fatalf("webhook body is not a direct contract: %v\n%s", err, body)
+	}
+	if decoded.Schema != canonical.ContractName || len(decoded.Products) != 1 || decoded.Products[0].ProductCode != "113007045" {
+		t.Fatalf("unexpected webhook contract: %+v", decoded)
+	}
+	text := string(body)
+	for _, forbidden := range []string{"\"records\"", "Sharh1", "must-not-cross", "FOROSH", "KHARYD", "ALLANBAR"} {
+		if strings.Contains(text, forbidden) {
+			t.Fatalf("canonical webhook leaked %q: %s", forbidden, body)
+		}
+	}
+}
+
+func TestCanonicalFullModeSelectsSnapshotInsteadOfDelta(t *testing.T) {
+	generated := time.Unix(1, 0)
+	snapshot := canonical.NewEnvelope([]canonical.Product{
+		{ProductCode: "A", RecordHash: "sha256:a"},
+		{ProductCode: "B", RecordHash: "sha256:b"},
+	}, "kala.db", "office", generated)
+	delta := canonical.NewEnvelope([]canonical.Product{
+		{ProductCode: "B", RecordHash: "sha256:b"},
+	}, "kala.db", "office", generated)
+	delta.EventType = "update"
+	body, _, err := encode(Config{Format: "json", Mode: "full"}, Event{
+		Type: "update", Contract: delta, SnapshotContract: snapshot,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded canonical.Envelope
+	if err := json.Unmarshal(body, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if len(decoded.Products) != 2 || decoded.EventID != snapshot.EventID {
+		t.Fatalf("full mode did not select the snapshot: %+v", decoded)
+	}
+}
+
+func TestCanonicalChangeModeCarriesDeletedCodeTombstone(t *testing.T) {
+	snapshot := canonical.NewEnvelope([]canonical.Product{
+		{ProductCode: "B", RecordHash: "sha256:b"},
+	}, "kala.db", "office", time.Unix(1, 0))
+	changes := recorddiff.ChangeSet{Type: "update", KeyField: "product_code", Deleted: []string{"A"}}
+	delta := canonical.ChangeEnvelope(snapshot, &changes)
+	body, _, err := encode(Config{Format: "json", Mode: "changes"}, Event{
+		Type: "update", Contract: delta, SnapshotContract: snapshot,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded canonical.Envelope
+	if err := json.Unmarshal(body, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if decoded.EventType != "update" || len(decoded.DeletedCodes) != 1 || decoded.DeletedCodes[0].ProductCode != "A" || !decoded.DeletedCodes[0].Deleted {
+		t.Fatalf("canonical webhook tombstone missing: %+v", decoded)
+	}
+}
+
+func TestDispatchRejectsRawOutboundUnlessExplicitlyAllowed(t *testing.T) {
+	cfg := Config{Enabled: true, Command: []string{"must-not-run"}}
+	err := Dispatch(t.Context(), cfg, Event{Type: "update", Raw: true, Records: []map[string]interface{}{{"Sharh1": "secret"}}})
+	if err == nil || !strings.Contains(err.Error(), "raw outbound updates are disabled") {
+		t.Fatalf("raw outbound event was not rejected: %v", err)
+	}
+}
+
+func TestDispatchRequireContractRejectsGenericNonRawPayload(t *testing.T) {
+	cfg := Config{Enabled: true, RequireContract: true, Command: []string{"must-not-run"}}
+	err := Dispatch(t.Context(), cfg, Event{Type: "update", Records: []map[string]interface{}{{"Sharh1": "must-not-cross"}}})
+	if err == nil || !strings.Contains(err.Error(), "requires a canonical contract") {
+		t.Fatalf("generic payload bypassed require_contract: %v", err)
+	}
+
+	cfg.Format = "csv"
+	err = Dispatch(t.Context(), cfg, Event{Type: "update", Contract: &canonical.Envelope{Schema: canonical.ContractName}})
+	if err == nil || !strings.Contains(err.Error(), "requires JSON") {
+		t.Fatalf("CSV bypassed require_contract: %v", err)
 	}
 }
 

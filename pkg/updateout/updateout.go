@@ -12,30 +12,35 @@ import (
 	"strings"
 	"time"
 
+	"github.com/atomicdeploy/patris-export/pkg/canonical"
 	"github.com/atomicdeploy/patris-export/pkg/recorddiff"
 	"github.com/atomicdeploy/patris-export/pkg/recordsink"
 )
 
 type Config struct {
-	Enabled bool              `json:"enabled" yaml:"enabled" toml:"enabled"`
-	URL     string            `json:"url,omitempty" yaml:"url,omitempty" toml:"url,omitempty"`
-	Method  string            `json:"method,omitempty" yaml:"method,omitempty" toml:"method,omitempty"`
-	Format  string            `json:"format,omitempty" yaml:"format,omitempty" toml:"format,omitempty"`
-	Mode    string            `json:"mode,omitempty" yaml:"mode,omitempty" toml:"mode,omitempty"`
-	Initial bool              `json:"initial" yaml:"initial" toml:"initial"`
-	Timeout string            `json:"timeout,omitempty" yaml:"timeout,omitempty" toml:"timeout,omitempty"`
-	Headers map[string]string `json:"headers,omitempty" yaml:"headers,omitempty" toml:"headers,omitempty"`
-	Command []string          `json:"command,omitempty" yaml:"command,omitempty" toml:"command,omitempty"`
+	Enabled         bool              `json:"enabled" yaml:"enabled" toml:"enabled"`
+	URL             string            `json:"url,omitempty" yaml:"url,omitempty" toml:"url,omitempty"`
+	Method          string            `json:"method,omitempty" yaml:"method,omitempty" toml:"method,omitempty"`
+	Format          string            `json:"format,omitempty" yaml:"format,omitempty" toml:"format,omitempty"`
+	Mode            string            `json:"mode,omitempty" yaml:"mode,omitempty" toml:"mode,omitempty"`
+	Initial         bool              `json:"initial" yaml:"initial" toml:"initial"`
+	AllowRaw        bool              `json:"allow_raw,omitempty" yaml:"allow_raw,omitempty" toml:"allow_raw,omitempty"`
+	RequireContract bool              `json:"require_contract,omitempty" yaml:"require_contract,omitempty" toml:"require_contract,omitempty"`
+	Timeout         string            `json:"timeout,omitempty" yaml:"timeout,omitempty" toml:"timeout,omitempty"`
+	Headers         map[string]string `json:"headers,omitempty" yaml:"headers,omitempty" toml:"headers,omitempty"`
+	Command         []string          `json:"command,omitempty" yaml:"command,omitempty" toml:"command,omitempty"`
 }
 
 type Event struct {
-	Type      string                   `json:"type"`
-	Timestamp string                   `json:"timestamp"`
-	Source    string                   `json:"source,omitempty"`
-	Raw       bool                     `json:"raw,omitempty"`
-	Records   []map[string]interface{} `json:"records,omitempty"`
-	Changes   *recorddiff.ChangeSet    `json:"changes,omitempty"`
-	KeyField  string                   `json:"key_field,omitempty"`
+	Type             string                   `json:"type"`
+	Timestamp        string                   `json:"timestamp"`
+	Source           string                   `json:"source,omitempty"`
+	Raw              bool                     `json:"raw,omitempty"`
+	Records          []map[string]interface{} `json:"records,omitempty"`
+	Changes          *recorddiff.ChangeSet    `json:"changes,omitempty"`
+	KeyField         string                   `json:"key_field,omitempty"`
+	Contract         *canonical.Envelope      `json:"contract,omitempty"`
+	SnapshotContract *canonical.Envelope      `json:"snapshot_contract,omitempty"`
 }
 
 func Normalize(cfg Config) Config {
@@ -70,6 +75,17 @@ func Dispatch(ctx context.Context, cfg Config, event Event) error {
 	cfg = Normalize(cfg)
 	if !cfg.Enabled {
 		return nil
+	}
+	if event.Raw && !cfg.AllowRaw {
+		return fmt.Errorf("raw outbound updates are disabled; enable allow_raw explicitly only for a trusted non-integration destination")
+	}
+	if cfg.RequireContract {
+		if cfg.Format != "json" {
+			return fmt.Errorf("require_contract requires JSON delivery")
+		}
+		if selectedContract(cfg, event) == nil {
+			return fmt.Errorf("outbound destination requires a canonical contract")
+		}
 	}
 	if event.Timestamp == "" {
 		event.Timestamp = time.Now().Format(time.RFC3339)
@@ -110,6 +126,11 @@ func sendHTTP(ctx context.Context, cfg Config, event Event) error {
 	req.Header.Set("User-Agent", "patris-export")
 	req.Header.Set("X-Patris-Event", event.Type)
 	req.Header.Set("X-Patris-Source", event.Source)
+	if contract := selectedContract(cfg, event); contract != nil {
+		req.Header.Set("X-Patris-Contract", contract.Schema)
+		req.Header.Set("X-Patris-Contract-Version", contract.SchemaVersion)
+		req.Header.Set("X-Patris-Event-ID", contract.EventID)
+	}
 	for key, value := range cfg.Headers {
 		req.Header.Set(key, value)
 	}
@@ -152,6 +173,13 @@ func runCommand(ctx context.Context, cfg Config, event Event) error {
 }
 
 func encode(cfg Config, event Event) ([]byte, string, error) {
+	if contract := selectedContract(cfg, event); cfg.Format == "json" && contract != nil {
+		data, err := json.MarshalIndent(contract, "", "  ")
+		if err != nil {
+			return nil, "", err
+		}
+		return append(data, '\n'), "application/json; charset=utf-8", nil
+	}
 	if cfg.Mode == "full" || event.Type == "initial" {
 		event.Changes = nil
 	} else {
@@ -170,6 +198,13 @@ func encode(cfg Config, event Event) ([]byte, string, error) {
 		return nil, "", err
 	}
 	return append(data, '\n'), "application/json; charset=utf-8", nil
+}
+
+func selectedContract(cfg Config, event Event) *canonical.Envelope {
+	if (cfg.Mode == "full" || event.Type == "initial") && event.SnapshotContract != nil {
+		return event.SnapshotContract
+	}
+	return event.Contract
 }
 
 func rowsFromChanges(changes *recorddiff.ChangeSet, keyField string) []map[string]interface{} {
