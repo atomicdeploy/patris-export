@@ -973,22 +973,28 @@ func normalize(cfg *Config) {
 	if cfg.UI.ColumnWidths == nil {
 		cfg.UI.ColumnWidths = map[string]int{}
 	}
+	normalizedColumnWidths := make(map[string]int, len(cfg.UI.ColumnWidths))
 	for field, width := range cfg.UI.ColumnWidths {
 		cleanField := strings.TrimSpace(field)
 		if cleanField == "" {
-			delete(cfg.UI.ColumnWidths, field)
 			continue
 		}
-		if width < 80 {
-			width = 80
-		} else if width > 480 {
-			width = 480
+		width = clampUIColumnWidth(width)
+		canonicalField := canonicalUIColumnKey(cleanField)
+		if canonicalField != cleanField || field != cleanField {
+			if _, exists := normalizedColumnWidths[canonicalField]; !exists {
+				normalizedColumnWidths[canonicalField] = width
+			}
 		}
-		if cleanField != field {
-			delete(cfg.UI.ColumnWidths, field)
-		}
-		cfg.UI.ColumnWidths[cleanField] = width
 	}
+	for field, width := range cfg.UI.ColumnWidths {
+		cleanField := strings.TrimSpace(field)
+		if cleanField == "" || field != cleanField || canonicalUIColumnKey(cleanField) != cleanField {
+			continue
+		}
+		normalizedColumnWidths[cleanField] = clampUIColumnWidth(width)
+	}
+	cfg.UI.ColumnWidths = normalizedColumnWidths
 	if cfg.UI.RowIconRules == nil {
 		cfg.UI.RowIconRules = defaultRowIconRules()
 	}
@@ -1026,6 +1032,29 @@ func normalize(cfg *Config) {
 	if cfg.ColumnLabels == nil {
 		cfg.ColumnLabels = map[string]string{}
 	}
+}
+
+func canonicalUIColumnKey(field string) string {
+	switch strings.ToLower(strings.TrimSpace(field)) {
+	case "code", "product_code":
+		return "product_code"
+	case "name":
+		return "name"
+	case "serial":
+		return "serial"
+	default:
+		return strings.TrimSpace(field)
+	}
+}
+
+func clampUIColumnWidth(width int) int {
+	if width < 80 {
+		return 80
+	}
+	if width > 480 {
+		return 480
+	}
+	return width
 }
 
 func setAddr(cfg *Config, addr string) {

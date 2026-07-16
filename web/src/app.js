@@ -5,8 +5,11 @@ import {
     DEFAULT_ROW_ICON_FALLBACK,
     ROW_ICON_NAMES,
     ROW_RULE_OPERATORS,
+    assignStableRecordKeys,
+    canonicalColumnKey,
     clampColumnWidth,
     defaultColumnWidth,
+    duplicateSafeRecordKeys,
     fitMenuPosition,
     iconMarkup,
     keyboardColumnWidth,
@@ -14,12 +17,15 @@ import {
     normalizeRowIconFallback,
     normalizeRowIconRule,
     normalizeRowIconRules,
+    nextRovingKey,
     pruneSelectedKeys,
     resizedColumnWidth,
+    resolvedRovingKey,
     resolveRowIcon,
     rowCommandDefinitions,
     selectionSummary,
     stableRecordKey,
+    structuredValueText,
     tableLanguage,
     tableText
 } from './table-ux.js';
@@ -53,9 +59,12 @@ const state = {
     hiddenColumns: new Set(),  // Track hidden columns
     columnOrder: [],
     selectedKeys: new Set(),
+    recordSelectionKeys: new WeakMap(),
+    rovingRowKey: '',
     rowMenu: {
         record: null,
-        trigger: null
+        trigger: null,
+        focusTarget: null
     },
     openRangePanel: null,
     openRangeAnchor: null,
@@ -848,6 +857,7 @@ const JalaliUtils = {
 
 // Detect field type based on values
 function detectFieldType(field, records) {
+    if (field === 'warehouse_stock') return 'text';
     if (records.length === 0) return 'text';
     
     // Get sample values (configurable sample size for performance)
@@ -884,7 +894,7 @@ function detectFieldType(field, records) {
     }
     
     // Check for categorical (limited unique values)
-    const uniqueValues = new Set(values.map(v => String(v)));
+    const uniqueValues = new Set(values.map(structuredValueText));
     if (uniqueValues.size <= FIELD_DETECTION.CATEGORICAL_MAX_UNIQUE && 
         uniqueValues.size < values.length * FIELD_DETECTION.CATEGORICAL_RATIO) {
         return 'categorical';
@@ -913,7 +923,7 @@ function calculateFieldStats(field, records) {
             stats.hasNull = true;
         } else {
             values.push(value);
-            stats.uniqueValues.add(String(value));
+            stats.uniqueValues.add(structuredValueText(value));
         }
     }
     
@@ -1013,7 +1023,12 @@ function applySettings() {
     setChecked('enableRowIcons', state.settings.enableRowIcons);
     setValue('rowIconFallbackIcon', state.settings.rowIconFallback.icon);
     setValue('rowIconFallbackColor', state.settings.rowIconFallback.color);
-    setValue('rowIconFallbackLabel', state.settings.rowIconFallback.label);
+    setValue(
+        'rowIconFallbackLabel',
+        state.settings.rowIconFallback.label === DEFAULT_ROW_ICON_FALLBACK.label
+            ? t('fallbackProduct')
+            : state.settings.rowIconFallback.label
+    );
     applyConfigToSettingsForm();
     document.body.classList.toggle('rtl-text-mode', !!state.settings.rtlTextDirection);
     document.body.classList.toggle('table-rtl', isTableRTL());
@@ -1064,6 +1079,34 @@ function t(key, values = {}) {
     return tableText(state.settings.language, key, values);
 }
 
+const DEFAULT_RULE_LABELS = Object.freeze({
+    warnings: 'Warnings',
+    stale: 'Stale source data',
+    'price-missing': 'Price unavailable',
+    'weight-missing': 'Weight unavailable',
+    'out-of-stock': 'Out of stock',
+    'in-stock': 'In stock'
+});
+
+function localizedRuleLabel(rule, index = 0) {
+    const defaultLabel = DEFAULT_RULE_LABELS[rule?.id];
+    if (!rule?.label || (defaultLabel && rule.label === defaultLabel)) {
+        const key = `ruleLabel_${String(rule?.id || '').replaceAll('-', '_')}`;
+        const translated = t(key);
+        if (translated !== key) return translated;
+    }
+    return rule?.label || t('rule', { number: index + 1 });
+}
+
+function localizedAppearanceLabel(appearance) {
+    if (appearance?.ruleId) {
+        const index = state.settings.rowIconRules.findIndex(rule => rule.id === appearance.ruleId);
+        if (index >= 0) return localizedRuleLabel(state.settings.rowIconRules[index], index);
+    }
+    if (!appearance?.label || appearance.label === DEFAULT_ROW_ICON_FALLBACK.label) return t('fallbackProduct');
+    return appearance.label;
+}
+
 function applyTableTranslations() {
     document.querySelectorAll('[data-table-i18n]').forEach(element => {
         element.textContent = t(element.dataset.tableI18n);
@@ -1102,7 +1145,7 @@ function populateRowIconOptions(select, selected) {
     ROW_ICON_NAMES.forEach(icon => {
         const option = document.createElement('option');
         option.value = icon;
-        option.textContent = icon.replace(/(^|-)([a-z])/g, (_, separator, letter) => `${separator ? ' ' : ''}${letter.toUpperCase()}`);
+        option.textContent = t(`icon_${icon}`);
         option.selected = icon === selected;
         select.appendChild(option);
     });
@@ -1134,16 +1177,6 @@ function renderRowIconRulesEditor() {
     const container = document.getElementById('rowIconRules');
     if (!container) return;
 
-    const datalist = document.getElementById('rowIconFieldOptions');
-    if (datalist) {
-        datalist.innerHTML = '';
-        CANONICAL_ROW_FIELDS.forEach(field => {
-            const option = document.createElement('option');
-            option.value = field;
-            datalist.appendChild(option);
-        });
-    }
-
     state.settings.rowIconRules = normalizeRowIconRules(state.settings.rowIconRules);
     container.innerHTML = '';
     state.settings.rowIconRules.forEach((rule, index) => {
@@ -1154,7 +1187,7 @@ function renderRowIconRulesEditor() {
         const heading = document.createElement('div');
         heading.className = 'row-icon-rule-heading';
         const title = document.createElement('strong');
-        title.textContent = rule.label || t('rule', { number: index + 1 });
+        title.textContent = localizedRuleLabel(rule, index);
         const enabledLabel = document.createElement('label');
         enabledLabel.className = 'checkbox-label compact-checkbox';
         const enabled = document.createElement('input');
@@ -1180,16 +1213,25 @@ function renderRowIconRulesEditor() {
         const controls = document.createElement('div');
         controls.className = 'row-icon-rule-controls';
 
-        const fieldInput = document.createElement('input');
-        fieldInput.type = 'text';
-        fieldInput.className = 'text-input';
-        fieldInput.setAttribute('list', 'rowIconFieldOptions');
-        fieldInput.value = rule.field;
-        fieldInput.addEventListener('input', () => {
-            rule.field = fieldInput.value.trim();
-            scheduleTableUXPreview();
+        const fieldInput = document.createElement('select');
+        fieldInput.className = 'select-input';
+        const fieldPlaceholder = document.createElement('option');
+        fieldPlaceholder.value = '';
+        fieldPlaceholder.textContent = t('selectCanonicalField');
+        fieldPlaceholder.disabled = true;
+        fieldPlaceholder.selected = !rule.field;
+        fieldInput.appendChild(fieldPlaceholder);
+        CANONICAL_ROW_FIELDS.forEach(field => {
+            const option = document.createElement('option');
+            option.value = field;
+            option.textContent = field;
+            option.selected = field === rule.field;
+            fieldInput.appendChild(option);
         });
-        fieldInput.addEventListener('change', () => scheduleTableUXSave());
+        fieldInput.addEventListener('change', () => {
+            rule.field = fieldInput.value;
+            scheduleTableUXSave();
+        });
 
         const operatorSelect = document.createElement('select');
         operatorSelect.className = 'select-input';
@@ -1240,10 +1282,10 @@ function renderRowIconRulesEditor() {
         const labelInput = document.createElement('input');
         labelInput.type = 'text';
         labelInput.className = 'text-input';
-        labelInput.value = rule.label;
+        labelInput.value = localizedRuleLabel(rule, index);
         labelInput.addEventListener('input', () => {
             rule.label = labelInput.value.trim();
-            title.textContent = rule.label || t('rule', { number: index + 1 });
+            title.textContent = localizedRuleLabel(rule, index);
             scheduleTableUXPreview();
         });
         labelInput.addEventListener('change', () => scheduleTableUXSave());
@@ -2620,6 +2662,7 @@ function handleWebSocketMessage(data) {
         }
         // Initial load - records are already transformed with ANBAR as array
         state.records = normalizeRecordsPayload(data.added || []);
+        refreshRecordSelectionKeys({ reset: true });
         state.filteredRecords = [];
         state.fields = [];
         state.fieldTypes = {};
@@ -2692,6 +2735,7 @@ function handleWebSocketMessage(data) {
             if (changeDescription) changeDescription += ', ';
             changeDescription += `${data.modified.length} modified`;
         }
+        refreshRecordSelectionKeys();
         
         // Trigger notifications if there were changes
         if (totalChanges > 0) {
@@ -2949,9 +2993,64 @@ function ensureCodeFirst() {
     }
 }
 
+function refreshRecordSelectionKeys({ reset = false } = {}) {
+    if (reset) state.recordSelectionKeys = new WeakMap();
+    state.recordSelectionKeys = assignStableRecordKeys(state.records, state.recordSelectionKeys);
+    state.rovingRowKey = resolvedRovingKey(state.rovingRowKey, state.records.map(recordSelectionKey));
+}
+
+function recordSelectionKey(record) {
+    if (!record || typeof record !== 'object') return '';
+    let key = state.recordSelectionKeys.get(record);
+    if (!key) {
+        const base = duplicateSafeRecordKeys([record])[0];
+        key = base || `row:${Date.now().toString(36)}`;
+        state.recordSelectionKeys.set(record, key);
+    }
+    return key;
+}
+
+function captureTableHeaderFocus(thead) {
+    const active = document.activeElement;
+    if (!thead?.contains(active)) return null;
+    if (active.matches('.selection-header-cell .table-selection-checkbox')) return { kind: 'selection' };
+    if (active.closest('[data-header-control="clear-filters"]')) return { kind: 'clear-filters' };
+    const filter = active.closest('th[data-filter-field]');
+    if (filter) {
+        const controls = [...filter.querySelectorAll('input, select, button, [tabindex]')];
+        return { kind: 'filter', field: filter.dataset.filterField, index: Math.max(0, controls.indexOf(active)) };
+    }
+    const header = active.closest('th[data-field]');
+    if (!header) return null;
+    return {
+        kind: active.matches('.column-resizer') ? 'resizer' : 'header',
+        field: header.dataset.field
+    };
+}
+
+function restoreTableHeaderFocus(thead, target) {
+    if (!target) return;
+    let element = null;
+    if (target.kind === 'selection') {
+        element = thead.querySelector('.selection-header-cell .table-selection-checkbox');
+    } else if (target.kind === 'clear-filters') {
+        element = thead.querySelector('[data-header-control="clear-filters"] button');
+    } else if (target.kind === 'filter') {
+        const filter = [...thead.querySelectorAll('th[data-filter-field]')]
+            .find(candidate => candidate.dataset.filterField === target.field);
+        element = filter?.querySelectorAll('input, select, button, [tabindex]')?.[target.index];
+    } else {
+        const header = [...thead.querySelectorAll('th[data-field]')]
+            .find(candidate => candidate.dataset.field === target.field);
+        element = target.kind === 'resizer' ? header?.querySelector('.column-resizer') : header;
+    }
+    element?.focus({ preventScroll: true });
+}
+
 // Render table header with filters
 function renderTableHeader() {
     const thead = document.getElementById('tableHead');
+    const focusTarget = captureTableHeaderFocus(thead);
     thead.innerHTML = '';
 
     const visibleFields = state.fields.filter(field => !state.hiddenColumns.has(field));
@@ -2993,6 +3092,7 @@ function renderTableHeader() {
                     
                     // Create filter cell for this ANBAR field
                     const filterTh = document.createElement('th');
+                    filterTh.dataset.filterField = anbarField;
                     filterTh.appendChild(createFilterControl(anbarField));
                     filterRow.appendChild(filterTh);
                 });
@@ -3010,6 +3110,7 @@ function renderTableHeader() {
             
             // Create filter cell for this field
             const filterTh = document.createElement('th');
+            filterTh.dataset.filterField = field;
             if (field === 'Code') {
                 filterTh.classList.add('sticky-column');
             }
@@ -3029,6 +3130,7 @@ function renderTableHeader() {
     
     const actionsFilter = document.createElement('th');
     actionsFilter.className = 'actions-column';
+    actionsFilter.dataset.headerControl = 'clear-filters';
     // Add clear all filters button
     const clearBtn = document.createElement('button');
     clearBtn.className = 'btn-clear-filters';
@@ -3053,6 +3155,7 @@ function renderTableHeader() {
         thead.appendChild(columnRow);
     }
     thead.appendChild(filterRow);
+    restoreTableHeaderFocus(thead, focusTarget);
 }
 
 const SELECTION_COLUMN_WIDTH = 68;
@@ -3085,7 +3188,7 @@ function renderColumnLayout(visibleFields) {
 }
 
 function columnWidth(field) {
-    return clampColumnWidth(state.settings.columnWidths?.[field], defaultColumnWidth(field));
+    return clampColumnWidth(state.settings.columnWidths?.[canonicalColumnKey(field)], defaultColumnWidth(field));
 }
 
 function updateTablePixelWidth(visibleFields = state.fields.filter(field => !state.hiddenColumns.has(field))) {
@@ -3105,7 +3208,7 @@ function createSelectionHeaderCell(rowSpan) {
     checkbox.className = 'table-selection-checkbox';
     checkbox.setAttribute('aria-label', t('selectAll'));
     checkbox.title = t('selectAll');
-    const summary = selectionSummary(state.selectedKeys, state.filteredRecords);
+    const summary = selectionSummary(state.selectedKeys, state.filteredRecords, recordSelectionKey);
     checkbox.checked = summary.checked;
     checkbox.indeterminate = summary.indeterminate;
     checkbox.disabled = summary.selectable === 0;
@@ -3117,7 +3220,7 @@ function createSelectionHeaderCell(rowSpan) {
 
 function setFilteredSelection(selected) {
     state.filteredRecords.forEach(record => {
-        const key = stableRecordKey(record);
+        const key = recordSelectionKey(record);
         if (!key) return;
         if (selected) state.selectedKeys.add(key);
         else state.selectedKeys.delete(key);
@@ -3128,7 +3231,7 @@ function setFilteredSelection(selected) {
 }
 
 function updateSelectionCount() {
-    pruneSelectedKeys(state.selectedKeys, state.records);
+    pruneSelectedKeys(state.selectedKeys, state.records, recordSelectionKey);
     const count = state.selectedKeys.size;
     const element = document.getElementById('selectionCount');
     if (!element) return;
@@ -3239,7 +3342,9 @@ function createColumnResizer(field) {
 
 function setColumnWidth(field, width, { persist = false } = {}) {
     const normalized = clampColumnWidth(width, defaultColumnWidth(field));
-    state.settings.columnWidths[field] = normalized;
+    const key = canonicalColumnKey(field);
+    state.settings.columnWidths[key] = normalized;
+    if (key !== field) delete state.settings.columnWidths[field];
     const col = [...document.querySelectorAll('#dataTable col[data-column-field]')]
         .find(element => element.dataset.columnField === field);
     if (col) col.style.width = `${normalized}px`;
@@ -3248,6 +3353,7 @@ function setColumnWidth(field, width, { persist = false } = {}) {
 }
 
 function resetColumnWidth(field) {
+    delete state.settings.columnWidths[canonicalColumnKey(field)];
     delete state.settings.columnWidths[field];
     renderTableHeader();
     saveSettings();
@@ -3281,7 +3387,7 @@ function createFilterControl(field) {
         
         const defaultOption = document.createElement('option');
         defaultOption.value = '';
-        defaultOption.textContent = 'All';
+        defaultOption.textContent = t('all');
         select.appendChild(defaultOption);
         
         // Sort unique values
@@ -3322,7 +3428,7 @@ function createFilterControl(field) {
         const input = document.createElement('input');
         input.type = 'text';
         input.className = 'filter-input';
-        input.placeholder = 'Filter...';
+        input.placeholder = t('filterPlaceholder');
         input.value = currentFilter?.value ?? '';
         input.setAttribute('aria-label', `Filter ${displayFieldName(field)} text`);
         
@@ -3804,10 +3910,10 @@ function createCodeFilterControl(currentFilter) {
     typeSelect.className = 'filter-select code-filter-type';
     typeSelect.setAttribute('aria-label', 'Filter Code type');
     [
-        ['', 'All'],
-        ['group', 'Group'],
-        ['subgroup', 'Subgroup'],
-        ['item', 'Item']
+        ['', t('all')],
+        ['group', t('group')],
+        ['subgroup', t('subgroup')],
+        ['item', t('item')]
     ].forEach(([value, label]) => {
         const option = document.createElement('option');
         option.value = value;
@@ -3826,7 +3932,7 @@ function createCodeFilterControl(currentFilter) {
 
     const badge = document.createElement('span');
     badge.className = 'filter-badge';
-    badge.textContent = currentFilter ? 'Code' : 'Any';
+    badge.textContent = currentFilter ? t('code') : t('any');
 
     const update = () => {
         const codeType = typeSelect.value;
@@ -3836,6 +3942,7 @@ function createCodeFilterControl(currentFilter) {
         } else {
             delete state.columnFilters.Code;
         }
+        badge.textContent = codeType || segment ? t('code') : t('any');
         saveColumnFilters();
         applyFilters();
     };
@@ -3864,19 +3971,85 @@ function clearAllFilters() {
     applyFilters();
 }
 
+function captureTableBodyFocus(tbody) {
+    const row = document.activeElement?.closest?.('#tableBody tr[data-row-key]');
+    return row && tbody.contains(row) ? row.dataset.rowKey : '';
+}
+
+function restoreTableBodyFocus(tbody, key) {
+    if (!key) return;
+    const rows = [...tbody.querySelectorAll('tr[data-row-key]')];
+    const row = rows.find(candidate => candidate.dataset.rowKey === key)
+        || rows.find(candidate => candidate.dataset.rowKey === state.rovingRowKey);
+    row?.focus({ preventScroll: true });
+}
+
+function updateRovingRow(key, { focus = false } = {}) {
+    const rows = [...document.querySelectorAll('#tableBody tr[data-row-key]')];
+    const visibleKeys = rows.map(row => row.dataset.rowKey);
+    state.rovingRowKey = resolvedRovingKey(key, visibleKeys);
+    rows.forEach(row => {
+        row.tabIndex = row.dataset.rowKey === state.rovingRowKey ? 0 : -1;
+    });
+    if (focus) {
+        rows.find(row => row.dataset.rowKey === state.rovingRowKey)?.focus({ preventScroll: true });
+    }
+}
+
+function rowAccessibleLabel(record, selectionKey) {
+    const label = stableRecordKey(record) || String(record?.name ?? record?.Name ?? '').trim() || t('inspect');
+    const duplicate = String(selectionKey || '').match(/#(\d+)$/)?.[1];
+    return duplicate ? `${label} (${duplicate})` : label;
+}
+
+function renderTableCellValue(cell, field, value) {
+    if (field === 'warehouse_stock' && value && typeof value === 'object' && !Array.isArray(value)) {
+        const list = document.createElement('div');
+        list.className = 'warehouse-stock-list';
+        Object.entries(value)
+            .sort(([left], [right]) => left.localeCompare(right, undefined, { numeric: true, sensitivity: 'base' }))
+            .forEach(([warehouse, amount]) => {
+                const chip = document.createElement('span');
+                chip.className = 'warehouse-stock-chip';
+                const name = document.createElement('span');
+                name.className = 'warehouse-stock-name';
+                name.textContent = warehouse;
+                const stock = document.createElement('strong');
+                stock.className = 'warehouse-stock-value';
+                stock.textContent = structuredValueText(amount) || '0';
+                chip.append(name, stock);
+                list.appendChild(chip);
+            });
+        if (!list.childElementCount) list.textContent = '—';
+        cell.appendChild(list);
+        return;
+    }
+
+    if (field !== 'Code' && field !== 'Serial' && typeof value !== 'object'
+        && value !== null && value !== undefined && value !== '' && !isNaN(value)) {
+        cell.textContent = formatNumberWithSeparator(value);
+        cell.style.textAlign = 'right';
+        return;
+    }
+    cell.textContent = structuredValueText(value);
+}
+
 // Render table body
 function renderTable(changedIndices = new Set()) {
     const tbody = document.getElementById('tableBody');
     const loading = document.getElementById('loading');
     const emptyState = document.getElementById('emptyState');
+    const focusedRowKey = captureTableBodyFocus(tbody);
 
-    pruneSelectedKeys(state.selectedKeys, state.records);
+    refreshRecordSelectionKeys();
+    pruneSelectedKeys(state.selectedKeys, state.records, recordSelectionKey);
     updateSelectionHeaderState();
     updateSelectionCount();
     loading.style.display = 'none';
 
     if (state.filteredRecords.length === 0) {
         tbody.innerHTML = '';
+        state.rovingRowKey = '';
         emptyState.style.display = 'flex';
         return;
     }
@@ -3894,19 +4067,24 @@ function renderTable(changedIndices = new Set()) {
         }
     }
 
+    const visibleSelectionKeys = recordsToShow.map(recordSelectionKey);
+    state.rovingRowKey = resolvedRovingKey(focusedRowKey || state.rovingRowKey, visibleSelectionKeys);
+
     tbody.innerHTML = '';
 
     recordsToShow.forEach(record => {
         const row = document.createElement('tr');
         const codeInfo = parsePatrisCode(record.Code);
         const recordCode = stableRecordKey(record);
+        const selectionKey = recordSelectionKey(record);
         if (recordCode) {
             row.dataset.code = recordCode;
         }
-        row.tabIndex = 0;
-        row.setAttribute('aria-selected', state.selectedKeys.has(recordCode) ? 'true' : 'false');
-        row.setAttribute('aria-label', recordCode || t('inspect'));
-        row.classList.toggle('selected', state.selectedKeys.has(recordCode));
+        row.dataset.rowKey = selectionKey;
+        row.tabIndex = selectionKey === state.rovingRowKey ? 0 : -1;
+        row.setAttribute('aria-selected', state.selectedKeys.has(selectionKey) ? 'true' : 'false');
+        row.setAttribute('aria-label', rowAccessibleLabel(record, selectionKey));
+        row.classList.toggle('selected', state.selectedKeys.has(selectionKey));
         row.classList.add(`code-${codeInfo.type}`);
         row.classList.add(anbarTotal(record) > 0 ? 'has-stock' : 'no-stock');
 
@@ -3925,7 +4103,7 @@ function renderTable(changedIndices = new Set()) {
             }
         }
 
-        row.appendChild(createRowSelectionCell(record, recordCode, row));
+        row.appendChild(createRowSelectionCell(record, selectionKey, row));
 
         // Add data cells
         state.fields.forEach(field => {
@@ -3950,16 +4128,7 @@ function renderTable(changedIndices = new Set()) {
                 // Right-align numeric ANBAR values
                 td.style.textAlign = 'right';
             } else {
-                const value = record[field];
-
-                // Apply thousand separator to numeric fields (except Code and Serial)
-                if (field !== 'Code' && field !== 'Serial' && value !== null && value !== undefined && !isNaN(value)) {
-                    td.textContent = formatNumberWithSeparator(value);
-                    // Right-align numeric fields
-                    td.style.textAlign = 'right';
-                } else {
-                    td.textContent = value !== null && value !== undefined ? value : '';
-                }
+                renderTableCellValue(td, field, record[field]);
             }
 
             // Make Code column sticky
@@ -3983,6 +4152,7 @@ function renderTable(changedIndices = new Set()) {
         menuButton.setAttribute('aria-label', menuButton.title);
         menuButton.setAttribute('aria-haspopup', 'menu');
         menuButton.setAttribute('aria-expanded', 'false');
+        menuButton.tabIndex = -1;
         menuButton.addEventListener('click', event => {
             event.stopPropagation();
             openRowCommandMenu(record, { trigger: menuButton, focusMenu: true });
@@ -3994,14 +4164,19 @@ function renderTable(changedIndices = new Set()) {
 
         // Make row clickable to inspect
         row.addEventListener('click', () => {
+            updateRovingRow(selectionKey);
             persistScrollAnchorForCode(recordCode);
             inspectRecord(record);
+        });
+        row.addEventListener('focus', event => {
+            if (event.target === row) updateRovingRow(selectionKey);
         });
         row.addEventListener('contextmenu', event => {
             event.preventDefault();
             openRowCommandMenu(record, { point: { x: event.clientX, y: event.clientY }, trigger: row, focusMenu: true });
         });
         row.addEventListener('keydown', event => {
+            if (event.target !== row) return;
             if (event.key === 'ContextMenu' || (event.shiftKey && event.key === 'F10')) {
                 event.preventDefault();
                 const rect = row.getBoundingClientRect();
@@ -4010,6 +4185,16 @@ function renderTable(changedIndices = new Set()) {
                     trigger: row,
                     focusMenu: true
                 });
+            } else if (['ArrowUp', 'ArrowDown', 'Home', 'End'].includes(event.key)) {
+                event.preventDefault();
+                updateRovingRow(nextRovingKey(visibleSelectionKeys, selectionKey, event.key), { focus: true });
+            } else if (event.key === ' ') {
+                event.preventDefault();
+                executeRowCommand('toggle_selection', record);
+            } else if (event.key === 'Enter') {
+                event.preventDefault();
+                persistScrollAnchorForCode(recordCode);
+                inspectRecord(record);
             }
         });
 
@@ -4018,9 +4203,10 @@ function renderTable(changedIndices = new Set()) {
     if (!(state.settings.autoScrollToChanged && changedIndices.size > 0)) {
         restoreScrollAnchorAfterRender();
     }
+    restoreTableBodyFocus(tbody, focusedRowKey);
 }
 
-function createRowSelectionCell(record, recordCode, row) {
+function createRowSelectionCell(record, selectionKey, row) {
     const cell = document.createElement('td');
     cell.className = 'selection-column selection-cell';
     const content = document.createElement('div');
@@ -4028,14 +4214,14 @@ function createRowSelectionCell(record, recordCode, row) {
     const checkbox = document.createElement('input');
     checkbox.type = 'checkbox';
     checkbox.className = 'table-selection-checkbox';
-    checkbox.checked = !!recordCode && state.selectedKeys.has(recordCode);
-    checkbox.disabled = !recordCode;
-    checkbox.setAttribute('aria-label', t('selectRowLabel', { code: recordCode || '—' }));
+    checkbox.checked = state.selectedKeys.has(selectionKey);
+    checkbox.tabIndex = -1;
+    checkbox.setAttribute('aria-label', t('selectRowLabel', { code: rowAccessibleLabel(record, selectionKey) }));
     checkbox.addEventListener('click', event => event.stopPropagation());
     checkbox.addEventListener('change', () => {
-        if (!recordCode) return;
-        if (checkbox.checked) state.selectedKeys.add(recordCode);
-        else state.selectedKeys.delete(recordCode);
+        if (checkbox.checked) state.selectedKeys.add(selectionKey);
+        else state.selectedKeys.delete(selectionKey);
+        updateRovingRow(selectionKey);
         row.classList.toggle('selected', checkbox.checked);
         row.setAttribute('aria-selected', checkbox.checked ? 'true' : 'false');
         updateSelectionHeaderState();
@@ -4049,9 +4235,10 @@ function createRowSelectionCell(record, recordCode, row) {
         icon.className = 'conditional-row-icon';
         icon.style.color = appearance.color;
         icon.innerHTML = iconMarkup(appearance.icon);
-        icon.title = appearance.label || appearance.icon;
+        const appearanceLabel = localizedAppearanceLabel(appearance);
+        icon.title = appearanceLabel;
         icon.setAttribute('role', 'img');
-        icon.setAttribute('aria-label', appearance.label || appearance.icon);
+        icon.setAttribute('aria-label', appearanceLabel);
         if (appearance.ruleId) icon.dataset.ruleId = appearance.ruleId;
         content.appendChild(icon);
     }
@@ -4062,7 +4249,7 @@ function createRowSelectionCell(record, recordCode, row) {
 function updateSelectionHeaderState() {
     const checkbox = document.querySelector('.selection-header-cell .table-selection-checkbox');
     if (!checkbox) return;
-    const summary = selectionSummary(state.selectedKeys, state.filteredRecords);
+    const summary = selectionSummary(state.selectedKeys, state.filteredRecords, recordSelectionKey);
     checkbox.checked = summary.checked;
     checkbox.indeterminate = summary.indeterminate;
     checkbox.disabled = summary.selectable === 0;
@@ -4070,8 +4257,9 @@ function updateSelectionHeaderState() {
 
 function commandsForRow(record) {
     const recordCode = stableRecordKey(record);
+    const selectionKey = recordSelectionKey(record);
     return rowCommandDefinitions({
-        selected: !!recordCode && state.selectedKeys.has(recordCode),
+        selected: state.selectedKeys.has(selectionKey),
         hasCode: !!recordCode
     }).map(definition => ({
         ...definition,
@@ -4086,6 +4274,7 @@ function openRowCommandMenu(record, { point = null, trigger = null, focusMenu = 
     closeRowCommandMenu({ restoreFocus: false });
     state.rowMenu.record = record;
     state.rowMenu.trigger = trigger;
+    state.rowMenu.focusTarget = trigger?.closest?.('tr[data-row-key]') || trigger;
     if (trigger?.matches('.row-action-button')) trigger.setAttribute('aria-expanded', 'true');
 
     menu.innerHTML = '';
@@ -4100,7 +4289,7 @@ function openRowCommandMenu(record, { point = null, trigger = null, focusMenu = 
         item.querySelector('span').textContent = command.label;
         item.addEventListener('click', event => {
             event.stopPropagation();
-            closeRowCommandMenu({ restoreFocus: false });
+            closeRowCommandMenu({ restoreFocus: true });
             Promise.resolve(command.execute()).catch(error => {
                 showInAppToast(t('copyFailed'), error.message, { error: true, source: 'row_action', eventType: 'row_action' });
             });
@@ -4142,13 +4331,15 @@ function closeRowCommandMenu({ restoreFocus = false } = {}) {
     const menu = document.getElementById('rowContextMenu');
     if (!menu || menu.hidden) return;
     const trigger = state.rowMenu.trigger;
+    const focusTarget = state.rowMenu.focusTarget;
     if (trigger?.matches('.row-action-button')) trigger.setAttribute('aria-expanded', 'false');
     menu.hidden = true;
     menu.classList.remove('open');
     menu.innerHTML = '';
     state.rowMenu.record = null;
     state.rowMenu.trigger = null;
-    if (restoreFocus && trigger?.isConnected) trigger.focus({ preventScroll: true });
+    state.rowMenu.focusTarget = null;
+    if (restoreFocus && focusTarget?.isConnected) focusTarget.focus({ preventScroll: true });
 }
 
 function initRowCommandMenu() {
@@ -4175,7 +4366,8 @@ function initRowCommandMenu() {
             event.preventDefault();
             items[event.key === 'Home' ? 0 : items.length - 1]?.focus();
         } else if (event.key === 'Tab') {
-            closeRowCommandMenu({ restoreFocus: false });
+            event.preventDefault();
+            closeRowCommandMenu({ restoreFocus: true });
         }
     });
     window.addEventListener('resize', () => closeRowCommandMenu({ restoreFocus: false }));
@@ -4184,6 +4376,7 @@ function initRowCommandMenu() {
 
 async function executeRowCommand(commandID, record) {
     const recordCode = stableRecordKey(record);
+    const selectionKey = recordSelectionKey(record);
     switch (commandID) {
         case 'inspect':
             persistScrollAnchorForCode(recordCode);
@@ -4198,9 +4391,9 @@ async function executeRowCommand(commandID, record) {
             showInAppToast(t('copied'), t('jsonCopied'), { source: 'row_action', eventType: 'row_action' });
             return;
         case 'toggle_selection':
-            if (!recordCode) return;
-            if (state.selectedKeys.has(recordCode)) state.selectedKeys.delete(recordCode);
-            else state.selectedKeys.add(recordCode);
+            if (state.selectedKeys.has(selectionKey)) state.selectedKeys.delete(selectionKey);
+            else state.selectedKeys.add(selectionKey);
+            state.rovingRowKey = selectionKey;
             renderTableHeader();
             renderTable();
             return;
@@ -4564,7 +4757,7 @@ function filterRecords() {
             return state.fields.some(field => {
                 const value = getFieldValue(record, field);
                 if (value === null || value === undefined) return false;
-                return String(value).toLowerCase().includes(searchLower);
+                return structuredValueText(value).toLowerCase().includes(searchLower);
             });
         });
     }
@@ -4595,7 +4788,7 @@ function passesFilter(record, field, filter) {
     
     switch (filter.type) {
         case 'categorical':
-            return String(value) === filter.value;
+            return structuredValueText(value) === filter.value;
             
         case 'numeric':
             const numValue = typeof value === 'string' ? parseFloat(value) : value;
@@ -4625,7 +4818,7 @@ function passesFilter(record, field, filter) {
             return true;
             
         case 'text':
-            return String(value).toLowerCase().includes(filter.value.toLowerCase());
+            return structuredValueText(value).toLowerCase().includes(filter.value.toLowerCase());
 
         case 'code':
             const parsed = parsePatrisCode(value);
@@ -4644,12 +4837,19 @@ function passesFilter(record, field, filter) {
 // Update field filter dropdown
 function updateFieldFilter() {
     const select = document.getElementById('fieldFilter');
-    select.innerHTML = '<option value="">All Fields</option>';
+    if (!select) return;
+    select.innerHTML = '';
+    const allFields = document.createElement('option');
+    allFields.value = '';
+    allFields.textContent = t('allFields');
+    allFields.selected = !state.selectedField;
+    select.appendChild(allFields);
     
     state.fields.forEach(field => {
         const option = document.createElement('option');
         option.value = field;
-        option.textContent = field;
+        option.textContent = displayFieldName(field);
+        option.selected = state.selectedField === field;
         select.appendChild(option);
     });
 }
@@ -4929,6 +5129,7 @@ function init() {
         applySettings();
         saveSettings();
         renderTableHeader();
+        updateFieldFilter();
         renderTable();
     });
 
@@ -4937,6 +5138,7 @@ function init() {
         applySettings();
         saveSettings();
         renderTableHeader();
+        updateFieldFilter();
         renderTable();
     });
     
@@ -5124,6 +5326,7 @@ async function fetchInitialData() {
         const data = await response.json();
         
         state.records = normalizeRecordsPayload(data);
+        refreshRecordSelectionKeys({ reset: true });
         state.filteredRecords = [];
         state.fields = [];
         state.fieldTypes = {};

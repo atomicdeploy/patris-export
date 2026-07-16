@@ -48,7 +48,7 @@
             <div class="toolbar-section">
                 <input type="text" id="searchInput" class="search-input" placeholder="Search records..." data-table-i18n-placeholder="searchPlaceholder" aria-keyshortcuts="F2" title="Press F2 to focus search">
                 <select id="fieldFilter" class="field-select">
-                    <option value="">All Fields</option>
+                    <option value="" data-table-i18n="allFields">All fields</option>
                 </select>
             </div>
             <div class="toolbar-section">
@@ -226,7 +226,6 @@
                                 </button>
                             </div>
                             <label class="checkbox-label"><input type="checkbox" id="enableRowIcons" checked><span data-table-i18n="enableRowIcons">Show conditional row icons</span></label>
-                            <datalist id="rowIconFieldOptions"></datalist>
                             <div class="row-icon-rules" id="rowIconRules"></div>
                             <fieldset class="row-icon-fallback">
                                 <legend data-table-i18n="fallback">Fallback</legend>

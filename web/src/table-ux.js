@@ -18,6 +18,7 @@ export const CANONICAL_ROW_FIELDS = [
     'name',
     'serial',
     'total_stock',
+    'warehouse_stock',
     'minimum_stock',
     'foreign_price',
     'weight_grams',
@@ -68,6 +69,14 @@ const TABLE_MESSAGES = {
         logs: 'Logs',
         total: 'Total',
         filtered: 'Filtered',
+        allFields: 'All fields',
+        all: 'All',
+        any: 'Any',
+        filterPlaceholder: 'Filter...',
+        group: 'Group',
+        subgroup: 'Subgroup',
+        item: 'Item',
+        code: 'Code',
         searchPlaceholder: 'Search records...',
         noRecords: 'No records found',
         actions: 'Actions',
@@ -97,6 +106,7 @@ const TABLE_MESSAGES = {
         addRule: 'Add rule',
         fallback: 'Fallback',
         field: 'Canonical key',
+        selectCanonicalField: 'Select a canonical key',
         operator: 'Operator',
         value: 'Value',
         icon: 'Icon',
@@ -109,6 +119,21 @@ const TABLE_MESSAGES = {
         rule: 'Rule {number}',
         rowColoring: 'Row coloring',
         enableRowColoring: 'Enable row coloring rules',
+        icon_warning: 'Warning',
+        icon_clock: 'Clock',
+        icon_price: 'Price',
+        icon_weight: 'Weight',
+        icon_stock: 'Stock',
+        icon_package: 'Package',
+        icon_check: 'Check',
+        icon_info: 'Info',
+        ruleLabel_warnings: 'Warnings',
+        ruleLabel_stale: 'Stale source data',
+        ruleLabel_price_missing: 'Price unavailable',
+        ruleLabel_weight_missing: 'Weight unavailable',
+        ruleLabel_out_of_stock: 'Out of stock',
+        ruleLabel_in_stock: 'In stock',
+        fallbackProduct: 'Product',
         op_equals: 'Equals',
         op_not_equals: 'Does not equal',
         op_contains: 'Contains',
@@ -130,6 +155,14 @@ const TABLE_MESSAGES = {
         logs: 'رویدادها',
         total: 'کل',
         filtered: 'فیلترشده',
+        allFields: 'همه فیلدها',
+        all: 'همه',
+        any: 'هر مقدار',
+        filterPlaceholder: 'فیلتر...',
+        group: 'گروه',
+        subgroup: 'زیرگروه',
+        item: 'کالا',
+        code: 'کد',
         searchPlaceholder: 'جست‌وجوی رکوردها...',
         noRecords: 'رکوردی پیدا نشد',
         actions: 'عملیات',
@@ -159,6 +192,7 @@ const TABLE_MESSAGES = {
         addRule: 'افزودن قانون',
         fallback: 'حالت پیش‌فرض',
         field: 'کلید استاندارد',
+        selectCanonicalField: 'یک کلید استاندارد انتخاب کنید',
         operator: 'عملگر',
         value: 'مقدار',
         icon: 'آیکون',
@@ -171,6 +205,21 @@ const TABLE_MESSAGES = {
         rule: 'قانون {number}',
         rowColoring: 'رنگ‌آمیزی ردیف',
         enableRowColoring: 'فعال‌کردن قوانین رنگ‌آمیزی ردیف',
+        icon_warning: 'هشدار',
+        icon_clock: 'زمان',
+        icon_price: 'قیمت',
+        icon_weight: 'وزن',
+        icon_stock: 'موجودی',
+        icon_package: 'بسته',
+        icon_check: 'تأیید',
+        icon_info: 'اطلاعات',
+        ruleLabel_warnings: 'هشدارها',
+        ruleLabel_stale: 'داده منبع قدیمی',
+        ruleLabel_price_missing: 'قیمت در دسترس نیست',
+        ruleLabel_weight_missing: 'وزن در دسترس نیست',
+        ruleLabel_out_of_stock: 'ناموجود',
+        ruleLabel_in_stock: 'موجود',
+        fallbackProduct: 'محصول',
         op_equals: 'برابر است',
         op_not_equals: 'برابر نیست',
         op_contains: 'شامل است',
@@ -239,16 +288,66 @@ export function stableRecordKey(record) {
     return value === null || value === undefined ? '' : String(value).trim();
 }
 
-export function pruneSelectedKeys(selectedKeys, records) {
-    const existing = new Set((records || []).map(stableRecordKey).filter(Boolean));
+export function structuredValueText(value) {
+    if (value === null || value === undefined) return '';
+    if (Array.isArray(value)) return value.map(structuredValueText).filter(Boolean).join(', ');
+    if (typeof value === 'object') {
+        return Object.entries(value)
+            .sort(([left], [right]) => left.localeCompare(right, undefined, { numeric: true, sensitivity: 'base' }))
+            .map(([key, nested]) => `${key}: ${structuredValueText(nested)}`)
+            .join(', ');
+    }
+    return String(value);
+}
+
+export function duplicateSafeRecordKeys(records) {
+    const counts = new Map();
+    return (records || []).map(record => {
+        const code = stableRecordKey(record);
+        const base = code ? `code:${code}` : `row:${hashText(stableValue(record))}`;
+        const occurrence = (counts.get(base) || 0) + 1;
+        counts.set(base, occurrence);
+        return occurrence === 1 ? base : `${base}#${occurrence}`;
+    });
+}
+
+export function assignStableRecordKeys(records, keyMap = new WeakMap()) {
+    const source = Array.isArray(records) ? records : [];
+    const proposed = duplicateSafeRecordKeys(source);
+    const used = new Set();
+
+    source.forEach(record => {
+        if (record && typeof record === 'object') {
+            const existing = keyMap.get(record);
+            if (existing) used.add(existing);
+        }
+    });
+
+    source.forEach((record, index) => {
+        if (!record || typeof record !== 'object' || keyMap.has(record)) return;
+        const base = proposed[index] || `row:${index + 1}`;
+        let key = base;
+        let suffix = 2;
+        while (used.has(key)) {
+            key = `${base}~${suffix}`;
+            suffix += 1;
+        }
+        keyMap.set(record, key);
+        used.add(key);
+    });
+    return keyMap;
+}
+
+export function pruneSelectedKeys(selectedKeys, records, keyForRecord = stableRecordKey) {
+    const existing = new Set((records || []).map(keyForRecord).filter(Boolean));
     for (const key of selectedKeys) {
         if (!existing.has(key)) selectedKeys.delete(key);
     }
     return selectedKeys;
 }
 
-export function selectionSummary(selectedKeys, records) {
-    const keys = [...new Set((records || []).map(stableRecordKey).filter(Boolean))];
+export function selectionSummary(selectedKeys, records, keyForRecord = stableRecordKey) {
+    const keys = [...new Set((records || []).map(keyForRecord).filter(Boolean))];
     const selected = keys.reduce((count, key) => count + (selectedKeys.has(key) ? 1 : 0), 0);
     return {
         selectable: keys.length,
@@ -256,6 +355,28 @@ export function selectionSummary(selectedKeys, records) {
         checked: keys.length > 0 && selected === keys.length,
         indeterminate: selected > 0 && selected < keys.length
     };
+}
+
+export function resolvedRovingKey(preferredKey, visibleKeys) {
+    const keys = (visibleKeys || []).filter(Boolean);
+    if (preferredKey && keys.includes(preferredKey)) return preferredKey;
+    return keys[0] || '';
+}
+
+export function nextRovingKey(visibleKeys, currentKey, command) {
+    const keys = (visibleKeys || []).filter(Boolean);
+    if (keys.length === 0) return '';
+    if (command === 'Home') return keys[0];
+    if (command === 'End') return keys[keys.length - 1];
+    const current = Math.max(0, keys.indexOf(currentKey));
+    if (command === 'ArrowUp') return keys[Math.max(0, current - 1)];
+    if (command === 'ArrowDown') return keys[Math.min(keys.length - 1, current + 1)];
+    return resolvedRovingKey(currentKey, keys);
+}
+
+export function rovingTabIndexes(visibleKeys, preferredKey) {
+    const active = resolvedRovingKey(preferredKey, visibleKeys);
+    return (visibleKeys || []).map(key => key === active ? 0 : -1);
 }
 
 export function defaultColumnWidth(field) {
@@ -287,10 +408,29 @@ export function keyboardColumnWidth(currentWidth, key, rtl = false) {
 export function normalizeColumnWidths(widths) {
     if (!widths || typeof widths !== 'object' || Array.isArray(widths)) return {};
     return Object.entries(widths).reduce((result, [field, width]) => {
-        const key = String(field || '').trim();
-        if (key) result[key] = clampColumnWidth(width, defaultColumnWidth(key));
+        const key = canonicalColumnKey(field);
+        if (key && (result[key] === undefined || String(field) === key)) {
+            result[key] = clampColumnWidth(width, defaultColumnWidth(key));
+        }
         return result;
     }, {});
+}
+
+export function canonicalColumnKey(field) {
+    const source = String(field || '').trim();
+    const lowered = source.toLowerCase();
+    if (lowered === 'code' || lowered === 'product_code') return 'product_code';
+    if (lowered === 'name') return 'name';
+    if (lowered === 'serial') return 'serial';
+    return source;
+}
+
+export function canonicalRuleField(field) {
+    const lowered = String(field || '').trim().toLowerCase();
+    if (lowered === 'code') return 'product_code';
+    if (lowered === 'name') return 'name';
+    if (lowered === 'serial') return 'serial';
+    return CANONICAL_ROW_FIELDS.includes(lowered) ? lowered : '';
 }
 
 export function normalizeRowIconRule(rule, index = 0) {
@@ -299,7 +439,7 @@ export function normalizeRowIconRule(rule, index = 0) {
     const icon = ROW_ICON_NAMES.includes(source.icon) ? source.icon : 'info';
     return {
         id: String(source.id || `rule-${index + 1}`).trim() || `rule-${index + 1}`,
-        field: String(source.field || '').trim(),
+        field: canonicalRuleField(source.field),
         operator,
         value: source.value === null || source.value === undefined ? '' : String(source.value),
         icon,
@@ -335,16 +475,18 @@ export function resolveRowIcon(record, rules, fallback) {
 
 export function canonicalRowValue(record, field) {
     if (!record || typeof record !== 'object') return undefined;
-    if (field === 'product_code') return record.product_code ?? record.Code;
-    if (field === 'name') return record.name ?? record.Name;
-    if (field === 'serial') return record.serial ?? record.Serial;
-    if (field === 'total_stock' && record.total_stock === undefined && Array.isArray(record.ANBAR)) {
+    const canonicalField = canonicalRuleField(field);
+    if (!canonicalField) return undefined;
+    if (canonicalField === 'product_code') return record.product_code ?? record.Code;
+    if (canonicalField === 'name') return record.name ?? record.Name;
+    if (canonicalField === 'serial') return record.serial ?? record.Serial;
+    if (canonicalField === 'total_stock' && record.total_stock === undefined && Array.isArray(record.ANBAR)) {
         return record.ANBAR.reduce((total, value) => {
             const numeric = Number(value);
             return total + (Number.isFinite(numeric) ? numeric : 0);
         }, 0);
     }
-    return record[field];
+    return record[canonicalField];
 }
 
 export function rowRuleMatches(actual, operator, expected) {
@@ -480,4 +622,21 @@ function jalaliOrdinal(year, month, day) {
 
 function validColor(value) {
     return /^#[0-9a-f]{6}$/i.test(String(value || ''));
+}
+
+function stableValue(value) {
+    if (Array.isArray(value)) return `[${value.map(stableValue).join(',')}]`;
+    if (value && typeof value === 'object') {
+        return `{${Object.keys(value).sort().map(key => `${JSON.stringify(key)}:${stableValue(value[key])}`).join(',')}}`;
+    }
+    return JSON.stringify(value ?? null);
+}
+
+function hashText(value) {
+    let hash = 2166136261;
+    for (let index = 0; index < value.length; index += 1) {
+        hash ^= value.charCodeAt(index);
+        hash = Math.imul(hash, 16777619);
+    }
+    return (hash >>> 0).toString(36);
 }

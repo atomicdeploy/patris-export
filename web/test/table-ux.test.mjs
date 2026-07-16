@@ -5,19 +5,28 @@ import test from 'node:test';
 const source = await readFile(new URL('../src/table-ux.js', import.meta.url), 'utf8');
 const {
     DEFAULT_ROW_ICON_FALLBACK,
+    assignStableRecordKeys,
+    canonicalColumnKey,
+    canonicalRowValue,
+    canonicalRuleField,
     clampColumnWidth,
+    duplicateSafeRecordKeys,
     fitMenuPosition,
     iconMarkup,
     keyboardColumnWidth,
     normalizeColumnWidths,
     normalizeRowIconRules,
+    nextRovingKey,
     pruneSelectedKeys,
     resizedColumnWidth,
+    resolvedRovingKey,
     resolveRowIcon,
     rowCommandDefinitions,
     rowRuleMatches,
+    rovingTabIndexes,
     selectionSummary,
     stableRecordKey,
+    structuredValueText,
     tableText
 } = await import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}`);
 
@@ -43,6 +52,35 @@ test('selection is Code-keyed, filter-aware, and pruned only when rows disappear
     });
 });
 
+test('duplicate and noncanonical records receive stable distinct selection keys', () => {
+    const rows = [
+        { Code: '001', name: 'First' },
+        { Code: '001', name: 'Duplicate' },
+        { name: 'No code', weight_grams: 20 },
+        { name: 'No code', weight_grams: 20 }
+    ];
+    const keys = duplicateSafeRecordKeys(rows);
+    assert.deepEqual(keys.slice(0, 2), ['code:001', 'code:001#2']);
+    assert.match(keys[2], /^row:[a-z0-9]+$/);
+    assert.equal(keys[3], `${keys[2]}#2`);
+
+    const keyByRecord = new Map(rows.map((row, index) => [row, keys[index]]));
+    const selected = new Set([keys[1], keys[2]]);
+    assert.deepEqual(selectionSummary(selected, rows, row => keyByRecord.get(row)), {
+        selectable: 4,
+        selected: 2,
+        checked: false,
+        indeterminate: true
+    });
+    assert.deepEqual(duplicateSafeRecordKeys([...rows].reverse()).sort(), [...keys].sort());
+
+    const stableKeys = assignStableRecordKeys(rows);
+    const beforeSort = rows.map(row => stableKeys.get(row));
+    assignStableRecordKeys([...rows].reverse(), stableKeys);
+    assert.deepEqual(rows.map(row => stableKeys.get(row)), beforeSort);
+    assert.equal(new Set(beforeSort).size, rows.length);
+});
+
 test('column widths clamp and keyboard/pointer resizing reverse in RTL', () => {
     assert.equal(clampColumnWidth(20), 80);
     assert.equal(clampColumnWidth(999), 480);
@@ -52,7 +90,12 @@ test('column widths clamp and keyboard/pointer resizing reverse in RTL', () => {
     assert.equal(keyboardColumnWidth(140, 'ArrowRight', true), 128);
     assert.equal(keyboardColumnWidth(140, 'Home', false), null);
     assert.equal(keyboardColumnWidth(140, 'Escape', false), undefined);
-    assert.deepEqual(normalizeColumnWidths({ Code: 900, Name: '120', '': 100 }), { Code: 480, Name: 120 });
+    assert.equal(canonicalColumnKey('Code'), 'product_code');
+    assert.deepEqual(
+        normalizeColumnWidths({ Code: 900, product_code: 211, Name: '120', '': 100 }),
+        { product_code: 211, name: 120 }
+    );
+    assert.deepEqual(normalizeColumnWidths({ product_code: 211, Code: 900, 'product_code ': 444 }), { product_code: 211 });
 });
 
 test('ordered icon rules match transformed canonical values and keep a fallback', () => {
@@ -68,6 +111,33 @@ test('ordered icon rules match transformed canonical values and keep a fallback'
     assert.equal(rowRuleMatches('04.09.10', 'stale_days', '7'), true);
     assert.equal(rowRuleMatches([], 'empty', ''), true);
     assert.equal(rowRuleMatches(['a', 'b'], 'contains', 'B'), true);
+
+    const rawRule = normalizeRowIconRules([
+        { id: 'raw', field: 'Sharh1', operator: 'not_empty', icon: 'warning' }
+    ]);
+    assert.equal(canonicalRuleField('Sharh1'), '');
+    assert.equal(rawRule[0].field, '');
+    assert.equal(canonicalRowValue({ Sharh1: 'must not match' }, 'Sharh1'), undefined);
+    assert.equal(resolveRowIcon({ Sharh1: 'must not match' }, rawRule, DEFAULT_ROW_ICON_FALLBACK).ruleId, '');
+    assert.equal(canonicalRuleField('Code'), 'product_code');
+    assert.equal(canonicalRowValue({ Code: '001' }, 'product_code'), '001');
+});
+
+test('table rows use a single roving tab stop and predictable arrow commands', () => {
+    const keys = ['row-1', 'row-2', 'row-3'];
+    assert.equal(resolvedRovingKey('missing', keys), 'row-1');
+    assert.deepEqual(rovingTabIndexes(keys, 'row-2'), [-1, 0, -1]);
+    assert.equal(nextRovingKey(keys, 'row-2', 'ArrowDown'), 'row-3');
+    assert.equal(nextRovingKey(keys, 'row-2', 'ArrowUp'), 'row-1');
+    assert.equal(nextRovingKey(keys, 'row-2', 'Home'), 'row-1');
+    assert.equal(nextRovingKey(keys, 'row-2', 'End'), 'row-3');
+});
+
+test('structured warehouse stock has readable deterministic text', () => {
+    const text = structuredValueText({ Tehran: 3, Karaj: { reserved: 1, available: 2 } });
+    assert.equal(text, 'Karaj: available: 2, reserved: 1, Tehran: 3');
+    assert.doesNotMatch(text, /\[object Object\]/);
+    assert.equal(structuredValueText(['north', 2]), 'north, 2');
 });
 
 test('row command metadata is shared and selection label is state-aware', () => {
@@ -88,6 +158,11 @@ test('menu positioning stays inside the viewport', () => {
 test('English and Persian table strings interpolate and SVG names are allowlisted', () => {
     assert.equal(tableText('en', 'selectedCount', { count: 3 }), '3 selected');
     assert.equal(tableText('fa', 'selectedCount', { count: 3 }), '3 انتخاب‌شده');
+    assert.equal(tableText('fa', 'allFields'), 'همه فیلدها');
+    assert.equal(tableText('fa', 'filterPlaceholder'), 'فیلتر...');
+    assert.equal(tableText('fa', 'icon_warning'), 'هشدار');
+    assert.equal(tableText('fa', 'ruleLabel_price_missing'), 'قیمت در دسترس نیست');
+    assert.equal(tableText('fa', 'fallbackProduct'), 'محصول');
     assert.match(iconMarkup('warning'), /^<svg/);
     assert.doesNotMatch(iconMarkup('<script>'), /script/);
 });

@@ -120,7 +120,7 @@ func TestUITableUXPersistsThroughConfigPath(t *testing.T) {
 		cfg.UI.Language = "fa"
 		cfg.UI.RTLTextDirection = true
 		cfg.UI.EnableRowColoring = false
-		cfg.UI.ColumnWidths = map[string]int{"product_code": 211, "name": 999}
+		cfg.UI.ColumnWidths = map[string]int{"Code": 333, "product_code ": 444, "product_code": 211, "Name": 180, "name": 999}
 		cfg.UI.RowIconRules = []RowIconRule{{
 			ID: "missing-price", Field: "final_price", Operator: "empty",
 			Icon: "price", Color: "#dc2626", Label: "Price unavailable",
@@ -140,6 +140,9 @@ func TestUITableUXPersistsThroughConfigPath(t *testing.T) {
 	}
 	if ui.ColumnWidths["product_code"] != 211 || ui.ColumnWidths["name"] != 480 {
 		t.Fatalf("canonical column widths were not persisted and clamped: %+v", ui.ColumnWidths)
+	}
+	if _, exists := ui.ColumnWidths["Code"]; exists {
+		t.Fatalf("legacy Code width was not migrated: %+v", ui.ColumnWidths)
 	}
 	if len(ui.RowIconRules) != 1 || ui.RowIconRules[0].Field != "final_price" || ui.RowIconRules[0].Icon != "price" {
 		t.Fatalf("ordered row icon rules were not preserved: %+v", ui.RowIconRules)

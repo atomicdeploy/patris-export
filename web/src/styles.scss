@@ -717,6 +717,47 @@ body.is-loading .data-table {
     }
 }
 
+.warehouse-stock-list {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.3rem;
+    min-width: 8rem;
+}
+
+.warehouse-stock-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    max-width: 100%;
+    padding: 0.15rem 0.45rem;
+    border: 1px solid $border-light;
+    border-radius: 999px;
+    background: $bg-light-tertiary;
+    font-size: 0.78rem;
+    line-height: 1.3;
+
+    .dark-mode & {
+        border-color: $border-dark;
+        background: $bg-dark-tertiary;
+    }
+}
+
+.warehouse-stock-name {
+    overflow: hidden;
+    color: $text-light-secondary;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+
+    .dark-mode & {
+        color: $text-dark-secondary;
+    }
+}
+
+.warehouse-stock-value {
+    color: inherit;
+    font-variant-numeric: tabular-nums;
+}
+
 @keyframes highlight {
     0% {
         background-color: rgba(99, 102, 241, 0.3);
