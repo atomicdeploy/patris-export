@@ -36,10 +36,16 @@ jobs:
         sudo apt-get update
         sudo apt-get install -y pxlib-dev pxlib1
     
-    - name: Build web frontend
+    - name: Install and audit web dependencies
       run: |
         cd web
-        npm install
+        npm clean-install
+        npm audit --audit-level=high
+
+    - name: Test and build web frontend
+      run: |
+        cd web
+        npm test
         npm run build
         
     - name: Run tests
