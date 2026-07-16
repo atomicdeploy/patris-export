@@ -156,12 +156,13 @@ freshness window so an outage cannot recreate an N+1 catalog storm.
 Static/standalone mode implements no prefetch capability and makes no remote
 requests.
 
-Digitalogic's dedicated pricing-input bearer credential authorizes exactly the
-integration-catalog GET and assignment-batch POST. It does not authorize the
-legacy single-Code route or any write route. Do not reuse Patris push or
-product-sync write secrets. Deploy the compatible Digitalogic endpoint and its
-read credential before enabling production prefetch, then reference that one
-credential through `bearer_token_env`.
+Production rollout depends on the pending Digitalogic least-privilege
+credential work in issue #60. Once implemented and deployed, its dedicated
+pricing-input bearer must authorize exactly the integration-catalog GET and
+assignment-batch POST, not the legacy single-Code route or any write route. Do
+not reuse Patris push or product-sync write secrets. Deploy the compatible
+Digitalogic endpoint and that read credential before enabling production
+prefetch, then reference the one credential through `bearer_token_env`.
 
 Patris calculates only when the catalog is
 `digitalogic.integration-catalog` major version 1, `currency.local` is `IRT`,
