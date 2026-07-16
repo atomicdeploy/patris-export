@@ -211,7 +211,14 @@ func SyncSQLDB(ctx context.Context, db *sql.DB, options SQLOptions, rows []map[s
 	result.Reconciliation, err = normalizeReconciliation(options.Reconciliation)
 	defer func() {
 		result.ElapsedMS = time.Since(started).Milliseconds()
-		if err != nil && result.Failed == 0 {
+		if err != nil {
+			// Inserted/updated/unchanged/deleted are committed-result counts, not
+			// a plan. Never report successes for an operation that rolled back or
+			// whose commit outcome was not confirmed.
+			result.Inserted = 0
+			result.Updated = 0
+			result.Unchanged = 0
+			result.Deleted = 0
 			result.Failed = len(rows)
 		}
 	}()
@@ -255,6 +262,9 @@ func SyncSQLDB(ctx context.Context, db *sql.DB, options SQLOptions, rows []map[s
 
 	var beforeColumns map[string]bool
 	if tableExists {
+		if err := requireTransactionalTable(ctx, db, driver, table); err != nil {
+			return result, err
+		}
 		beforeColumns, err = existingColumns(ctx, db, driver, table)
 		if err != nil {
 			return result, err
@@ -266,6 +276,11 @@ func SyncSQLDB(ctx context.Context, db *sql.DB, options SQLOptions, rows []map[s
 
 	if !options.DryRun && len(rows) > 0 {
 		if err := createTable(ctx, db, driver, table, fields, keyField, rows); err != nil {
+			return result, err
+		}
+		// Re-check after CREATE IF NOT EXISTS so a concurrently created or
+		// pre-existing non-transactional table cannot bypass the earlier probe.
+		if err := requireTransactionalTable(ctx, db, driver, table); err != nil {
 			return result, err
 		}
 		if err := ensureColumns(ctx, db, driver, table, fields, keyField, rows); err != nil {
@@ -350,6 +365,28 @@ func sqlTableExists(ctx context.Context, db *sql.DB, driver, table string) (bool
 		return false, err
 	}
 	return exists == 1, nil
+}
+
+func requireTransactionalTable(ctx context.Context, db *sql.DB, driver, table string) error {
+	if isSQLite(driver) {
+		return nil
+	}
+	query := "SELECT ENGINE FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = ? LIMIT 1"
+	var engine sql.NullString
+	if err := db.QueryRowContext(ctx, query, table).Scan(&engine); err != nil {
+		if err == sql.ErrNoRows {
+			return fmt.Errorf("SQL table %q disappeared before synchronization", table)
+		}
+		return fmt.Errorf("inspect %s storage engine: %w", table, err)
+	}
+	if !engine.Valid || !strings.EqualFold(strings.TrimSpace(engine.String), "InnoDB") {
+		name := strings.TrimSpace(engine.String)
+		if name == "" {
+			name = "unknown"
+		}
+		return fmt.Errorf("existing table %q uses non-transactional or unsupported engine %q; InnoDB is required", table, name)
+	}
+	return nil
 }
 
 func normalizeReconciliation(value ReconciliationMode) (ReconciliationMode, error) {

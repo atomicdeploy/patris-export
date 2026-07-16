@@ -388,6 +388,7 @@ type schemaDriverState struct {
 	prepared          []preparedExecution
 	columns           [][]driver.Value
 	tableExists       bool
+	engine            string
 	commits           int
 	rollbacks         int
 	productExecs      int
@@ -424,6 +425,17 @@ func (conn *schemaConn) Close() error              { return nil }
 func (conn *schemaConn) Begin() (driver.Tx, error) { return &schemaTx{state: conn.state}, nil }
 
 func (conn *schemaConn) QueryContext(_ context.Context, query string, _ []driver.NamedValue) (driver.Rows, error) {
+	if strings.HasPrefix(query, "SELECT ENGINE FROM information_schema.tables") {
+		values := [][]driver.Value{}
+		if conn.state.tableExists {
+			engine := conn.state.engine
+			if engine == "" {
+				engine = "InnoDB"
+			}
+			values = append(values, []driver.Value{engine})
+		}
+		return &schemaRows{columns: []string{"ENGINE"}, values: values}, nil
+	}
 	if strings.Contains(query, "information_schema.tables") {
 		values := [][]driver.Value{}
 		if conn.state.tableExists {
@@ -451,6 +463,12 @@ func (conn *schemaConn) QueryContext(_ context.Context, query string, _ []driver
 
 func (conn *schemaConn) ExecContext(_ context.Context, query string, _ []driver.NamedValue) (driver.Result, error) {
 	conn.state.execs = append(conn.state.execs, query)
+	if strings.HasPrefix(query, "CREATE TABLE IF NOT EXISTS ") {
+		conn.state.tableExists = true
+		if conn.state.engine == "" {
+			conn.state.engine = "InnoDB"
+		}
+	}
 	return driver.RowsAffected(1), nil
 }
 

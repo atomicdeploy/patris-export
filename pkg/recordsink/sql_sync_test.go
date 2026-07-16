@@ -182,8 +182,33 @@ func TestSQLBatchFailureRollsBackAndReportsFailedRows(t *testing.T) {
 	if !errors.Is(err, errInjectedProductWrite) {
 		t.Fatalf("batch error = %v", err)
 	}
-	if result.Failed != len(rows) || state.commits != 0 || state.rollbacks != 1 {
+	if result.Inserted != 0 || result.Updated != 0 || result.Unchanged != 0 || result.Deleted != 0 || result.Failed != len(rows) || state.commits != 0 || state.rollbacks != 1 {
 		t.Fatalf("failure result=%+v commits=%d rollbacks=%d", result, state.commits, state.rollbacks)
+	}
+}
+
+func TestSQLSyncRejectsExistingNonTransactionalMySQLTable(t *testing.T) {
+	state := &schemaDriverState{
+		tableExists: true,
+		engine:      "MyISAM",
+		columns: [][]driver.Value{
+			{"product_code", "varchar(191)", "NO", "PRI", nil, ""},
+			{"final_price", "bigint", "YES", "", nil, ""},
+		},
+	}
+	db := sql.OpenDB(schemaConnector{state: state})
+	defer db.Close()
+	result, err := SyncSQLDB(context.Background(), db, SQLOptions{
+		Driver: "mysql", Table: "products", KeyField: "product_code", Batch: 2,
+	}, []map[string]interface{}{{"product_code": "001", "final_price": int64(100)}})
+	if err == nil || !strings.Contains(err.Error(), "InnoDB is required") {
+		t.Fatalf("non-transactional table error = %v", err)
+	}
+	if result.Failed != 1 || result.Inserted != 0 || result.Updated != 0 || result.Unchanged != 0 || result.Deleted != 0 {
+		t.Fatalf("non-transactional failure result = %+v", result)
+	}
+	if len(state.execs) != 0 || len(state.prepared) != 0 || state.commits != 0 || state.rollbacks != 0 {
+		t.Fatalf("non-transactional table was mutated: execs=%#v prepared=%#v commits=%d rollbacks=%d", state.execs, state.prepared, state.commits, state.rollbacks)
 	}
 }
 
