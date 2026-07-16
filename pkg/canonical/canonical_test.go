@@ -215,7 +215,7 @@ func TestDuplicateCodesAreQuarantinedDeterministically(t *testing.T) {
 	}
 }
 
-func TestSourceIdentityAndEventIdentityAreStableAcrossPathURLAndGenerationTime(t *testing.T) {
+func TestSourceIdentityIsStableAndEventIdentityIncludesGenerationTime(t *testing.T) {
 	cfg, provider := canonicalTestConfig("A")
 	rows := []map[string]interface{}{{"Code": "A", "Sharh1": "0 0 0 1", "Sharh2": "1 گرم", "ALLANBAR": 1}}
 	_, first := Transform(context.Background(), rows, "https://office.example/files/kala.db?revision=2", cfg, provider, time.Unix(1, 0))
@@ -223,11 +223,11 @@ func TestSourceIdentityAndEventIdentityAreStableAcrossPathURLAndGenerationTime(t
 	if first.Source.ID != "kala.db" || first.Source.Dataset != "kala.db" {
 		t.Fatalf("URL source identity is wrong: %+v", first.Source)
 	}
-	if first.Source.Revision != second.Source.Revision || first.EventID != second.EventID {
-		t.Fatalf("volatile generated_at changed deterministic identities: first=%+v second=%+v", first, second)
+	if first.Source.Revision != second.Source.Revision {
+		t.Fatalf("generated_at changed the source revision: first=%+v second=%+v", first, second)
 	}
-	if first.GeneratedAt == second.GeneratedAt {
-		t.Fatal("generated_at did not reflect generation time")
+	if first.GeneratedAt == second.GeneratedAt || first.EventID == second.EventID {
+		t.Fatal("event occurrence identity did not include generated_at")
 	}
 }
 
@@ -245,8 +245,9 @@ func TestCatalogFetchTimeDoesNotChangeRecordOrEventIdentity(t *testing.T) {
 	firstResolution.CatalogFetchedAt = time.Unix(1, 0)
 	secondResolution := base
 	secondResolution.CatalogFetchedAt = time.Unix(2, 0)
-	firstRows, first := Transform(context.Background(), row, "kala.db", cfg, fixedResolutionProvider{firstResolution}, time.Unix(10, 0))
-	secondRows, second := Transform(context.Background(), row, "kala.db", cfg, fixedResolutionProvider{secondResolution}, time.Unix(20, 0))
+	generatedAt := time.Unix(10, 0)
+	firstRows, first := Transform(context.Background(), row, "kala.db", cfg, fixedResolutionProvider{firstResolution}, generatedAt)
+	secondRows, second := Transform(context.Background(), row, "kala.db", cfg, fixedResolutionProvider{secondResolution}, generatedAt)
 	if firstRows[0]["record_hash"] != secondRows[0]["record_hash"] || first.Source.Revision != second.Source.Revision || first.EventID != second.EventID {
 		t.Fatalf("volatile catalog fetch time changed identities: first=%+v second=%+v", first, second)
 	}

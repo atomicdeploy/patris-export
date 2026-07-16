@@ -132,6 +132,11 @@ mismatches force null final prices and explicit compatibility warnings.
 
 Canonical JSON and JSON webhooks use `digitalogic.product-sync` version `1.0`:
 
+`event_id` covers the validated `generated_at` value as well as the sorted
+record hashes and tombstones. Identical content generated at a later time is a
+new ordered occurrence, so a receiver can advance its watermark without
+allowing an older changed event through afterward.
+
 The server exposes this envelope at `GET /api/product-sync`. The viewer-facing
 `GET /api/records` endpoint remains a Code-keyed collection of canonical
 product rows; envelope metadata never appears as table rows.

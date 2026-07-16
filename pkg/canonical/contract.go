@@ -168,6 +168,7 @@ func eventID(envelope *Envelope) string {
 		FormulaID        string      `json:"formula_id"`
 		FormulaRevision  string      `json:"formula_revision"`
 		Source           Source      `json:"source"`
+		GeneratedAt      string      `json:"generated_at"`
 		Products         []string    `json:"products"`
 		DeletedCodes     []Tombstone `json:"deleted_codes,omitempty"`
 		QuarantinedCodes []string    `json:"quarantined_codes,omitempty"`
@@ -180,7 +181,8 @@ func eventID(envelope *Envelope) string {
 	material, _ := json.Marshal(identity{
 		Schema: envelope.Schema, SchemaVersion: envelope.SchemaVersion, EventType: envelope.EventType,
 		LocalCurrency: envelope.LocalCurrency, FormulaID: envelope.FormulaID, FormulaRevision: envelope.FormulaRevision,
-		Source: envelope.Source, Products: hashes, DeletedCodes: envelope.DeletedCodes, QuarantinedCodes: envelope.QuarantinedCodes,
+		Source: envelope.Source, GeneratedAt: envelope.GeneratedAt, Products: hashes,
+		DeletedCodes: envelope.DeletedCodes, QuarantinedCodes: envelope.QuarantinedCodes,
 	})
 	return hashBytes(material)
 }

@@ -3,7 +3,7 @@
   "schema_version": "1.0",
   "event": "digitalogic.product-sync",
   "event_type": "snapshot",
-  "event_id": "sha256:b659a592853f5709fd3ee0d52f7e58738cf3d109fe58d538257738a6dd157dff",
+  "event_id": "sha256:25d5afce95dfdcf598c28f9c9639cbd54ed7f2e838a6c285844eee75d972ef06",
   "local_currency": "IRT",
   "formula_id": "landed_price_v1",
   "formula_revision": "1.0.0",
