@@ -17,7 +17,7 @@ const (
 	ModeDigitalogic    = "digitalogic"
 	defaultFreshFor    = 5 * time.Minute
 	defaultMaxStale    = time.Hour
-	defaultTimeout     = 5 * time.Second
+	defaultTimeout     = 15 * time.Second
 	defaultMaxEntries  = 2048
 	defaultMaxBytes    = int64(2 << 20)
 	defaultConcurrency = 8

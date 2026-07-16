@@ -723,6 +723,14 @@ func ApplyEnv(cfg *Config) {
 	if value := os.Getenv("PATRIS_EXPORT_PRICING_MAX_STALE"); strings.TrimSpace(value) != "" {
 		cfg.Canonical.Pricing.Digitalogic.MaxStale = strings.TrimSpace(value)
 	}
+	if value := os.Getenv("PATRIS_EXPORT_PRICING_TIMEOUT"); strings.TrimSpace(value) != "" {
+		cfg.Canonical.Pricing.Digitalogic.Timeout = strings.TrimSpace(value)
+	}
+	if value := os.Getenv("PATRIS_EXPORT_PRICING_BATCH_SIZE"); strings.TrimSpace(value) != "" {
+		if batch, err := strconv.Atoi(strings.TrimSpace(value)); err == nil {
+			cfg.Canonical.Pricing.Digitalogic.BatchSize = batch
+		}
+	}
 	for _, key := range []string{"PATRIS_EXPORT_TEMP_DIR", "PATRIS_EXPORT_TMPDIR"} {
 		if value := os.Getenv(key); strings.TrimSpace(value) != "" {
 			cfg.Runtime.TempDir = strings.TrimSpace(value)
