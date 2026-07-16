@@ -12,9 +12,9 @@
     "type": "percentage",
     "profit_percent": "30",
     "source": "global_default",
-    "revision": "sha256:fixture-default-markup",
+    "revision": "sha256:e1d7fcacade8a8c44486ae63e7ab3188205ac8135c1cb5c60d8e71e715b9f87e",
     "updated_at": "2026-07-16 12:00:00",
-    "updated_by": 1,
+    "updated_by": 0,
     "storage_present": true,
     "bounds": {
       "minimum": "0",
@@ -31,11 +31,8 @@
         "code": "113007045",
         "import_freight_method_id": "air_express",
         "profit_percent": "30",
-        "pricing_warnings": [],
-        "markup": {
-          "profit_percent": "30",
-          "warning": null
-        }
+        "profit_percent_source": "global_default",
+        "pricing_warnings": []
       }
     },
     {
@@ -43,7 +40,6 @@
       "status": "error",
       "error": {
         "code": "digitalogic_product_code_not_found",
-        "message": "No product has that exact Patris Code or SKU.",
         "http_status": 404,
         "retryable": false
       }

@@ -47,6 +47,7 @@ type assignmentWire struct {
 	Code            string   `json:"code"`
 	MethodID        string   `json:"import_freight_method_id"`
 	ProfitPercent   *Decimal `json:"profit_percent"`
+	ProfitSource    string   `json:"profit_percent_source"`
 	PricingWarnings []string `json:"pricing_warnings"`
 	Markup          struct {
 		ProfitPercent *Decimal `json:"profit_percent"`
