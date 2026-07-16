@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/atomicdeploy/patris-export/pkg/appconfig"
@@ -24,6 +25,7 @@ import (
 	"github.com/atomicdeploy/patris-export/pkg/oneshot"
 	"github.com/atomicdeploy/patris-export/pkg/paradox"
 	"github.com/atomicdeploy/patris-export/pkg/processmon"
+	"github.com/atomicdeploy/patris-export/pkg/recorddiff"
 	"github.com/atomicdeploy/patris-export/pkg/recordmap"
 	"github.com/atomicdeploy/patris-export/pkg/recordpipe"
 	"github.com/atomicdeploy/patris-export/pkg/recordsink"
@@ -626,11 +628,19 @@ func runConvert(cmd *cobra.Command, args []string) {
 		checkProcessConflicts(dbFile)
 	}
 
+	var convertMu sync.Mutex
+	var updateState watchChangeState
 	convertAndSend := func(path, eventType string) {
+		convertMu.Lock()
+		defer convertMu.Unlock()
+
 		result, err := convertFile(path, charMap, useStdout, cfg)
-		if err == nil {
-			sendConvertUpdate(cfg, path, result, eventType, nil)
+		if err != nil {
+			return
 		}
+
+		changes := updateState.Next(result, eventType, time.Now())
+		sendConvertUpdate(cfg, path, result, eventType, changes)
 	}
 
 	if watchMode {
@@ -815,16 +825,20 @@ func writeConvertOutput(dbFile string, result recordpipe.Result, useStdout bool,
 	return nil
 }
 
-func sendConvertUpdate(cfg appconfig.Config, source string, result recordpipe.Result, eventType string, changes map[string]interface{}) {
+func sendConvertUpdate(cfg appconfig.Config, source string, result recordpipe.Result, eventType string, changes *recorddiff.ChangeSet) {
 	if !cfg.SendUpdates.Enabled {
 		return
 	}
 	if eventType == "initial" && !cfg.SendUpdates.Initial {
 		return
 	}
+	timestamp := time.Now().Format(time.RFC3339)
+	if changes != nil && changes.Timestamp != "" {
+		timestamp = changes.Timestamp
+	}
 	event := updateout.Event{
 		Type:      eventType,
-		Timestamp: time.Now().Format(time.RFC3339),
+		Timestamp: timestamp,
 		Source:    source,
 		Raw:       result.Raw,
 		Records:   result.Rows,
@@ -834,6 +848,21 @@ func sendConvertUpdate(cfg appconfig.Config, source string, result recordpipe.Re
 	if err := updateout.Dispatch(context.Background(), cfg.SendUpdates, event); err != nil {
 		warningColor.Printf("Send update failed: %v\n", err)
 	}
+}
+
+type watchChangeState struct {
+	previousRows []map[string]interface{}
+}
+
+func (state *watchChangeState) Next(result recordpipe.Result, eventType string, at time.Time) *recorddiff.ChangeSet {
+	var changes *recorddiff.ChangeSet
+	if eventType != "initial" {
+		changeSet := recorddiff.Between(state.previousRows, result.Rows, result.KeyField, at)
+		changeSet.Raw = result.Raw
+		changes = &changeSet
+	}
+	state.previousRows = recordmap.CopyRows(result.Rows)
+	return changes
 }
 
 func firstNonEmpty(values ...string) string {

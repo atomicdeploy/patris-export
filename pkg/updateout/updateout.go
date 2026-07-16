@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/atomicdeploy/patris-export/pkg/recorddiff"
 	"github.com/atomicdeploy/patris-export/pkg/recordsink"
 )
 
@@ -33,7 +34,7 @@ type Event struct {
 	Source    string                   `json:"source,omitempty"`
 	Raw       bool                     `json:"raw,omitempty"`
 	Records   []map[string]interface{} `json:"records,omitempty"`
-	Changes   map[string]interface{}   `json:"changes,omitempty"`
+	Changes   *recorddiff.ChangeSet    `json:"changes,omitempty"`
 	KeyField  string                   `json:"key_field,omitempty"`
 }
 
@@ -159,7 +160,7 @@ func encode(cfg Config, event Event) ([]byte, string, error) {
 	if cfg.Format == "csv" {
 		rows := event.Records
 		if len(rows) == 0 && event.Changes != nil {
-			rows = rowsFromChanges(event.Changes)
+			rows = rowsFromChanges(event.Changes, event.KeyField)
 		}
 		data, err := recordsink.CSVBytes(rows, event.KeyField)
 		return data, "text/csv; charset=utf-8", err
@@ -171,19 +172,50 @@ func encode(cfg Config, event Event) ([]byte, string, error) {
 	return append(data, '\n'), "application/json; charset=utf-8", nil
 }
 
-func rowsFromChanges(changes map[string]interface{}) []map[string]interface{} {
-	rows := []map[string]interface{}{}
-	if added, ok := changes["added"].([]map[string]interface{}); ok {
-		rows = append(rows, added...)
+func rowsFromChanges(changes *recorddiff.ChangeSet, keyField string) []map[string]interface{} {
+	if changes == nil {
+		return nil
 	}
-	if modified, ok := changes["modified"].([]interface{}); ok {
-		for _, item := range modified {
-			if m, ok := item.(map[string]interface{}); ok {
-				if values, ok := m["new_values"].(map[string]interface{}); ok {
-					rows = append(rows, values)
-				}
-			}
+	if strings.TrimSpace(keyField) == "" {
+		keyField = changes.KeyField
+	}
+	if strings.TrimSpace(keyField) == "" {
+		keyField = "Code"
+	}
+
+	rows := []map[string]interface{}{}
+	for _, added := range changes.Added {
+		row := copyRow(added)
+		row["_change_type"] = "added"
+		rows = append(rows, row)
+	}
+	for _, modified := range changes.Modified {
+		row := copyRow(modified.Record)
+		if len(row) == 0 {
+			row = copyRow(modified.NewValues)
 		}
+		if _, exists := row[keyField]; !exists {
+			row[keyField] = modified.Code
+		}
+		row["_change_type"] = "modified"
+		if len(modified.ChangedFields) > 0 {
+			row["_changed_fields"] = strings.Join(modified.ChangedFields, ",")
+		}
+		rows = append(rows, row)
+	}
+	for _, deleted := range changes.Deleted {
+		rows = append(rows, map[string]interface{}{
+			keyField:       deleted,
+			"_change_type": "deleted",
+		})
 	}
 	return rows
+}
+
+func copyRow(row map[string]interface{}) map[string]interface{} {
+	copy := make(map[string]interface{}, len(row)+2)
+	for key, value := range row {
+		copy[key] = value
+	}
+	return copy
 }
