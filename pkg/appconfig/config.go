@@ -116,14 +116,45 @@ type NotificationsConfig struct {
 }
 
 type UIConfig struct {
-	Theme                   string `json:"theme" yaml:"theme" toml:"theme"`
-	AutoScrollToChanged     bool   `json:"auto_scroll_to_changed" yaml:"auto_scroll_to_changed" toml:"auto_scroll_to_changed"`
-	HighlightChanges        bool   `json:"highlight_changes" yaml:"highlight_changes" toml:"highlight_changes"`
-	RTLTextDirection        bool   `json:"rtl_text_direction" yaml:"rtl_text_direction" toml:"rtl_text_direction"`
-	EnablePagination        bool   `json:"enable_pagination" yaml:"enable_pagination" toml:"enable_pagination"`
-	PageSize                int    `json:"page_size" yaml:"page_size" toml:"page_size"`
-	PlayNotificationSound   bool   `json:"play_notification_sound" yaml:"play_notification_sound" toml:"play_notification_sound"`
-	NotificationSoundSource string `json:"notification_sound_source" yaml:"notification_sound_source" toml:"notification_sound_source"`
+	Theme                   string            `json:"theme" yaml:"theme" toml:"theme"`
+	Language                string            `json:"language" yaml:"language" toml:"language"`
+	AutoScrollToChanged     bool              `json:"auto_scroll_to_changed" yaml:"auto_scroll_to_changed" toml:"auto_scroll_to_changed"`
+	HighlightChanges        bool              `json:"highlight_changes" yaml:"highlight_changes" toml:"highlight_changes"`
+	RTLTextDirection        bool              `json:"rtl_text_direction" yaml:"rtl_text_direction" toml:"rtl_text_direction"`
+	EnablePagination        bool              `json:"enable_pagination" yaml:"enable_pagination" toml:"enable_pagination"`
+	PageSize                int               `json:"page_size" yaml:"page_size" toml:"page_size"`
+	PlayNotificationSound   bool              `json:"play_notification_sound" yaml:"play_notification_sound" toml:"play_notification_sound"`
+	NotificationSoundSource string            `json:"notification_sound_source" yaml:"notification_sound_source" toml:"notification_sound_source"`
+	ShowFooter              bool              `json:"show_footer" yaml:"show_footer" toml:"show_footer"`
+	LastUpdateDisplayMode   string            `json:"last_update_display_mode" yaml:"last_update_display_mode" toml:"last_update_display_mode"`
+	EnableRowColoring       bool              `json:"enable_row_coloring" yaml:"enable_row_coloring" toml:"enable_row_coloring"`
+	RowColorGroup           string            `json:"row_color_group" yaml:"row_color_group" toml:"row_color_group"`
+	RowColorSubgroup        string            `json:"row_color_subgroup" yaml:"row_color_subgroup" toml:"row_color_subgroup"`
+	RowColorNoStock         string            `json:"row_color_no_stock" yaml:"row_color_no_stock" toml:"row_color_no_stock"`
+	RowColorHasStock        string            `json:"row_color_has_stock" yaml:"row_color_has_stock" toml:"row_color_has_stock"`
+	EnableRowIcons          bool              `json:"enable_row_icons" yaml:"enable_row_icons" toml:"enable_row_icons"`
+	ColumnWidths            map[string]int    `json:"column_widths" yaml:"column_widths" toml:"column_widths"`
+	RowIconRules            []RowIconRule     `json:"row_icon_rules" yaml:"row_icon_rules" toml:"row_icon_rules"`
+	RowIconFallback         RowIconAppearance `json:"row_icon_fallback" yaml:"row_icon_fallback" toml:"row_icon_fallback"`
+}
+
+// RowIconRule is evaluated in slice order against transformed canonical keys.
+// Disabled is deliberately negative so omitted config remains enabled.
+type RowIconRule struct {
+	ID       string `json:"id" yaml:"id" toml:"id"`
+	Field    string `json:"field" yaml:"field" toml:"field"`
+	Operator string `json:"operator" yaml:"operator" toml:"operator"`
+	Value    string `json:"value" yaml:"value" toml:"value"`
+	Icon     string `json:"icon" yaml:"icon" toml:"icon"`
+	Color    string `json:"color" yaml:"color" toml:"color"`
+	Label    string `json:"label" yaml:"label" toml:"label"`
+	Disabled bool   `json:"disabled,omitempty" yaml:"disabled,omitempty" toml:"disabled,omitempty"`
+}
+
+type RowIconAppearance struct {
+	Icon  string `json:"icon" yaml:"icon" toml:"icon"`
+	Color string `json:"color" yaml:"color" toml:"color"`
+	Label string `json:"label" yaml:"label" toml:"label"`
 }
 
 type Manager struct {
@@ -178,15 +209,42 @@ func Default() Config {
 		},
 		UI: UIConfig{
 			Theme:                   "system",
+			Language:                "en",
 			HighlightChanges:        true,
 			PageSize:                100,
 			NotificationSoundSource: "external",
+			ShowFooter:              true,
+			LastUpdateDisplayMode:   "both",
+			EnableRowColoring:       true,
+			RowColorGroup:           "#6366f1",
+			RowColorSubgroup:        "#0ea5e9",
+			RowColorNoStock:         "#6b7280",
+			RowColorHasStock:        "#10b981",
+			EnableRowIcons:          true,
+			ColumnWidths:            map[string]int{},
+			RowIconRules:            defaultRowIconRules(),
+			RowIconFallback: RowIconAppearance{
+				Icon:  "info",
+				Color: "#6366f1",
+				Label: "Product",
+			},
 		},
 		ColumnLabels: map[string]string{
 			"Code":  "Code",
 			"Name":  "Name",
 			"ANBAR": "Warehouse",
 		},
+	}
+}
+
+func defaultRowIconRules() []RowIconRule {
+	return []RowIconRule{
+		{ID: "warnings", Field: "warnings", Operator: "not_empty", Icon: "warning", Color: "#d97706", Label: "Warnings"},
+		{ID: "stale", Field: "source_updated_at", Operator: "stale_days", Value: "7", Icon: "clock", Color: "#b45309", Label: "Stale source data"},
+		{ID: "price-missing", Field: "final_price", Operator: "empty", Icon: "price", Color: "#dc2626", Label: "Price unavailable"},
+		{ID: "weight-missing", Field: "weight_grams", Operator: "empty", Icon: "weight", Color: "#7c3aed", Label: "Weight unavailable"},
+		{ID: "out-of-stock", Field: "total_stock", Operator: "lte", Value: "0", Icon: "package", Color: "#6b7280", Label: "Out of stock"},
+		{ID: "in-stock", Field: "total_stock", Operator: "gt", Value: "0", Icon: "stock", Color: "#059669", Label: "In stock"},
 	}
 }
 
@@ -890,12 +948,113 @@ func normalize(cfg *Config) {
 	if cfg.UI.Theme == "" {
 		cfg.UI.Theme = "system"
 	}
+	cfg.UI.Language = strings.ToLower(strings.TrimSpace(cfg.UI.Language))
+	if cfg.UI.Language != "fa" {
+		cfg.UI.Language = "en"
+	}
 	if cfg.UI.NotificationSoundSource == "" {
 		cfg.UI.NotificationSoundSource = "external"
+	}
+	if cfg.UI.LastUpdateDisplayMode == "" {
+		cfg.UI.LastUpdateDisplayMode = "both"
+	}
+	if cfg.UI.RowColorGroup == "" {
+		cfg.UI.RowColorGroup = "#6366f1"
+	}
+	if cfg.UI.RowColorSubgroup == "" {
+		cfg.UI.RowColorSubgroup = "#0ea5e9"
+	}
+	if cfg.UI.RowColorNoStock == "" {
+		cfg.UI.RowColorNoStock = "#6b7280"
+	}
+	if cfg.UI.RowColorHasStock == "" {
+		cfg.UI.RowColorHasStock = "#10b981"
+	}
+	if cfg.UI.ColumnWidths == nil {
+		cfg.UI.ColumnWidths = map[string]int{}
+	}
+	normalizedColumnWidths := make(map[string]int, len(cfg.UI.ColumnWidths))
+	for field, width := range cfg.UI.ColumnWidths {
+		cleanField := strings.TrimSpace(field)
+		if cleanField == "" {
+			continue
+		}
+		width = clampUIColumnWidth(width)
+		canonicalField := canonicalUIColumnKey(cleanField)
+		if canonicalField != cleanField || field != cleanField {
+			if _, exists := normalizedColumnWidths[canonicalField]; !exists {
+				normalizedColumnWidths[canonicalField] = width
+			}
+		}
+	}
+	for field, width := range cfg.UI.ColumnWidths {
+		cleanField := strings.TrimSpace(field)
+		if cleanField == "" || field != cleanField || canonicalUIColumnKey(cleanField) != cleanField {
+			continue
+		}
+		normalizedColumnWidths[cleanField] = clampUIColumnWidth(width)
+	}
+	cfg.UI.ColumnWidths = normalizedColumnWidths
+	if cfg.UI.RowIconRules == nil {
+		cfg.UI.RowIconRules = defaultRowIconRules()
+	}
+	for index := range cfg.UI.RowIconRules {
+		rule := &cfg.UI.RowIconRules[index]
+		rule.ID = strings.TrimSpace(rule.ID)
+		if rule.ID == "" {
+			rule.ID = fmt.Sprintf("rule-%d", index+1)
+		}
+		rule.Field = strings.TrimSpace(rule.Field)
+		rule.Operator = strings.ToLower(strings.TrimSpace(rule.Operator))
+		if rule.Operator == "" {
+			rule.Operator = "equals"
+		}
+		rule.Value = strings.TrimSpace(rule.Value)
+		rule.Icon = strings.ToLower(strings.TrimSpace(rule.Icon))
+		if rule.Icon == "" {
+			rule.Icon = "info"
+		}
+		rule.Color = strings.TrimSpace(rule.Color)
+		if rule.Color == "" {
+			rule.Color = "#6366f1"
+		}
+		rule.Label = strings.TrimSpace(rule.Label)
+	}
+	if strings.TrimSpace(cfg.UI.RowIconFallback.Icon) == "" {
+		cfg.UI.RowIconFallback.Icon = "info"
+	}
+	if strings.TrimSpace(cfg.UI.RowIconFallback.Color) == "" {
+		cfg.UI.RowIconFallback.Color = "#6366f1"
+	}
+	if strings.TrimSpace(cfg.UI.RowIconFallback.Label) == "" {
+		cfg.UI.RowIconFallback.Label = "Product"
 	}
 	if cfg.ColumnLabels == nil {
 		cfg.ColumnLabels = map[string]string{}
 	}
+}
+
+func canonicalUIColumnKey(field string) string {
+	switch strings.ToLower(strings.TrimSpace(field)) {
+	case "code", "product_code":
+		return "product_code"
+	case "name":
+		return "name"
+	case "serial":
+		return "serial"
+	default:
+		return strings.TrimSpace(field)
+	}
+}
+
+func clampUIColumnWidth(width int) int {
+	if width < 80 {
+		return 80
+	}
+	if width > 480 {
+		return 480
+	}
+	return width
 }
 
 func setAddr(cfg *Config, addr string) {

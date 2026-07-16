@@ -109,6 +109,49 @@ func TestManagerSavesOnlyChangedValues(t *testing.T) {
 	}
 }
 
+func TestUITableUXPersistsThroughConfigPath(t *testing.T) {
+	dir := t.TempDir()
+	jsonPath := filepath.Join(dir, "patris-export.json")
+	mgr, err := LoadFiles([]string{jsonPath})
+	if err != nil {
+		t.Fatalf("LoadFiles failed: %v", err)
+	}
+	if err := mgr.Update(func(cfg *Config) {
+		cfg.UI.Language = "fa"
+		cfg.UI.RTLTextDirection = true
+		cfg.UI.EnableRowColoring = false
+		cfg.UI.ColumnWidths = map[string]int{"Code": 333, "product_code ": 444, "product_code": 211, "Name": 180, "name": 999}
+		cfg.UI.RowIconRules = []RowIconRule{{
+			ID: "missing-price", Field: "final_price", Operator: "empty",
+			Icon: "price", Color: "#dc2626", Label: "Price unavailable",
+		}}
+		cfg.UI.RowIconFallback = RowIconAppearance{Icon: "package", Color: "#64748b", Label: "Product"}
+	}); err != nil {
+		t.Fatalf("Update failed: %v", err)
+	}
+
+	reloaded, err := LoadFiles([]string{jsonPath})
+	if err != nil {
+		t.Fatalf("reload failed: %v", err)
+	}
+	ui := reloaded.Get().UI
+	if ui.Language != "fa" || !ui.RTLTextDirection || ui.EnableRowColoring {
+		t.Fatalf("language, direction, or independent coloring toggle was not preserved: %+v", ui)
+	}
+	if ui.ColumnWidths["product_code"] != 211 || ui.ColumnWidths["name"] != 480 {
+		t.Fatalf("canonical column widths were not persisted and clamped: %+v", ui.ColumnWidths)
+	}
+	if _, exists := ui.ColumnWidths["Code"]; exists {
+		t.Fatalf("legacy Code width was not migrated: %+v", ui.ColumnWidths)
+	}
+	if len(ui.RowIconRules) != 1 || ui.RowIconRules[0].Field != "final_price" || ui.RowIconRules[0].Icon != "price" {
+		t.Fatalf("ordered row icon rules were not preserved: %+v", ui.RowIconRules)
+	}
+	if ui.RowIconFallback.Icon != "package" || ui.RowIconFallback.Color != "#64748b" {
+		t.Fatalf("row icon fallback was not preserved: %+v", ui.RowIconFallback)
+	}
+}
+
 func TestApplyEnvNotificationOptions(t *testing.T) {
 	t.Setenv("PATRIS_EXPORT_NOTIFICATIONS", "true")
 	t.Setenv("PATRIS_EXPORT_NOTIFY_CLIENT_CONNECTED", "true")
