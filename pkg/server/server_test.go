@@ -10,7 +10,6 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -169,6 +168,15 @@ func TestServerJSON(t *testing.T) {
 
 		if w.Code != http.StatusBadRequest {
 			t.Fatalf("Expected status 400, got %d", w.Code)
+		}
+	})
+
+	t.Run("GET /api/product-sync unavailable for generic dataset", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/api/product-sync", nil)
+		w := httptest.NewRecorder()
+		srv.router.ServeHTTP(w, req)
+		if w.Code != http.StatusNotFound {
+			t.Fatalf("Expected status 404, got %d: %s", w.Code, w.Body.String())
 		}
 	})
 
@@ -500,12 +508,40 @@ func TestCanonicalKalaParityAcrossRESTCSVXLSXAndWebSocket(t *testing.T) {
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("REST status = %d: %s", recorder.Code, recorder.Body.String())
 	}
-	var envelope canonical.Envelope
-	if err := json.NewDecoder(recorder.Body).Decode(&envelope); err != nil {
-		t.Fatalf("decode canonical REST envelope: %v", err)
+	var keyedProducts map[string]map[string]interface{}
+	if err := json.NewDecoder(recorder.Body).Decode(&keyedProducts); err != nil {
+		t.Fatalf("decode canonical REST product rows: %v", err)
 	}
-	restProduct := canonicalTypedProductByCode(t, envelope.Products, "102001011")
+	if len(keyedProducts) != 354 {
+		t.Fatalf("canonical /api/records returned %d top-level entries, want 354 product rows", len(keyedProducts))
+	}
+	for _, metadata := range []string{"schema", "schema_version", "event", "event_id", "products"} {
+		if _, leaked := keyedProducts[metadata]; leaked {
+			t.Fatalf("canonical envelope metadata %q was exposed as a viewer row", metadata)
+		}
+	}
+	restProduct, ok := keyedProducts["102001011"]
+	if !ok {
+		t.Fatalf("canonical product Code 102001011 missing from keyed REST rows")
+	}
+	restProduct["product_code"] = "102001011"
 	assertCanonicalFixtureValues(t, "REST", restProduct)
+
+	contractRequest := httptest.NewRequest(http.MethodGet, "/api/product-sync", nil)
+	contractRecorder := httptest.NewRecorder()
+	srv.router.ServeHTTP(contractRecorder, contractRequest)
+	if contractRecorder.Code != http.StatusOK {
+		t.Fatalf("contract status = %d: %s", contractRecorder.Code, contractRecorder.Body.String())
+	}
+	if contentType := contractRecorder.Header().Get("Content-Type"); !strings.HasPrefix(contentType, "application/vnd.digitalogic.product-sync+json") {
+		t.Fatalf("unexpected contract content type %q", contentType)
+	}
+	var envelope canonical.Envelope
+	if err := json.NewDecoder(contractRecorder.Body).Decode(&envelope); err != nil {
+		t.Fatalf("decode dedicated canonical REST envelope: %v", err)
+	}
+	contractRESTProduct := canonicalTypedProductByCode(t, envelope.Products, "102001011")
+	assertJSONEquivalent(t, "records and dedicated contract", restProduct, contractRESTProduct)
 
 	csvRequest := httptest.NewRequest(http.MethodGet, "/api/records.csv", nil)
 	csvRecorder := httptest.NewRecorder()
@@ -553,8 +589,21 @@ func TestCanonicalKalaParityAcrossRESTCSVXLSXAndWebSocket(t *testing.T) {
 	wsProduct := canonicalProductByCode(t, message.Added, "102001011")
 	assertCanonicalFixtureValues(t, "WebSocket", wsProduct)
 	contractProduct := canonicalTypedProductByCode(t, message.Contract.Products, "102001011")
-	if !reflect.DeepEqual(restProduct, contractProduct) {
-		t.Fatalf("REST and WebSocket contract products differ:\nREST=%#v\nWS=%#v", restProduct, contractProduct)
+	assertJSONEquivalent(t, "REST and WebSocket contract", restProduct, contractProduct)
+}
+
+func assertJSONEquivalent(t *testing.T, source string, left, right interface{}) {
+	t.Helper()
+	leftJSON, err := json.Marshal(left)
+	if err != nil {
+		t.Fatalf("marshal %s left value: %v", source, err)
+	}
+	rightJSON, err := json.Marshal(right)
+	if err != nil {
+		t.Fatalf("marshal %s right value: %v", source, err)
+	}
+	if !bytes.Equal(leftJSON, rightJSON) {
+		t.Fatalf("%s values differ:\nleft=%s\nright=%s", source, leftJSON, rightJSON)
 	}
 }
 

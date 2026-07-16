@@ -204,6 +204,7 @@ func (s *Server) setupRoutes() {
 	s.router.HandleFunc("/partials/charmap", s.handleCharmapPartial).Methods("GET")
 	s.router.HandleFunc("/api/records", s.handleGetRecords).Methods("GET")
 	s.router.HandleFunc("/api/records.{format:json|csv|xlsx}", s.handleGetRecords).Methods("GET")
+	s.router.HandleFunc("/api/product-sync", s.handleGetProductSyncContract).Methods("GET")
 	s.router.HandleFunc("/api/info", s.handleGetInfo).Methods("GET")
 	s.router.HandleFunc("/api/app", s.handleGetApp).Methods("GET")
 	s.router.HandleFunc("/api/charmap", s.handleGetCharmap).Methods("GET")
@@ -238,10 +239,7 @@ func (s *Server) Records() (map[string]interface{}, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to read records: %w", err)
 	}
-	if payload, ok := result.Payload.(map[string]interface{}); ok {
-		return payload, nil
-	}
-	return recordmap.Keyed(result.Rows, result.KeyField, true), nil
+	return recordsPayload(result), nil
 }
 
 func (s *Server) RecordsPayload() (interface{}, error) {
@@ -249,7 +247,11 @@ func (s *Server) RecordsPayload() (interface{}, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to read records: %w", err)
 	}
-	return result.Payload, nil
+	return recordsPayload(result), nil
+}
+
+func recordsPayload(result recordpipe.Result) map[string]interface{} {
+	return recordmap.Keyed(result.Rows, result.KeyField, true)
 }
 
 func (s *Server) RecordResult() (recordpipe.Result, error) {
@@ -553,8 +555,26 @@ func (s *Server) handleGetRecords(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	if err := json.NewEncoder(w).Encode(result.Payload); err != nil {
+	if err := json.NewEncoder(w).Encode(recordsPayload(result)); err != nil {
 		http.Error(w, fmt.Sprintf("Failed to encode JSON: %v", err), http.StatusInternalServerError)
+	}
+}
+
+// handleGetProductSyncContract exposes the versioned integration envelope
+// without changing the long-standing row collection returned by /api/records.
+func (s *Server) handleGetProductSyncContract(w http.ResponseWriter, _ *http.Request) {
+	result, err := s.RecordResult()
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Failed to read records: %v", err), http.StatusInternalServerError)
+		return
+	}
+	if result.Contract == nil {
+		http.Error(w, "canonical product-sync contract is not available for this dataset", http.StatusNotFound)
+		return
+	}
+	w.Header().Set("Content-Type", "application/vnd.digitalogic.product-sync+json; version=1.0")
+	if err := json.NewEncoder(w).Encode(result.Contract); err != nil {
+		http.Error(w, fmt.Sprintf("Failed to encode product-sync contract: %v", err), http.StatusInternalServerError)
 	}
 }
 

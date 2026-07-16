@@ -1,3 +1,5 @@
+import { normalizeRecordsPayload } from './records.js';
+
 // Application state
 const state = {
     records: [],
@@ -4349,14 +4351,7 @@ async function fetchInitialData() {
         
         const data = await response.json();
         
-        // data is usually transformed as { "101": {...}, "102": {...}, ... }.
-        // Some API modes can return an array, so handle both shapes.
-        state.records = Array.isArray(data)
-            ? data
-            : Object.entries(data).map(([code, record]) => ({
-                Code: code,
-                ...record
-            }));
+        state.records = normalizeRecordsPayload(data);
         state.filteredRecords = [];
         state.fields = [];
         state.fieldTypes = {};

@@ -132,6 +132,14 @@ mismatches force null final prices and explicit compatibility warnings.
 
 Canonical JSON and JSON webhooks use `digitalogic.product-sync` version `1.0`:
 
+The server exposes this envelope at `GET /api/product-sync`. The viewer-facing
+`GET /api/records` endpoint remains a Code-keyed collection of canonical
+product rows; envelope metadata never appears as table rows.
+
+Cross-project contract verification uses the entirely synthetic two-product
+fixture at `testdata/digitalogic-product-sync-v1.synthetic.json`; production
+exports and catalog values must never be committed as golden fixtures.
+
 ```json
 {
   "schema": "digitalogic.product-sync",

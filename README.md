@@ -508,6 +508,11 @@ curl -H "Accept: text/csv" http://localhost:8080/api/records -o kala.csv
 Add `download=1` to ask the API for an attachment filename, for example
 `/api/records.csv?download=1`.
 
+For a configured canonical dataset, `GET /api/product-sync` returns the full
+versioned `digitalogic.product-sync` envelope. `/api/records` deliberately
+remains the Code-keyed product-row collection used by the viewer and embedded
+records API.
+
 **JSON response:**
 ```json
 {
