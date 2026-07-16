@@ -1,5 +1,28 @@
 import { normalizeRecordsPayload } from './records.js';
 import { createExportMenuController } from './export-menu.js';
+import {
+    CANONICAL_ROW_FIELDS,
+    DEFAULT_ROW_ICON_FALLBACK,
+    ROW_ICON_NAMES,
+    ROW_RULE_OPERATORS,
+    clampColumnWidth,
+    defaultColumnWidth,
+    fitMenuPosition,
+    iconMarkup,
+    keyboardColumnWidth,
+    normalizeColumnWidths,
+    normalizeRowIconFallback,
+    normalizeRowIconRule,
+    normalizeRowIconRules,
+    pruneSelectedKeys,
+    resizedColumnWidth,
+    resolveRowIcon,
+    rowCommandDefinitions,
+    selectionSummary,
+    stableRecordKey,
+    tableLanguage,
+    tableText
+} from './table-ux.js';
 
 // Application state
 const state = {
@@ -29,6 +52,11 @@ const state = {
     columnFilters: {},  // Store active filters per column: { fieldName: { type, value, ... } }
     hiddenColumns: new Set(),  // Track hidden columns
     columnOrder: [],
+    selectedKeys: new Set(),
+    rowMenu: {
+        record: null,
+        trigger: null
+    },
     openRangePanel: null,
     openRangeAnchor: null,
     scrollAnchor: null,
@@ -52,11 +80,16 @@ const state = {
         notificationSoundSource: 'external',
         showFooter: true,
         lastUpdateDisplayMode: 'both',
+        language: 'en',
         enableRowColoring: true,
         rowColorGroup: '#6366f1',
         rowColorSubgroup: '#0ea5e9',
         rowColorNoStock: '#6b7280',
-        rowColorHasStock: '#10b981'
+        rowColorHasStock: '#10b981',
+        enableRowIcons: true,
+        columnWidths: {},
+        rowIconRules: [],
+        rowIconFallback: { ...DEFAULT_ROW_ICON_FALLBACK }
     },
     notificationAudio: null,
     originalTitle: document.title,
@@ -323,15 +356,24 @@ function applyConfig(config, source = 'server') {
             notificationSoundSource: config.ui.notification_sound_source || state.settings.notificationSoundSource,
             showFooter: config.ui.show_footer === undefined ? state.settings.showFooter : config.ui.show_footer !== false,
             lastUpdateDisplayMode: config.ui.last_update_display_mode || state.settings.lastUpdateDisplayMode,
+            language: tableLanguage(config.ui.language || state.settings.language),
             enableRowColoring: config.ui.enable_row_coloring !== false,
             rowColorGroup: config.ui.row_color_group || state.settings.rowColorGroup,
             rowColorSubgroup: config.ui.row_color_subgroup || state.settings.rowColorSubgroup,
             rowColorNoStock: config.ui.row_color_no_stock || state.settings.rowColorNoStock,
-            rowColorHasStock: config.ui.row_color_has_stock || state.settings.rowColorHasStock
+            rowColorHasStock: config.ui.row_color_has_stock || state.settings.rowColorHasStock,
+            enableRowIcons: config.ui.enable_row_icons !== false,
+            columnWidths: normalizeColumnWidths(config.ui.column_widths),
+            rowIconRules: normalizeRowIconRules(config.ui.row_icon_rules),
+            rowIconFallback: normalizeRowIconFallback(config.ui.row_icon_fallback)
         };
         localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify(state.settings));
         applySettings();
         initTheme();
+        if (state.fields.length > 0) {
+            renderTableHeader();
+            renderTable();
+        }
     }
     if (source !== 'local') {
         console.info('⚙️ Configuration applied from %s', source, config);
@@ -535,11 +577,16 @@ function syncSettingsToConfig() {
         notification_sound_source: state.settings.notificationSoundSource,
         show_footer: state.settings.showFooter,
         last_update_display_mode: state.settings.lastUpdateDisplayMode,
+        language: tableLanguage(state.settings.language),
         enable_row_coloring: state.settings.enableRowColoring,
         row_color_group: state.settings.rowColorGroup,
         row_color_subgroup: state.settings.rowColorSubgroup,
         row_color_no_stock: state.settings.rowColorNoStock,
-        row_color_has_stock: state.settings.rowColorHasStock
+        row_color_has_stock: state.settings.rowColorHasStock,
+        enable_row_icons: state.settings.enableRowIcons,
+        column_widths: normalizeColumnWidths(state.settings.columnWidths),
+        row_icon_rules: normalizeRowIconRules(state.settings.rowIconRules),
+        row_icon_fallback: normalizeRowIconFallback(state.settings.rowIconFallback)
     };
     saveConfigToServer(state.config);
 }
@@ -944,6 +991,10 @@ function anbarTotal(record) {
 
 // Apply settings to UI
 function applySettings() {
+    state.settings.language = tableLanguage(state.settings.language);
+    state.settings.columnWidths = normalizeColumnWidths(state.settings.columnWidths);
+    state.settings.rowIconRules = normalizeRowIconRules(state.settings.rowIconRules);
+    state.settings.rowIconFallback = normalizeRowIconFallback(state.settings.rowIconFallback);
     setChecked('showFooter', state.settings.showFooter);
     setChecked('autoScrollToChanged', state.settings.autoScrollToChanged);
     setChecked('highlightChanges', state.settings.highlightChanges);
@@ -953,15 +1004,26 @@ function applySettings() {
     setChecked('playNotificationSound', state.settings.playNotificationSound);
     setValue('notificationSoundSource', state.settings.notificationSoundSource || 'external');
     setValue('lastUpdateDisplayMode', state.settings.lastUpdateDisplayMode || 'both');
+    setValue('interfaceLanguage', state.settings.language);
     setChecked('enableRowColoring', state.settings.enableRowColoring);
     setValue('rowColorGroup', state.settings.rowColorGroup || '#6366f1');
     setValue('rowColorSubgroup', state.settings.rowColorSubgroup || '#0ea5e9');
     setValue('rowColorNoStock', state.settings.rowColorNoStock || '#6b7280');
     setValue('rowColorHasStock', state.settings.rowColorHasStock || '#10b981');
+    setChecked('enableRowIcons', state.settings.enableRowIcons);
+    setValue('rowIconFallbackIcon', state.settings.rowIconFallback.icon);
+    setValue('rowIconFallbackColor', state.settings.rowIconFallback.color);
+    setValue('rowIconFallbackLabel', state.settings.rowIconFallback.label);
     applyConfigToSettingsForm();
     document.body.classList.toggle('rtl-text-mode', !!state.settings.rtlTextDirection);
+    document.body.classList.toggle('table-rtl', isTableRTL());
+    document.documentElement.lang = state.settings.language;
+    document.getElementById('dataTable')?.setAttribute('dir', isTableRTL() ? 'rtl' : 'ltr');
     applyFooterVisibility();
     applyRowColorSettings();
+    applyTableTranslations();
+    renderRowIconRulesEditor();
+    updateSelectionCount();
     updateLastUpdateDisplay();
 }
 
@@ -992,6 +1054,244 @@ function applyRowColorSettings() {
     root.style.setProperty('--row-no-stock-color', hexToRgba(state.settings.rowColorNoStock, 0.9));
     root.style.setProperty('--row-stock-accent', state.settings.rowColorHasStock || '#10b981');
     document.body.classList.toggle('row-coloring-disabled', !state.settings.enableRowColoring);
+}
+
+function isTableRTL() {
+    return state.settings.rtlTextDirection === true;
+}
+
+function t(key, values = {}) {
+    return tableText(state.settings.language, key, values);
+}
+
+function applyTableTranslations() {
+    document.querySelectorAll('[data-table-i18n]').forEach(element => {
+        element.textContent = t(element.dataset.tableI18n);
+    });
+    document.querySelectorAll('[data-table-i18n-placeholder]').forEach(element => {
+        element.placeholder = t(element.dataset.tableI18nPlaceholder);
+    });
+    const rowMenu = document.getElementById('rowContextMenu');
+    if (rowMenu) {
+        rowMenu.setAttribute('aria-label', t('actions'));
+        rowMenu.dir = isTableRTL() ? 'rtl' : 'ltr';
+    }
+    updateSelectionCount();
+}
+
+let tableUXSaveTimer = null;
+let tableUXPreviewTimer = null;
+function scheduleTableUXSave({ header = false, editor = false } = {}) {
+    clearTimeout(tableUXSaveTimer);
+    tableUXSaveTimer = setTimeout(() => {
+        saveSettings();
+        if (header) renderTableHeader();
+        if (editor) renderRowIconRulesEditor();
+        renderTable();
+    }, 180);
+}
+
+function scheduleTableUXPreview() {
+    clearTimeout(tableUXPreviewTimer);
+    tableUXPreviewTimer = setTimeout(renderTable, 100);
+}
+
+function populateRowIconOptions(select, selected) {
+    if (!select) return;
+    select.innerHTML = '';
+    ROW_ICON_NAMES.forEach(icon => {
+        const option = document.createElement('option');
+        option.value = icon;
+        option.textContent = icon.replace(/(^|-)([a-z])/g, (_, separator, letter) => `${separator ? ' ' : ''}${letter.toUpperCase()}`);
+        option.selected = icon === selected;
+        select.appendChild(option);
+    });
+}
+
+function createRuleField(labelKey, control) {
+    const label = document.createElement('label');
+    label.className = 'field-label row-icon-rule-field';
+    const caption = document.createElement('span');
+    caption.textContent = t(labelKey);
+    label.appendChild(caption);
+    label.appendChild(control);
+    return label;
+}
+
+function createRuleIconButton(icon, label, action, disabled = false) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'btn btn-icon row-icon-rule-action';
+    button.innerHTML = iconMarkup(icon);
+    button.title = label;
+    button.setAttribute('aria-label', label);
+    button.disabled = disabled;
+    button.addEventListener('click', action);
+    return button;
+}
+
+function renderRowIconRulesEditor() {
+    const container = document.getElementById('rowIconRules');
+    if (!container) return;
+
+    const datalist = document.getElementById('rowIconFieldOptions');
+    if (datalist) {
+        datalist.innerHTML = '';
+        CANONICAL_ROW_FIELDS.forEach(field => {
+            const option = document.createElement('option');
+            option.value = field;
+            datalist.appendChild(option);
+        });
+    }
+
+    state.settings.rowIconRules = normalizeRowIconRules(state.settings.rowIconRules);
+    container.innerHTML = '';
+    state.settings.rowIconRules.forEach((rule, index) => {
+        const card = document.createElement('section');
+        card.className = 'row-icon-rule';
+        card.dataset.ruleId = rule.id;
+
+        const heading = document.createElement('div');
+        heading.className = 'row-icon-rule-heading';
+        const title = document.createElement('strong');
+        title.textContent = rule.label || t('rule', { number: index + 1 });
+        const enabledLabel = document.createElement('label');
+        enabledLabel.className = 'checkbox-label compact-checkbox';
+        const enabled = document.createElement('input');
+        enabled.type = 'checkbox';
+        enabled.checked = !rule.disabled;
+        enabled.setAttribute('aria-label', t('enabled'));
+        enabled.addEventListener('change', () => {
+            rule.disabled = !enabled.checked;
+            scheduleTableUXSave();
+        });
+        const enabledText = document.createElement('span');
+        enabledText.textContent = t('enabled');
+        enabledLabel.append(enabled, enabledText);
+        const headingActions = document.createElement('div');
+        headingActions.className = 'row-icon-rule-actions';
+        headingActions.append(
+            createRuleIconButton('arrowUp', t('moveUp'), () => moveRowIconRule(index, -1), index === 0),
+            createRuleIconButton('arrowDown', t('moveDown'), () => moveRowIconRule(index, 1), index === state.settings.rowIconRules.length - 1),
+            createRuleIconButton('trash', t('removeRule'), () => removeRowIconRule(index))
+        );
+        heading.append(title, enabledLabel, headingActions);
+
+        const controls = document.createElement('div');
+        controls.className = 'row-icon-rule-controls';
+
+        const fieldInput = document.createElement('input');
+        fieldInput.type = 'text';
+        fieldInput.className = 'text-input';
+        fieldInput.setAttribute('list', 'rowIconFieldOptions');
+        fieldInput.value = rule.field;
+        fieldInput.addEventListener('input', () => {
+            rule.field = fieldInput.value.trim();
+            scheduleTableUXPreview();
+        });
+        fieldInput.addEventListener('change', () => scheduleTableUXSave());
+
+        const operatorSelect = document.createElement('select');
+        operatorSelect.className = 'select-input';
+        ROW_RULE_OPERATORS.forEach(operator => {
+            const option = document.createElement('option');
+            option.value = operator;
+            option.textContent = t(`op_${operator}`);
+            option.selected = operator === rule.operator;
+            operatorSelect.appendChild(option);
+        });
+        operatorSelect.addEventListener('change', () => {
+            rule.operator = operatorSelect.value;
+            scheduleTableUXSave();
+        });
+
+        const valueInput = document.createElement('input');
+        valueInput.type = 'text';
+        valueInput.className = 'text-input';
+        valueInput.value = rule.value;
+        valueInput.disabled = ['empty', 'not_empty', 'truthy', 'falsy'].includes(rule.operator);
+        valueInput.addEventListener('input', () => {
+            rule.value = valueInput.value;
+            scheduleTableUXPreview();
+        });
+        valueInput.addEventListener('change', () => scheduleTableUXSave());
+        operatorSelect.addEventListener('change', () => {
+            valueInput.disabled = ['empty', 'not_empty', 'truthy', 'falsy'].includes(operatorSelect.value);
+        });
+
+        const iconSelect = document.createElement('select');
+        iconSelect.className = 'select-input';
+        populateRowIconOptions(iconSelect, rule.icon);
+        iconSelect.addEventListener('change', () => {
+            rule.icon = iconSelect.value;
+            scheduleTableUXSave();
+        });
+
+        const colorInput = document.createElement('input');
+        colorInput.type = 'color';
+        colorInput.className = 'color-input';
+        colorInput.value = rule.color;
+        colorInput.addEventListener('input', () => {
+            rule.color = colorInput.value;
+            scheduleTableUXPreview();
+        });
+        colorInput.addEventListener('change', () => scheduleTableUXSave());
+
+        const labelInput = document.createElement('input');
+        labelInput.type = 'text';
+        labelInput.className = 'text-input';
+        labelInput.value = rule.label;
+        labelInput.addEventListener('input', () => {
+            rule.label = labelInput.value.trim();
+            title.textContent = rule.label || t('rule', { number: index + 1 });
+            scheduleTableUXPreview();
+        });
+        labelInput.addEventListener('change', () => scheduleTableUXSave());
+
+        controls.append(
+            createRuleField('field', fieldInput),
+            createRuleField('operator', operatorSelect),
+            createRuleField('value', valueInput),
+            createRuleField('icon', iconSelect),
+            createRuleField('color', colorInput),
+            createRuleField('label', labelInput)
+        );
+        card.append(heading, controls);
+        container.appendChild(card);
+    });
+
+    const fallback = normalizeRowIconFallback(state.settings.rowIconFallback);
+    state.settings.rowIconFallback = fallback;
+    populateRowIconOptions(document.getElementById('rowIconFallbackIcon'), fallback.icon);
+}
+
+function addRowIconRule() {
+    const index = state.settings.rowIconRules.length;
+    state.settings.rowIconRules.push(normalizeRowIconRule({
+        id: `rule-${Date.now().toString(36)}`,
+        field: 'warnings',
+        operator: 'not_empty',
+        icon: 'info',
+        color: '#6366f1',
+        label: ''
+    }, index));
+    renderRowIconRulesEditor();
+    scheduleTableUXSave();
+}
+
+function moveRowIconRule(index, direction) {
+    const target = index + direction;
+    if (target < 0 || target >= state.settings.rowIconRules.length) return;
+    const [rule] = state.settings.rowIconRules.splice(index, 1);
+    state.settings.rowIconRules.splice(target, 0, rule);
+    renderRowIconRulesEditor();
+    scheduleTableUXSave();
+}
+
+function removeRowIconRule(index) {
+    state.settings.rowIconRules.splice(index, 1);
+    renderRowIconRulesEditor();
+    scheduleTableUXSave();
 }
 
 function applyFooterVisibility() {
@@ -1235,8 +1535,9 @@ function initDialogActionButtons() {
         menuButton.type = 'button';
         menuButton.className = 'btn btn-icon dialog-menu-btn';
         menuButton.title = 'More actions';
+        menuButton.setAttribute('aria-label', 'More actions');
         menuButton.dataset.dialogMenu = panelId;
-        menuButton.innerHTML = '&hellip;';
+        menuButton.innerHTML = iconMarkup('more');
         closeButton.parentElement?.insertBefore(menuButton, closeButton);
         closeButton.dataset.normalizedDialogActions = '1';
     });
@@ -2257,7 +2558,7 @@ async function requestSourceRefresh() {
         if (button) {
             setTimeout(() => {
                 button.disabled = false;
-                button.textContent = '🔄 Refresh Now';
+                button.innerHTML = `${iconMarkup('refresh')}<span data-table-i18n="refresh">${t('refresh')}</span>`;
             }, 500);
         }
     }
@@ -2318,7 +2619,7 @@ function handleWebSocketMessage(data) {
             applyProcessStatus(data.status);
         }
         // Initial load - records are already transformed with ANBAR as array
-        state.records = data.added || [];
+        state.records = normalizeRecordsPayload(data.added || []);
         state.filteredRecords = [];
         state.fields = [];
         state.fieldTypes = {};
@@ -2362,7 +2663,7 @@ function handleWebSocketMessage(data) {
         // Handle added records
         if (data.added && data.added.length > 0) {
             const startIndex = state.records.length;
-            state.records.push(...data.added);
+            state.records.push(...normalizeRecordsPayload(data.added));
             
             // Mark added records as changed
             data.added.forEach((_, i) => {
@@ -2596,7 +2897,10 @@ function extractFields() {
     const allFields = Object.keys(firstRecord);
     
     // Separate ANBAR array from other fields
-    const nonAnbarFields = allFields.filter(f => f !== 'ANBAR');
+    // Code is the stable viewer identity alias for canonical product_code.
+    // Keep the canonical key on the record for rules/integrations without
+    // rendering a duplicate identity column.
+    const nonAnbarFields = allFields.filter(f => f !== 'ANBAR' && f !== 'product_code');
     
     // If ANBAR is an array, create separate ANBAR1, ANBAR2, etc. columns
     if (firstRecord.ANBAR && Array.isArray(firstRecord.ANBAR)) {
@@ -2651,6 +2955,7 @@ function renderTableHeader() {
     thead.innerHTML = '';
 
     const visibleFields = state.fields.filter(field => !state.hiddenColumns.has(field));
+    renderColumnLayout(visibleFields);
     const visibleAnbarFields = visibleFields.filter(field => isAnbarField(field));
     const hasAnbarFields = visibleAnbarFields.length > 0;
 
@@ -2660,6 +2965,12 @@ function renderTableHeader() {
     columnRow.className = hasAnbarFields ? 'column-header-row has-anbar-group' : 'column-header-row';
     const filterRow = document.createElement('tr');
     filterRow.className = 'filter-row';
+
+    groupRow.appendChild(createSelectionHeaderCell(hasAnbarFields ? 2 : 1));
+    const selectionFilter = document.createElement('th');
+    selectionFilter.className = 'selection-column selection-filter-cell';
+    selectionFilter.setAttribute('aria-hidden', 'true');
+    filterRow.appendChild(selectionFilter);
 
     let processedAnbar = false;
 
@@ -2709,15 +3020,15 @@ function renderTableHeader() {
     
     // Add actions column
     const actionsHeader = document.createElement('th');
-    actionsHeader.textContent = 'Actions';
-    actionsHeader.style.width = '100px';
+    actionsHeader.textContent = t('actions');
+    actionsHeader.className = 'actions-column';
     if (hasAnbarFields) {
         actionsHeader.setAttribute('rowspan', '2');
     }
     groupRow.appendChild(actionsHeader);
     
     const actionsFilter = document.createElement('th');
-    actionsFilter.style.width = '100px';
+    actionsFilter.className = 'actions-column';
     // Add clear all filters button
     const clearBtn = document.createElement('button');
     clearBtn.className = 'btn-clear-filters';
@@ -2729,9 +3040,10 @@ function renderTableHeader() {
             <path d="M9 7V5h6v2" />
             <path d="M7 7l1 13h8l1-13" />
         </svg>
-        <span>Clear</span>
+        <span>${t('clearFilters')}</span>
     `;
-    clearBtn.title = 'Clear all filters';
+    clearBtn.title = t('clearAllFilters');
+    clearBtn.setAttribute('aria-label', t('clearAllFilters'));
     clearBtn.addEventListener('click', clearAllFilters);
     actionsFilter.appendChild(clearBtn);
     filterRow.appendChild(actionsFilter);
@@ -2741,6 +3053,87 @@ function renderTableHeader() {
         thead.appendChild(columnRow);
     }
     thead.appendChild(filterRow);
+}
+
+const SELECTION_COLUMN_WIDTH = 68;
+const ACTIONS_COLUMN_WIDTH = 60;
+
+function renderColumnLayout(visibleFields) {
+    const table = document.getElementById('dataTable');
+    if (!table) return;
+    table.querySelector('colgroup')?.remove();
+    const colgroup = document.createElement('colgroup');
+
+    const selectionCol = document.createElement('col');
+    selectionCol.className = 'selection-column-layout';
+    selectionCol.style.width = `${SELECTION_COLUMN_WIDTH}px`;
+    colgroup.appendChild(selectionCol);
+
+    visibleFields.forEach(field => {
+        const col = document.createElement('col');
+        col.dataset.columnField = field;
+        col.style.width = `${columnWidth(field)}px`;
+        colgroup.appendChild(col);
+    });
+
+    const actionsCol = document.createElement('col');
+    actionsCol.className = 'actions-column-layout';
+    actionsCol.style.width = `${ACTIONS_COLUMN_WIDTH}px`;
+    colgroup.appendChild(actionsCol);
+    table.insertBefore(colgroup, table.firstChild);
+    updateTablePixelWidth(visibleFields);
+}
+
+function columnWidth(field) {
+    return clampColumnWidth(state.settings.columnWidths?.[field], defaultColumnWidth(field));
+}
+
+function updateTablePixelWidth(visibleFields = state.fields.filter(field => !state.hiddenColumns.has(field))) {
+    const table = document.getElementById('dataTable');
+    if (!table) return;
+    const width = SELECTION_COLUMN_WIDTH + ACTIONS_COLUMN_WIDTH
+        + visibleFields.reduce((total, field) => total + columnWidth(field), 0);
+    table.style.width = `${width}px`;
+}
+
+function createSelectionHeaderCell(rowSpan) {
+    const th = document.createElement('th');
+    th.className = 'selection-column selection-header-cell';
+    if (rowSpan > 1) th.setAttribute('rowspan', String(rowSpan));
+    const checkbox = document.createElement('input');
+    checkbox.type = 'checkbox';
+    checkbox.className = 'table-selection-checkbox';
+    checkbox.setAttribute('aria-label', t('selectAll'));
+    checkbox.title = t('selectAll');
+    const summary = selectionSummary(state.selectedKeys, state.filteredRecords);
+    checkbox.checked = summary.checked;
+    checkbox.indeterminate = summary.indeterminate;
+    checkbox.disabled = summary.selectable === 0;
+    checkbox.addEventListener('click', event => event.stopPropagation());
+    checkbox.addEventListener('change', () => setFilteredSelection(checkbox.checked));
+    th.appendChild(checkbox);
+    return th;
+}
+
+function setFilteredSelection(selected) {
+    state.filteredRecords.forEach(record => {
+        const key = stableRecordKey(record);
+        if (!key) return;
+        if (selected) state.selectedKeys.add(key);
+        else state.selectedKeys.delete(key);
+    });
+    renderTableHeader();
+    renderTable();
+    updateSelectionCount();
+}
+
+function updateSelectionCount() {
+    pruneSelectedKeys(state.selectedKeys, state.records);
+    const count = state.selectedKeys.size;
+    const element = document.getElementById('selectionCount');
+    if (!element) return;
+    element.hidden = count === 0;
+    element.textContent = count ? t('selectedCount', { count }) : '';
 }
 
 function isAnbarField(field) {
@@ -2763,18 +3156,108 @@ function createHeaderCell(field, { label, rowSpan = 1, className = '' } = {}) {
 
     const sortIndicator = document.createElement('span');
     sortIndicator.className = 'sort-indicator';
-    if (state.sortField === field) {
-        sortIndicator.textContent = state.sortDirection === 'asc' ? '▲' : '▼';
-        sortIndicator.style.opacity = '1';
-    } else {
-        sortIndicator.textContent = '▲';
-        sortIndicator.style.opacity = '0.3';
-    }
+    sortIndicator.innerHTML = iconMarkup('chevron');
+    sortIndicator.classList.toggle('active', state.sortField === field);
+    sortIndicator.classList.toggle('descending', state.sortField === field && state.sortDirection === 'desc');
     sortContainer.appendChild(sortIndicator);
 
     th.appendChild(sortContainer);
-    th.addEventListener('click', () => sortByField(field));
+    th.dataset.field = field;
+    th.tabIndex = 0;
+    th.setAttribute('aria-sort', state.sortField === field ? (state.sortDirection === 'asc' ? 'ascending' : 'descending') : 'none');
+    th.addEventListener('click', event => {
+        if (!event.target.closest('.column-resizer')) sortByField(field);
+    });
+    th.addEventListener('keydown', event => {
+        if ((event.key === 'Enter' || event.key === ' ') && event.target === th) {
+            event.preventDefault();
+            sortByField(field);
+        }
+    });
+    th.appendChild(createColumnResizer(field));
     return th;
+}
+
+function createColumnResizer(field) {
+    const handle = document.createElement('span');
+    handle.className = 'column-resizer';
+    handle.tabIndex = 0;
+    handle.setAttribute('role', 'separator');
+    handle.setAttribute('aria-orientation', 'vertical');
+    handle.setAttribute('aria-label', t('resizeColumn', { column: displayFieldName(field) }));
+    handle.setAttribute('aria-description', t('resizeHelp'));
+    handle.setAttribute('aria-valuemin', '80');
+    handle.setAttribute('aria-valuemax', '480');
+    handle.setAttribute('aria-valuenow', String(columnWidth(field)));
+
+    handle.addEventListener('click', event => event.stopPropagation());
+    handle.addEventListener('dblclick', event => {
+        event.preventDefault();
+        event.stopPropagation();
+        resetColumnWidth(field);
+    });
+    handle.addEventListener('keydown', event => {
+        const next = keyboardColumnWidth(columnWidth(field), event.key, isTableRTL());
+        if (next === undefined) return;
+        event.preventDefault();
+        event.stopPropagation();
+        if (next === null) {
+            resetColumnWidth(field);
+            return;
+        }
+        setColumnWidth(field, next, { persist: true });
+        handle.setAttribute('aria-valuenow', String(next));
+    });
+    handle.addEventListener('pointerdown', event => {
+        if (event.button !== 0) return;
+        event.preventDefault();
+        event.stopPropagation();
+        const startX = event.clientX;
+        const startWidth = columnWidth(field);
+        handle.classList.add('resizing');
+        handle.setPointerCapture?.(event.pointerId);
+
+        const move = moveEvent => {
+            const width = resizedColumnWidth(startWidth, moveEvent.clientX - startX, isTableRTL());
+            setColumnWidth(field, width, { persist: false });
+            handle.setAttribute('aria-valuenow', String(width));
+        };
+        const end = endEvent => {
+            handle.classList.remove('resizing');
+            handle.releasePointerCapture?.(endEvent.pointerId);
+            handle.removeEventListener('pointermove', move);
+            handle.removeEventListener('pointerup', end);
+            handle.removeEventListener('pointercancel', end);
+            saveSettings();
+        };
+        handle.addEventListener('pointermove', move);
+        handle.addEventListener('pointerup', end);
+        handle.addEventListener('pointercancel', end);
+    });
+    return handle;
+}
+
+function setColumnWidth(field, width, { persist = false } = {}) {
+    const normalized = clampColumnWidth(width, defaultColumnWidth(field));
+    state.settings.columnWidths[field] = normalized;
+    const col = [...document.querySelectorAll('#dataTable col[data-column-field]')]
+        .find(element => element.dataset.columnField === field);
+    if (col) col.style.width = `${normalized}px`;
+    updateTablePixelWidth();
+    if (persist) saveSettings();
+}
+
+function resetColumnWidth(field) {
+    delete state.settings.columnWidths[field];
+    renderTableHeader();
+    saveSettings();
+}
+
+function resetAllColumnWidths() {
+    state.settings.columnWidths = {};
+    renderTableHeader();
+    saveSettings();
+    showInAppToast(t('widthsReset'), '', { source: 'table_settings', eventType: 'table_settings' });
 }
 
 // Create filter control based on field type
@@ -2936,7 +3419,7 @@ function createRangePopover2(field, currentFilter, mode) {
     const button = document.createElement('button');
     button.type = 'button';
     button.className = 'range-trigger range-trigger-ellipsis';
-    button.innerHTML = '<span aria-hidden="true">&hellip;</span>';
+    button.innerHTML = iconMarkup('more');
     button.setAttribute('aria-label', `Open ${displayFieldName(field)} range options`);
 
     const panel = document.createElement('div');
@@ -3386,17 +3869,20 @@ function renderTable(changedIndices = new Set()) {
     const tbody = document.getElementById('tableBody');
     const loading = document.getElementById('loading');
     const emptyState = document.getElementById('emptyState');
-    
+
+    pruneSelectedKeys(state.selectedKeys, state.records);
+    updateSelectionHeaderState();
+    updateSelectionCount();
     loading.style.display = 'none';
-    
+
     if (state.filteredRecords.length === 0) {
         tbody.innerHTML = '';
         emptyState.style.display = 'flex';
         return;
     }
-    
+
     emptyState.style.display = 'none';
-    
+
     let recordsToShow = state.settings.enablePagination
         ? state.filteredRecords.slice(0, state.settings.pageSize)
         : state.filteredRecords;
@@ -3407,26 +3893,30 @@ function renderTable(changedIndices = new Set()) {
             recordsToShow = state.filteredRecords.slice(0, anchorIndex + 1);
         }
     }
-    
+
     tbody.innerHTML = '';
-    
-    recordsToShow.forEach((record, displayIndex) => {
+
+    recordsToShow.forEach(record => {
         const row = document.createElement('tr');
         const codeInfo = parsePatrisCode(record.Code);
-        const recordCode = String(record.Code ?? '');
+        const recordCode = stableRecordKey(record);
         if (recordCode) {
             row.dataset.code = recordCode;
         }
+        row.tabIndex = 0;
+        row.setAttribute('aria-selected', state.selectedKeys.has(recordCode) ? 'true' : 'false');
+        row.setAttribute('aria-label', recordCode || t('inspect'));
+        row.classList.toggle('selected', state.selectedKeys.has(recordCode));
         row.classList.add(`code-${codeInfo.type}`);
         row.classList.add(anbarTotal(record) > 0 ? 'has-stock' : 'no-stock');
-        
+
         // Find the original index in state.records
         const originalIndex = state.records.indexOf(record);
-        
+
         // Add highlight class if changed
         if (changedIndices.has(originalIndex) && state.settings.highlightChanges) {
             row.classList.add('changed');
-            
+
             // Scroll to changed item if setting is enabled
             if (state.settings.autoScrollToChanged && originalIndex === Math.min(...changedIndices)) {
                 setTimeout(() => {
@@ -3434,16 +3924,18 @@ function renderTable(changedIndices = new Set()) {
                 }, 100);
             }
         }
-        
+
+        row.appendChild(createRowSelectionCell(record, recordCode, row));
+
         // Add data cells
         state.fields.forEach(field => {
             // Skip hidden columns
             if (state.hiddenColumns.has(field)) {
                 return;
             }
-            
+
             const td = document.createElement('td');
-            
+
             // Handle ANBAR fields (ANBAR1, ANBAR2, etc.)
             if (field.startsWith('ANBAR') && field.length > 5) {
                 const anbarIndex = parseInt(field.substring(5), 10) - 1;
@@ -3459,7 +3951,7 @@ function renderTable(changedIndices = new Set()) {
                 td.style.textAlign = 'right';
             } else {
                 const value = record[field];
-                
+
                 // Apply thousand separator to numeric fields (except Code and Serial)
                 if (field !== 'Code' && field !== 'Serial' && value !== null && value !== undefined && !isNaN(value)) {
                     td.textContent = formatNumberWithSeparator(value);
@@ -3469,44 +3961,268 @@ function renderTable(changedIndices = new Set()) {
                     td.textContent = value !== null && value !== undefined ? value : '';
                 }
             }
-            
+
             // Make Code column sticky
             if (field === 'Code') {
                 td.classList.add('sticky-column');
             }
             row.appendChild(td);
         });
-        
+
         // Add actions cell
         const actionsCell = document.createElement('td');
-        actionsCell.className = 'action-cell';
+        actionsCell.className = 'action-cell actions-column';
         const actionsWrap = document.createElement('div');
         actionsWrap.className = 'action-cell-content';
-        
-        const inspectBtn = document.createElement('button');
-        inspectBtn.className = 'action-btn';
-        inspectBtn.textContent = '🔍 Inspect';
-        inspectBtn.onclick = (e) => {
-            e.stopPropagation();
-            persistScrollAnchorForCode(recordCode);
-            inspectRecord(record);
-        };
-        
-        actionsWrap.appendChild(inspectBtn);
+
+        const menuButton = document.createElement('button');
+        menuButton.type = 'button';
+        menuButton.className = 'action-btn row-action-button';
+        menuButton.innerHTML = iconMarkup('more');
+        menuButton.title = t('rowActions', { code: recordCode || '—' });
+        menuButton.setAttribute('aria-label', menuButton.title);
+        menuButton.setAttribute('aria-haspopup', 'menu');
+        menuButton.setAttribute('aria-expanded', 'false');
+        menuButton.addEventListener('click', event => {
+            event.stopPropagation();
+            openRowCommandMenu(record, { trigger: menuButton, focusMenu: true });
+        });
+
+        actionsWrap.appendChild(menuButton);
         actionsCell.appendChild(actionsWrap);
         row.appendChild(actionsCell);
-        
+
         // Make row clickable to inspect
-        row.onclick = () => {
+        row.addEventListener('click', () => {
             persistScrollAnchorForCode(recordCode);
             inspectRecord(record);
-        };
-        
+        });
+        row.addEventListener('contextmenu', event => {
+            event.preventDefault();
+            openRowCommandMenu(record, { point: { x: event.clientX, y: event.clientY }, trigger: row, focusMenu: true });
+        });
+        row.addEventListener('keydown', event => {
+            if (event.key === 'ContextMenu' || (event.shiftKey && event.key === 'F10')) {
+                event.preventDefault();
+                const rect = row.getBoundingClientRect();
+                openRowCommandMenu(record, {
+                    point: { x: isTableRTL() ? rect.right - 8 : rect.left + 8, y: rect.top + Math.min(rect.height, 32) },
+                    trigger: row,
+                    focusMenu: true
+                });
+            }
+        });
+
         tbody.appendChild(row);
     });
     if (!(state.settings.autoScrollToChanged && changedIndices.size > 0)) {
         restoreScrollAnchorAfterRender();
     }
+}
+
+function createRowSelectionCell(record, recordCode, row) {
+    const cell = document.createElement('td');
+    cell.className = 'selection-column selection-cell';
+    const content = document.createElement('div');
+    content.className = 'selection-cell-content';
+    const checkbox = document.createElement('input');
+    checkbox.type = 'checkbox';
+    checkbox.className = 'table-selection-checkbox';
+    checkbox.checked = !!recordCode && state.selectedKeys.has(recordCode);
+    checkbox.disabled = !recordCode;
+    checkbox.setAttribute('aria-label', t('selectRowLabel', { code: recordCode || '—' }));
+    checkbox.addEventListener('click', event => event.stopPropagation());
+    checkbox.addEventListener('change', () => {
+        if (!recordCode) return;
+        if (checkbox.checked) state.selectedKeys.add(recordCode);
+        else state.selectedKeys.delete(recordCode);
+        row.classList.toggle('selected', checkbox.checked);
+        row.setAttribute('aria-selected', checkbox.checked ? 'true' : 'false');
+        updateSelectionHeaderState();
+        updateSelectionCount();
+    });
+    content.appendChild(checkbox);
+
+    if (state.settings.enableRowIcons) {
+        const appearance = resolveRowIcon(record, state.settings.rowIconRules, state.settings.rowIconFallback);
+        const icon = document.createElement('span');
+        icon.className = 'conditional-row-icon';
+        icon.style.color = appearance.color;
+        icon.innerHTML = iconMarkup(appearance.icon);
+        icon.title = appearance.label || appearance.icon;
+        icon.setAttribute('role', 'img');
+        icon.setAttribute('aria-label', appearance.label || appearance.icon);
+        if (appearance.ruleId) icon.dataset.ruleId = appearance.ruleId;
+        content.appendChild(icon);
+    }
+    cell.appendChild(content);
+    return cell;
+}
+
+function updateSelectionHeaderState() {
+    const checkbox = document.querySelector('.selection-header-cell .table-selection-checkbox');
+    if (!checkbox) return;
+    const summary = selectionSummary(state.selectedKeys, state.filteredRecords);
+    checkbox.checked = summary.checked;
+    checkbox.indeterminate = summary.indeterminate;
+    checkbox.disabled = summary.selectable === 0;
+}
+
+function commandsForRow(record) {
+    const recordCode = stableRecordKey(record);
+    return rowCommandDefinitions({
+        selected: !!recordCode && state.selectedKeys.has(recordCode),
+        hasCode: !!recordCode
+    }).map(definition => ({
+        ...definition,
+        label: t(definition.labelKey),
+        execute: () => executeRowCommand(definition.id, record)
+    }));
+}
+
+function openRowCommandMenu(record, { point = null, trigger = null, focusMenu = false } = {}) {
+    const menu = document.getElementById('rowContextMenu');
+    if (!menu) return;
+    closeRowCommandMenu({ restoreFocus: false });
+    state.rowMenu.record = record;
+    state.rowMenu.trigger = trigger;
+    if (trigger?.matches('.row-action-button')) trigger.setAttribute('aria-expanded', 'true');
+
+    menu.innerHTML = '';
+    commandsForRow(record).forEach(command => {
+        const item = document.createElement('button');
+        item.type = 'button';
+        item.className = 'row-context-menu-item';
+        item.setAttribute('role', 'menuitem');
+        item.tabIndex = -1;
+        item.dataset.command = command.id;
+        item.innerHTML = `${iconMarkup(command.icon)}<span></span>`;
+        item.querySelector('span').textContent = command.label;
+        item.addEventListener('click', event => {
+            event.stopPropagation();
+            closeRowCommandMenu({ restoreFocus: false });
+            Promise.resolve(command.execute()).catch(error => {
+                showInAppToast(t('copyFailed'), error.message, { error: true, source: 'row_action', eventType: 'row_action' });
+            });
+        });
+        menu.appendChild(item);
+    });
+
+    menu.hidden = false;
+    menu.classList.add('open');
+    menu.dir = isTableRTL() ? 'rtl' : 'ltr';
+    menu.style.visibility = 'hidden';
+    menu.style.left = '0px';
+    menu.style.top = '0px';
+
+    const menuWidth = menu.offsetWidth || 220;
+    const menuHeight = menu.offsetHeight || 180;
+    let x = point?.x;
+    let y = point?.y;
+    if (!point && trigger) {
+        const rect = trigger.getBoundingClientRect();
+        x = isTableRTL() ? rect.left : rect.right - menuWidth;
+        y = rect.bottom + 4;
+    }
+    const position = fitMenuPosition({
+        x,
+        y,
+        width: menuWidth,
+        height: menuHeight,
+        viewportWidth: window.innerWidth,
+        viewportHeight: window.innerHeight
+    });
+    menu.style.left = `${position.left}px`;
+    menu.style.top = `${position.top}px`;
+    menu.style.visibility = 'visible';
+    if (focusMenu) menu.querySelector('[role="menuitem"]')?.focus({ preventScroll: true });
+}
+
+function closeRowCommandMenu({ restoreFocus = false } = {}) {
+    const menu = document.getElementById('rowContextMenu');
+    if (!menu || menu.hidden) return;
+    const trigger = state.rowMenu.trigger;
+    if (trigger?.matches('.row-action-button')) trigger.setAttribute('aria-expanded', 'false');
+    menu.hidden = true;
+    menu.classList.remove('open');
+    menu.innerHTML = '';
+    state.rowMenu.record = null;
+    state.rowMenu.trigger = null;
+    if (restoreFocus && trigger?.isConnected) trigger.focus({ preventScroll: true });
+}
+
+function initRowCommandMenu() {
+    document.addEventListener('pointerdown', event => {
+        const menu = document.getElementById('rowContextMenu');
+        if (!menu?.hidden && !menu.contains(event.target) && !event.target.closest('.row-action-button')) {
+            closeRowCommandMenu({ restoreFocus: false });
+        }
+    }, true);
+    document.addEventListener('keydown', event => {
+        const menu = document.getElementById('rowContextMenu');
+        if (!menu || menu.hidden) return;
+        const items = [...menu.querySelectorAll('[role="menuitem"]')];
+        const current = items.indexOf(document.activeElement);
+        if (event.key === 'Escape') {
+            event.preventDefault();
+            event.stopImmediatePropagation();
+            closeRowCommandMenu({ restoreFocus: true });
+        } else if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+            event.preventDefault();
+            const delta = event.key === 'ArrowDown' ? 1 : -1;
+            items[(current + delta + items.length) % items.length]?.focus();
+        } else if (event.key === 'Home' || event.key === 'End') {
+            event.preventDefault();
+            items[event.key === 'Home' ? 0 : items.length - 1]?.focus();
+        } else if (event.key === 'Tab') {
+            closeRowCommandMenu({ restoreFocus: false });
+        }
+    });
+    window.addEventListener('resize', () => closeRowCommandMenu({ restoreFocus: false }));
+    document.addEventListener('scroll', () => closeRowCommandMenu({ restoreFocus: false }), true);
+}
+
+async function executeRowCommand(commandID, record) {
+    const recordCode = stableRecordKey(record);
+    switch (commandID) {
+        case 'inspect':
+            persistScrollAnchorForCode(recordCode);
+            inspectRecord(record);
+            return;
+        case 'copy_code':
+            await copyTextToClipboard(recordCode);
+            showInAppToast(t('copied'), t('codeCopied'), { source: 'row_action', eventType: 'row_action' });
+            return;
+        case 'copy_json':
+            await copyTextToClipboard(JSON.stringify(record, null, 2));
+            showInAppToast(t('copied'), t('jsonCopied'), { source: 'row_action', eventType: 'row_action' });
+            return;
+        case 'toggle_selection':
+            if (!recordCode) return;
+            if (state.selectedKeys.has(recordCode)) state.selectedKeys.delete(recordCode);
+            else state.selectedKeys.add(recordCode);
+            renderTableHeader();
+            renderTable();
+            return;
+        default:
+            return;
+    }
+}
+
+async function copyTextToClipboard(text) {
+    if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(text);
+        return;
+    }
+    const textarea = document.createElement('textarea');
+    textarea.value = text;
+    textarea.style.position = 'fixed';
+    textarea.style.opacity = '0';
+    document.body.appendChild(textarea);
+    textarea.select();
+    const copied = document.execCommand('copy');
+    textarea.remove();
+    if (!copied) throw new Error(t('copyFailed'));
 }
 
 // Sort by field
@@ -4003,7 +4719,8 @@ function toggleTheme() {
 // Update theme icon
 function updateThemeIcon(isDark) {
     const btn = document.getElementById('themeToggle');
-    btn.textContent = isDark ? '☀️' : '🌙';
+    if (!btn) return;
+    btn.innerHTML = iconMarkup(isDark ? 'sun' : 'moon');
 }
 
 function setLoadingState(isLoading) {
@@ -4089,6 +4806,7 @@ function init() {
     initChromeMirrors();
     initTableWheelScroll();
     initScrollAnchorTracking();
+    initRowCommandMenu();
     initRouter();
     setInterval(updateLastUpdateDisplay, 30000);
     
@@ -4169,6 +4887,8 @@ function init() {
         closeRouteDialog();
     });
 
+    document.getElementById('resetColumnWidths')?.addEventListener('click', resetAllColumnWidths);
+
     document.getElementById('refreshNowBtn').addEventListener('click', requestSourceRefresh);
     
     document.getElementById('showAllColumns').addEventListener('click', () => {
@@ -4208,6 +4928,16 @@ function init() {
         state.settings.rtlTextDirection = e.target.checked;
         applySettings();
         saveSettings();
+        renderTableHeader();
+        renderTable();
+    });
+
+    document.getElementById('interfaceLanguage')?.addEventListener('change', event => {
+        state.settings.language = tableLanguage(event.target.value);
+        applySettings();
+        saveSettings();
+        renderTableHeader();
+        renderTable();
     });
     
     document.getElementById('playNotificationSound').addEventListener('change', (e) => {
@@ -4309,6 +5039,30 @@ function init() {
             saveSettings();
         });
     });
+
+    document.getElementById('enableRowIcons')?.addEventListener('change', event => {
+        state.settings.enableRowIcons = event.target.checked;
+        saveSettings();
+        renderTable();
+    });
+    document.getElementById('addRowIconRule')?.addEventListener('click', addRowIconRule);
+    const fallbackIcon = document.getElementById('rowIconFallbackIcon');
+    const fallbackColor = document.getElementById('rowIconFallbackColor');
+    const fallbackLabel = document.getElementById('rowIconFallbackLabel');
+    fallbackIcon?.addEventListener('change', () => {
+        state.settings.rowIconFallback.icon = fallbackIcon.value;
+        scheduleTableUXSave();
+    });
+    fallbackColor?.addEventListener('input', () => {
+        state.settings.rowIconFallback.color = fallbackColor.value;
+        scheduleTableUXPreview();
+    });
+    fallbackColor?.addEventListener('change', () => scheduleTableUXSave());
+    fallbackLabel?.addEventListener('input', () => {
+        state.settings.rowIconFallback.label = fallbackLabel.value.trim();
+        scheduleTableUXPreview();
+    });
+    fallbackLabel?.addEventListener('change', () => scheduleTableUXSave());
     
     // Initialize notification audio
     initNotificationAudio();

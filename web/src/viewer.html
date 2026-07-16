@@ -46,7 +46,7 @@
 
         <div class="toolbar">
             <div class="toolbar-section">
-                <input type="text" id="searchInput" class="search-input" placeholder="🔍 Search records..." aria-keyshortcuts="F2" title="Press F2 to focus search">
+                <input type="text" id="searchInput" class="search-input" placeholder="Search records..." data-table-i18n-placeholder="searchPlaceholder" aria-keyshortcuts="F2" title="Press F2 to focus search">
                 <select id="fieldFilter" class="field-select">
                     <option value="">All Fields</option>
                 </select>
@@ -54,11 +54,12 @@
             <div class="toolbar-section">
                 <div class="export-container">
                     <button class="btn btn-primary" id="exportBtn" type="button" title="Export data" aria-haspopup="menu" aria-controls="exportDropdown" aria-expanded="false">
-                        📥 Export
+                        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12M7 10l5 5 5-5"/><path d="M4 19h16"/></svg>
+                        <span data-table-i18n="export">Export</span>
                     </button>
                     <div class="export-dropdown" id="exportDropdown" role="menu" aria-label="Export formats">
                         <button class="export-option" id="exportJSON" type="button" role="menuitem" data-export-format="json">
-                            <span class="export-icon">📄</span>
+                            <span class="export-icon" aria-hidden="true"><svg class="export-svg" viewBox="0 0 24 24"><path d="M6 3h9l4 4v14H6z"/><path d="M15 3v5h5M9 12h6M9 16h6"/></svg></span>
                             <div class="export-details">
                                 <div class="export-title">Export as JSON</div>
                                 <div class="export-desc">JavaScript Object Notation</div>
@@ -83,17 +84,21 @@
                     </div>
                 </div>
                 <button class="btn btn-secondary" id="columnsBtn" title="Manage columns">
-                    👁️ Columns
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M9 4v16M15 4v16"/></svg>
+                    <span data-table-i18n="columns">Columns</span>
                 </button>
                 <button class="btn btn-secondary" id="refreshNowBtn" title="Reload data from the source">
-                    🔄 Refresh Now
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 7v5h-5"/><path d="M4 17v-5h5"/><path d="M18 9a7 7 0 0 0-12-2l-2 5M6 15a7 7 0 0 0 12 2l2-5"/></svg>
+                    <span data-table-i18n="refresh">Refresh now</span>
                 </button>
                 <button class="btn btn-secondary event-log-button" id="eventLogBtn" title="Open event log">
-                    Logs <span class="event-log-count" id="eventLogCount">0</span>
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 6h12M8 12h12M8 18h12"/><path d="M4 6h.01M4 12h.01M4 18h.01"/></svg>
+                    <span data-table-i18n="logs">Logs</span> <span class="event-log-count" id="eventLogCount">0</span>
                 </button>
                 <div class="record-count">
-                    Total: <strong id="totalCount">0</strong> | 
-                    Filtered: <strong id="filteredCount">0</strong>
+                    <span data-table-i18n="total">Total</span>: <strong id="totalCount">0</strong> |
+                    <span data-table-i18n="filtered">Filtered</span>: <strong id="filteredCount">0</strong>
+                    <span class="selection-count" id="selectionCount" aria-live="polite" hidden></span>
                 </div>
             </div>
         </div>
@@ -109,11 +114,13 @@
                     <p>Loading data...</p>
                 </div>
                 <div class="empty-state" id="emptyState" style="display: none;">
-                    <div class="empty-icon">📭</div>
-                    <p>No records found</p>
+                    <div class="empty-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 5h16v14H4z"/><path d="m4 13 4-4h8l4 4M8 13l2 2h4l2-2"/></svg></div>
+                    <p data-table-i18n="noRecords">No records found</p>
                 </div>
             </div>
         </div>
+
+        <div class="row-context-menu" id="rowContextMenu" role="menu" aria-label="Row actions" hidden></div>
 
         <div class="drop-overlay" id="dropOverlay" aria-hidden="true">
             <div class="drop-card">
@@ -146,11 +153,17 @@
                 <div class="settings-body">
                     <div class="settings-pane active" data-settings-pane="ui">
                         <div class="settings-grid">
-                            <label class="field-label">Theme
+                             <label class="field-label">Theme
                                 <select id="settingsTheme" class="select-input">
                                     <option value="system">System</option>
                                     <option value="light">Light</option>
                                     <option value="dark">Dark</option>
+                                </select>
+                             </label>
+                            <label class="field-label"><span data-table-i18n="language">Language</span>
+                                <select id="interfaceLanguage" class="select-input">
+                                    <option value="en">English</option>
+                                    <option value="fa">فارسی</option>
                                 </select>
                             </label>
                             <label class="field-label">Records per page
@@ -184,9 +197,9 @@
                             <label class="checkbox-label"><input type="checkbox" id="playNotificationSound"><span>Play notification sound on updates</span></label>
                         </div>
                         <div class="settings-subsection">
-                            <h3>Row coloring</h3>
+                            <h3 data-table-i18n="rowColoring">Row coloring</h3>
                             <div class="settings-grid color-grid">
-                                <label class="checkbox-label color-toggle"><input type="checkbox" id="enableRowColoring" checked><span>Enable row coloring rules</span></label>
+                                <label class="checkbox-label color-toggle"><input type="checkbox" id="enableRowColoring" checked><span data-table-i18n="enableRowColoring">Enable row coloring rules</span></label>
                                 <label class="field-label">Group rows
                                     <input id="rowColorGroup" class="color-input" type="color" value="#6366f1">
                                 </label>
@@ -200,6 +213,27 @@
                                     <input id="rowColorHasStock" class="color-input" type="color" value="#10b981">
                                 </label>
                             </div>
+                        </div>
+                        <div class="settings-subsection row-icon-settings">
+                            <div class="settings-subsection-heading">
+                                <div>
+                                    <h3 data-table-i18n="rowIcons">Conditional row icons</h3>
+                                    <p class="settings-help" data-table-i18n="rowIconsHelp">The first enabled rule that matches a transformed canonical key wins.</p>
+                                </div>
+                                <button class="btn btn-secondary" id="addRowIconRule" type="button">
+                                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+                                    <span data-table-i18n="addRule">Add rule</span>
+                                </button>
+                            </div>
+                            <label class="checkbox-label"><input type="checkbox" id="enableRowIcons" checked><span data-table-i18n="enableRowIcons">Show conditional row icons</span></label>
+                            <datalist id="rowIconFieldOptions"></datalist>
+                            <div class="row-icon-rules" id="rowIconRules"></div>
+                            <fieldset class="row-icon-fallback">
+                                <legend data-table-i18n="fallback">Fallback</legend>
+                                <label class="field-label"><span data-table-i18n="icon">Icon</span><select id="rowIconFallbackIcon" class="select-input"></select></label>
+                                <label class="field-label"><span data-table-i18n="color">Color</span><input id="rowIconFallbackColor" class="color-input" type="color" value="#6366f1"></label>
+                                <label class="field-label"><span data-table-i18n="label">Accessible label</span><input id="rowIconFallbackLabel" class="text-input" type="text" value="Product"></label>
+                            </fieldset>
                         </div>
                         <div class="button-row">
                             <button class="btn btn-secondary" id="testNotificationSound" type="button">Test sound</button>
@@ -280,7 +314,7 @@
                     <div class="dialog-actions">
                         <button class="btn btn-secondary" id="showAllColumns" type="button">Show all</button>
                         <button class="btn btn-secondary" id="hideAllColumns" type="button">Hide all</button>
-                        <button class="btn btn-icon dialog-menu-btn" type="button" title="More actions" data-dialog-menu="columnsPanel">&hellip;</button>
+                        <button class="btn btn-secondary" id="resetColumnWidths" type="button" data-table-i18n="resetColumnWidths">Reset widths</button>
                         <button class="btn btn-icon dialog-close-btn" id="closeColumns" type="button" title="Close" aria-label="Close"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12" /><path d="M18 6L6 18" /></svg></button>
                     </div>
                 </div>
@@ -306,7 +340,7 @@
                         <p class="settings-path">Live WebSocket, source, and process status.</p>
                     </div>
                     <div class="dialog-actions">
-                        <button class="btn btn-icon dialog-menu-btn" type="button" title="More actions" data-dialog-menu="connectionPanel">&hellip;</button>
+                        <button class="btn btn-icon dialog-menu-btn" type="button" title="More actions" data-dialog-menu="connectionPanel" aria-label="More actions"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/></svg></button>
                         <button class="btn btn-icon dialog-close-btn" id="closeConnection" type="button" title="Close" aria-label="Close"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12" /><path d="M18 6L6 18" /></svg></button>
                     </div>
                 </div>
@@ -326,7 +360,7 @@
                     </div>
                     <div class="dialog-actions">
                         <button class="btn btn-secondary" id="clearEventLog" type="button">Clear</button>
-                        <button class="btn btn-icon dialog-menu-btn" type="button" title="More actions" data-dialog-menu="eventLogPanel">&hellip;</button>
+                        <button class="btn btn-icon dialog-menu-btn" type="button" title="More actions" data-dialog-menu="eventLogPanel" aria-label="More actions"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/></svg></button>
                         <button class="btn btn-icon dialog-close-btn" id="closeEventLog" type="button" title="Close" aria-label="Close"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12" /><path d="M18 6L6 18" /></svg></button>
                     </div>
                 </div>
