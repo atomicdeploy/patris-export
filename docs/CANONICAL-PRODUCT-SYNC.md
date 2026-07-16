@@ -207,8 +207,10 @@ environment variable at request time and sent only in
 `X-Digitalogic-Product-Sync-Secret`; it is not copied into persisted config or
 delivery logs or inherited by an optional command sink. Remote secret-bearing
 destinations require HTTPS. The sink preserves the canonical `X-Patris-*`
-identity headers, parses the WordPress REST response, surfaces apply state, and
-can retry the identical event when the receiver reports partial/pending work. See
+identity headers and uses contract `source.id` instead of the local database
+path for `X-Patris-Source`. It parses the WordPress REST response, surfaces
+apply state, and can retry the identical event when the receiver reports
+partial/pending work. See
 [`docs/examples/export-transform-send.md`](examples/export-transform-send.md)
 for the complete configuration and retry policy.
 

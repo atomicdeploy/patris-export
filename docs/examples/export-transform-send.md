@@ -121,7 +121,10 @@ environment.
 Patris writes `X-Patris-Event`, `X-Patris-Source`, `X-Patris-Contract`,
 `X-Patris-Contract-Version`, and `X-Patris-Event-ID` after custom headers, so
 configuration cannot replace the canonical body identity. The receiver checks
-the contract/version/event ID headers against the body.
+the contract/version/event ID headers against the body. For canonical events,
+`X-Patris-Source` is the public contract `source.id`; the local database path
+is never sent in that header. Generic non-contract webhooks retain their
+configured event source.
 
 Raw-mode outbound delivery fails closed by default. `send_updates.allow_raw`
 must be explicitly enabled for a trusted, non-integration destination; never

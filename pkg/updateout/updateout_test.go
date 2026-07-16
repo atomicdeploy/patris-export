@@ -246,7 +246,7 @@ func TestDispatchDigitalogicRetriesIdenticalEventAndSurfacesRecovery(t *testing.
 		if got := r.Header.Get("X-Patris-Event"); got != "update" {
 			t.Errorf("event type header = %q", got)
 		}
-		if got := r.Header.Get("X-Patris-Source"); got != "kala.db" {
+		if got := r.Header.Get("X-Patris-Source"); got != "patris-office" {
 			t.Errorf("source header = %q", got)
 		}
 		w.Header().Set("Content-Type", "application/json")
@@ -273,7 +273,7 @@ func TestDispatchDigitalogicRetriesIdenticalEventAndSurfacesRecovery(t *testing.
 			"X-Patris-Source":           "spoofed",
 		},
 	}
-	result, err := DispatchWithResult(t.Context(), cfg, Event{Type: "update", Source: "kala.db", Contract: contract})
+	result, err := DispatchWithResult(t.Context(), cfg, Event{Type: "update", Source: `C:\Patris\data4\kala.db`, Contract: contract})
 	if err != nil {
 		t.Fatalf("product-sync dispatch failed: %v", err)
 	}

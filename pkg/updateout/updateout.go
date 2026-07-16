@@ -293,7 +293,11 @@ func applyHeaders(req *http.Request, cfg Config, event Event, contract *canonica
 	req.Header.Set("Content-Type", contentType)
 	req.Header.Set("User-Agent", "patris-export")
 	req.Header.Set("X-Patris-Event", event.Type)
-	req.Header.Set("X-Patris-Source", event.Source)
+	source := event.Source
+	if contract != nil && strings.TrimSpace(contract.Source.ID) != "" {
+		source = contract.Source.ID
+	}
+	req.Header.Set("X-Patris-Source", source)
 	if contract != nil {
 		req.Header.Set("X-Patris-Contract", contract.Schema)
 		req.Header.Set("X-Patris-Contract-Version", contract.SchemaVersion)
