@@ -61,6 +61,8 @@ $pxlibSource = Join-Path $depsRoot "pxlib"
 $pxlibBuild = Join-Path $depsRoot "pxlib-build-windows"
 $pxlibInstall = Join-Path $depsRoot "pxlib-install-windows"
 $deployRoot = Join-Path $AtomicDeployRoot "deploy"
+$stageParent = Join-Path $AtomicDeployRoot "build"
+$stageRoot = Join-Path $stageParent "patris-export-windows-amd64"
 $vcpkgRoot = $(if ($env:VCPKG_ROOT) { $env:VCPKG_ROOT } else { Join-Path $depsRoot "vcpkg" })
 $vcpkgTriplet = $(if ($env:VCPKG_DEFAULT_TRIPLET) { $env:VCPKG_DEFAULT_TRIPLET } else { "x64-windows" })
 $useVcpkg = $env:USE_VCPKG -match '^(1|true|yes|on)$'
@@ -77,7 +79,16 @@ if ($Version -notmatch '^[0-9]+(\.[0-9]+)*(-[a-zA-Z0-9._-]+)?$') {
     throw "Invalid version '$Version'."
 }
 
-New-Item -ItemType Directory -Force $depsRoot, $deployRoot | Out-Null
+New-Item -ItemType Directory -Force $depsRoot, $deployRoot, $stageParent | Out-Null
+$resolvedStageParent = [System.IO.Path]::GetFullPath($stageParent).TrimEnd('\') + '\'
+$resolvedStageRoot = [System.IO.Path]::GetFullPath($stageRoot)
+if (-not $resolvedStageRoot.StartsWith($resolvedStageParent, [System.StringComparison]::OrdinalIgnoreCase)) {
+    throw "Refusing to clean an unsafe Windows staging path: $resolvedStageRoot"
+}
+if (Test-Path -LiteralPath $resolvedStageRoot) {
+    Remove-Item -LiteralPath $resolvedStageRoot -Recurse -Force
+}
+New-Item -ItemType Directory -Force $resolvedStageRoot | Out-Null
 
 $winLibsBin = "$env:LOCALAPPDATA\Microsoft\WinGet\Packages\BrechtSanders.WinLibs.POSIX.UCRT_Microsoft.Winget.Source_8wekyb3d8bbwe\mingw64\bin"
 $goBin = "C:\Program Files\Go\bin"
@@ -190,7 +201,7 @@ try {
         Pop-Location
     }
 
-    $buildDate = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
+    $buildDate = (& $git -C $repoRoot show -s --format=%cI HEAD).Trim()
     $commit = (& $git -C $repoRoot rev-parse --short=12 HEAD).Trim()
     $versionPkg = "github.com/atomicdeploy/patris-export/pkg/version"
     $env:VERSION = $Version
@@ -212,21 +223,41 @@ try {
         Write-Host "Using optional vcpkg C dependency paths: $vcpkgInstalled"
     }
 
-    $outExe = Join-Path $deployRoot "patris-export-windows-amd64.exe"
+    $outExe = Join-Path $resolvedStageRoot "patris-export-windows-amd64.exe"
     Invoke-Checked $go @("build", "-ldflags", "-X $versionPkg.Version=$Version -X $versionPkg.BuildDate=$buildDate -X $versionPkg.Commit=$commit", "-o", $outExe, ".\cmd\patris-export")
-    Copy-Item $outExe (Join-Path $deployRoot "patris-export.exe") -Force
+    Copy-Item $outExe (Join-Path $resolvedStageRoot "patris-export.exe") -Force
 
-    $outDll = Join-Path $deployRoot "patris-export.dll"
+    $outDll = Join-Path $resolvedStageRoot "patris-export.dll"
     Invoke-Checked $go @("build", "-buildmode=c-shared", "-ldflags", "-X $versionPkg.Version=$Version -X $versionPkg.BuildDate=$buildDate -X $versionPkg.Commit=$commit", "-o", $outDll, ".\cmd\patris-export-lib")
-    if (-not (Test-Path (Join-Path $deployRoot "patris-export.h"))) {
+    if (-not (Test-Path (Join-Path $resolvedStageRoot "patris-export.h"))) {
         throw "The Windows shared-library build did not produce patris-export.h."
     }
 
-    Copy-Item (Join-Path $pxlibInstall "bin\*.dll") $deployRoot -ErrorAction SilentlyContinue
+    Copy-Item (Join-Path $pxlibInstall "bin\*.dll") $resolvedStageRoot -ErrorAction SilentlyContinue
+    $gccBin = Split-Path -Parent $gcc
     foreach ($runtimeDll in @("libgcc_s_seh-1.dll", "libwinpthread-1.dll", "libstdc++-6.dll")) {
-        $runtimePath = Join-Path $winLibsBin $runtimeDll
-        if (Test-Path $runtimePath) {
-            Copy-Item $runtimePath $deployRoot -Force
+        $runtimePath = (& $gcc "-print-file-name=$runtimeDll" | Select-Object -First 1).Trim()
+        if (-not (Test-Path -LiteralPath $runtimePath)) {
+            $runtimePath = Join-Path $gccBin $runtimeDll
+        }
+        if (Test-Path -LiteralPath $runtimePath) {
+            Copy-Item -LiteralPath $runtimePath -Destination $resolvedStageRoot -Force
+        }
+    }
+
+    $requiredFiles = @(
+        "patris-export-windows-amd64.exe",
+        "patris-export.exe",
+        "patris-export.dll",
+        "patris-export.h",
+        "libpxlib.dll",
+        "libgcc_s_seh-1.dll",
+        "libstdc++-6.dll",
+        "libwinpthread-1.dll"
+    )
+    foreach ($requiredFile in $requiredFiles) {
+        if (-not (Test-Path -LiteralPath (Join-Path $resolvedStageRoot $requiredFile))) {
+            throw "Clean Windows staging build is missing required file: $requiredFile"
         }
     }
 
@@ -236,7 +267,14 @@ try {
         Write-Warning "Patris database not found at $PatrisDb; skipping local database smoke test."
     }
 
-    Write-Host "Built executable: $outExe"
+    Invoke-Checked $outExe @("--version")
+
+    foreach ($requiredFile in $requiredFiles) {
+        Copy-Item -LiteralPath (Join-Path $resolvedStageRoot $requiredFile) -Destination (Join-Path $deployRoot $requiredFile) -Force
+    }
+
+    Write-Host "Verified clean Windows staging build: $resolvedStageRoot"
+    Write-Host "Promoted executable: $(Join-Path $deployRoot 'patris-export.exe')"
 } finally {
     Pop-Location
 }

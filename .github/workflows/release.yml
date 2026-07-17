@@ -258,6 +258,15 @@ jobs:
           if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             existing_dir="$(mktemp -d)"
             trap 'rm -rf -- "$existing_dir"' EXIT
+            existing_state="$(gh release view "$RELEASE_TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --json isDraft,isPrerelease,publishedAt \
+              --jq '[.isDraft, .isPrerelease, (.publishedAt // "")] | @tsv')"
+            IFS=$'\t' read -r existing_draft existing_prerelease existing_published <<< "$existing_state"
+            if [[ "$existing_draft" != "false" || "$existing_prerelease" != "false" || -z "$existing_published" ]]; then
+              echo "Existing $RELEASE_TAG is not a durable published stable release." >&2
+              exit 1
+            fi
             existing_body="$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json body --jq '.body')"
             if ! grep -Fq "$GITHUB_SHA" <<<"$existing_body"; then
               echo "Existing release $RELEASE_TAG does not identify source commit $GITHUB_SHA." >&2
@@ -296,6 +305,15 @@ jobs:
           LINUX_ARCHIVE: ${{ needs.package.outputs.linux_archive }}
         run: |
           set -euo pipefail
+          release_state="$(gh release view "$RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --json isDraft,isPrerelease,publishedAt \
+            --jq '[.isDraft, .isPrerelease, (.publishedAt // "")] | @tsv')"
+          IFS=$'\t' read -r release_draft release_prerelease release_published <<< "$release_state"
+          if [[ "$release_draft" != "false" || "$release_prerelease" != "false" || -z "$release_published" ]]; then
+            echo "Release $RELEASE_TAG is not a durable published stable release." >&2
+            exit 1
+          fi
           mapfile -t assets < <(gh release view "$RELEASE_TAG" \
             --repo "$GITHUB_REPOSITORY" \
             --json assets \
