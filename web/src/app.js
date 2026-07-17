@@ -1,6 +1,18 @@
 import { normalizeRecordsPayload } from './records.js';
 import { createExportMenuController } from './export-menu.js';
 import {
+    MAX_DETAILED_EVENT_LOG_ENTRIES,
+    createEventLogChangeSnapshot,
+    deletedRecordIdentityKey,
+    escapeHtml,
+    eventLogChangeDetailsMarkup,
+    eventLogDisclosureText,
+    isEventLogChangeDetails,
+    modifiedRecordIdentityKey,
+    recordIdentityKey,
+    retainRecentEventLogChanges
+} from './event-log.js';
+import {
     CANONICAL_ROW_FIELDS,
     DEFAULT_ROW_ICON_FALLBACK,
     ROW_ICON_NAMES,
@@ -327,9 +339,12 @@ function loadSettings() {
     const savedEventLog = localStorage.getItem(EVENT_LOG_STORAGE_KEY);
     if (savedEventLog) {
         try {
-            state.eventLog = JSON.parse(savedEventLog)
-                .filter(entry => entry && entry.title)
-                .slice(0, MAX_EVENT_LOG_ENTRIES);
+            state.eventLog = retainRecentEventLogChanges(
+                JSON.parse(savedEventLog)
+                    .filter(entry => entry && entry.title)
+                    .slice(0, MAX_EVENT_LOG_ENTRIES),
+                MAX_DETAILED_EVENT_LOG_ENTRIES
+            );
         } catch (e) {
             state.eventLog = [];
         }
@@ -1040,6 +1055,7 @@ function applySettings() {
     renderRowIconRulesEditor();
     updateSelectionCount();
     updateLastUpdateDisplay();
+    renderEventLogPanel();
 }
 
 function setValue(id, value) {
@@ -2125,6 +2141,7 @@ function showInAppToast(title, message, options = {}) {
 }
 
 function recordEventLog(entry = {}) {
+    const changes = isEventLogChangeDetails(entry.changes) ? entry.changes : null;
     const logEntry = {
         id: entry.id || createTabId(),
         time: entry.timestamp || new Date().toISOString(),
@@ -2132,11 +2149,16 @@ function recordEventLog(entry = {}) {
         type: String(entry.type || 'event'),
         source: String(entry.source || entry.type || 'web-ui'),
         title: String(entry.title || 'Patris Export event'),
+        titleKey: entry.titleKey ? String(entry.titleKey) : '',
         message: String(entry.message || ''),
-        details: entry.details ? String(entry.details) : ''
+        details: entry.details ? String(entry.details) : '',
+        ...(changes ? { changes } : {})
     };
     state.eventLog.unshift(logEntry);
-    state.eventLog = state.eventLog.slice(0, MAX_EVENT_LOG_ENTRIES);
+    state.eventLog = retainRecentEventLogChanges(
+        state.eventLog.slice(0, MAX_EVENT_LOG_ENTRIES),
+        MAX_DETAILED_EVENT_LOG_ENTRIES
+    );
     saveEventLog();
     renderEventLogCount();
     renderEventLogPanel();
@@ -2154,6 +2176,19 @@ function saveEventLog() {
         localStorage.setItem(EVENT_LOG_STORAGE_KEY, JSON.stringify(state.eventLog));
     } catch (error) {
         console.warn('Failed to persist event log:', error);
+        const compacted = retainRecentEventLogChanges(state.eventLog, 4);
+        try {
+            localStorage.setItem(EVENT_LOG_STORAGE_KEY, JSON.stringify(compacted));
+            state.eventLog = compacted;
+        } catch (compactedError) {
+            const summariesOnly = retainRecentEventLogChanges(state.eventLog, 0);
+            try {
+                localStorage.setItem(EVENT_LOG_STORAGE_KEY, JSON.stringify(summariesOnly));
+                state.eventLog = summariesOnly;
+            } catch (summaryError) {
+                console.warn('Failed to persist compacted event log:', compactedError, summaryError);
+            }
+        }
     }
 }
 
@@ -2175,40 +2210,115 @@ function renderEventLogCount() {
     }
 }
 
+function eventLogChangeLabels() {
+    return {
+        added: t('eventLogAdded'),
+        modified: t('eventLogModified'),
+        deleted: t('eventLogDeleted'),
+        row: t('eventLogRow'),
+        field: t('eventLogField'),
+        before: t('eventLogBefore'),
+        after: t('eventLogAfter'),
+        value: t('eventLogValue'),
+        noFields: t('eventLogNoFields'),
+        moreFields: t('eventLogMoreFields'),
+        boundedPreview: t('eventLogBoundedPreview')
+    };
+}
+
+function eventLogEntrySummaryMarkup(entry, disclosure = '') {
+    const parsedTime = new Date(entry.time);
+    const displayTime = Number.isNaN(parsedTime.getTime()) ? entry.time : formatDateTime(parsedTime);
+    const title = entry.titleKey ? t(entry.titleKey) : entry.title;
+    return `
+        <span class="event-log-entry-meta">
+            <time datetime="${escapeHtml(entry.time)}">${escapeHtml(displayTime)}</time>
+            <span>${escapeHtml(entry.type)}</span>
+            <span>${escapeHtml(entry.source)}</span>
+        </span>
+        <span class="event-log-entry-body">
+            <strong>${escapeHtml(title)}</strong>
+            ${entry.message ? `<span class="event-log-entry-message">${escapeHtml(entry.message)}</span>` : ''}
+            ${!disclosure && entry.details ? `<code>${escapeHtml(entry.details)}</code>` : ''}
+            ${!disclosure && entry.changeDetailsExpired ? `<span class="event-log-detail-expired">${escapeHtml(t('eventLogDetailsExpired'))}</span>` : ''}
+        </span>
+        ${disclosure ? `
+            <span class="event-log-entry-disclosure">
+                <span>${escapeHtml(disclosure)}</span>
+                ${iconMarkup('chevron')}
+            </span>` : ''}
+    `;
+}
+
 function renderEventLogPanel() {
     const summary = document.getElementById('eventLogSummary');
     const list = document.getElementById('eventLogList');
     if (!summary || !list) return;
+
+    const openEntries = new Set(
+        Array.from(list.querySelectorAll('details.event-log-entry[open][data-event-id]'))
+            .map(entry => entry.dataset.eventId)
+    );
+    const activeSummary = document.activeElement instanceof Element
+        ? document.activeElement.closest('summary.event-log-entry-summary')
+        : null;
+    const focusedEventId = activeSummary?.parentElement?.dataset?.eventId || '';
+    const direction = isTableRTL() ? 'rtl' : 'ltr';
+    summary.setAttribute('dir', direction);
+    list.setAttribute('dir', direction);
 
     const counts = state.eventLog.reduce((acc, entry) => {
         acc[entry.level] = (acc[entry.level] || 0) + 1;
         return acc;
     }, {});
     summary.innerHTML = `
-        <div><span>Total</span><strong>${state.eventLog.length.toLocaleString()}</strong></div>
-        <div><span>Updates</span><strong>${(counts.update || 0).toLocaleString()}</strong></div>
-        <div><span>Warnings</span><strong>${((counts.warning || 0) + (counts.error || 0)).toLocaleString()}</strong></div>
+        <div><span>${escapeHtml(t('eventLogTotal'))}</span><strong>${state.eventLog.length.toLocaleString()}</strong></div>
+        <div><span>${escapeHtml(t('eventLogUpdates'))}</span><strong>${(counts.update || 0).toLocaleString()}</strong></div>
+        <div><span>${escapeHtml(t('eventLogWarnings'))}</span><strong>${((counts.warning || 0) + (counts.error || 0)).toLocaleString()}</strong></div>
     `;
 
     if (state.eventLog.length === 0) {
-        list.innerHTML = '<div class="event-log-empty">No notification-capable events have been captured yet.</div>';
+        list.innerHTML = `<div class="event-log-empty">${escapeHtml(t('eventLogEmpty'))}</div>`;
         return;
     }
 
-    list.innerHTML = state.eventLog.map(entry => `
-        <article class="event-log-entry ${escapeHtml(entry.level)}">
-            <div class="event-log-entry-meta">
-                <time>${formatDateTime(new Date(entry.time))}</time>
-                <span>${escapeHtml(entry.type)}</span>
-                <span>${escapeHtml(entry.source)}</span>
-            </div>
-            <div class="event-log-entry-body">
-                <strong>${escapeHtml(entry.title)}</strong>
-                ${entry.message ? `<p>${escapeHtml(entry.message)}</p>` : ''}
-                ${entry.details ? `<code>${escapeHtml(entry.details)}</code>` : ''}
-            </div>
-        </article>
-    `).join('');
+    const changeLabels = eventLogChangeLabels();
+    list.innerHTML = state.eventLog.map(entry => {
+        const level = normalizeEventLevel(entry.level);
+        if (!isEventLogChangeDetails(entry.changes)) {
+            return `
+                <article class="event-log-entry ${escapeHtml(level)}">
+                    <div class="event-log-entry-static">
+                        ${eventLogEntrySummaryMarkup(entry)}
+                    </div>
+                </article>`;
+        }
+
+        const disclosure = eventLogDisclosureText(entry.changes, t('eventLogViewChanges'));
+        return `
+            <details class="event-log-entry ${escapeHtml(level)}" data-event-id="${escapeHtml(entry.id)}">
+                <summary class="event-log-entry-summary">
+                    ${eventLogEntrySummaryMarkup(entry, disclosure)}
+                </summary>
+                <div class="event-log-entry-detail-content">
+                    ${eventLogChangeDetailsMarkup(entry.changes, changeLabels)}
+                    ${entry.details ? `
+                        <div class="event-log-technical-details">
+                            <strong>${escapeHtml(t('eventLogTechnicalDetails'))}</strong>
+                            <code>${escapeHtml(entry.details)}</code>
+                        </div>` : ''}
+                </div>
+            </details>`;
+    }).join('');
+
+    let summaryToRefocus = null;
+    list.querySelectorAll('details.event-log-entry[data-event-id]').forEach(entry => {
+        if (openEntries.has(entry.dataset.eventId)) entry.open = true;
+        if (focusedEventId && entry.dataset.eventId === focusedEventId) {
+            summaryToRefocus = entry.querySelector('summary.event-log-entry-summary');
+        }
+    });
+    summaryToRefocus?.focus();
 }
 
 function isSupportedSourceFile(file) {
@@ -2689,22 +2799,28 @@ function handleWebSocketMessage(data) {
         updateFooterLastUpdate();
         
         // Track changes for notification
-        let totalChanges = 0;
-        let changeDescription = '';
+        const keyField = String(data.key_field || data.keyField || 'Code');
+        const changeCounts = {
+            added: Array.isArray(data.added) ? data.added.length : 0,
+            modified: Array.isArray(data.modified) ? data.modified.length : 0,
+            deleted: Array.isArray(data.deleted) ? data.deleted.length : 0
+        };
+        const totalChanges = changeCounts.added + changeCounts.modified + changeCounts.deleted;
+        const logChanges = createEventLogChangeSnapshot(data, state.records);
         
-        // Handle deleted records (by Code)
-        if (data.deleted && data.deleted.length > 0) {
-            const deletedCodes = new Set(data.deleted.map(String));
-            state.records = state.records.filter(record => {
-                const code = String(record.Code);
-                return !deletedCodes.has(code);
+        // Handle deleted records by the update's declared identity field.
+        if (changeCounts.deleted > 0) {
+            const deletedKeys = new Set(data.deleted.map((value, index) => (
+                deletedRecordIdentityKey(value, keyField, index)
+            )));
+            state.records = state.records.filter((record, index) => {
+                const key = recordIdentityKey(record, keyField, index);
+                return !deletedKeys.has(key);
             });
-            totalChanges += data.deleted.length;
-            changeDescription = `${data.deleted.length} deleted`;
         }
         
         // Handle added records
-        if (data.added && data.added.length > 0) {
+        if (changeCounts.added > 0) {
             const startIndex = state.records.length;
             state.records.push(...normalizeRecordsPayload(data.added));
             
@@ -2712,28 +2828,24 @@ function handleWebSocketMessage(data) {
             data.added.forEach((_, i) => {
                 changedIndices.add(startIndex + i);
             });
-            totalChanges += data.added.length;
-            if (changeDescription) changeDescription += ', ';
-            changeDescription += `${data.added.length} added`;
         }
         
         // Handle modified records (if any)
-        if (data.modified && data.modified.length > 0) {
-            data.modified.forEach(change => {
-                const code = String(change.code);
-                const index = state.records.findIndex(r => String(r.Code) === code);
+        if (changeCounts.modified > 0) {
+            data.modified.forEach((change, changeIndex) => {
+                const key = modifiedRecordIdentityKey(change, keyField, changeIndex);
+                const index = state.records.findIndex((record, recordIndex) => (
+                    recordIdentityKey(record, keyField, recordIndex) === key
+                ));
                 if (index !== -1) {
                     // Merge the new values into the existing record
                     // Note: The server sends new_values (snake_case) not newValues (camelCase)
                     const newValues = change.new_values || change.newValues || {};
                     Object.assign(state.records[index], newValues);
                     changedIndices.add(index);
-                    console.log(`Updated record ${code}:`, newValues);
+                    console.log(`Updated record ${key}:`, newValues);
                 }
             });
-            totalChanges += data.modified.length;
-            if (changeDescription) changeDescription += ', ';
-            changeDescription += `${data.modified.length} modified`;
         }
         refreshRecordSelectionKeys();
         
@@ -2745,7 +2857,7 @@ function handleWebSocketMessage(data) {
             // Flash title with change info (use detailed description if available)
             // Note: Title and favicon flashing always occur regardless of audio settings
             // This is by design to provide visual feedback even when sound is disabled
-            const titleMessage = changeDescription || `${totalChanges} record${totalChanges > 1 ? 's' : ''} updated`;
+            const titleMessage = t('eventLogChangeSummary', changeCounts);
             flashTitle(titleMessage);
             
             // Flash favicon
@@ -2753,11 +2865,14 @@ function handleWebSocketMessage(data) {
 
             recordEventLog({
                 title: 'Rows changed',
+                titleKey: 'eventLogRowsChanged',
                 message: titleMessage,
                 level: 'update',
                 type: 'row_updated',
                 source: 'websocket',
-                details: `added=${data.added?.length || 0} modified=${data.modified?.length || 0} deleted=${data.deleted?.length || 0}`
+                timestamp: data.timestamp,
+                details: `added=${data.added?.length || 0} modified=${data.modified?.length || 0} deleted=${data.deleted?.length || 0}`,
+                changes: logChanges
             });
         }
     } else if (data.type === 'toast') {
@@ -2867,15 +2982,6 @@ function formatDateTime(date) {
     const minutes = String(date.getMinutes()).padStart(2, '0');
     const seconds = String(date.getSeconds()).padStart(2, '0');
     return `${year}/${month}/${day} ${hours}:${minutes}:${seconds}`;
-}
-
-function escapeHtml(value) {
-    return String(value ?? '')
-        .replace(/&/g, '&amp;')
-        .replace(/</g, '&lt;')
-        .replace(/>/g, '&gt;')
-        .replace(/"/g, '&quot;')
-        .replace(/'/g, '&#39;');
 }
 
 function updateFooterLastUpdate(timestamp) {
