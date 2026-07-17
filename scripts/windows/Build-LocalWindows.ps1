@@ -52,6 +52,10 @@ function Convert-ToMsysPath {
 }
 
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
+$pinnedPxlibRef = (Get-Content (Join-Path $repoRoot "dependencies\pxlib.ref") -Raw).Trim()
+if (-not $PxlibRef) {
+    $PxlibRef = $pinnedPxlibRef
+}
 $depsRoot = Join-Path $AtomicDeployRoot "deps"
 $pxlibSource = Join-Path $depsRoot "pxlib"
 $pxlibBuild = Join-Path $depsRoot "pxlib-build-windows"
@@ -62,27 +66,15 @@ $vcpkgTriplet = $(if ($env:VCPKG_DEFAULT_TRIPLET) { $env:VCPKG_DEFAULT_TRIPLET }
 $useVcpkg = $env:USE_VCPKG -match '^(1|true|yes|on)$'
 
 if (-not $Version) {
-    Push-Location $repoRoot
-    try {
-        $previousErrorActionPreference = $ErrorActionPreference
-        $ErrorActionPreference = "Continue"
-        $Version = (& git describe --tags --abbrev=0 2>$null)
-        $describeExitCode = $LASTEXITCODE
-        $ErrorActionPreference = $previousErrorActionPreference
-        if ($describeExitCode -ne 0 -or -not $Version) {
-            $Version = "v1.0.0"
-        }
-    } finally {
-        if ($previousErrorActionPreference) {
-            $ErrorActionPreference = $previousErrorActionPreference
-        }
-        Pop-Location
+    $versionSource = Get-Content (Join-Path $repoRoot "pkg\version\version.go") -Raw
+    $versionMatch = [regex]::Match($versionSource, 'Version\s*=\s*"([^"]+)"')
+    if (-not $versionMatch.Success) {
+        throw "Unable to read the source version from pkg\version\version.go."
     }
-    $Version = $Version -replace '^v', ''
+    $Version = $versionMatch.Groups[1].Value
 }
 if ($Version -notmatch '^[0-9]+(\.[0-9]+)*(-[a-zA-Z0-9._-]+)?$') {
-    Write-Warning "Invalid version '$Version'; using 1.0.0"
-    $Version = "1.0.0"
+    throw "Invalid version '$Version'."
 }
 
 New-Item -ItemType Directory -Force $depsRoot, $deployRoot | Out-Null
@@ -190,13 +182,20 @@ try {
 
     Push-Location web
     try {
-        cmd /c npm install
-        if ($LASTEXITCODE -ne 0) { throw "npm install failed" }
+        cmd /c npm ci
+        if ($LASTEXITCODE -ne 0) { throw "npm ci failed" }
         cmd /c npm run build
         if ($LASTEXITCODE -ne 0) { throw "npm run build failed" }
     } finally {
         Pop-Location
     }
+
+    $buildDate = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
+    $commit = (& $git -C $repoRoot rev-parse --short=12 HEAD).Trim()
+    $versionPkg = "github.com/atomicdeploy/patris-export/pkg/version"
+    $env:VERSION = $Version
+    $env:BUILD_DATE = $buildDate
+    $env:COMMIT = $commit
 
     Invoke-Checked $bash @("-lc", "cd '$(Convert-ToMsysPath $repoRoot)' && ./scripts/generate-version-rc.sh cmd/patris-export/patris-export.rc")
     Invoke-Checked $windres @("--target=pe-x86-64", "-i", "cmd/patris-export/patris-export.rc", "-o", "cmd/patris-export/patris-export_windows_amd64.syso", "-O", "coff")
@@ -213,12 +212,15 @@ try {
         Write-Host "Using optional vcpkg C dependency paths: $vcpkgInstalled"
     }
 
-    $buildDate = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
-    $commit = (& $git -C $repoRoot rev-parse --short=12 HEAD).Trim()
-    $versionPkg = "github.com/atomicdeploy/patris-export/pkg/version"
     $outExe = Join-Path $deployRoot "patris-export-windows-amd64.exe"
     Invoke-Checked $go @("build", "-ldflags", "-X $versionPkg.Version=$Version -X $versionPkg.BuildDate=$buildDate -X $versionPkg.Commit=$commit", "-o", $outExe, ".\cmd\patris-export")
     Copy-Item $outExe (Join-Path $deployRoot "patris-export.exe") -Force
+
+    $outDll = Join-Path $deployRoot "patris-export.dll"
+    Invoke-Checked $go @("build", "-buildmode=c-shared", "-ldflags", "-X $versionPkg.Version=$Version -X $versionPkg.BuildDate=$buildDate -X $versionPkg.Commit=$commit", "-o", $outDll, ".\cmd\patris-export-lib")
+    if (-not (Test-Path (Join-Path $deployRoot "patris-export.h"))) {
+        throw "The Windows shared-library build did not produce patris-export.h."
+    }
 
     Copy-Item (Join-Path $pxlibInstall "bin\*.dll") $deployRoot -ErrorAction SilentlyContinue
     foreach ($runtimeDll in @("libgcc_s_seh-1.dll", "libwinpthread-1.dll", "libstdc++-6.dll")) {

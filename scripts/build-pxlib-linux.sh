@@ -4,8 +4,8 @@ set -euo pipefail
 PREFIX="${1:?Usage: $0 <install-prefix>}"
 WORK_DIR="${PXLIB_WORK_DIR:-/tmp/patris-pxlib-linux}"
 PXLIB_REPO="${PXLIB_REPO:-https://github.com/steinm/pxlib.git}"
-PXLIB_REF="${PXLIB_REF:-}"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+PXLIB_REF="${PXLIB_REF:-$(tr -d '[:space:]' < "$REPO_ROOT/dependencies/pxlib.ref")}"
 SRC_DIR="$WORK_DIR/src"
 BUILD_DIR="$WORK_DIR/build"
 
@@ -13,9 +13,7 @@ rm -rf "$WORK_DIR"
 mkdir -p "$WORK_DIR" "$PREFIX"
 
 git clone "$PXLIB_REPO" "$SRC_DIR"
-if [ -n "$PXLIB_REF" ]; then
-    git -C "$SRC_DIR" checkout "$PXLIB_REF"
-fi
+git -C "$SRC_DIR" checkout --detach "$PXLIB_REF"
 
 sed -i 's/#include <Windows\.h>/#include <windows.h>/g' "$SRC_DIR/src/paradox.c" 2>/dev/null || true
 sed -i 's/#include <Winbase\.h>/#include <winbase.h>/g' "$SRC_DIR/src/paradox.c" 2>/dev/null || true

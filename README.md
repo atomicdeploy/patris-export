@@ -3,7 +3,7 @@
 A fast and performant application for reading, parsing, and converting Paradox/BDE database files (`*.db`) from Patris81 software.
 
 [![Build and Release](https://github.com/atomicdeploy/patris-export/actions/workflows/build.yml/badge.svg)](https://github.com/atomicdeploy/patris-export/actions/workflows/build.yml)
-[![Go Version](https://img.shields.io/badge/Go-1.23-blue.svg)](https://golang.org)
+[![Go Version](https://img.shields.io/badge/Go-1.25-blue.svg)](https://go.dev)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
 ## ✨ Features
@@ -27,14 +27,23 @@ A fast and performant application for reading, parsing, and converting Paradox/B
 
 ### From Release
 
-Download the latest release for your platform from the [Releases page](https://github.com/atomicdeploy/patris-export/releases).
+Download the latest source-built release for your platform from the
+[Releases page](https://github.com/atomicdeploy/patris-export/releases).
 
-**Windows users:** The Windows release includes the required pxlib.dll file. Make sure to keep it in the same directory as the executable.
+**Windows users:** Extract the complete Windows ZIP and keep the included
+pxlib/MinGW DLLs beside `patris-export.exe`.
+
+**Linux users:** Extract the Linux tarball and launch it with the included
+`run-patris-export.sh` so the bundled pxlib runtime is loaded.
+
+Every release includes `SHA256SUMS`, an install guide, a build manifest, a
+curated changelog, and links to the exact tagged source. See
+[binary installation details](docs/INSTALL-BINARIES.md).
 
 ### From Source
 
 Requirements:
-- Go 1.23 or later
+- Go 1.25 or later
 - pxlib development library
   - **Linux:** `sudo apt-get install pxlib-dev pxlib1`
   - **Windows:** See [docs/WINDOWS_BUILD.md](docs/WINDOWS_BUILD.md) for building pxlib

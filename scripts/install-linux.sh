@@ -73,7 +73,7 @@ build_binary() {
         export LD_LIBRARY_PATH="$PXLIB_PREFIX/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
     fi
 
-    (cd web && npm install && npm run build)
+    (cd web && npm ci && npm run build)
     CGO_ENABLED=1 GOOS=linux GOARCH=amd64 go build \
         -ldflags "-X $VERSION_PKG.Version=$VERSION -X $VERSION_PKG.BuildDate=$(date -u +'%Y-%m-%dT%H:%M:%SZ') -X $VERSION_PKG.Commit=$COMMIT" \
         -o "$BUILD_DIR/patris-export-linux-amd64" ./cmd/patris-export

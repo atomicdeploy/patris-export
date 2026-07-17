@@ -6,7 +6,7 @@ BUILD_DIR=build
 
 # Version information
 VERSION?=1.0.0
-BUILD_DATE=$(shell date -u +'%Y-%m-%dT%H:%M:%SZ')
+BUILD_DATE?=$(shell date -u +'%Y-%m-%dT%H:%M:%SZ')
 COMMIT?=$(shell git rev-parse --short=12 HEAD 2>/dev/null || echo unknown)
 VERSION_PKG=github.com/atomicdeploy/patris-export/pkg/version
 LDFLAGS=-ldflags "-X $(VERSION_PKG).Version=$(VERSION) -X $(VERSION_PKG).BuildDate=$(BUILD_DATE) -X $(VERSION_PKG).Commit=$(COMMIT)"
@@ -22,7 +22,7 @@ assets: ## Rebuild generated assets (Windows icon, validate notification audio)
 
 build-web: ## Build the web frontend
 	@echo "🌐 Building web frontend..."
-	@cd web && npm install --silent && npm run build
+	@cd web && npm ci --silent && npm run build
 	@echo "✅ Web frontend built"
 
 build: build-web ## Build for current platform
@@ -122,5 +122,5 @@ deps: ## Download dependencies
 	@echo "📥 Downloading dependencies..."
 	go mod download
 	go mod tidy
-	@cd web && npm install
+	@cd web && npm ci
 	@echo "✅ Dependencies ready"
