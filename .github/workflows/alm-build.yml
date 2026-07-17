@@ -1,0 +1,155 @@
+name: Optional Patris ALM Candidate
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: patris-alm-candidate-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  guard:
+    name: Require main branch
+    runs-on: ubuntu-latest
+    steps:
+      - name: Refuse non-main dispatches
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_REF" != "refs/heads/main" ]]; then
+            echo "Optional ALM candidates must be dispatched from refs/heads/main, not $GITHUB_REF." >&2
+            exit 1
+          fi
+
+  build_alm_candidate:
+    name: Build and verify optional Windows candidate
+    needs: guard
+    runs-on: windows-latest
+    env:
+      ENABLE_ALM: "1"
+      ALM_APP_ID: Digitalogic-Patris-ALM-v1
+
+    steps:
+      - name: Checkout current main source
+        uses: actions/checkout@v7.0.0
+        with:
+          fetch-depth: 0
+
+      - name: Confirm immutable main source and resolve metadata
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $head = (& git rev-parse HEAD).Trim()
+          if ($head -ne $env:GITHUB_SHA) {
+              throw "The checked-out source ($head) is not the dispatched main commit ($($env:GITHUB_SHA))."
+          }
+
+          $versionSource = Get-Content -LiteralPath "pkg\version\version.go" -Raw
+          $match = [regex]::Match($versionSource, 'Version\s*=\s*"([^"]+)"')
+          if (-not $match.Success -or $match.Groups[1].Value -notmatch '^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$') {
+              throw "Unable to resolve a semantic source version."
+          }
+          $version = $match.Groups[1].Value
+          $buildDate = (& git show -s --format=%cI HEAD).Trim()
+          $shortCommit = $head.Substring(0, 12)
+          "VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "BUILD_DATE=$buildDate" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "COMMIT=$head" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "ALM_ARTIFACT_LABEL=v$version-$shortCommit-alm-compat" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "ALM_ARTIFACT_NAME=patris-export-v$version-$shortCommit-alm-compat" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Set up Go
+        uses: actions/setup-go@v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v7.0.0
+        with:
+          node-version: "24"
+
+      - name: Set up Python for DLL verification
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      - name: Install MSYS2 MinGW build tools
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            git
+            base-devel
+            mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-cmake
+            mingw-w64-x86_64-make
+            mingw-w64-x86_64-pkgconf
+            mingw-w64-x86_64-python
+
+      - name: Add MSYS2 MinGW to PATH
+        shell: pwsh
+        run: |
+          "C:\msys64\mingw64\bin" | Out-File -FilePath $env:GITHUB_PATH -Append
+
+      - name: Build ALM executable and dynamic library from source
+        shell: cmd
+        run: build.cmd --target windows-native --ci --no-assets
+
+      - name: Install pinned NSIS
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          choco install nsis --version=3.12.0 --yes --no-progress
+          if ($LASTEXITCODE -ne 0) {
+              throw "Pinned NSIS installation failed with exit code $LASTEXITCODE."
+          }
+
+      - name: Assemble, install, activate, interop-test, uninstall, and purge
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          .\scripts\windows\Build-ALMCandidate.ps1 `
+            -BuildDirectory build `
+            -OutputDirectory build\alm-candidate `
+            -Version $env:VERSION `
+            -ArtifactLabel $env:ALM_ARTIFACT_LABEL `
+            -SourceCommit $env:COMMIT `
+            -SourceBuildDate $env:BUILD_DATE `
+            -ALMAppID $env:ALM_APP_ID `
+            -DatabasePath testdata\kala.db `
+            -PythonPath (Get-Command python).Source
+
+      - name: Upload unsigned optional ALM candidate
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: ${{ env.ALM_ARTIFACT_NAME }}
+          path: build/alm-candidate/*
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 30
+
+      - name: Generate ALM candidate summary
+        if: always()
+        shell: bash
+        env:
+          JOB_STATUS: ${{ job.status }}
+          GITHUB_TOKEN: ${{ github.token }}
+          ARTIFACT_RETENTION_DAYS: "30"
+          ARTIFACT_NAME: ${{ env.ALM_ARTIFACT_NAME }}
+        run: |
+          bash .github/scripts/ci-summary.sh build \
+            "Optional Patris ALM Candidate" \
+            "Built the opt-in ALM compatibility variant from main and verified fail-closed licensing, ephemeral activation, exact database results, DLL ABI interop, assisted installation, preserving uninstall, isolated purge, unsigned status, and checksums." \
+            "$ARTIFACT_NAME" \
+            "Unsigned optional ALM compatibility installer candidate" \
+            build/alm-candidate/patris-export-*-windows-amd64-setup.exe \
+            build/alm-candidate/PATRIS-ALM-SHA256SUMS \
+            build/alm-candidate/PATRIS-ALM-BUILD.txt \
+            build/alm-candidate/PATRIS-ALM-BUILD-VARIANT.json \
+            build/alm-candidate/PATRIS-ALM-PAYLOAD-MANIFEST.txt
