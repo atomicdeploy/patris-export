@@ -6,14 +6,17 @@ set -euo pipefail
 
 OUTPUT_FILE="${1:-cmd/patris-export/patris-export.rc}"
 ICON_FILE="${PATRIS_EXPORT_ICON_FILE:-assets/windows/patris-api.ico}"
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
 
 # Validate OUTPUT_FILE to prevent directory traversal and absolute paths
 if [[ "$OUTPUT_FILE" == /* ]] || [[ "$OUTPUT_FILE" == *".."* ]]; then
     echo "Error: Invalid output file path. Absolute paths and directory traversal are not allowed." >&2
     exit 1
 fi
-# Get version from git tag or default to 1.0.0
-VERSION=$(git describe --tags --abbrev=0 2>/dev/null || echo "v1.0.0")
+# Prefer the explicit build version, then the canonical source version.
+SOURCE_VERSION="$(sed -nE 's/^[[:space:]]*Version[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/p' "$REPO_ROOT/pkg/version/version.go" | head -n 1)"
+VERSION="${VERSION:-$SOURCE_VERSION}"
 VERSION=$(echo "$VERSION" | sed 's/^v//')
 # Validate VERSION to allow only digits, dots, and optional pre-release (e.g., -rc1)
 if [[ ! "$VERSION" =~ ^[0-9]+(\.[0-9]+)*(-[a-zA-Z0-9._-]+)?$ ]]; then
@@ -22,38 +25,20 @@ if [[ ! "$VERSION" =~ ^[0-9]+(\.[0-9]+)*(-[a-zA-Z0-9._-]+)?$ ]]; then
 fi
 VERSION_COMMA=$(echo "$VERSION" | sed 's/-.*$//' | sed 's/\./,/g')
 
-# Get current year
-CURRENT_YEAR=$(date +%Y)
-
-# Sanity check: ensure CURRENT_YEAR is >= 2024 and <= next year
-NEXT_YEAR=$(date +%Y -d 'next year' 2>/dev/null || date -v+1y +%Y 2>/dev/null || echo $((CURRENT_YEAR + 1)))
-if ! [[ "$CURRENT_YEAR" =~ ^[0-9]{4}$ ]] || [ "$CURRENT_YEAR" -lt 2024 ] || [ "$CURRENT_YEAR" -gt "$NEXT_YEAR" ]; then
-    echo "Warning: System year ($CURRENT_YEAR) is out of expected range (2024-$NEXT_YEAR). Using 2024 instead." >&2
-    CURRENT_YEAR=2024
-fi
-# Parse repository URL to get owner and name
-REPO_URL=$(git config --get remote.origin.url 2>/dev/null || true)
-REPO_URL="${REPO_URL%.git}"
-# Handle both SSH (git@github.com:owner/repo) and HTTPS (https://github.com/owner/repo)
-if [[ "$REPO_URL" =~ ^git@github\.com:(.+)/(.+)$ ]]; then
-    REPO_OWNER="${BASH_REMATCH[1]}"
-    REPO_NAME="${BASH_REMATCH[2]}"
-elif [[ "$REPO_URL" =~ ^https://github\.com/(.+)/(.+)$ ]]; then
-    REPO_OWNER="${BASH_REMATCH[1]}"
-    REPO_NAME="${BASH_REMATCH[2]}"
+SOURCE_BUILD_DATE="${BUILD_DATE:-$(git -C "$REPO_ROOT" show -s --format=%cI HEAD)}"
+if [[ "$SOURCE_BUILD_DATE" =~ ^([0-9]{4})- ]]; then
+    CURRENT_YEAR="${BASH_REMATCH[1]}"
 else
-    REPO_OWNER="Unknown"
-    REPO_NAME="Unknown"
+    echo "Build date must start with a four-digit year: $SOURCE_BUILD_DATE" >&2
+    exit 1
 fi
 
-# Validate REPO_OWNER and REPO_NAME to prevent injection (allow alphanumeric, dash, underscore, dot)
+REPO_OWNER="${PATRIS_EXPORT_REPO_OWNER:-atomicdeploy}"
+
+# Validate the source-controlled company value before writing the RC file.
 if [[ ! "$REPO_OWNER" =~ ^[a-zA-Z0-9._-]+$ ]]; then
     echo "Warning: Invalid repository owner format, using default" >&2
     REPO_OWNER="Unknown"
-fi
-if [[ ! "$REPO_NAME" =~ ^[a-zA-Z0-9._-]+$ ]]; then
-    echo "Warning: Invalid repository name format, using default" >&2
-    REPO_NAME="Unknown"
 fi
 
 # Function to escape strings for C string literals
@@ -64,37 +49,7 @@ escape_c_string() {
     printf '%s' "$input" | sed 's/\\/\\\\/g; s/"/\\"/g'
 }
 
-# Function to URL-encode a string for safe use in URLs
-urlencode() {
-    if command -v python3 &> /dev/null; then
-        python3 -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1]))' "$1"
-    else
-        # Repository owner/name are validated to URL-safe characters below.
-        printf '%s' "$1"
-    fi
-}
-
-# Try to fetch description via GitHub API (no auth required for public repos)
-DESCRIPTION=""
-if command -v curl &> /dev/null && [ "$REPO_OWNER" != "Unknown" ]; then
-    # URL-encode owner and repo for API URL
-    REPO_OWNER_ENC=$(urlencode "$REPO_OWNER")
-    REPO_NAME_ENC=$(urlencode "$REPO_NAME")
-    # Use jq if available for safer JSON parsing, otherwise fallback
-    if command -v jq &> /dev/null; then
-        DESCRIPTION=$(curl -s "https://api.github.com/repos/$REPO_OWNER_ENC/$REPO_NAME_ENC" | jq -r '.description // ""' 2>/dev/null || echo "")
-    else
-        # Safer fallback: use python if available
-        if command -v python3 &> /dev/null; then
-            DESCRIPTION=$(curl -s "https://api.github.com/repos/$REPO_OWNER_ENC/$REPO_NAME_ENC" | python3 -c "import sys, json; data = json.load(sys.stdin); print(data.get('description', ''))" 2>/dev/null || echo "")
-        fi
-    fi
-fi
-
-# Fallback to default if GitHub API fails or returns empty
-if [ -z "$DESCRIPTION" ]; then
-    DESCRIPTION="Paradox/BDE database file converter"
-fi
+DESCRIPTION="${PATRIS_EXPORT_FILE_DESCRIPTION:-Paradox/BDE extraction, transformation, and integration platform}"
 
 # Truncate DESCRIPTION to 256 characters to avoid overly long resource strings
 DESCRIPTION="${DESCRIPTION:0:256}"

@@ -4,121 +4,345 @@ on:
   push:
     tags:
       - 'v*'
+  pull_request:
+    branches: [main]
+  workflow_dispatch: {}
 
 permissions:
-  contents: write
+  contents: read
   actions: read
 
-jobs:
-  release:
-    name: Create Release
-    runs-on: ubuntu-latest
-    
-    steps:
-    - name: Checkout code
-      uses: actions/checkout@v7.0.0
-      
-    - name: Wait for build workflows
-      uses: actions/github-script@v9
-      with:
-        script: |
-          // Wait for the build workflows to complete
-          const workflows = ['build.yml', 'build-windows.yml'];
-          const sha = context.sha;
-          
-          for (const workflow of workflows) {
-            console.log(`Checking workflow: ${workflow}`);
-            
-            // Poll for workflow runs
-            let completed = false;
-            for (let i = 0; i < 30; i++) {
-              const runs = await github.rest.actions.listWorkflowRuns({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                workflow_id: workflow,
-                head_sha: sha
-              });
-              
-              if (runs.data.workflow_runs.length > 0) {
-                const run = runs.data.workflow_runs[0];
-                console.log(`Run status: ${run.status}, conclusion: ${run.conclusion}`);
-                
-                if (run.status === 'completed') {
-                  if (run.conclusion === 'success') {
-                    completed = true;
-                    break;
-                  } else {
-                    throw new Error(`Workflow ${workflow} failed with conclusion: ${run.conclusion}`);
-                  }
-                }
-              }
-              
-              // Wait 10 seconds before checking again
-              await new Promise(resolve => setTimeout(resolve, 10000));
-            }
-            
-            if (!completed) {
-              throw new Error(`Workflow ${workflow} did not complete in time`);
-            }
-          }
-      
-    - name: Download Linux artifact
-      uses: dawidd6/action-download-artifact@v21
-      with:
-        workflow: build.yml
-        name: patris-export-linux-amd64
-        path: ./artifacts
-        commit: ${{ github.sha }}
-        
-    - name: Download Windows MinGW artifact
-      uses: dawidd6/action-download-artifact@v21
-      with:
-        workflow: build-windows.yml
-        name: patris-export-windows-mingw-amd64
-        path: ./artifacts
-        commit: ${{ github.sha }}
-        
-    - name: Download Windows MinGW cross-compile artifact
-      uses: dawidd6/action-download-artifact@v21
-      with:
-        workflow: build.yml
-        name: patris-export-windows-mingw-cross-amd64
-        path: ./artifacts-cross
-        commit: ${{ github.sha }}
-      continue-on-error: true
-        
-    - name: Create Release
-      uses: softprops/action-gh-release@v3
-      with:
-        files: |
-          artifacts/patris-export-linux-amd64
-          artifacts/libpatris-export.so
-          artifacts/libpatris-export.h
-          artifacts/patris-export-windows-amd64.exe
-          artifacts/*.dll
-          artifacts-cross/patris-export-windows-amd64.exe
-          artifacts-cross/patris-export.h
-          artifacts-cross/*.dll
-        generate_release_notes: true
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
-    - name: Generate release summary
-      if: always()
-      shell: bash
-      env:
-        JOB_STATUS: ${{ job.status }}
-        GITHUB_TOKEN: ${{ github.token }}
-        ARTIFACT_RETENTION_DAYS: ${{ github.retention_days }}
-      run: |
-        bash .github/scripts/ci-summary.sh release \
-          "🚀 Release Summary" \
-          "Collected same-commit build artifacts, published the release payload, and fingerprinted the files that should be attached to the GitHub Release." \
-          artifacts/patris-export-linux-amd64 \
-          artifacts/libpatris-export.so \
-          artifacts/libpatris-export.h \
-          artifacts/patris-export-windows-amd64.exe \
-          artifacts/*.dll \
-          artifacts-cross/patris-export-windows-amd64.exe \
-          artifacts-cross/patris-export.h \
-          artifacts-cross/*.dll
+jobs:
+  test:
+    name: Verify source
+    uses: ./.github/workflows/test.yml
+    permissions:
+      contents: read
+
+  build:
+    name: Build Linux and verify Windows cross-build
+    uses: ./.github/workflows/build.yml
+    permissions:
+      contents: read
+      actions: read
+
+  build_windows:
+    name: Build canonical Windows package
+    uses: ./.github/workflows/build-windows.yml
+    permissions:
+      contents: read
+      actions: read
+
+  package:
+    name: Package installable release
+    needs: [test, build, build_windows]
+    runs-on: ubuntu-latest
+    outputs:
+      release_tag: ${{ steps.metadata.outputs.release_tag }}
+      artifact_name: ${{ steps.metadata.outputs.artifact_name }}
+      windows_archive: ${{ steps.metadata.outputs.windows_archive }}
+      linux_archive: ${{ steps.metadata.outputs.linux_archive }}
+
+    steps:
+      - name: Checkout tagged source
+        uses: actions/checkout@v7.0.0
+        with:
+          fetch-depth: 0
+
+      - name: Download Linux source build
+        uses: actions/download-artifact@v8.0.1
+        with:
+          name: patris-export-linux-amd64
+          path: release-input/linux
+
+      - name: Download canonical native Windows source build
+        uses: actions/download-artifact@v8.0.1
+        with:
+          name: patris-export-windows-mingw-amd64
+          path: release-input/windows
+
+      - name: Resolve release metadata
+        id: metadata
+        shell: bash
+        env:
+          REQUESTED_RELEASE: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || 'candidate' }}
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            git fetch --no-tags origin main:refs/remotes/origin/main
+            if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+              echo "Release tag $GITHUB_REF_NAME does not point to code merged into main." >&2
+              exit 1
+            fi
+          fi
+          source scripts/release-lib.sh
+          release_metadata "$GITHUB_WORKSPACE" "$REQUESTED_RELEASE"
+          artifact_label="$RELEASE_LABEL"
+          if [[ "$RELEASE_IS_CANDIDATE" == "1" ]]; then
+            artifact_label="${RELEASE_LABEL}-${GITHUB_SHA:0:12}"
+          fi
+          {
+            echo "release_request=$REQUESTED_RELEASE"
+            echo "release_tag=$RELEASE_TAG"
+            echo "artifact_name=patris-export-$artifact_label"
+            echo "windows_archive=patris-export-$artifact_label-windows-amd64.zip"
+            echo "linux_archive=patris-export-$artifact_label-linux-amd64.tar.gz"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Build deterministic platform packages
+        shell: bash
+        env:
+          RELEASE_REQUEST: ${{ steps.metadata.outputs.release_request }}
+        run: bash scripts/package-release.sh "$RELEASE_REQUEST" "$GITHUB_SHA" release-input release-package
+
+      - name: Verify packaged downloads
+        shell: bash
+        env:
+          WINDOWS_ARCHIVE: ${{ steps.metadata.outputs.windows_archive }}
+          LINUX_ARCHIVE: ${{ steps.metadata.outputs.linux_archive }}
+        run: |
+          set -euo pipefail
+          (
+            cd release-package
+            sha256sum -c SHA256SUMS
+            unzip -t "$WINDOWS_ARCHIVE"
+            tar -tzf "$LINUX_ARCHIVE"
+          )
+          smoke_dir="$(mktemp -d)"
+          trap 'rm -rf -- "$smoke_dir"' EXIT
+          tar -xzf "release-package/$LINUX_ARCHIVE" -C "$smoke_dir"
+          "$smoke_dir/patris-export-linux-amd64/run-patris-export.sh" --version
+          "$smoke_dir/patris-export-linux-amd64/run-patris-export.sh" info testdata/kala.db
+
+      - name: Upload complete release package
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: ${{ steps.metadata.outputs.artifact_name }}
+          path: |
+            release-package/${{ steps.metadata.outputs.windows_archive }}
+            release-package/${{ steps.metadata.outputs.linux_archive }}
+            release-package/SHA256SUMS
+            release-package/RELEASE_NOTES.md
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 90
+
+      - name: Generate package summary
+        if: always()
+        shell: bash
+        env:
+          JOB_STATUS: ${{ job.status }}
+          GITHUB_TOKEN: ${{ github.token }}
+          ARTIFACT_RETENTION_DAYS: ${{ github.retention_days }}
+          ARTIFACT_NAME: ${{ steps.metadata.outputs.artifact_name }}
+          WINDOWS_ARCHIVE: ${{ steps.metadata.outputs.windows_archive }}
+          LINUX_ARCHIVE: ${{ steps.metadata.outputs.linux_archive }}
+        run: |
+          bash .github/scripts/ci-summary.sh build \
+            "Release Package Summary" \
+            "Collected same-run source builds into versioned, installable platform archives with a curated changelog and SHA-256 manifest." \
+            "$ARTIFACT_NAME" \
+            "Installable Windows and Linux release bundle" \
+            "release-package/$WINDOWS_ARCHIVE" \
+            "release-package/$LINUX_ARCHIVE" \
+            release-package/SHA256SUMS \
+            release-package/RELEASE_NOTES.md
+
+  verify_windows_package:
+    name: Smoke-test packaged Windows download
+    needs: package
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout source fixtures
+        uses: actions/checkout@v7.0.0
+
+      - name: Download complete candidate package
+        uses: actions/download-artifact@v8.0.1
+        with:
+          name: ${{ needs.package.outputs.artifact_name }}
+          path: release-package
+
+      - name: Extract and verify canonical Windows bundle
+        shell: pwsh
+        env:
+          RELEASE_TAG: ${{ needs.package.outputs.release_tag }}
+          WINDOWS_ARCHIVE: ${{ needs.package.outputs.windows_archive }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $smokeRoot = Join-Path $env:RUNNER_TEMP "patris-export-release-smoke"
+          Expand-Archive -LiteralPath (Join-Path "release-package" $env:WINDOWS_ARCHIVE) -DestinationPath $smokeRoot
+          $appRoot = Join-Path $smokeRoot "patris-export-windows-amd64"
+          foreach ($required in @(
+              "patris-export.exe",
+              "patris-export.dll",
+              "patris-export.h",
+              "libpxlib.dll",
+              "libgcc_s_seh-1.dll",
+              "libstdc++-6.dll",
+              "libwinpthread-1.dll",
+              "INSTALL.md",
+              "BUILD-MANIFEST.txt"
+          )) {
+              if (-not (Test-Path (Join-Path $appRoot $required))) {
+                  throw "Packaged Windows download is missing $required."
+              }
+          }
+          $executable = Join-Path $appRoot "patris-export.exe"
+          $versionOutput = (& $executable --version | Out-String)
+          $expectedVersion = $env:RELEASE_TAG -replace '^v', ''
+          if ($LASTEXITCODE -ne 0 -or $versionOutput -notmatch [regex]::Escape($expectedVersion)) {
+              throw "Packaged executable version check failed: $versionOutput"
+          }
+          & $executable info testdata\kala.db
+          if ($LASTEXITCODE -ne 0) {
+              throw "Packaged executable database smoke test failed."
+          }
+
+  publish:
+    name: Publish durable GitHub release
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: [package, verify_windows_package]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: read
+
+    steps:
+      - name: Checkout tagged source
+        uses: actions/checkout@v7.0.0
+        with:
+          fetch-depth: 0
+
+      - name: Download verified release package
+        uses: actions/download-artifact@v8.0.1
+        with:
+          name: ${{ needs.package.outputs.artifact_name }}
+          path: release-package
+
+      - name: Append GitHub merged-change history
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.package.outputs.release_tag }}
+        run: |
+          set -euo pipefail
+          generated_notes="$(gh api \
+            --method POST \
+            "repos/$GITHUB_REPOSITORY/releases/generate-notes" \
+            -f tag_name="$RELEASE_TAG" \
+            -f target_commitish="$GITHUB_SHA" \
+            --jq '.body')"
+          if [[ -n "$generated_notes" ]]; then
+            {
+              echo
+              echo '## Complete merged-change history'
+              echo
+              printf '%s\n' "$generated_notes"
+            } >> release-package/RELEASE_NOTES.md
+          fi
+
+      - name: Create release and upload installable assets
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.package.outputs.release_tag }}
+          WINDOWS_ARCHIVE: ${{ needs.package.outputs.windows_archive }}
+          LINUX_ARCHIVE: ${{ needs.package.outputs.linux_archive }}
+        run: |
+          set -euo pipefail
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            existing_dir="$(mktemp -d)"
+            trap 'rm -rf -- "$existing_dir"' EXIT
+            existing_state="$(gh release view "$RELEASE_TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --json isDraft,isPrerelease,publishedAt \
+              --jq '[.isDraft, .isPrerelease, (.publishedAt // "")] | @tsv')"
+            IFS=$'\t' read -r existing_draft existing_prerelease existing_published <<< "$existing_state"
+            if [[ "$existing_draft" != "false" || "$existing_prerelease" != "false" || -z "$existing_published" ]]; then
+              echo "Existing $RELEASE_TAG is not a durable published stable release." >&2
+              exit 1
+            fi
+            existing_body="$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json body --jq '.body')"
+            if ! grep -Fq "$GITHUB_SHA" <<<"$existing_body"; then
+              echo "Existing release $RELEASE_TAG does not identify source commit $GITHUB_SHA." >&2
+              exit 1
+            fi
+            gh release download "$RELEASE_TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --dir "$existing_dir" \
+              --pattern "$WINDOWS_ARCHIVE" \
+              --pattern "$LINUX_ARCHIVE" \
+              --pattern SHA256SUMS
+            for file in "$WINDOWS_ARCHIVE" "$LINUX_ARCHIVE" SHA256SUMS; do
+              if ! cmp -s "release-package/$file" "$existing_dir/$file"; then
+                echo "Existing immutable release asset differs: $file" >&2
+                exit 1
+              fi
+            done
+            echo "Release $RELEASE_TAG already contains the identical verified assets."
+          else
+            gh release create "$RELEASE_TAG" \
+              --verify-tag \
+              --title "Patris Export ${RELEASE_TAG#v}" \
+              --notes-file release-package/RELEASE_NOTES.md \
+              "release-package/$WINDOWS_ARCHIVE" \
+              "release-package/$LINUX_ARCHIVE" \
+              release-package/SHA256SUMS \
+              --repo "$GITHUB_REPOSITORY"
+          fi
+
+      - name: Verify durable release assets
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.package.outputs.release_tag }}
+          WINDOWS_ARCHIVE: ${{ needs.package.outputs.windows_archive }}
+          LINUX_ARCHIVE: ${{ needs.package.outputs.linux_archive }}
+        run: |
+          set -euo pipefail
+          release_state="$(gh release view "$RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --json isDraft,isPrerelease,publishedAt \
+            --jq '[.isDraft, .isPrerelease, (.publishedAt // "")] | @tsv')"
+          IFS=$'\t' read -r release_draft release_prerelease release_published <<< "$release_state"
+          if [[ "$release_draft" != "false" || "$release_prerelease" != "false" || -z "$release_published" ]]; then
+            echo "Release $RELEASE_TAG is not a durable published stable release." >&2
+            exit 1
+          fi
+          mapfile -t assets < <(gh release view "$RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --json assets \
+            --jq '.assets[].name')
+          for expected in "$WINDOWS_ARCHIVE" "$LINUX_ARCHIVE" SHA256SUMS; do
+            if ! printf '%s\n' "${assets[@]}" | grep -Fxq "$expected"; then
+              echo "Published release is missing $expected" >&2
+              exit 1
+            fi
+          done
+
+      - name: Generate durable release summary
+        if: always()
+        shell: bash
+        env:
+          JOB_STATUS: ${{ job.status }}
+          GITHUB_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.package.outputs.release_tag }}
+          WINDOWS_ARCHIVE: ${{ needs.package.outputs.windows_archive }}
+          LINUX_ARCHIVE: ${{ needs.package.outputs.linux_archive }}
+        run: |
+          if [[ "$JOB_STATUS" == "success" ]]; then
+            description="Published source-built, installable Windows and Linux packages with curated and generated changelogs, pinned dependencies, and durable checksums."
+          else
+            description="Release publication failed. Candidate files are fingerprinted below for diagnosis, but no mutable release replacement is performed."
+          fi
+          bash .github/scripts/ci-summary.sh release \
+            "Release Summary" \
+            "$description" \
+            "release-package/$WINDOWS_ARCHIVE" \
+            "release-package/$LINUX_ARCHIVE" \
+            release-package/SHA256SUMS

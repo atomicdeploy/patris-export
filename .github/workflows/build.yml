@@ -1,12 +1,9 @@
 name: Build
 
 on:
+  workflow_call:
   push:
     branches: [ main, develop ]
-    tags:
-      - 'v*'
-  pull_request:
-    branches: [ main ]
 
 permissions:
   contents: read
@@ -23,6 +20,10 @@ jobs:
     steps:
     - name: Checkout code
       uses: actions/checkout@v7.0.0
+
+    - name: Resolve deterministic source metadata
+      shell: bash
+      run: echo "BUILD_DATE=$(git show -s --format=%cI HEAD)" >> "$GITHUB_ENV"
       
     - name: Set up Go
       uses: actions/setup-go@v7.0.0
@@ -39,18 +40,29 @@ jobs:
       run: |
         sudo apt-get update
         sudo apt-get install -y build-essential cmake git
-        if bash scripts/build-pxlib-linux.sh "$GITHUB_WORKSPACE/.deps/pxlib-linux"; then
-          echo "CGO_CFLAGS=-I$GITHUB_WORKSPACE/.deps/pxlib-linux/include" >> "$GITHUB_ENV"
-          echo "CGO_LDFLAGS=-L$GITHUB_WORKSPACE/.deps/pxlib-linux/lib" >> "$GITHUB_ENV"
-          echo "LD_LIBRARY_PATH=$GITHUB_WORKSPACE/.deps/pxlib-linux/lib" >> "$GITHUB_ENV"
-        else
-          echo "Source pxlib build failed; falling back to distro pxlib packages"
-          sudo apt-get install -y pxlib-dev pxlib1
-        fi
+        bash scripts/build-pxlib-linux.sh "$GITHUB_WORKSPACE/.deps/pxlib-linux"
+        echo "CGO_CFLAGS=-I$GITHUB_WORKSPACE/.deps/pxlib-linux/include" >> "$GITHUB_ENV"
+        echo "CGO_LDFLAGS=-L$GITHUB_WORKSPACE/.deps/pxlib-linux/lib" >> "$GITHUB_ENV"
+        echo "LD_LIBRARY_PATH=$GITHUB_WORKSPACE/.deps/pxlib-linux/lib" >> "$GITHUB_ENV"
     
     - name: Build Linux artifacts
       shell: bash
       run: bash ./build.sh --target linux --ci --skip-pxlib --no-assets
+
+    - name: Collect and smoke-test Linux runtime
+      shell: bash
+      run: |
+        set -euo pipefail
+        mapfile -t pxlib_runtime < <(find .deps/pxlib-linux/lib -maxdepth 1 \( -type f -o -type l \) -name 'libpx*.so*' -print | LC_ALL=C sort)
+        if ((${#pxlib_runtime[@]} == 0)); then
+          echo 'No source-built pxlib runtime libraries were found.' >&2
+          exit 1
+        fi
+        for library in "${pxlib_runtime[@]}"; do
+          cp -L "$library" "build/$(basename "$library")"
+        done
+        LD_LIBRARY_PATH="$GITHUB_WORKSPACE/build:${LD_LIBRARY_PATH:-}" ./build/patris-export-linux-amd64 --version
+        LD_LIBRARY_PATH="$GITHUB_WORKSPACE/build:${LD_LIBRARY_PATH:-}" ./build/patris-export-linux-amd64 info testdata/kala.db
       
     - name: Upload Linux artifact
       uses: actions/upload-artifact@v7.0.1
@@ -60,6 +72,7 @@ jobs:
           build/patris-export-linux-amd64
           build/libpatris-export.so
           build/libpatris-export.h
+          build/libpx*.so*
 
     - name: Generate Linux build summary
       if: always()
@@ -87,6 +100,10 @@ jobs:
     steps:
     - name: Checkout code
       uses: actions/checkout@v7.0.0
+
+    - name: Resolve deterministic source metadata
+      shell: bash
+      run: echo "BUILD_DATE=$(git show -s --format=%cI HEAD)" >> "$GITHUB_ENV"
       
     - name: Set up Go
       uses: actions/setup-go@v7.0.0

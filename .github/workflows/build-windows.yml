@@ -1,12 +1,9 @@
 name: Build Windows MinGW
 
 on:
+  workflow_call:
   push:
     branches: [ main, develop ]
-    tags:
-      - 'v*'
-  pull_request:
-    branches: [ main ]
 
 permissions:
   contents: read
@@ -23,6 +20,12 @@ jobs:
     steps:
     - name: Checkout code
       uses: actions/checkout@v7.0.0
+
+    - name: Resolve deterministic source metadata
+      shell: pwsh
+      run: |
+        $buildDate = (& git show -s --format=%cI HEAD).Trim()
+        "BUILD_DATE=$buildDate" | Out-File -FilePath $env:GITHUB_ENV -Append
       
     - name: Set up Go
       uses: actions/setup-go@v7.0.0

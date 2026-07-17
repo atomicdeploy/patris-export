@@ -4,15 +4,17 @@ set -Eeuo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BUILD_DIR="$ROOT_DIR/build"
 DEPS_DIR="$ROOT_DIR/.deps"
-VERSION="${VERSION:-$(git -C "$ROOT_DIR" describe --tags --abbrev=0 2>/dev/null || echo "v1.0.0")}"
+SOURCE_VERSION="$(sed -nE 's/^[[:space:]]*Version[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/p' "$ROOT_DIR/pkg/version/version.go" | head -n 1)"
+VERSION="${VERSION:-$SOURCE_VERSION}"
 VERSION="${VERSION#v}"
 if [[ ! "$VERSION" =~ ^[0-9]+(\.[0-9]+)*(-[a-zA-Z0-9._-]+)?$ ]]; then
-    echo "Warning: Invalid VERSION '$VERSION', using 1.0.0" >&2
-    VERSION="1.0.0"
+    echo "Invalid VERSION '$VERSION' or source version metadata." >&2
+    exit 1
 fi
 VERSION_PKG="github.com/atomicdeploy/patris-export/pkg/version"
 BUILD_DATE="${BUILD_DATE:-$(date -u +'%Y-%m-%dT%H:%M:%SZ')}"
 COMMIT="${COMMIT:-$(git -C "$ROOT_DIR" rev-parse --short=12 HEAD 2>/dev/null || echo unknown)}"
+export VERSION BUILD_DATE COMMIT
 TARGET="current"
 CI_MODE="${CI:-0}"
 SKIP_PXLIB=0
@@ -174,7 +176,7 @@ log "Target: ${BOLD}$TARGET${RESET}"
 log "Version: ${VERSION}  Commit: ${COMMIT}  Date: ${BUILD_DATE}"
 
 need git "Git is required for version metadata and upstream pxlib fetches."
-need go "Install Go 1.24 or newer."
+    need go "Install Go 1.25 or newer."
 if [ "$SKIP_WEB" -eq 0 ]; then
     need npm "Install Node.js/npm 24 or newer."
 fi
@@ -194,7 +196,7 @@ run_assets() {
 run_web() {
     [ "$SKIP_WEB" -eq 0 ] || return 0
     step "🌐 Building web frontend"
-    (cd "$ROOT_DIR/web" && npm install && npm run build)
+    (cd "$ROOT_DIR/web" && npm ci && npm run build)
 }
 
 run_tests() {
@@ -320,7 +322,6 @@ compile_windows_resources() {
 
 build_linux() {
     prepare_linux_pxlib
-    run_web
     step "🐧 Building Linux executable and shared library"
     make build-linux build-lib-linux
     run_tests
