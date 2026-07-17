@@ -7,6 +7,20 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-07-17
+
+### Added
+
+- Branded NSIS MUI2 Windows installers with current-user/all-users modes, runtime and optional C SDK components, preserved configuration by default, explicit purge uninstall, localized wizard support, silent deployment smoke tests, and release checksum/asset wiring.
+- Optional Windows-only `alm_compat` build variants with deterministic AHK_ALM-compatible UTF-8 hardware challenges, per-user key management, read-only legacy adjacent-key discovery, CLI management commands, stable C ABI management symbols, fail-closed engine creation, and variant manifests.
+- Stable C ABI version and capabilities queries describing RPC methods, transports, string ownership, threading, process-global settings, and licensing mode.
+
+### Fixed
+
+- Embedded engine handles now serialize calls, reject calls once close begins, wait for in-flight work, stop HTTP/IPC transports deterministically, contain recoverable panics at every C entry point, and clear stale ABI errors after successful calls.
+- Installed TOML/YAML/JSON configuration names are discovered in the per-user configuration directory, and IPC endpoint binding failures are reported synchronously.
+- Windows release verification now loads and exercises the published DLL ABI against the real database fixture before an installer can be published.
+
 ## [1.0.1] - 2026-07-17
 
 ### Fixed

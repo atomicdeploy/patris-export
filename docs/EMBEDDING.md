@@ -27,7 +27,7 @@ Outputs:
 - Windows: `build/patris-export.dll` and `build/patris-export.h`
 - Linux: `build/libpatris-export.so` and `build/libpatris-export.h`
 
-The library still uses CGO and pxlib. Keep `pxlib.dll` beside the Windows host executable or make it available through `PATH`. On Linux, keep `libpx.so` in the system linker path or set `LD_LIBRARY_PATH`.
+The library still uses CGO and pxlib. Keep `libpxlib.dll` beside the Windows host executable or make it available through `PATH`. On Linux, keep `libpx.so` in the system linker path or set `LD_LIBRARY_PATH`.
 
 ## Go Embedded API
 
@@ -58,6 +58,12 @@ http.Handle("/patris/", http.StripPrefix("/patris", engine.Server().Router()))
 The exported C functions are:
 
 - `PatrisExportVersionJSON() char*`
+- `PatrisExportABIVersion() uint32_t`
+- `PatrisExportCapabilitiesJSON() char*`
+- `PatrisExportLicenseStatusJSON() char*`
+- `PatrisExportLicenseChallenge() char*`
+- `PatrisExportLicenseInstall(char* key) char*`
+- `PatrisExportLicenseRemove() char*`
 - `PatrisExportCreate(char* options_json) uint64_t`
 - `PatrisExportClose(uint64_t handle) int`
 - `PatrisExportCall(uint64_t handle, char* request_json) char*`
@@ -67,6 +73,29 @@ The exported C functions are:
 - `PatrisExportFreeString(char* value)`
 
 Every returned string must be released with `PatrisExportFreeString`.
+
+ABI version 1 serializes operations for each engine handle. Closing a handle
+removes it from the registry immediately, rejects new calls, waits for an
+already-running call, and then closes the engine. Successful ABI operations
+clear the previous error. `PatrisExportLastError` is a process-global snapshot,
+so a caller should copy and free it immediately after a failed operation rather
+than relying on it across concurrent calls.
+
+The capabilities document lists the canonical direct/IPC request methods,
+transport support, string ownership, threading contract, and build-time
+licensing mode. Runtime converter
+and temporary-file settings are currently process-wide, so hosts should use one
+active engine per process. All C entry points contain Go panics at the ABI
+boundary and report a contained panic through `PatrisExportLastError` where the
+platform runtime permits recovery.
+
+License management symbols are present in every build, preserving one host ABI
+for standard and optional licensed variants. Standard builds report that no
+license is required. Builds created with the `alm_compat` tag fail
+`PatrisExportCreate` until a valid per-user or legacy adjacent key is found;
+hosts can query the status/challenge and install or remove the per-user key
+without creating an engine. See [LICENSING.md](LICENSING.md) for the exact
+profile, build flags, key locations, attribution, and security limitations.
 
 Example options JSON:
 

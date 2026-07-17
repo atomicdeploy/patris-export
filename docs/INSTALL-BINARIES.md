@@ -6,6 +6,16 @@ download with the release's `SHA256SUMS` before installation.
 
 ## Windows amd64
 
+For a normal desktop installation, download
+`patris-export-vX.Y.Z-windows-amd64-setup.exe`. The assisted installer provides
+current-user and all-users modes, start-menu and optional desktop shortcuts,
+an optional C SDK component, registered uninstall support, and safe upgrades.
+Configuration is preserved by default; removal requires an explicit checkbox
+or the documented `/PURGEDATA` silent-uninstall switch. See
+[WINDOWS_INSTALLER.md](WINDOWS_INSTALLER.md) for deployment and build details.
+
+For a portable or embedding-oriented installation:
+
 1. Download `patris-export-vX.Y.Z-windows-amd64.zip`.
 2. Extract the complete archive to a permanent directory such as
    `C:\Program Files\Patris Export`.

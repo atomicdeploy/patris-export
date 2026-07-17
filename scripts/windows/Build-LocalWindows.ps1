@@ -4,7 +4,8 @@ param(
     [string]$PxlibRef = $env:PXLIB_REF,
     [string]$PatrisDb = "C:\Patris\data4\kala.db",
     [string]$Version = $env:VERSION,
-    [switch]$SkipPxlibBuild
+    [switch]$SkipPxlibBuild,
+    [switch]$SkipPromote
 )
 
 $ErrorActionPreference = "Stop"
@@ -60,9 +61,20 @@ $depsRoot = Join-Path $AtomicDeployRoot "deps"
 $pxlibSource = Join-Path $depsRoot "pxlib"
 $pxlibBuild = Join-Path $depsRoot "pxlib-build-windows"
 $pxlibInstall = Join-Path $depsRoot "pxlib-install-windows"
-$deployRoot = Join-Path $AtomicDeployRoot "deploy"
+$almEnabled = $env:ENABLE_ALM -match '^(1|true|yes|on)$'
+$almAppID = $env:ALM_APP_ID
+if ($almEnabled -and -not $almAppID) {
+    throw "ENABLE_ALM=1 requires ALM_APP_ID."
+}
+if ($almEnabled -and $almAppID -notmatch '^[A-Za-z0-9._:@+\-]{6,128}$') {
+    throw "ALM_APP_ID must be 6-128 characters from A-Z, a-z, 0-9, '.', '_', ':', '@', '+', or '-'."
+}
+$buildVariant = if ($almEnabled) { "alm-compat" } else { "standard" }
+$licensingMode = if ($almEnabled) { "alm_compat_utf8_v1" } else { "none" }
+$deployRoot = if ($almEnabled) { Join-Path $AtomicDeployRoot "deploy\alm-compat" } else { Join-Path $AtomicDeployRoot "deploy" }
 $stageParent = Join-Path $AtomicDeployRoot "build"
-$stageRoot = Join-Path $stageParent "patris-export-windows-amd64"
+$stageName = if ($almEnabled) { "patris-export-windows-amd64-alm-compat" } else { "patris-export-windows-amd64" }
+$stageRoot = Join-Path $stageParent $stageName
 $vcpkgRoot = $(if ($env:VCPKG_ROOT) { $env:VCPKG_ROOT } else { Join-Path $depsRoot "vcpkg" })
 $vcpkgTriplet = $(if ($env:VCPKG_DEFAULT_TRIPLET) { $env:VCPKG_DEFAULT_TRIPLET } else { "x64-windows" })
 $useVcpkg = $env:USE_VCPKG -match '^(1|true|yes|on)$'
@@ -204,6 +216,7 @@ try {
     $buildDate = (& $git -C $repoRoot show -s --format=%cI HEAD).Trim()
     $commit = (& $git -C $repoRoot rev-parse --short=12 HEAD).Trim()
     $versionPkg = "github.com/atomicdeploy/patris-export/pkg/version"
+    $licensingPkg = "github.com/atomicdeploy/patris-export/pkg/licensing"
     $env:VERSION = $Version
     $env:BUILD_DATE = $buildDate
     $env:COMMIT = $commit
@@ -223,12 +236,21 @@ try {
         Write-Host "Using optional vcpkg C dependency paths: $vcpkgInstalled"
     }
 
+    $linkerFlags = "-X $versionPkg.Version=$Version -X $versionPkg.BuildDate=$buildDate -X $versionPkg.Commit=$commit"
+    $tagArguments = @()
+    if ($almEnabled) {
+        $tagArguments = @("-tags", "alm_compat")
+        $linkerFlags += " -X $licensingPkg.almAppID=$almAppID"
+    }
+
     $outExe = Join-Path $resolvedStageRoot "patris-export-windows-amd64.exe"
-    Invoke-Checked $go @("build", "-ldflags", "-X $versionPkg.Version=$Version -X $versionPkg.BuildDate=$buildDate -X $versionPkg.Commit=$commit", "-o", $outExe, ".\cmd\patris-export")
+    $exeBuildArguments = @("build") + $tagArguments + @("-ldflags", $linkerFlags, "-o", $outExe, ".\cmd\patris-export")
+    Invoke-Checked $go $exeBuildArguments
     Copy-Item $outExe (Join-Path $resolvedStageRoot "patris-export.exe") -Force
 
     $outDll = Join-Path $resolvedStageRoot "patris-export.dll"
-    Invoke-Checked $go @("build", "-buildmode=c-shared", "-ldflags", "-X $versionPkg.Version=$Version -X $versionPkg.BuildDate=$buildDate -X $versionPkg.Commit=$commit", "-o", $outDll, ".\cmd\patris-export-lib")
+    $dllBuildArguments = @("build") + $tagArguments + @("-buildmode=c-shared", "-ldflags", $linkerFlags, "-o", $outDll, ".\cmd\patris-export-lib")
+    Invoke-Checked $go $dllBuildArguments
     if (-not (Test-Path (Join-Path $resolvedStageRoot "patris-export.h"))) {
         throw "The Windows shared-library build did not produce patris-export.h."
     }
@@ -245,6 +267,34 @@ try {
         }
     }
 
+    [ordered]@{
+        variant = $buildVariant
+        licensing_mode = $licensingMode
+        license_required = [bool]$almEnabled
+    } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $resolvedStageRoot "BUILD-VARIANT.json") -Encoding utf8
+
+    $documentation = [ordered]@{
+        "README.md" = Join-Path $repoRoot "README.md"
+        "INSTALL.md" = Join-Path $repoRoot "docs\INSTALL-BINARIES.md"
+        "LICENSE" = Join-Path $repoRoot "LICENSE"
+        "NOTICE" = Join-Path $repoRoot "NOTICE"
+        "LICENSING.md" = Join-Path $repoRoot "docs\LICENSING.md"
+        "CHANGELOG.md" = Join-Path $repoRoot "CHANGELOG.md"
+    }
+    foreach ($destinationName in $documentation.Keys) {
+        Copy-Item -LiteralPath $documentation[$destinationName] -Destination (Join-Path $resolvedStageRoot $destinationName) -Force
+    }
+    $pxlibCommit = (Get-Content (Join-Path $repoRoot "dependencies\pxlib.ref") -Raw).Trim()
+    @(
+        "Patris Export $Version",
+        "Build variant: $buildVariant",
+        "Licensing mode: $licensingMode",
+        "Source commit: $commit",
+        "pxlib source commit: $pxlibCommit",
+        "Build date: $buildDate",
+        "Built by: scripts/windows/Build-LocalWindows.ps1"
+    ) | Set-Content -LiteralPath (Join-Path $resolvedStageRoot "BUILD-MANIFEST.txt") -Encoding utf8
+
     $requiredFiles = @(
         "patris-export-windows-amd64.exe",
         "patris-export.exe",
@@ -253,7 +303,15 @@ try {
         "libpxlib.dll",
         "libgcc_s_seh-1.dll",
         "libstdc++-6.dll",
-        "libwinpthread-1.dll"
+        "libwinpthread-1.dll",
+        "BUILD-VARIANT.json",
+        "README.md",
+        "INSTALL.md",
+        "LICENSE",
+        "NOTICE",
+        "LICENSING.md",
+        "CHANGELOG.md",
+        "BUILD-MANIFEST.txt"
     )
     foreach ($requiredFile in $requiredFiles) {
         if (-not (Test-Path -LiteralPath (Join-Path $resolvedStageRoot $requiredFile))) {
@@ -261,7 +319,9 @@ try {
         }
     }
 
-    if (Test-Path $PatrisDb) {
+    if ($almEnabled) {
+        Invoke-Checked $outExe @("license", "status")
+    } elseif (Test-Path $PatrisDb) {
         Invoke-Checked $outExe @("info", $PatrisDb)
     } else {
         Write-Warning "Patris database not found at $PatrisDb; skipping local database smoke test."
@@ -269,12 +329,19 @@ try {
 
     Invoke-Checked $outExe @("--version")
 
-    foreach ($requiredFile in $requiredFiles) {
-        Copy-Item -LiteralPath (Join-Path $resolvedStageRoot $requiredFile) -Destination (Join-Path $deployRoot $requiredFile) -Force
+    if (-not $SkipPromote) {
+        foreach ($requiredFile in $requiredFiles) {
+            Copy-Item -LiteralPath (Join-Path $resolvedStageRoot $requiredFile) -Destination (Join-Path $deployRoot $requiredFile) -Force
+        }
     }
 
     Write-Host "Verified clean Windows staging build: $resolvedStageRoot"
-    Write-Host "Promoted executable: $(Join-Path $deployRoot 'patris-export.exe')"
+    Write-Host "Build variant: $buildVariant ($licensingMode)"
+    if ($SkipPromote) {
+        Write-Host "Promotion skipped; the existing live deployment was left untouched."
+    } else {
+        Write-Host "Promoted executable: $(Join-Path $deployRoot 'patris-export.exe')"
+    }
 } finally {
     Pop-Location
 }

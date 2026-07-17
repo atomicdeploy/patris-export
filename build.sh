@@ -12,6 +12,7 @@ if [[ ! "$VERSION" =~ ^[0-9]+(\.[0-9]+)*(-[a-zA-Z0-9._-]+)?$ ]]; then
     exit 1
 fi
 VERSION_PKG="github.com/atomicdeploy/patris-export/pkg/version"
+LICENSING_PKG="github.com/atomicdeploy/patris-export/pkg/licensing"
 BUILD_DATE="${BUILD_DATE:-$(date -u +'%Y-%m-%dT%H:%M:%SZ')}"
 COMMIT="${COMMIT:-$(git -C "$ROOT_DIR" rev-parse --short=12 HEAD 2>/dev/null || echo unknown)}"
 export VERSION BUILD_DATE COMMIT
@@ -21,6 +22,11 @@ SKIP_PXLIB=0
 SKIP_WEB=0
 SKIP_ASSETS=0
 RUN_TESTS=0
+BUILD_VARIANT="standard"
+LICENSING_MODE="none"
+LICENSE_REQUIRED="false"
+GO_BUILD_TAG_ARGS=()
+ALM_LDFLAG=""
 
 if [ -t 1 ]; then
     BOLD=$'\033[1m'
@@ -61,6 +67,8 @@ Environment:
   PXLIB_ROOT          Existing pxlib install prefix to use
   PXLIB_REPO/PXLIB_REF Override upstream pxlib source and ref
   USE_VCPKG=1         Adds VCPKG_ROOT installed include/lib/bin paths as optional C dependency paths
+  ENABLE_ALM=1        Build the optional Windows ALM compatibility variant
+  ALM_APP_ID          Required public derivation identifier when ENABLE_ALM=1
 EOF
 }
 
@@ -94,8 +102,18 @@ to_windows_path() {
 }
 
 ldflags() {
-    printf -- '-X %s.Version=%s -X %s.BuildDate=%s -X %s.Commit=%s' \
-        "$VERSION_PKG" "$VERSION" "$VERSION_PKG" "$BUILD_DATE" "$VERSION_PKG" "$COMMIT"
+    printf -- '-X %s.Version=%s -X %s.BuildDate=%s -X %s.Commit=%s%s' \
+        "$VERSION_PKG" "$VERSION" "$VERSION_PKG" "$BUILD_DATE" "$VERSION_PKG" "$COMMIT" "$ALM_LDFLAG"
+}
+
+write_variant_manifest() {
+    cat > "$BUILD_DIR/BUILD-VARIANT.json" <<EOF
+{
+  "variant": "$BUILD_VARIANT",
+  "licensing_mode": "$LICENSING_MODE",
+  "license_required": $LICENSE_REQUIRED
+}
+EOF
 }
 
 while [ "$#" -gt 0 ]; do
@@ -154,6 +172,20 @@ if [ "$TARGET" = "windows" ]; then
     fi
 fi
 
+if [[ "${ENABLE_ALM:-0}" =~ ^(1|true|yes|on)$ ]]; then
+    [ -n "${ALM_APP_ID:-}" ] || fail "ENABLE_ALM=1 requires ALM_APP_ID."
+    [[ "$ALM_APP_ID" =~ ^[A-Za-z0-9._:@+-]{6,128}$ ]] || \
+        fail "ALM_APP_ID must be 6-128 characters from A-Z, a-z, 0-9, '.', '_', ':', '@', '+', or '-'."
+    if [ "$TARGET" = "linux" ] || [ "$TARGET" = "all" ]; then
+        fail "The alm_compat profile requires Windows WMI/CIM and can only build a Windows target."
+    fi
+    BUILD_VARIANT="alm-compat"
+    LICENSING_MODE="alm_compat_utf8_v1"
+    LICENSE_REQUIRED="true"
+    GO_BUILD_TAG_ARGS=(-tags alm_compat)
+    ALM_LDFLAG=" -X $LICENSING_PKG.almAppID=$ALM_APP_ID"
+fi
+
 if [ "$TARGET" = "all" ]; then
     extra=()
     [ "$CI_MODE" = "1" ] && extra+=(--ci)
@@ -174,6 +206,7 @@ fi
 step "🏗️  Patris Export build"
 log "Target: ${BOLD}$TARGET${RESET}"
 log "Version: ${VERSION}  Commit: ${COMMIT}  Date: ${BUILD_DATE}"
+log "Variant: ${BUILD_VARIANT}  Licensing: ${LICENSING_MODE}"
 
 need git "Git is required for version metadata and upstream pxlib fetches."
     need go "Install Go 1.25 or newer."
@@ -202,7 +235,7 @@ run_web() {
 run_tests() {
     [ "$RUN_TESTS" -eq 1 ] || return 0
     step "🧪 Running Go tests"
-    go test ./...
+    go test "${GO_BUILD_TAG_ARGS[@]}" ./...
 }
 
 ensure_python3() {
@@ -323,7 +356,7 @@ compile_windows_resources() {
 build_linux() {
     prepare_linux_pxlib
     step "🐧 Building Linux executable and shared library"
-    make build-linux build-lib-linux
+    make ENABLE_ALM="${ENABLE_ALM:-0}" ALM_APP_ID="${ALM_APP_ID:-}" build-linux build-lib-linux
     run_tests
 }
 
@@ -338,8 +371,8 @@ build_windows_cross() {
     compile_windows_resources x86_64-w64-mingw32-windres
     mkdir -p "$BUILD_DIR"
     step "🪟 Building Windows executable and DLL"
-    CGO_ENABLED=1 GOOS=windows GOARCH=amd64 "$GO_BINARY" build -ldflags "$(ldflags)" -o "$BUILD_DIR/patris-export-windows-amd64.exe" ./cmd/patris-export
-    CGO_ENABLED=1 GOOS=windows GOARCH=amd64 "$GO_BINARY" build -buildmode=c-shared -ldflags "$(ldflags)" -o "$BUILD_DIR/patris-export.dll" ./cmd/patris-export-lib
+    CGO_ENABLED=1 GOOS=windows GOARCH=amd64 "$GO_BINARY" build "${GO_BUILD_TAG_ARGS[@]}" -ldflags "$(ldflags)" -o "$BUILD_DIR/patris-export-windows-amd64.exe" ./cmd/patris-export
+    CGO_ENABLED=1 GOOS=windows GOARCH=amd64 "$GO_BINARY" build "${GO_BUILD_TAG_ARGS[@]}" -buildmode=c-shared -ldflags "$(ldflags)" -o "$BUILD_DIR/patris-export.dll" ./cmd/patris-export-lib
     copy_windows_dlls
     run_tests
 }
@@ -357,8 +390,8 @@ build_windows_native() {
     compile_windows_resources "$windres_name"
     mkdir -p "$BUILD_DIR"
     step "🪟 Building native Windows executable and DLL"
-    CGO_ENABLED=1 GOOS=windows GOARCH=amd64 go build -ldflags "$(ldflags)" -o "$BUILD_DIR/patris-export-windows-amd64.exe" ./cmd/patris-export
-    CGO_ENABLED=1 GOOS=windows GOARCH=amd64 go build -buildmode=c-shared -ldflags "$(ldflags)" -o "$BUILD_DIR/patris-export.dll" ./cmd/patris-export-lib
+    CGO_ENABLED=1 GOOS=windows GOARCH=amd64 go build "${GO_BUILD_TAG_ARGS[@]}" -ldflags "$(ldflags)" -o "$BUILD_DIR/patris-export-windows-amd64.exe" ./cmd/patris-export
+    CGO_ENABLED=1 GOOS=windows GOARCH=amd64 go build "${GO_BUILD_TAG_ARGS[@]}" -buildmode=c-shared -ldflags "$(ldflags)" -o "$BUILD_DIR/patris-export.dll" ./cmd/patris-export-lib
     copy_windows_dlls
     run_tests
 }
@@ -372,6 +405,8 @@ case "$TARGET" in
     windows-native) build_windows_native ;;
     *) fail "Unsupported target: $TARGET" ;;
 esac
+
+write_variant_manifest
 
 step "📦 Build artifacts"
 artifact_count=0

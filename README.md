@@ -30,13 +30,15 @@ A fast and performant application for reading, parsing, and converting Paradox/B
 Download the latest source-built release for your platform from the
 [Releases page](https://github.com/atomicdeploy/patris-export/releases).
 
-**Windows users:** Extract the complete Windows ZIP and keep the included
-pxlib/MinGW DLLs beside `patris-export.exe`.
+**Windows users:** Run the checksummed assisted setup executable for a normal
+installation with shortcuts, configuration-safe upgrades, and uninstall
+support. The complete Windows ZIP remains available for portable and embedding
+scenarios; keep its pxlib/MinGW DLLs beside `patris-export.exe`.
 
 **Linux users:** Extract the Linux tarball and launch it with the included
 `run-patris-export.sh` so the bundled pxlib runtime is loaded.
 
-Every release includes `SHA256SUMS`, an install guide, a build manifest, a
+Every release includes `SHA256SUMS`, an assisted Windows installer, an install guide, a build manifest, a
 curated changelog, and links to the exact tagged source. See
 [binary installation details](docs/INSTALL-BINARIES.md).
 
@@ -210,7 +212,7 @@ viewer, and `w` to inspect WebSocket updates through WebSocat.
 ![Patris Export TUI dashboard](docs/screenshots/tui-dashboard.svg)
 
 Terminal WebSocket inspection with WebSocat is documented in [docs/examples/websocat.md](docs/examples/websocat.md).
-Embedding, loadable-library builds, and local IPC are documented in [docs/EMBEDDING.md](docs/EMBEDDING.md).
+Embedding, loadable-library builds, and local IPC are documented in [docs/EMBEDDING.md](docs/EMBEDDING.md). Optional Windows ALM compatibility builds and their security limitations are documented in [docs/LICENSING.md](docs/LICENSING.md).
 
 Experimental RTL logical text conversion is available as an opt-in backend flag
 and web display setting. See [docs/RTL_CONVERSION.md](docs/RTL_CONVERSION.md).

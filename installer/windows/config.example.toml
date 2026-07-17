@@ -1,0 +1,16 @@
+# Copy this file to %APPDATA%\Patris Export\patris-export.toml and adjust it for
+# the local Patris installation. The installer never overwrites active config.
+
+[database]
+path = 'C:\Patris\data4\kala.db'
+
+[server]
+host = "127.0.0.1"
+port = 18080
+
+[ui]
+language = "fa"
+rtl_text_direction = false
+
+[runtime]
+debug = false

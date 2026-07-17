@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"strings"
 	"sync"
@@ -33,14 +34,19 @@ type Options struct {
 }
 
 type Engine struct {
-	mu      sync.Mutex
-	cfg     appconfig.Config
-	manager *appconfig.Manager
-	server  *server.Server
-	http    *http.Server
-	ipc     *ipc.Server
-	cancel  context.CancelFunc
+	mu        sync.Mutex
+	closed    bool
+	cfg       appconfig.Config
+	manager   *appconfig.Manager
+	server    *server.Server
+	http      *http.Server
+	httpDone  chan struct{}
+	ipc       *ipc.Server
+	ipcCancel context.CancelFunc
+	ipcDone   chan struct{}
 }
+
+var errEngineClosed = errors.New("embedded engine is closed")
 
 func New(options Options) (*Engine, error) {
 	manager, err := appconfig.LoadFiles(options.ConfigFiles)
@@ -126,6 +132,11 @@ func (e *Engine) StartWatch(debounce string) error {
 	if err != nil {
 		return fmt.Errorf("invalid debounce duration %q: %w", debounce, err)
 	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.closed {
+		return errEngineClosed
+	}
 	return e.server.StartWatching(duration)
 }
 
@@ -135,13 +146,24 @@ func (e *Engine) StartHTTP(addr string) error {
 	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	if e.closed {
+		return errEngineClosed
+	}
 	if e.http != nil {
 		return errors.New("HTTP server already started")
 	}
-	e.http = &http.Server{Addr: addr, Handler: e.server.Router()}
+	listener, err := net.Listen("tcp", addr)
+	if err != nil {
+		return fmt.Errorf("listen for embedded HTTP on %s: %w", addr, err)
+	}
+	httpServer := &http.Server{Addr: listener.Addr().String(), Handler: e.server.Router()}
+	done := make(chan struct{})
+	e.http = httpServer
+	e.httpDone = done
 	go func() {
-		log.Printf("Embedded HTTP listening on %s", addr)
-		if err := e.http.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		defer close(done)
+		log.Printf("Embedded HTTP listening on %s", listener.Addr())
+		if err := httpServer.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			log.Printf("Embedded HTTP server stopped with error: %v", err)
 		}
 	}()
@@ -149,30 +171,46 @@ func (e *Engine) StartHTTP(addr string) error {
 }
 
 func (e *Engine) StartIPC(path string) (string, error) {
-	ctx, cancel := context.WithCancel(context.Background())
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	if e.closed {
+		return "", errEngineClosed
+	}
 	if e.ipc != nil {
-		cancel()
 		return "", errors.New("IPC server already started")
 	}
-	e.cancel = cancel
-	e.ipc = ipc.NewServer(path, e)
+	ctx, cancel := context.WithCancel(context.Background())
+	ipcServer := ipc.NewServer(path, e)
+	listener, err := ipcServer.Listen()
+	if err != nil {
+		cancel()
+		return "", fmt.Errorf("listen for embedded IPC on %s: %w", ipcServer.Path(), err)
+	}
+	done := make(chan struct{})
+	e.ipcCancel = cancel
+	e.ipc = ipcServer
+	e.ipcDone = done
 	go func() {
-		if err := e.ipc.Serve(ctx); err != nil {
+		defer close(done)
+		if err := ipcServer.ServeListener(ctx, listener); err != nil {
 			log.Printf("IPC server stopped with error: %v", err)
 		}
 	}()
-	return e.ipc.Path(), nil
+	return ipcServer.Path(), nil
 }
 
 func (e *Engine) Close() error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	if e.cancel != nil {
-		e.cancel()
-		e.cancel = nil
+	if e.closed {
+		return nil
 	}
+	e.closed = true
+	if e.ipcCancel != nil {
+		e.ipcCancel()
+		e.ipcCancel = nil
+	}
+
 	var firstErr error
 	if e.http != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
@@ -182,13 +220,33 @@ func (e *Engine) Close() error {
 		cancel()
 		e.http = nil
 	}
+	if err := waitForStop(e.httpDone, "HTTP"); err != nil && firstErr == nil {
+		firstErr = err
+	}
+	e.httpDone = nil
+	if err := waitForStop(e.ipcDone, "IPC"); err != nil && firstErr == nil {
+		firstErr = err
+	}
+	e.ipcDone = nil
+	e.ipc = nil
 	if e.server != nil {
 		if err := e.server.Close(); err != nil && firstErr == nil {
 			firstErr = err
 		}
 	}
-	e.ipc = nil
 	return firstErr
+}
+
+func waitForStop(done <-chan struct{}, name string) error {
+	if done == nil {
+		return nil
+	}
+	select {
+	case <-done:
+		return nil
+	case <-time.After(3 * time.Second):
+		return fmt.Errorf("timed out waiting for embedded %s server to stop", name)
+	}
 }
 
 func (e *Engine) CallJSON(ctx context.Context, raw string) (string, error) {
@@ -205,11 +263,40 @@ func (e *Engine) CallJSON(ctx context.Context, raw string) (string, error) {
 }
 
 func (e *Engine) Call(ctx context.Context, req ipc.Request) ipc.Response {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.closed {
+		return ipc.Response{ID: req.ID, OK: false, Error: errEngineClosed.Error()}
+	}
 	return NewServerHandler(e.server).Call(ctx, req)
 }
 
 func (e *Engine) Subscribe(ctx context.Context, buffer int) (<-chan map[string]interface{}, func()) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.closed {
+		ch := make(chan map[string]interface{})
+		close(ch)
+		return ch, func() {}
+	}
 	return e.server.SubscribeEvents(buffer)
+}
+
+var supportedMethods = []string{
+	"app.get",
+	"records.list",
+	"info.get",
+	"status.get",
+	"config.get",
+	"config.set",
+	"toast.show",
+	"refresh",
+}
+
+// SupportedMethods returns the canonical request names shared by direct C ABI
+// calls and local IPC clients. Aliases accepted by the dispatcher are omitted.
+func SupportedMethods() []string {
+	return append([]string(nil), supportedMethods...)
 }
 
 type ServerHandler struct {

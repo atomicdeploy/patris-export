@@ -478,9 +478,10 @@ EOF
 
 ### Install
 
-- Windows: extract the complete `windows-amd64.zip` archive and keep all DLLs beside `patris-export.exe`.
+- Windows (recommended): run the checksummed `windows-amd64-setup.exe` assisted installer. Release builds can additionally require Authenticode when certificate secrets are configured.
+- Windows (portable/embedding): extract the complete `windows-amd64.zip` archive and keep all DLLs beside `patris-export.exe`.
 - Linux: extract the `linux-amd64.tar.gz` archive and run `run-patris-export.sh`.
-- Verify either archive against `SHA256SUMS` before installation.
+- Verify the chosen installer or archive against `SHA256SUMS` before installation.
 
 EOF
     append_context
