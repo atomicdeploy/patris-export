@@ -61,6 +61,23 @@ func TestServerJSON(t *testing.T) {
 	}
 	defer srv.Close()
 
+	t.Run("POST /api/refresh", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodPost, "/api/refresh", nil)
+		w := httptest.NewRecorder()
+		srv.router.ServeHTTP(w, req)
+
+		if w.Code != http.StatusOK {
+			t.Fatalf("expected status 200, got %d", w.Code)
+		}
+		var response map[string]interface{}
+		if err := json.NewDecoder(w.Body).Decode(&response); err != nil {
+			t.Fatalf("failed to decode refresh response: %v", err)
+		}
+		if response["refreshed"] != true {
+			t.Fatalf("expected refreshed=true, got %#v", response)
+		}
+	})
+
 	// Test GET /api/records
 	t.Run("GET /api/records", func(t *testing.T) {
 		req := httptest.NewRequest("GET", "/api/records", nil)

@@ -14,6 +14,7 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - Branded NSIS MUI2 Windows installers with current-user/all-users modes, runtime and optional C SDK components, preserved configuration by default, explicit purge uninstall, localized wizard support, silent deployment smoke tests, and release checksum/asset wiring.
 - Optional Windows-only `alm_compat` build variants with deterministic AHK_ALM-compatible UTF-8 hardware challenges, per-user key management, read-only legacy adjacent-key discovery, CLI management commands, stable C ABI management symbols, fail-closed engine creation, and variant manifests.
 - Stable C ABI version and capabilities queries describing RPC methods, transports, string ownership, threading, process-global settings, and licensing mode.
+- A `POST /api/refresh` endpoint matching the existing WebSocket, IPC, and embedded-library manual-refresh command.
 
 ### Fixed
 

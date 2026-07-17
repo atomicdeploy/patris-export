@@ -552,6 +552,10 @@ versioned `digitalogic.product-sync` envelope. `/api/records` deliberately
 remains the Code-keyed product-row collection used by the viewer and embedded
 records API.
 
+`POST /api/refresh` forces the same source snapshot refresh used by the Web UI,
+WebSocket, IPC, and embedded-library `refresh` command. This gives desktop and
+remote clients one consistent manual-refresh operation.
+
 **JSON response:**
 ```json
 {
