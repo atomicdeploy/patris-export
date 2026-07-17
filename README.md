@@ -550,7 +550,11 @@ normal Patris Export config file rather than in a separate table-settings file.
 For a configured canonical dataset, `GET /api/product-sync` returns the full
 versioned `digitalogic.product-sync` envelope. `/api/records` deliberately
 remains the Code-keyed product-row collection used by the viewer and embedded
-records API.
+records API. Contract v1.1 carries category rows separately: `GET
+/api/categories` returns the Code-keyed hierarchy, and the viewer reuses the
+same table controls through its Products/Categories switch. Products include
+their explicit `category_code`; reserved accounting and service rows appear in
+`excluded_codes` and are never exposed as products.
 
 `POST /api/refresh` forces the same source snapshot refresh used by the Web UI,
 WebSocket, IPC, and embedded-library `refresh` command. This gives desktop and

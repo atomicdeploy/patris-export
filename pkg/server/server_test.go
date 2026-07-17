@@ -16,6 +16,7 @@ import (
 
 	"github.com/atomicdeploy/patris-export/pkg/appconfig"
 	"github.com/atomicdeploy/patris-export/pkg/canonical"
+	"github.com/atomicdeploy/patris-export/pkg/recordpipe"
 	"github.com/gorilla/websocket"
 	"github.com/xuri/excelize/v2"
 )
@@ -535,8 +536,8 @@ func TestCanonicalKalaParityAcrossRESTCSVXLSXAndWebSocket(t *testing.T) {
 	if err := json.NewDecoder(recorder.Body).Decode(&keyedProducts); err != nil {
 		t.Fatalf("decode canonical REST product rows: %v", err)
 	}
-	if len(keyedProducts) != 354 {
-		t.Fatalf("canonical /api/records returned %d top-level entries, want 354 product rows", len(keyedProducts))
+	if len(keyedProducts) != 292 {
+		t.Fatalf("canonical /api/records returned %d top-level entries, want 292 leaf product rows", len(keyedProducts))
 	}
 	for _, metadata := range []string{"schema", "schema_version", "event", "event_id", "products"} {
 		if _, leaked := keyedProducts[metadata]; leaked {
@@ -565,6 +566,31 @@ func TestCanonicalKalaParityAcrossRESTCSVXLSXAndWebSocket(t *testing.T) {
 	}
 	contractRESTProduct := canonicalTypedProductByCode(t, envelope.Products, "102001011")
 	assertJSONEquivalent(t, "records and dedicated contract", restProduct, contractRESTProduct)
+	if envelope.SchemaVersion != canonical.ContractVersion || len(envelope.Categories) != 54 {
+		t.Fatalf("canonical contract version/categories = %s/%d, want %s/54", envelope.SchemaVersion, len(envelope.Categories), canonical.ContractVersion)
+	}
+
+	categoriesRequest := httptest.NewRequest(http.MethodGet, "/api/categories", nil)
+	categoriesRecorder := httptest.NewRecorder()
+	srv.router.ServeHTTP(categoriesRecorder, categoriesRequest)
+	if categoriesRecorder.Code != http.StatusOK {
+		t.Fatalf("categories status = %d: %s", categoriesRecorder.Code, categoriesRecorder.Body.String())
+	}
+	var keyedCategories map[string]map[string]interface{}
+	if err := json.NewDecoder(categoriesRecorder.Body).Decode(&keyedCategories); err != nil {
+		t.Fatalf("decode canonical categories: %v", err)
+	}
+	if len(keyedCategories) != 54 {
+		t.Fatalf("canonical /api/categories returned %d entries, want 54", len(keyedCategories))
+	}
+	if _, leakedAsProduct := keyedProducts["101"]; leakedAsProduct {
+		t.Fatalf("root category Code 101 leaked into /api/records")
+	}
+	if category, exists := keyedCategories["101"]; !exists || category["category_code"] != nil || category["depth"] != float64(1) {
+		// Keyed payloads carry the Code in the object key, not redundantly in
+		// the row. Depth proves the structural projection survived.
+		t.Fatalf("root category Code 101 missing or malformed: %#v", category)
+	}
 
 	csvRequest := httptest.NewRequest(http.MethodGet, "/api/records.csv", nil)
 	csvRecorder := httptest.NewRecorder()
@@ -958,12 +984,16 @@ func TestComputeChanges(t *testing.T) {
 
 func TestClientSnapshotSeedDoesNotReplaceWatcherBaseline(t *testing.T) {
 	srv := &Server{
-		lastRecords:      []map[string]interface{}{{"Code": "watcher"}},
-		lastRecordsReady: true,
+		lastRecords:          []map[string]interface{}{{"Code": "watcher"}},
+		lastRecordsReady:     true,
+		lastContractRevision: "sha256:watcher",
 	}
-	srv.seedLastRecords([]map[string]interface{}{{"Code": "client"}})
+	srv.seedLastSnapshot([]map[string]interface{}{{"Code": "client"}}, "sha256:client")
 	if len(srv.lastRecords) != 1 || srv.lastRecords[0]["Code"] != "watcher" {
 		t.Fatalf("client snapshot replaced watcher baseline: %#v", srv.lastRecords)
+	}
+	if srv.lastContractRevision != "sha256:watcher" {
+		t.Fatalf("client snapshot replaced watcher contract revision: %q", srv.lastContractRevision)
 	}
 
 	empty := &Server{}
@@ -971,6 +1001,34 @@ func TestClientSnapshotSeedDoesNotReplaceWatcherBaseline(t *testing.T) {
 	empty.seedLastRecords([]map[string]interface{}{{"Code": "later-client"}})
 	if !empty.lastRecordsReady || len(empty.lastRecords) != 0 {
 		t.Fatalf("initialized empty baseline was replaced: %#v", empty.lastRecords)
+	}
+}
+
+func TestCategoryOnlyRevisionChangeTriggersUpdateDispatch(t *testing.T) {
+	rows := []map[string]interface{}{{"product_code": "101001001", "name": "LM2576"}}
+	srv := &Server{}
+	srv.seedLastSnapshot(rows, "sha256:before")
+
+	changes, contractChanged := srv.updateRecordBaseline(recordpipe.Result{
+		Rows:     rows,
+		KeyField: "product_code",
+		Contract: &canonical.Envelope{Source: canonical.Source{Revision: "sha256:after"}},
+	})
+	added, modified, deleted := changes.Counts()
+	if added+modified+deleted != 0 {
+		t.Fatalf("category-only revision produced product changes: %+v", changes)
+	}
+	if !contractChanged {
+		t.Fatal("category-only revision change was not marked for outbound dispatch")
+	}
+
+	_, contractChanged = srv.updateRecordBaseline(recordpipe.Result{
+		Rows:     rows,
+		KeyField: "product_code",
+		Contract: &canonical.Envelope{Source: canonical.Source{Revision: "sha256:after"}},
+	})
+	if contractChanged {
+		t.Fatal("unchanged contract revision requested a duplicate outbound dispatch")
 	}
 }
 

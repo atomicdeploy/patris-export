@@ -61,7 +61,7 @@ func TestBuildKalaProfileAgainstRealLegacyDatabaseFixture(t *testing.T) {
 		CatalogProvider: pricingcatalog.NewProvider(cfg.Canonical.Pricing),
 		GeneratedAt:     time.Date(2026, 7, 16, 0, 0, 0, 0, time.UTC),
 	})
-	if result.Contract == nil || result.KeyField != "product_code" || len(result.Rows) < 300 {
+	if result.Contract == nil || result.KeyField != "product_code" || len(result.Rows) != 292 || len(result.Contract.Categories) != 54 {
 		t.Fatalf("real fixture did not use canonical pipeline: contract=%v key=%q rows=%d", result.Contract != nil, result.KeyField, len(result.Rows))
 	}
 	var product map[string]interface{}

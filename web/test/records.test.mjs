@@ -3,7 +3,7 @@ import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 
 const source = await readFile(new URL('../src/records.js', import.meta.url), 'utf8');
-const { normalizeRecordsPayload } = await import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}`);
+const { normalizeCategoriesPayload, normalizeRecordsPayload } = await import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}`);
 
 test('normalizes Code-keyed API rows without treating metadata as records', () => {
     const rows = normalizeRecordsPayload({
@@ -29,4 +29,17 @@ test('consumes product-sync products and ignores envelope metadata', () => {
     assert.equal(rows.length, 2);
     assert.deepEqual(rows.map(row => row.Code), ['102001011', '102001012']);
     assert.ok(rows.every(row => !('schema' in row) && !('event_id' in row)));
+});
+
+test('normalizes keyed and contract category rows using the shared Code alias', () => {
+    assert.deepEqual(normalizeCategoriesPayload({
+        '101': { name: 'Semiconductors', depth: 1 },
+        '101001': { name: 'ICs', parent_code: '101', depth: 2 }
+    }).map(row => row.Code), ['101', '101001']);
+
+    const rows = normalizeCategoriesPayload({
+        schema: 'digitalogic.product-sync',
+        categories: [{ category_code: '102', name: 'Sensors', depth: 1 }]
+    });
+    assert.deepEqual(rows, [{ category_code: '102', name: 'Sensors', depth: 1, Code: '102' }]);
 });

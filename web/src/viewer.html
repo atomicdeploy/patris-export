@@ -46,6 +46,18 @@
 
         <div class="toolbar">
             <div class="toolbar-section">
+                <div class="catalog-switch" id="catalogSwitch" role="tablist" aria-label="Catalog record type" hidden>
+                    <button class="catalog-switch-option active" id="productsViewBtn" type="button" role="tab" aria-selected="true" data-catalog-view="products">
+                        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7.5 12 3l8 4.5v9L12 21l-8-4.5z"/><path d="m4 7.5 8 4.5 8-4.5M12 12v9"/></svg>
+                        <span data-table-i18n="products">Products</span>
+                        <strong id="productDatasetCount">0</strong>
+                    </button>
+                    <button class="catalog-switch-option" id="categoriesViewBtn" type="button" role="tab" aria-selected="false" data-catalog-view="categories">
+                        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h6l2 2h8v12H4z"/><path d="M8 11h8M8 15h5"/></svg>
+                        <span data-table-i18n="categories">Categories</span>
+                        <strong id="categoryDatasetCount">0</strong>
+                    </button>
+                </div>
                 <input type="text" id="searchInput" class="search-input" placeholder="Search records..." data-table-i18n-placeholder="searchPlaceholder" aria-keyshortcuts="F2" title="Press F2 to focus search">
                 <select id="fieldFilter" class="field-select">
                     <option value="" data-table-i18n="allFields">All fields</option>

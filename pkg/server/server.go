@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/atomicdeploy/patris-export/pkg/appconfig"
+	"github.com/atomicdeploy/patris-export/pkg/canonical"
 	"github.com/atomicdeploy/patris-export/pkg/converter"
 	"github.com/atomicdeploy/patris-export/pkg/datasource"
 	"github.com/atomicdeploy/patris-export/pkg/filecopy"
@@ -43,34 +44,35 @@ import (
 
 // Server represents the HTTP/WebSocket server
 type Server struct {
-	router             *mux.Router
-	dbPath             string
-	charMap            converter.CharMapping
-	dataSource         datasource.DataSource
-	dataSourceMu       sync.RWMutex
-	watcher            *watcher.FileWatcher
-	wsClients          map[*websocket.Conn]*sync.Mutex
-	wsClientsMu        sync.RWMutex
-	upgrader           websocket.Upgrader
-	lastRecords        []map[string]interface{}
-	lastRecordsMu      sync.RWMutex
-	lastRecordsReady   bool
-	lastModTime        time.Time
-	lastModTimeMu      sync.RWMutex
-	useTempFile        bool
-	config             *appconfig.Manager
-	configWatcher      *fsnotify.Watcher
-	version            version.Info
-	processMu          sync.Mutex
-	processStatusCache map[string]interface{}
-	processStatusAt    time.Time
-	lastSourceHash     string
-	lastSourceHashMu   sync.Mutex
-	eventSubscribers   map[chan map[string]interface{}]struct{}
-	eventSubscribersMu sync.RWMutex
-	catalogProvider    pricingcatalog.Provider
-	catalogProviderKey string
-	catalogProviderMu  sync.Mutex
+	router               *mux.Router
+	dbPath               string
+	charMap              converter.CharMapping
+	dataSource           datasource.DataSource
+	dataSourceMu         sync.RWMutex
+	watcher              *watcher.FileWatcher
+	wsClients            map[*websocket.Conn]*sync.Mutex
+	wsClientsMu          sync.RWMutex
+	upgrader             websocket.Upgrader
+	lastRecords          []map[string]interface{}
+	lastRecordsMu        sync.RWMutex
+	lastRecordsReady     bool
+	lastContractRevision string
+	lastModTime          time.Time
+	lastModTimeMu        sync.RWMutex
+	useTempFile          bool
+	config               *appconfig.Manager
+	configWatcher        *fsnotify.Watcher
+	version              version.Info
+	processMu            sync.Mutex
+	processStatusCache   map[string]interface{}
+	processStatusAt      time.Time
+	lastSourceHash       string
+	lastSourceHashMu     sync.Mutex
+	eventSubscribers     map[chan map[string]interface{}]struct{}
+	eventSubscribersMu   sync.RWMutex
+	catalogProvider      pricingcatalog.Provider
+	catalogProviderKey   string
+	catalogProviderMu    sync.Mutex
 }
 
 type Options struct {
@@ -204,6 +206,7 @@ func (s *Server) setupRoutes() {
 	s.router.HandleFunc("/partials/charmap", s.handleCharmapPartial).Methods("GET")
 	s.router.HandleFunc("/api/records", s.handleGetRecords).Methods("GET")
 	s.router.HandleFunc("/api/records.{format:json|csv|xlsx}", s.handleGetRecords).Methods("GET")
+	s.router.HandleFunc("/api/categories", s.handleGetCategories).Methods("GET")
 	s.router.HandleFunc("/api/product-sync", s.handleGetProductSyncContract).Methods("GET")
 	s.router.HandleFunc("/api/info", s.handleGetInfo).Methods("GET")
 	s.router.HandleFunc("/api/app", s.handleGetApp).Methods("GET")
@@ -253,6 +256,13 @@ func (s *Server) RecordsPayload() (interface{}, error) {
 
 func recordsPayload(result recordpipe.Result) map[string]interface{} {
 	return recordmap.Keyed(result.Rows, result.KeyField, true)
+}
+
+func categoriesPayload(result recordpipe.Result) map[string]interface{} {
+	if result.Contract == nil {
+		return map[string]interface{}{}
+	}
+	return recordmap.Keyed(canonical.CategoriesToRows(result.Contract.Categories), "category_code", true)
 }
 
 func (s *Server) RecordResult() (recordpipe.Result, error) {
@@ -561,6 +571,25 @@ func (s *Server) handleGetRecords(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// handleGetCategories exposes structural catalog rows independently from the
+// product collection. Generic/noncanonical datasets return 404 rather than an
+// empty shape that could be mistaken for a canonical catalog.
+func (s *Server) handleGetCategories(w http.ResponseWriter, _ *http.Request) {
+	result, err := s.RecordResult()
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Failed to read records: %v", err), http.StatusInternalServerError)
+		return
+	}
+	if result.Contract == nil {
+		http.Error(w, "canonical categories are not available for this dataset", http.StatusNotFound)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	if err := json.NewEncoder(w).Encode(categoriesPayload(result)); err != nil {
+		http.Error(w, fmt.Sprintf("Failed to encode categories: %v", err), http.StatusInternalServerError)
+	}
+}
+
 // handleGetProductSyncContract exposes the versioned integration envelope
 // without changing the long-standing row collection returned by /api/records.
 func (s *Server) handleGetProductSyncContract(w http.ResponseWriter, _ *http.Request) {
@@ -573,7 +602,7 @@ func (s *Server) handleGetProductSyncContract(w http.ResponseWriter, _ *http.Req
 		http.Error(w, "canonical product-sync contract is not available for this dataset", http.StatusNotFound)
 		return
 	}
-	w.Header().Set("Content-Type", "application/vnd.digitalogic.product-sync+json; version=1.0")
+	w.Header().Set("Content-Type", "application/vnd.digitalogic.product-sync+json; version="+result.Contract.SchemaVersion)
 	if err := json.NewEncoder(w).Encode(result.Contract); err != nil {
 		http.Error(w, fmt.Sprintf("Failed to encode product-sync contract: %v", err), http.StatusInternalServerError)
 	}
@@ -1197,7 +1226,11 @@ func (s *Server) sendRecordsToClient(conn *websocket.Conn, connMu *sync.Mutex) {
 
 	// Client connections are observational and must not replace a watcher-owned
 	// change baseline.
-	s.seedLastRecords(records)
+	revision := ""
+	if result.Contract != nil {
+		revision = result.Contract.Source.Revision
+	}
+	s.seedLastSnapshot(records, revision)
 
 	log.Printf("📤 Sent initial %d records to client", len(records))
 	go s.broadcastProcessInfo()
@@ -1242,6 +1275,11 @@ func (s *Server) broadcastInitialSnapshot(reason string) {
 	s.lastRecordsMu.Lock()
 	s.lastRecords = records
 	s.lastRecordsReady = true
+	if result.Contract != nil {
+		s.lastContractRevision = result.Contract.Source.Revision
+	} else {
+		s.lastContractRevision = ""
+	}
 	s.lastRecordsMu.Unlock()
 
 	s.wsClientsMu.RLock()
@@ -1293,12 +1331,7 @@ func (s *Server) broadcastUpdate() {
 	records := result.Rows
 
 	// Compute changes
-	s.lastRecordsMu.Lock()
-	changeSet := s.computeChangeSetByKey(records, result.KeyField)
-	changeSet = result.FilterChanges(changeSet)
-	s.lastRecords = records
-	s.lastRecordsReady = true
-	s.lastRecordsMu.Unlock()
+	changeSet, contractChanged := s.updateRecordBaseline(result)
 	changeSet.Raw = result.Raw
 	changes := changeSet.Map()
 	if contract := result.SyncEnvelope(&changeSet); contract != nil {
@@ -1324,7 +1357,10 @@ func (s *Server) broadcastUpdate() {
 	s.wsClientsMu.RUnlock()
 
 	log.Printf("✅ Broadcast complete")
-	if added+modified+deleted > 0 {
+	if added+modified+deleted > 0 || contractChanged {
+		if contractChanged && added+modified+deleted == 0 {
+			log.Printf("Catalog structure changed without product-row changes")
+		}
 		s.notifyConfigured("row_updated", "Patris rows changed", s.rowChangeMessage(added, modified, deleted, changes))
 		s.dispatchUpdateEvent(updateout.Event{
 			Type:             "update",
@@ -1906,6 +1942,10 @@ func (s *Server) computeChangeSetByKey(newRecords []map[string]interface{}, keyF
 }
 
 func (s *Server) seedLastRecords(records []map[string]interface{}) {
+	s.seedLastSnapshot(records, "")
+}
+
+func (s *Server) seedLastSnapshot(records []map[string]interface{}, contractRevision string) {
 	s.lastRecordsMu.Lock()
 	defer s.lastRecordsMu.Unlock()
 	if s.lastRecordsReady {
@@ -1913,6 +1953,23 @@ func (s *Server) seedLastRecords(records []map[string]interface{}) {
 	}
 	s.lastRecords = recordmap.CopyRows(records)
 	s.lastRecordsReady = true
+	s.lastContractRevision = contractRevision
+}
+
+func (s *Server) updateRecordBaseline(result recordpipe.Result) (recorddiff.ChangeSet, bool) {
+	s.lastRecordsMu.Lock()
+	defer s.lastRecordsMu.Unlock()
+
+	currentRevision := ""
+	if result.Contract != nil {
+		currentRevision = result.Contract.Source.Revision
+	}
+	contractChanged := s.lastRecordsReady && currentRevision != s.lastContractRevision
+	changeSet := result.FilterChanges(s.computeChangeSetByKey(result.Rows, result.KeyField))
+	s.lastRecords = recordmap.CopyRows(result.Rows)
+	s.lastRecordsReady = true
+	s.lastContractRevision = currentRevision
+	return changeSet, contractChanged
 }
 
 // logDetailedChanges logs detailed information about what changed

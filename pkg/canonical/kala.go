@@ -31,8 +31,20 @@ var (
 	standaloneZero      = regexp.MustCompile(`(^|[\s|;,_-])0+(?:[.,]0+)?($|[\s|;,_-])`)
 )
 
+var reservedNonMerchandiseCodes = map[string]struct{}{
+	"117001": {}, // Yuan remittance accounting row.
+	"999010": {}, // Freight charge.
+	"999222": {}, // Decimal remainder.
+	"999332": {}, // Service.
+	"999888": {}, // Purchasing-service overhead.
+	"999991": {}, // Tax and duties.
+	"999993": {}, // Consolidated duties.
+	"999994": {}, // Legacy placeholder.
+}
+
 type Product struct {
 	ProductCode            string                  `json:"product_code"`
+	CategoryCode           string                  `json:"category_code"`
 	Name                   string                  `json:"name"`
 	Serial                 string                  `json:"serial"`
 	Unit                   string                  `json:"unit"`
@@ -59,6 +71,19 @@ type Product struct {
 	RecordHash             string                  `json:"record_hash,omitempty"`
 }
 
+// Category is the transformed catalog hierarchy carried beside products.
+// Patris category/header rows are structural records, not sellable products;
+// keeping a separate typed shape prevents zero-stock headers from crossing the
+// product boundary while preserving their names and hierarchy for consumers.
+type Category struct {
+	CategoryCode string   `json:"category_code"`
+	Name         string   `json:"name"`
+	ParentCode   string   `json:"parent_code"`
+	Depth        int      `json:"depth"`
+	Warnings     []string `json:"warnings"`
+	RecordHash   string   `json:"record_hash,omitempty"`
+}
+
 func Transform(ctx context.Context, rows []map[string]interface{}, source string, cfg Config, provider pricingcatalog.Provider, generatedAt time.Time) ([]map[string]interface{}, *Envelope) {
 	if provider == nil {
 		provider = pricingcatalog.NewProvider(cfg.Pricing)
@@ -70,17 +95,26 @@ func Transform(ctx context.Context, rows []map[string]interface{}, source string
 			codeCounts[code]++
 		}
 	}
-	quarantined := make([]string, 0)
+	duplicateCodes := make([]string, 0)
 	for code, count := range codeCounts {
 		if count > 1 {
-			quarantined = append(quarantined, code)
+			duplicateCodes = append(duplicateCodes, code)
 		}
 	}
-	sort.Strings(quarantined)
+	sort.Strings(duplicateCodes)
+	categoryCodes, excludedCodes, ambiguousCodes := classifyKalaRows(rows, codeCounts)
+	quarantined := normalizedWarnings(append(append([]string{}, duplicateCodes...), ambiguousCodes...))
+	categories := parseKalaCategories(rows, codeCounts, categoryCodes)
+	categoryByCode := make(map[string]Category, len(categories))
+	for _, category := range categories {
+		categoryByCode[category.CategoryCode] = category
+	}
+	quarantineSet := stringSet(quarantined)
+	excludedSet := stringSet(excludedCodes)
 	eligible := make([]int, 0, len(rows))
 	for index, row := range rows {
 		code := codeString(firstValue(row, "product_code", "code", "Code"))
-		if code != "" && codeCounts[code] == 1 {
+		if code != "" && codeCounts[code] == 1 && !categoryCodes[code] && !quarantineSet[code] && !excludedSet[code] {
 			eligible = append(eligible, index)
 		}
 	}
@@ -129,13 +163,252 @@ func Transform(ctx context.Context, rows []map[string]interface{}, source string
 		if codeCounts[product.ProductCode] > 1 {
 			continue
 		}
+		product.CategoryCode = longestCategoryPrefix(product.ProductCode, categoryByCode)
 		product.RecordHash = recordHash(product)
 		products = append(products, product)
 	}
 	sort.SliceStable(products, func(i, j int) bool {
 		return products[i].ProductCode < products[j].ProductCode
 	})
-	return ProductsToRows(products), NewEnvelope(products, source, cfg.SourceID, generatedAt, quarantined...)
+	envelope := NewCatalogEnvelope(products, categories, excludedCodes, source, cfg.SourceID, generatedAt, quarantined...)
+	envelope.Warnings = nil
+	for _, code := range duplicateCodes {
+		envelope.Warnings = append(envelope.Warnings, "duplicate_product_code:"+code)
+	}
+	for _, code := range ambiguousCodes {
+		envelope.Warnings = append(envelope.Warnings, "ambiguous_catalog_record:"+code)
+	}
+	envelope.Warnings = normalizedWarnings(envelope.Warnings)
+	return ProductsToRows(products), envelope
+}
+
+// classifyKalaRows applies the verified Patris hierarchy to the complete
+// snapshot. It deliberately fails closed for ambiguous numeric rows: category
+// headers and accounting/service entries must never become Woo products.
+func classifyKalaRows(rows []map[string]interface{}, codeCounts map[string]int) (map[string]bool, []string, []string) {
+	codes := make([]string, 0, len(codeCounts))
+	rowByCode := make(map[string]map[string]interface{}, len(rows))
+	for _, row := range rows {
+		code := codeString(firstValue(row, "product_code", "code", "Code"))
+		if code != "" && codeCounts[code] == 1 {
+			rowByCode[code] = row
+		}
+	}
+	for code := range codeCounts {
+		codes = append(codes, code)
+	}
+	sort.Strings(codes)
+
+	categories := make(map[string]bool)
+	excluded := make(map[string]bool)
+	quarantined := make(map[string]bool)
+	hasDescendant := make(map[string]bool)
+	for _, code := range codes {
+		if codeCounts[code] != 1 || len(code) != 6 || !asciiDigits(code) {
+			continue
+		}
+		for _, candidate := range codes {
+			if codeCounts[candidate] == 1 && len(candidate) == 9 && strings.HasPrefix(candidate, code) {
+				hasDescendant[code] = true
+				break
+			}
+		}
+	}
+
+	for _, code := range codes {
+		if codeCounts[code] != 1 || !asciiDigits(code) {
+			continue
+		}
+		if _, reserved := reservedNonMerchandiseCodes[code]; reserved {
+			excluded[code] = true
+			continue
+		}
+		row := rowByCode[code]
+		if len(code) == 3 {
+			if categoryHasStrongProductSignals(row) {
+				quarantined[code] = true
+			} else {
+				categories[code] = true
+			}
+			continue
+		}
+		if len(code) != 6 {
+			continue
+		}
+		if hasDescendant[code] {
+			if categoryHasStrongProductSignals(row) {
+				quarantined[code] = true
+			} else {
+				categories[code] = true
+			}
+			continue
+		}
+		if emptyCategoryHeader(code, row) {
+			categories[code] = true
+			continue
+		}
+		if !rowHasMerchandiseSignals(code, row) {
+			quarantined[code] = true
+		}
+	}
+
+	// Numeric Patris codes outside the documented 3/6/9 shapes are ambiguous.
+	// Do not require parents to be present here: filtered/partial extracts are a
+	// supported input, and their valid leaf products must remain exportable.
+	for _, code := range codes {
+		if codeCounts[code] != 1 || !asciiDigits(code) || categories[code] || excluded[code] || quarantined[code] {
+			continue
+		}
+		if len(code) != 6 && len(code) != 9 {
+			quarantined[code] = true
+		}
+	}
+
+	return categories, sortedSet(excluded), sortedSet(quarantined)
+}
+
+func asciiDigits(value string) bool {
+	if value == "" {
+		return false
+	}
+	for index := 0; index < len(value); index++ {
+		if value[index] < '0' || value[index] > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+func stringSet(values []string) map[string]bool {
+	result := make(map[string]bool, len(values))
+	for _, value := range values {
+		result[value] = true
+	}
+	return result
+}
+
+func sortedSet(values map[string]bool) []string {
+	result := make([]string, 0, len(values))
+	for value, included := range values {
+		if included {
+			result = append(result, value)
+		}
+	}
+	sort.Strings(result)
+	return result
+}
+
+func parseKalaCategories(rows []map[string]interface{}, codeCounts map[string]int, categoryCodes map[string]bool) []Category {
+	byCode := make(map[string]Category, len(categoryCodes))
+	for _, row := range rows {
+		code := codeString(firstValue(row, "product_code", "code", "Code"))
+		if code == "" || codeCounts[code] != 1 || !categoryCodes[code] {
+			continue
+		}
+		byCode[code] = Category{
+			CategoryCode: code,
+			Name:         normalizeText(firstValue(row, "name", "Name", "part_number")),
+			Warnings:     []string{},
+		}
+	}
+
+	codes := make([]string, 0, len(byCode))
+	for code := range byCode {
+		codes = append(codes, code)
+	}
+	sort.SliceStable(codes, func(i, j int) bool {
+		if len(codes[i]) != len(codes[j]) {
+			return len(codes[i]) < len(codes[j])
+		}
+		return codes[i] < codes[j]
+	})
+
+	for _, code := range codes {
+		category := byCode[code]
+		category.ParentCode = longestCategoryPrefix(code, byCode)
+		category.Depth = 1
+		for parent := category.ParentCode; parent != ""; {
+			category.Depth++
+			ancestor, exists := byCode[parent]
+			if !exists || ancestor.ParentCode == parent {
+				break
+			}
+			parent = ancestor.ParentCode
+		}
+		category.RecordHash = categoryRecordHash(category)
+		byCode[code] = category
+	}
+
+	categories := make([]Category, 0, len(codes))
+	for _, code := range codes {
+		categories = append(categories, byCode[code])
+	}
+	sort.SliceStable(categories, func(i, j int) bool {
+		return categories[i].CategoryCode < categories[j].CategoryCode
+	})
+	return categories
+}
+
+func longestCategoryPrefix(code string, categories map[string]Category) string {
+	parent := ""
+	for candidate := range categories {
+		if len(candidate) >= len(code) || len(candidate) <= len(parent) {
+			continue
+		}
+		if strings.HasPrefix(code, candidate) {
+			parent = candidate
+		}
+	}
+	return parent
+}
+
+func categoryHasStrongProductSignals(row map[string]interface{}) bool {
+	for _, stock := range warehouseStock(row) {
+		if stock != 0 {
+			return true
+		}
+	}
+	for _, fields := range [][]string{
+		{"sale_price_source", "FOROSH", "fee_kol"},
+		{"purchase_price_source", "KHARYD", "purchase_price"},
+		{"minimum_stock", "Sefaresh", "minimum"},
+	} {
+		if value := nullableNumber(firstValue(row, fields...)); value != nil && *value != 0 {
+			return true
+		}
+	}
+	for _, field := range []string{"foreign_price", "yuan_price", "weight_grams"} {
+		if value, exists := row[field]; exists && positiveDecimal(value) != nil {
+			return true
+		}
+	}
+	if strings.TrimSpace(normalizeText(firstValue(row, "location", "Location"))) != "" {
+		return true
+	}
+	warnings := []string{}
+	if extractForeignPrice(row, &warnings) != nil {
+		return true
+	}
+	warnings = nil
+	weight, location := extractWeightAndLocation(row, &warnings)
+	return weight != nil || strings.TrimSpace(location) != ""
+}
+
+func rowHasMerchandiseSignals(code string, row map[string]interface{}) bool {
+	if categoryHasStrongProductSignals(row) {
+		return true
+	}
+	serial := normalizeText(firstValue(row, "serial", "Serial"))
+	return serial != "" && serial != code
+}
+
+func emptyCategoryHeader(code string, row map[string]interface{}) bool {
+	if len(code) != 6 || !asciiDigits(code) || categoryHasStrongProductSignals(row) {
+		return false
+	}
+	name := normalizeText(firstValue(row, "name", "Name", "part_number"))
+	serial := normalizeText(firstValue(row, "serial", "Serial"))
+	return name != "" && serial == code
 }
 
 func parseKalaProduct(ctx context.Context, row map[string]interface{}, provider pricingcatalog.Provider) Product {
@@ -194,6 +467,7 @@ func parseKalaProduct(ctx context.Context, row map[string]interface{}, provider 
 func (product Product) Map() map[string]interface{} {
 	return map[string]interface{}{
 		"product_code":             product.ProductCode,
+		"category_code":            product.CategoryCode,
 		"name":                     product.Name,
 		"serial":                   product.Serial,
 		"unit":                     product.Unit,
@@ -233,6 +507,31 @@ func ProductsToRows(products []Product) []map[string]interface{} {
 		rows = append(rows, product.Map())
 	}
 	return rows
+}
+
+func (category Category) Map() map[string]interface{} {
+	return map[string]interface{}{
+		"category_code": category.CategoryCode,
+		"name":          category.Name,
+		"parent_code":   category.ParentCode,
+		"depth":         category.Depth,
+		"warnings":      append(make([]string, 0, len(category.Warnings)), category.Warnings...),
+		"record_hash":   category.RecordHash,
+	}
+}
+
+func CategoriesToRows(categories []Category) []map[string]interface{} {
+	rows := make([]map[string]interface{}, 0, len(categories))
+	for _, category := range categories {
+		rows = append(rows, category.Map())
+	}
+	return rows
+}
+
+func categoryRecordHash(category Category) string {
+	category.RecordHash = ""
+	material, _ := json.Marshal(category)
+	return hashBytes(material)
 }
 
 func extractForeignPrice(row map[string]interface{}, warnings *[]string) *pricingcatalog.Decimal {

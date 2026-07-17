@@ -194,7 +194,10 @@ mismatches force null final prices and explicit compatibility warnings.
 
 ## Transport contract
 
-Canonical JSON and JSON webhooks use `digitalogic.product-sync` version `1.0`:
+Canonical JSON and JSON webhooks use `digitalogic.product-sync` version `1.1`.
+Receivers that support major version 1 can continue accepting v1.0 product-only
+envelopes; v1.1 adds exact category and exclusion projections without exposing
+raw Patris fields.
 
 `event_id` covers the validated `generated_at` value as well as the sorted
 record hashes and tombstones. Identical content generated at a later time is a
@@ -203,7 +206,12 @@ allowing an older changed event through afterward.
 
 The server exposes this envelope at `GET /api/product-sync`. The viewer-facing
 `GET /api/records` endpoint remains a Code-keyed collection of canonical
-product rows; envelope metadata never appears as table rows.
+product rows; `GET /api/categories` returns the separately keyed category
+hierarchy. Envelope metadata never appears as table rows. The viewer presents
+both projections through one Products/Categories segmented control and reuses
+the same table, filtering, column, context-menu, accessibility, and RTL logic.
+
+![Products and categories in the shared catalog viewer](screenshots/catalog-products-categories.png)
 
 ![Canonical landed-pricing row in the records viewer](screenshots/canonical-product-sync-viewer.png)
 
@@ -214,7 +222,7 @@ exports and catalog values must never be committed as golden fixtures.
 ```json
 {
   "schema": "digitalogic.product-sync",
-  "schema_version": "1.0",
+  "schema_version": "1.1",
   "event": "digitalogic.product-sync",
   "event_type": "snapshot",
   "event_id": "sha256:...",
@@ -231,6 +239,7 @@ exports and catalog values must never be committed as golden fixtures.
   "products": [
     {
       "product_code": "113007045",
+      "category_code": "113007",
       "foreign_currency": "CNY",
       "foreign_price": 24.5,
       "weight_grams": 240,
@@ -243,9 +252,37 @@ exports and catalog values must never be committed as golden fixtures.
       "record_hash": "sha256:...",
       "warnings": []
     }
-  ]
+  ],
+  "categories": [
+    {
+      "category_code": "113",
+      "name": "Modules",
+      "parent_code": "",
+      "depth": 1,
+      "warnings": [],
+      "record_hash": "sha256:..."
+    },
+    {
+      "category_code": "113007",
+      "name": "Development modules",
+      "parent_code": "113",
+      "depth": 2,
+      "warnings": [],
+      "record_hash": "sha256:..."
+    }
+  ],
+  "excluded_codes": ["999010"]
 }
 ```
+
+Product `category_code` is the longest supplied structural prefix (the
+six-digit category is preferred over its three-digit parent). Partial extracts
+without hierarchy rows keep the product and use an empty category code rather
+than guessing. Category hashes cover code, name, parent, depth, and warnings;
+category and exclusion changes participate in source revisions and event IDs.
+Exact reserved accounting/service codes are excluded before classification,
+and ambiguous numeric shapes, duplicates, or signal-bearing parent conflicts
+are quarantined.
 
 Record hashes and source revisions are stable over unchanged values. Event IDs
 are deterministic for one occurrence and include its validated `generated_at`
