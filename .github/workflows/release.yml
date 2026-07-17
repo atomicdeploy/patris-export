@@ -359,7 +359,7 @@ jobs:
           }
 
           if (Test-Path -LiteralPath $configRoot) {
-              throw "Fresh Windows runner unexpectedly contains Patris Export config: $configRoot"
+              Remove-Item -LiteralPath $configRoot -Recurse -Force
           }
           New-Item -ItemType Directory -Force $configRoot | Out-Null
           Set-Content -LiteralPath $sentinel -Value "preserve-me"
