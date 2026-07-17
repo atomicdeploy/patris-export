@@ -73,7 +73,7 @@ if ($PurgeDataRoot) {
         throw "PurgeDataRoot is a smoke-test option and requires CurrentUserOnly."
     }
     $PurgeDataRoot = [System.IO.Path]::GetFullPath($PurgeDataRoot)
-    $allowedRoots = @((Join-Path $repoRoot "build"), $env:TEMP) |
+    $allowedRoots = @((Join-Path $repoRoot "build"), $env:RUNNER_TEMP, $env:TEMP) |
         Where-Object { $_ } |
         ForEach-Object { [System.IO.Path]::GetFullPath($_).TrimEnd('\') + '\' }
     $allowed = $false
