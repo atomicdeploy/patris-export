@@ -57,7 +57,7 @@ Options:
   -h, --help          Show this help
 
 Environment:
-  VERSION             Version string embedded in the binary (default: 1.0.0)
+  VERSION             Version string embedded in the binary (default: pkg/version/version.go)
   PXLIB_ROOT          Existing pxlib install prefix to use
   PXLIB_REPO/PXLIB_REF Override upstream pxlib source and ref
   USE_VCPKG=1         Adds VCPKG_ROOT installed include/lib/bin paths as optional C dependency paths

@@ -7,6 +7,17 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [1.0.1] - 2026-07-17
+
+### Fixed
+
+- Web UI row-count logs now expand to show added and deleted row snapshots plus field-level before/after values for modified records.
+- Event-log disclosures now include English and Persian labels, RTL-aware presentation, accessible native controls, and focus/open-state preservation during live updates.
+- Row updates now use the change set's declared key field consistently in both the live table and detailed event log.
+- Detailed log persistence is bounded, rejects malformed stored data safely, and remains compatible with existing count-only entries.
+- File watcher callback claims are deduplicated atomically; debounce timers are synchronized; and unwatch/close cancel pending work and future claims while allowing already-claimed callbacks to finish safely.
+- Makefile, build-helper documentation, and the Linux source installer now derive their default build version from the canonical Go version source.
+
 ## [1.0.0] - 2026-07-17
 
 ### Added
