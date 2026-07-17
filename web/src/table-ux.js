@@ -15,6 +15,7 @@ export const ROW_ICON_NAMES = [
 
 export const CANONICAL_ROW_FIELDS = [
     'product_code',
+    'category_code',
     'name',
     'serial',
     'total_stock',
@@ -63,6 +64,8 @@ export const ROW_COMMAND_DEFINITIONS = Object.freeze([
 
 const TABLE_MESSAGES = {
     en: {
+        products: 'Products',
+        categories: 'Categories',
         export: 'Export',
         columns: 'Columns',
         refresh: 'Refresh now',
@@ -172,6 +175,8 @@ const TABLE_MESSAGES = {
         op_stale_days: 'Older than days'
     },
     fa: {
+        products: 'محصولات',
+        categories: 'دسته‌بندی‌ها',
         export: 'خروجی',
         columns: 'ستون‌ها',
         refresh: 'به‌روزرسانی',

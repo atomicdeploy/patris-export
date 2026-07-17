@@ -7,6 +7,22 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-07-17
+
+### Added
+
+- Canonical catalog contract v1.1 separates typed, hashed category hierarchy rows and reserved accounting/service exclusions from commerce products, and assigns every product an explicit structural `category_code`.
+- `GET /api/categories` and an accessible Products/Categories segmented view expose the hierarchy through the existing filterable, resizable, RTL-aware data grid.
+
+### Changed
+
+- The verified live Patris classification now yields 73 categories, 8 non-merchandise exclusions, and 921 commerce leaves from 1,002 source rows; ambiguous or contradictory records fail closed into quarantine.
+- Category, exclusion, and product-category changes now participate in record/source/event identities, and category-only edits trigger outbound updates even when no product row changed.
+
+### Fixed
+
+- Valid product leaves in filtered extracts no longer require their parent rows to be present, while zero stock alone is no longer mistaken for a category signal.
+
 ## [1.1.0] - 2026-07-17
 
 ### Added

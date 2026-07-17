@@ -12,11 +12,12 @@ import (
 )
 
 const (
-	ContractName    = "digitalogic.product-sync"
-	ContractVersion = "1.0"
-	FormulaVersion  = "landed_price_v1"
-	FormulaRevision = "1.0.0"
-	LocalCurrency   = "IRT"
+	ContractName          = "digitalogic.product-sync"
+	ContractVersion       = "1.1"
+	LegacyContractVersion = "1.0"
+	FormulaVersion        = "landed_price_v1"
+	FormulaRevision       = "1.0.0"
+	LocalCurrency         = "IRT"
 )
 
 type Source struct {
@@ -43,12 +44,26 @@ type Envelope struct {
 	Source           Source      `json:"source"`
 	GeneratedAt      string      `json:"generated_at"`
 	Products         []Product   `json:"products"`
+	Categories       []Category  `json:"categories,omitempty"`
+	ExcludedCodes    []string    `json:"excluded_codes,omitempty"`
 	DeletedCodes     []Tombstone `json:"deleted_codes,omitempty"`
 	QuarantinedCodes []string    `json:"quarantined_codes,omitempty"`
 	Warnings         []string    `json:"warnings,omitempty"`
 }
 
 func NewEnvelope(rows []Product, source, sourceID string, generatedAt time.Time, quarantinedCodes ...string) *Envelope {
+	return newEnvelope(rows, nil, nil, ContractVersion, source, sourceID, generatedAt, quarantinedCodes...)
+}
+
+func NewEnvelopeWithCategories(rows []Product, categories []Category, source, sourceID string, generatedAt time.Time, quarantinedCodes ...string) *Envelope {
+	return newEnvelope(rows, categories, nil, ContractVersion, source, sourceID, generatedAt, quarantinedCodes...)
+}
+
+func NewCatalogEnvelope(rows []Product, categories []Category, excludedCodes []string, source, sourceID string, generatedAt time.Time, quarantinedCodes ...string) *Envelope {
+	return newEnvelope(rows, categories, excludedCodes, ContractVersion, source, sourceID, generatedAt, quarantinedCodes...)
+}
+
+func newEnvelope(rows []Product, categories []Category, excludedCodes []string, version, source, sourceID string, generatedAt time.Time, quarantinedCodes ...string) *Envelope {
 	if generatedAt.IsZero() {
 		generatedAt = time.Now()
 	}
@@ -56,14 +71,19 @@ func NewEnvelope(rows []Product, source, sourceID string, generatedAt time.Time,
 	sort.SliceStable(products, func(i, j int) bool {
 		return products[i].ProductCode < products[j].ProductCode
 	})
+	categories = cloneCategories(categories)
+	sort.SliceStable(categories, func(i, j int) bool {
+		return categories[i].CategoryCode < categories[j].CategoryCode
+	})
 	quarantinedCodes = normalizedWarnings(quarantinedCodes)
-	revision := sourceRevision(products, quarantinedCodes)
+	excludedCodes = normalizedWarnings(excludedCodes)
+	revision := sourceRevision(products, categories, excludedCodes, quarantinedCodes)
 	if strings.TrimSpace(sourceID) == "" {
 		sourceID = sourceBaseName(source)
 	}
 	envelope := &Envelope{
 		Schema:           ContractName,
-		SchemaVersion:    ContractVersion,
+		SchemaVersion:    version,
 		Event:            ContractName,
 		EventType:        "snapshot",
 		LocalCurrency:    LocalCurrency,
@@ -73,6 +93,8 @@ func NewEnvelope(rows []Product, source, sourceID string, generatedAt time.Time,
 		Source:           Source{ID: sourceID, Dataset: sourceBaseName(source), Revision: revision},
 		GeneratedAt:      generatedAt.UTC().Format(time.RFC3339Nano),
 		Products:         products,
+		Categories:       categories,
+		ExcludedCodes:    excludedCodes,
 		QuarantinedCodes: quarantinedCodes,
 	}
 	for _, code := range quarantinedCodes {
@@ -139,6 +161,8 @@ func ChangeEnvelope(snapshot *Envelope, changes *recorddiff.ChangeSet) *Envelope
 		Source:           snapshot.Source,
 		GeneratedAt:      snapshot.GeneratedAt,
 		Products:         products,
+		Categories:       cloneCategories(snapshot.Categories),
+		ExcludedCodes:    append([]string(nil), snapshot.ExcludedCodes...),
 		DeletedCodes:     deleted,
 		QuarantinedCodes: append([]string(nil), snapshot.QuarantinedCodes...),
 		Warnings:         append([]string(nil), snapshot.Warnings...),
@@ -147,10 +171,16 @@ func ChangeEnvelope(snapshot *Envelope, changes *recorddiff.ChangeSet) *Envelope
 	return envelope
 }
 
-func sourceRevision(products []Product, quarantinedCodes []string) string {
-	material := make([]string, 0, len(products))
+func sourceRevision(products []Product, categories []Category, excludedCodes, quarantinedCodes []string) string {
+	material := make([]string, 0, len(products)+len(categories)+len(excludedCodes))
 	for _, product := range products {
 		material = append(material, product.ProductCode+"="+product.RecordHash)
+	}
+	for _, category := range categories {
+		material = append(material, "category:"+category.CategoryCode+"="+category.RecordHash)
+	}
+	for _, code := range excludedCodes {
+		material = append(material, "excluded="+code)
 	}
 	sort.Strings(material)
 	for _, code := range quarantinedCodes {
@@ -170,6 +200,8 @@ func eventID(envelope *Envelope) string {
 		Source           Source      `json:"source"`
 		GeneratedAt      string      `json:"generated_at"`
 		Products         []string    `json:"products"`
+		Categories       []string    `json:"categories,omitempty"`
+		ExcludedCodes    []string    `json:"excluded_codes,omitempty"`
 		DeletedCodes     []Tombstone `json:"deleted_codes,omitempty"`
 		QuarantinedCodes []string    `json:"quarantined_codes,omitempty"`
 	}
@@ -178,10 +210,15 @@ func eventID(envelope *Envelope) string {
 		hashes = append(hashes, product.ProductCode+"="+product.RecordHash)
 	}
 	sort.Strings(hashes)
+	categoryHashes := make([]string, 0, len(envelope.Categories))
+	for _, category := range envelope.Categories {
+		categoryHashes = append(categoryHashes, category.CategoryCode+"="+category.RecordHash)
+	}
+	sort.Strings(categoryHashes)
 	material, _ := json.Marshal(identity{
 		Schema: envelope.Schema, SchemaVersion: envelope.SchemaVersion, EventType: envelope.EventType,
 		LocalCurrency: envelope.LocalCurrency, FormulaID: envelope.FormulaID, FormulaRevision: envelope.FormulaRevision,
-		Source: envelope.Source, GeneratedAt: envelope.GeneratedAt, Products: hashes,
+		Source: envelope.Source, GeneratedAt: envelope.GeneratedAt, Products: hashes, Categories: categoryHashes, ExcludedCodes: envelope.ExcludedCodes,
 		DeletedCodes: envelope.DeletedCodes, QuarantinedCodes: envelope.QuarantinedCodes,
 	})
 	return hashBytes(material)
@@ -198,12 +235,26 @@ func cloneEnvelope(value *Envelope) *Envelope {
 	}
 	copy := *value
 	copy.Products = cloneProducts(value.Products)
+	copy.Categories = cloneCategories(value.Categories)
+	copy.ExcludedCodes = append([]string(nil), value.ExcludedCodes...)
 	copy.DeletedCodes = append([]Tombstone(nil), value.DeletedCodes...)
 	copy.QuarantinedCodes = append([]string(nil), value.QuarantinedCodes...)
 	if value.Warnings != nil {
 		copy.Warnings = append(make([]string, 0, len(value.Warnings)), value.Warnings...)
 	}
 	return &copy
+}
+
+func cloneCategories(values []Category) []Category {
+	result := make([]Category, 0, len(values))
+	for _, value := range values {
+		copy := value
+		if value.Warnings != nil {
+			copy.Warnings = append(make([]string, 0, len(value.Warnings)), value.Warnings...)
+		}
+		result = append(result, copy)
+	}
+	return result
 }
 
 func cloneProducts(values []Product) []Product {

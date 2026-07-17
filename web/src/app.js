@@ -1,4 +1,4 @@
-import { normalizeRecordsPayload } from './records.js';
+import { normalizeCategoriesPayload, normalizeRecordsPayload } from './records.js';
 import { createExportMenuController } from './export-menu.js';
 import {
     MAX_DETAILED_EVENT_LOG_ENTRIES,
@@ -45,6 +45,10 @@ import {
 // Application state
 const state = {
     records: [],
+    catalogProducts: [],
+    catalogCategories: [],
+    catalogCategoriesAvailable: false,
+    catalogView: 'products',
     filteredRecords: [],
     fields: [],
     fieldTypes: {},  // Store detected field types
@@ -2771,7 +2775,16 @@ function handleWebSocketMessage(data) {
             applyProcessStatus(data.status);
         }
         // Initial load - records are already transformed with ANBAR as array
-        state.records = normalizeRecordsPayload(data.added || []);
+        state.catalogProducts = normalizeRecordsPayload(data.added || []);
+        if (data.contract && Array.isArray(data.contract.categories)) {
+            state.catalogCategories = normalizeCategoriesPayload(data.contract.categories);
+            state.catalogCategoriesAvailable = true;
+        } else {
+            state.catalogCategories = [];
+            state.catalogCategoriesAvailable = false;
+            state.catalogView = 'products';
+        }
+        selectActiveCatalogRows();
         refreshRecordSelectionKeys({ reset: true });
         state.filteredRecords = [];
         state.fields = [];
@@ -2806,14 +2819,14 @@ function handleWebSocketMessage(data) {
             deleted: Array.isArray(data.deleted) ? data.deleted.length : 0
         };
         const totalChanges = changeCounts.added + changeCounts.modified + changeCounts.deleted;
-        const logChanges = createEventLogChangeSnapshot(data, state.records);
+        const logChanges = createEventLogChangeSnapshot(data, state.catalogProducts);
         
         // Handle deleted records by the update's declared identity field.
         if (changeCounts.deleted > 0) {
             const deletedKeys = new Set(data.deleted.map((value, index) => (
                 deletedRecordIdentityKey(value, keyField, index)
             )));
-            state.records = state.records.filter((record, index) => {
+            state.catalogProducts = state.catalogProducts.filter((record, index) => {
                 const key = recordIdentityKey(record, keyField, index);
                 return !deletedKeys.has(key);
             });
@@ -2821,8 +2834,8 @@ function handleWebSocketMessage(data) {
         
         // Handle added records
         if (changeCounts.added > 0) {
-            const startIndex = state.records.length;
-            state.records.push(...normalizeRecordsPayload(data.added));
+            const startIndex = state.catalogProducts.length;
+            state.catalogProducts.push(...normalizeRecordsPayload(data.added));
             
             // Mark added records as changed
             data.added.forEach((_, i) => {
@@ -2834,19 +2847,30 @@ function handleWebSocketMessage(data) {
         if (changeCounts.modified > 0) {
             data.modified.forEach((change, changeIndex) => {
                 const key = modifiedRecordIdentityKey(change, keyField, changeIndex);
-                const index = state.records.findIndex((record, recordIndex) => (
+                const index = state.catalogProducts.findIndex((record, recordIndex) => (
                     recordIdentityKey(record, keyField, recordIndex) === key
                 ));
                 if (index !== -1) {
                     // Merge the new values into the existing record
                     // Note: The server sends new_values (snake_case) not newValues (camelCase)
                     const newValues = change.new_values || change.newValues || {};
-                    Object.assign(state.records[index], newValues);
+                    Object.assign(state.catalogProducts[index], newValues);
                     changedIndices.add(index);
                     console.log(`Updated record ${key}:`, newValues);
                 }
             });
         }
+        if (data.contract && Array.isArray(data.contract.categories)) {
+            state.catalogCategories = normalizeCategoriesPayload(data.contract.categories);
+            state.catalogCategoriesAvailable = true;
+            if (state.catalogView === 'categories') {
+                state.fields = [];
+                state.fieldTypes = {};
+                state.fieldStats = {};
+            }
+        }
+        selectActiveCatalogRows();
+        if (state.catalogView === 'categories') changedIndices.clear();
         refreshRecordSelectionKeys();
         
         // Trigger notifications if there were changes
@@ -4969,6 +4993,60 @@ function updateCounts() {
     updateFooterRecordCount();
 }
 
+function activeCatalogRows() {
+    return state.catalogView === 'categories' ? state.catalogCategories : state.catalogProducts;
+}
+
+function updateCatalogSwitch() {
+    const container = document.getElementById('catalogSwitch');
+    const productsButton = document.getElementById('productsViewBtn');
+    const categoriesButton = document.getElementById('categoriesViewBtn');
+    const productCount = document.getElementById('productDatasetCount');
+    const categoryCount = document.getElementById('categoryDatasetCount');
+    if (!container || !productsButton || !categoriesButton) return;
+
+    container.hidden = !state.catalogCategoriesAvailable;
+    productsButton.classList.toggle('active', state.catalogView === 'products');
+    categoriesButton.classList.toggle('active', state.catalogView === 'categories');
+    productsButton.setAttribute('aria-selected', String(state.catalogView === 'products'));
+    categoriesButton.setAttribute('aria-selected', String(state.catalogView === 'categories'));
+    if (productCount) productCount.textContent = state.catalogProducts.length.toLocaleString();
+    if (categoryCount) categoryCount.textContent = state.catalogCategories.length.toLocaleString();
+}
+
+function selectActiveCatalogRows() {
+    state.records = activeCatalogRows();
+    updateCatalogSwitch();
+}
+
+function switchCatalogView(view) {
+    if (view !== 'products' && view !== 'categories') return;
+    if (view === 'categories' && !state.catalogCategoriesAvailable) return;
+    if (view === state.catalogView && state.records === activeCatalogRows()) return;
+
+    state.catalogView = view;
+    selectActiveCatalogRows();
+    state.filteredRecords = [];
+    state.fields = [];
+    state.fieldTypes = {};
+    state.fieldStats = {};
+    state.selectedField = '';
+    state.columnFilters = {};
+    refreshRecordSelectionKeys({ reset: true });
+
+    if (state.records.length > 0) {
+        extractFields();
+        analyzeFields();
+    }
+    renderTableHeader();
+    updateFieldFilter();
+    filterRecords();
+    sortRecords();
+    renderTable();
+    updateCounts();
+    publishViewState();
+}
+
 // Inspect record
 function inspectRecord(record) {
     const panel = document.getElementById('inspectorPanel');
@@ -5118,6 +5196,9 @@ function init() {
     
     // Set up event listeners
     document.addEventListener('keydown', handleGlobalKeydown);
+    document.querySelectorAll('[data-catalog-view]').forEach(button => {
+        button.addEventListener('click', () => switchCatalogView(button.dataset.catalogView));
+    });
     document.getElementById('searchInput').addEventListener('input', (e) => {
         state.searchTerm = e.target.value;
         filterRecords();
@@ -5423,7 +5504,10 @@ async function fetchFileInfo() {
 // Fetch initial data
 async function fetchInitialData() {
     try {
-        const response = await fetch('/api/records');
+        const [response, categoriesResponse] = await Promise.all([
+            fetch('/api/records'),
+            fetch('/api/categories')
+        ]);
         
         if (!response.ok) {
             throw new Error(`HTTP error! status: ${response.status}`);
@@ -5431,7 +5515,16 @@ async function fetchInitialData() {
         
         const data = await response.json();
         
-        state.records = normalizeRecordsPayload(data);
+        state.catalogProducts = normalizeRecordsPayload(data);
+        if (categoriesResponse.ok) {
+            state.catalogCategories = normalizeCategoriesPayload(await categoriesResponse.json());
+            state.catalogCategoriesAvailable = true;
+        } else {
+            state.catalogCategories = [];
+            state.catalogCategoriesAvailable = false;
+            state.catalogView = 'products';
+        }
+        selectActiveCatalogRows();
         refreshRecordSelectionKeys({ reset: true });
         state.filteredRecords = [];
         state.fields = [];

@@ -108,7 +108,7 @@ func TestLandedPriceV1RoundsOnceHalfUpAndRejectsInvalidInput(t *testing.T) {
 }
 
 func TestKalaProfileTransformsPersianFixtureWithoutRawBoundaryFields(t *testing.T) {
-	code := "00113007045"
+	code := "113007045"
 	cfg, provider := canonicalTestConfig(code)
 	rows := []map[string]interface{}{{
 		"Code":     code,

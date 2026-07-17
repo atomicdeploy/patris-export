@@ -19,6 +19,12 @@ func TestSyntheticProductSyncGoldenFixture(t *testing.T) {
 	}
 	actual := append(encoded, '\n')
 	path := filepath.Join("..", "..", "testdata", "digitalogic-product-sync-v1.synthetic.json")
+	if os.Getenv("UPDATE_GOLDEN") == "1" {
+		if err := os.WriteFile(path, actual, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return
+	}
 	expected, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
@@ -44,19 +50,22 @@ func syntheticGoldenEnvelope() *Envelope {
 			ID: "synthetic-air", Name: "Synthetic Air", Enabled: &enabled, PricePerKgCNY: &freight,
 		}},
 		Assignments: map[string]pricingcatalog.Assignment{
-			"SYNTH-PRICED-001": {MethodID: "synthetic-air", ProfitPercent: &markup},
+			"101001001": {MethodID: "synthetic-air", ProfitPercent: &markup},
 		},
 	}}
 	rows := []map[string]interface{}{
+		{"Code": "101", "Name": "Synthetic components"},
+		{"Code": "101001", "Name": "Synthetic modules"},
 		{
-			"Code": "SYNTH-PRICED-001", "Name": "Synthetic priced product", "Serial": "SYNTH-PN-001", "Vahed": "unit",
+			"Code": "101001001", "Name": "Synthetic priced product", "Serial": "SYNTH-PN-001", "Vahed": "unit",
 			"foreign_price": "24.5", "weight_grams": "240", "location": "TEST-A", "FOROSH": 100000, "KHARYD": 90000,
 			"ANBAR": []interface{}{3, 2}, "ALLANBAR": 5, "Sefaresh": 1, "source_updated_at": "2026-01-01T00:00:00Z",
 		},
 		{
-			"Code": "SYNTH-NULL-002", "Name": "Synthetic incomplete product", "Serial": "SYNTH-PN-002", "Vahed": "unit",
+			"Code": "101001002", "Name": "Synthetic incomplete product", "Serial": "SYNTH-PN-002", "Vahed": "unit",
 			"Sharh1": "price unavailable", "Sharh2": "weight unavailable", "ANBAR": []interface{}{0, 0}, "ALLANBAR": 0,
 		},
+		{"Code": "999010", "Name": "Synthetic freight accounting row"},
 	}
 	_, envelope := Transform(
 		context.Background(), rows, "synthetic-kala.db", cfg, pricingcatalog.NewProvider(cfg.Pricing),
