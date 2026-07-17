@@ -52,15 +52,36 @@ func (s *Server) Path() string {
 }
 
 func (s *Server) Serve(ctx context.Context) error {
-	if s.handler == nil {
-		return errors.New("ipc handler is required")
-	}
-	ln, err := listenLocal(s.path)
+	ln, err := s.Listen()
 	if err != nil {
 		return err
 	}
+	return s.ServeListener(ctx, ln)
+}
+
+// Listen establishes the local endpoint synchronously so embedders can report
+// binding errors before claiming that IPC is ready.
+func (s *Server) Listen() (net.Listener, error) {
+	if s.handler == nil {
+		return nil, errors.New("ipc handler is required")
+	}
+	ln, err := listenLocal(s.path)
+	if err != nil {
+		return nil, err
+	}
+	return ln, nil
+}
+
+// ServeListener serves an endpoint created by Listen.
+func (s *Server) ServeListener(ctx context.Context, ln net.Listener) error {
+	if ln == nil {
+		return errors.New("ipc listener is required")
+	}
 	defer ln.Close()
 	defer cleanupLocal(s.path)
+	if s.handler == nil {
+		return errors.New("ipc handler is required")
+	}
 
 	go func() {
 		<-ctx.Done()
@@ -85,6 +106,10 @@ func (s *Server) handleConn(ctx context.Context, conn net.Conn) {
 	defer conn.Close()
 	connCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
+	go func() {
+		<-connCtx.Done()
+		_ = conn.Close()
+	}()
 
 	var writerMu sync.Mutex
 	write := func(v interface{}) {

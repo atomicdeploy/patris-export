@@ -44,6 +44,7 @@ jobs:
     outputs:
       release_tag: ${{ steps.metadata.outputs.release_tag }}
       artifact_name: ${{ steps.metadata.outputs.artifact_name }}
+      artifact_label: ${{ steps.metadata.outputs.artifact_label }}
       windows_archive: ${{ steps.metadata.outputs.windows_archive }}
       linux_archive: ${{ steps.metadata.outputs.linux_archive }}
 
@@ -89,6 +90,7 @@ jobs:
             echo "release_request=$REQUESTED_RELEASE"
             echo "release_tag=$RELEASE_TAG"
             echo "artifact_name=patris-export-$artifact_label"
+            echo "artifact_label=$artifact_label"
             echo "windows_archive=patris-export-$artifact_label-windows-amd64.zip"
             echo "linux_archive=patris-export-$artifact_label-linux-amd64.tar.gz"
           } >> "$GITHUB_OUTPUT"
@@ -153,13 +155,21 @@ jobs:
             release-package/RELEASE_NOTES.md
 
   verify_windows_package:
-    name: Smoke-test packaged Windows download
+    name: Build and smoke-test Windows installer
     needs: package
     runs-on: windows-latest
+    outputs:
+      artifact_name: ${{ needs.package.outputs.artifact_name }}-verified
+      installer_name: ${{ steps.installer.outputs.installer_name }}
 
     steps:
       - name: Checkout source fixtures
         uses: actions/checkout@v7.0.0
+
+      - name: Set up Python for DLL smoke test
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
 
       - name: Download complete candidate package
         uses: actions/download-artifact@v8.0.1
@@ -185,8 +195,13 @@ jobs:
               "libgcc_s_seh-1.dll",
               "libstdc++-6.dll",
               "libwinpthread-1.dll",
+              "README.md",
               "INSTALL.md",
-              "BUILD-MANIFEST.txt"
+              "LICENSING.md",
+              "LICENSE",
+              "NOTICE",
+              "BUILD-MANIFEST.txt",
+              "BUILD-VARIANT.json"
           )) {
               if (-not (Test-Path (Join-Path $appRoot $required))) {
                   throw "Packaged Windows download is missing $required."
@@ -202,6 +217,209 @@ jobs:
           if ($LASTEXITCODE -ne 0) {
               throw "Packaged executable database smoke test failed."
           }
+          python scripts\windows\smoke_dll.py (Join-Path $appRoot "patris-export.dll") testdata\kala.db
+          if ($LASTEXITCODE -ne 0) {
+              throw "Packaged DLL ABI smoke test failed."
+          }
+
+      - name: Build branded assisted installer
+        id: installer
+        shell: pwsh
+        env:
+          RELEASE_TAG: ${{ needs.package.outputs.release_tag }}
+          ARTIFACT_LABEL: ${{ needs.package.outputs.artifact_label }}
+          WINDOWS_ARCHIVE: ${{ needs.package.outputs.windows_archive }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          choco install nsis --version=3.12.0 --yes --no-progress
+          if ($LASTEXITCODE -ne 0) {
+              throw "Pinned NSIS installation failed with exit code $LASTEXITCODE."
+          }
+          $smokeRoot = Join-Path $env:RUNNER_TEMP "patris-export-release-smoke"
+          $appRoot = Join-Path $smokeRoot "patris-export-windows-amd64"
+          $version = $env:RELEASE_TAG -replace '^v', ''
+          .\scripts\windows\Build-Installer.ps1 `
+            -PayloadDirectory $appRoot `
+            -OutputDirectory release-package `
+            -Version $version `
+            -ArtifactLabel $env:ARTIFACT_LABEL `
+            -SourceCommit $env:GITHUB_SHA
+
+          $installers = @(Get-ChildItem -LiteralPath release-package -Filter "patris-export-*-windows-amd64-setup.exe" -File)
+          if ($installers.Count -ne 1) {
+              throw "Expected exactly one Windows installer, found $($installers.Count)."
+          }
+          "installer_name=$($installers[0].Name)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+      - name: Authenticode-sign installer when certificate is configured
+        shell: pwsh
+        env:
+          INSTALLER_NAME: ${{ steps.installer.outputs.installer_name }}
+          WINDOWS_SIGNING_PFX_BASE64: ${{ secrets.WINDOWS_SIGNING_PFX_BASE64 }}
+          WINDOWS_SIGNING_PASSWORD: ${{ secrets.WINDOWS_SIGNING_PASSWORD }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          if (-not $env:WINDOWS_SIGNING_PFX_BASE64) {
+              Write-Host "No Windows signing certificate is configured; publishing a checksummed unsigned installer."
+              exit 0
+          }
+          $certificate = Join-Path $env:RUNNER_TEMP "patris-signing.pfx"
+          try {
+              [IO.File]::WriteAllBytes($certificate, [Convert]::FromBase64String($env:WINDOWS_SIGNING_PFX_BASE64))
+              $signtool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin" -Recurse -Filter signtool.exe |
+                  Where-Object { $_.FullName -match '\\x64\\signtool\.exe$' } |
+                  Sort-Object FullName -Descending |
+                  Select-Object -First 1
+              if (-not $signtool) { throw "signtool.exe was not found." }
+              $installer = Join-Path "release-package" $env:INSTALLER_NAME
+              & $signtool.FullName sign /fd SHA256 /td SHA256 /tr http://timestamp.digicert.com /f $certificate /p $env:WINDOWS_SIGNING_PASSWORD $installer
+              if ($LASTEXITCODE -ne 0) { throw "signtool failed with exit code $LASTEXITCODE." }
+              $signature = Get-AuthenticodeSignature -LiteralPath $installer
+              if ($signature.Status -ne 'Valid') { throw "Installer signature is not valid: $($signature.StatusMessage)" }
+          } finally {
+              Remove-Item -LiteralPath $certificate -Force -ErrorAction SilentlyContinue
+          }
+
+      - name: Add installer to the checksum manifest
+        shell: pwsh
+        env:
+          INSTALLER_NAME: ${{ steps.installer.outputs.installer_name }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $installer = Join-Path "release-package" $env:INSTALLER_NAME
+          $digest = (Get-FileHash -LiteralPath $installer -Algorithm SHA256).Hash.ToLowerInvariant()
+          Add-Content -LiteralPath "release-package\SHA256SUMS" -Value "$digest  $env:INSTALLER_NAME" -Encoding ascii
+
+          foreach ($line in Get-Content -LiteralPath "release-package\SHA256SUMS") {
+              if ($line -notmatch '^([0-9a-f]{64})  (.+)$') {
+                  throw "Malformed SHA256SUMS line: $line"
+              }
+              $asset = Join-Path "release-package" $matches[2]
+              if (-not (Test-Path -LiteralPath $asset -PathType Leaf)) {
+                  throw "SHA256SUMS references missing asset: $($matches[2])"
+              }
+              $actual = (Get-FileHash -LiteralPath $asset -Algorithm SHA256).Hash.ToLowerInvariant()
+              if ($actual -ne $matches[1]) {
+                  throw "Checksum mismatch for $($matches[2])"
+              }
+          }
+
+      - name: Silent install, smoke, preserve, purge, and uninstall
+        shell: pwsh
+        env:
+          INSTALLER_NAME: ${{ steps.installer.outputs.installer_name }}
+          RELEASE_TAG: ${{ needs.package.outputs.release_tag }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $installer = (Resolve-Path (Join-Path "release-package" $env:INSTALLER_NAME)).Path
+          $installRoot = Join-Path $env:RUNNER_TEMP "patris-export-installed"
+          $configRoot = Join-Path $env:APPDATA "Patris Export"
+          $sentinel = Join-Path $configRoot "installer-ci-sentinel.txt"
+          $expectedVersion = $env:RELEASE_TAG -replace '^v', ''
+
+          function Invoke-Installer {
+              $process = Start-Process -FilePath $installer `
+                -ArgumentList @('/S', '/CurrentUser', "/D=$installRoot") `
+                -Wait -PassThru
+              if ($process.ExitCode -ne 0) {
+                  throw "Silent installer failed with exit code $($process.ExitCode)."
+              }
+              foreach ($required in @(
+                  "patris-export.exe",
+                  "patris-export.dll",
+                  "patris-export.h",
+                  "libpxlib.dll",
+                  "libgcc_s_seh-1.dll",
+                  "libstdc++-6.dll",
+                  "libwinpthread-1.dll",
+                  "README.md",
+                  "INSTALL.md",
+                  "BUILD-MANIFEST.txt",
+                  "BUILD-VARIANT.json",
+                  "LICENSE.txt",
+                  "NOTICE.txt",
+                  "CHANGELOG.md",
+                  "LICENSING.md",
+                  "INSTALLER.md",
+                  "config.example.toml",
+                  "Uninstall.exe"
+              )) {
+                  if (-not (Test-Path -LiteralPath (Join-Path $installRoot $required))) {
+                      throw "Silent installation is missing $required."
+                  }
+              }
+              $versionOutput = (& (Join-Path $installRoot "patris-export.exe") --version | Out-String)
+              if ($LASTEXITCODE -ne 0 -or $versionOutput -notmatch [regex]::Escape($expectedVersion)) {
+                  throw "Installed executable version check failed: $versionOutput"
+              }
+              & (Join-Path $installRoot "patris-export.exe") info testdata\kala.db
+              if ($LASTEXITCODE -ne 0) {
+                  throw "Installed executable database smoke test failed."
+              }
+          }
+
+          if (Test-Path -LiteralPath $configRoot) {
+              Remove-Item -LiteralPath $configRoot -Recurse -Force
+          }
+          New-Item -ItemType Directory -Force $configRoot | Out-Null
+          Set-Content -LiteralPath $sentinel -Value "preserve-me"
+          Invoke-Installer
+          $uninstall = Start-Process -FilePath (Join-Path $installRoot "Uninstall.exe") `
+            -ArgumentList @('/S', '/CurrentUser') -Wait -PassThru
+          if ($uninstall.ExitCode -ne 0) {
+              throw "Silent uninstall failed with exit code $($uninstall.ExitCode)."
+          }
+          if (-not (Test-Path -LiteralPath $sentinel)) {
+              throw "Normal uninstall removed configuration that must be preserved."
+          }
+
+          Invoke-Installer
+          $purge = Start-Process -FilePath (Join-Path $installRoot "Uninstall.exe") `
+            -ArgumentList @('/S', '/CurrentUser', '/PURGEDATA') -Wait -PassThru
+          if ($purge.ExitCode -ne 0) {
+              throw "Silent purge uninstall failed with exit code $($purge.ExitCode)."
+          }
+          if (Test-Path -LiteralPath $sentinel) {
+              throw "Explicit /PURGEDATA uninstall did not remove local configuration."
+          }
+          if (Test-Path -LiteralPath $installRoot) {
+              $remaining = @(Get-ChildItem -LiteralPath $installRoot -Force -ErrorAction SilentlyContinue)
+              if ($remaining.Count -gt 0) {
+                  throw "Uninstall left owned files in ${installRoot}: $($remaining.Name -join ', ')"
+              }
+          }
+
+      - name: Upload installer-verified release package
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: ${{ needs.package.outputs.artifact_name }}-verified
+          path: |
+            release-package/${{ needs.package.outputs.windows_archive }}
+            release-package/${{ needs.package.outputs.linux_archive }}
+            release-package/${{ steps.installer.outputs.installer_name }}
+            release-package/SHA256SUMS
+            release-package/RELEASE_NOTES.md
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 90
+
+      - name: Generate Windows installer summary
+        if: always()
+        shell: bash
+        env:
+          JOB_STATUS: ${{ job.status }}
+          GITHUB_TOKEN: ${{ github.token }}
+          ARTIFACT_RETENTION_DAYS: ${{ github.retention_days }}
+          ARTIFACT_NAME: ${{ needs.package.outputs.artifact_name }}-verified
+          INSTALLER_NAME: ${{ steps.installer.outputs.installer_name }}
+        run: |
+          bash .github/scripts/ci-summary.sh build \
+            "Windows Installer Summary" \
+            "Built the branded MUI2 installer from the canonical Windows payload and verified silent install, runtime smoke tests, config-preserving uninstall, explicit data purge, and checksums." \
+            "$ARTIFACT_NAME" \
+            "Installer-verified release bundle" \
+            "release-package/$INSTALLER_NAME" \
+            release-package/SHA256SUMS
 
   publish:
     name: Publish durable GitHub release
@@ -221,7 +439,7 @@ jobs:
       - name: Download verified release package
         uses: actions/download-artifact@v8.0.1
         with:
-          name: ${{ needs.package.outputs.artifact_name }}
+          name: ${{ needs.verify_windows_package.outputs.artifact_name }}
           path: release-package
 
       - name: Append GitHub merged-change history
@@ -253,6 +471,7 @@ jobs:
           RELEASE_TAG: ${{ needs.package.outputs.release_tag }}
           WINDOWS_ARCHIVE: ${{ needs.package.outputs.windows_archive }}
           LINUX_ARCHIVE: ${{ needs.package.outputs.linux_archive }}
+          WINDOWS_INSTALLER: ${{ needs.verify_windows_package.outputs.installer_name }}
         run: |
           set -euo pipefail
           if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
@@ -277,8 +496,9 @@ jobs:
               --dir "$existing_dir" \
               --pattern "$WINDOWS_ARCHIVE" \
               --pattern "$LINUX_ARCHIVE" \
+              --pattern "$WINDOWS_INSTALLER" \
               --pattern SHA256SUMS
-            for file in "$WINDOWS_ARCHIVE" "$LINUX_ARCHIVE" SHA256SUMS; do
+            for file in "$WINDOWS_ARCHIVE" "$LINUX_ARCHIVE" "$WINDOWS_INSTALLER" SHA256SUMS; do
               if ! cmp -s "release-package/$file" "$existing_dir/$file"; then
                 echo "Existing immutable release asset differs: $file" >&2
                 exit 1
@@ -292,6 +512,7 @@ jobs:
               --notes-file release-package/RELEASE_NOTES.md \
               "release-package/$WINDOWS_ARCHIVE" \
               "release-package/$LINUX_ARCHIVE" \
+              "release-package/$WINDOWS_INSTALLER" \
               release-package/SHA256SUMS \
               --repo "$GITHUB_REPOSITORY"
           fi
@@ -303,6 +524,7 @@ jobs:
           RELEASE_TAG: ${{ needs.package.outputs.release_tag }}
           WINDOWS_ARCHIVE: ${{ needs.package.outputs.windows_archive }}
           LINUX_ARCHIVE: ${{ needs.package.outputs.linux_archive }}
+          WINDOWS_INSTALLER: ${{ needs.verify_windows_package.outputs.installer_name }}
         run: |
           set -euo pipefail
           release_state="$(gh release view "$RELEASE_TAG" \
@@ -318,7 +540,7 @@ jobs:
             --repo "$GITHUB_REPOSITORY" \
             --json assets \
             --jq '.assets[].name')
-          for expected in "$WINDOWS_ARCHIVE" "$LINUX_ARCHIVE" SHA256SUMS; do
+          for expected in "$WINDOWS_ARCHIVE" "$LINUX_ARCHIVE" "$WINDOWS_INSTALLER" SHA256SUMS; do
             if ! printf '%s\n' "${assets[@]}" | grep -Fxq "$expected"; then
               echo "Published release is missing $expected" >&2
               exit 1
@@ -334,6 +556,7 @@ jobs:
           RELEASE_TAG: ${{ needs.package.outputs.release_tag }}
           WINDOWS_ARCHIVE: ${{ needs.package.outputs.windows_archive }}
           LINUX_ARCHIVE: ${{ needs.package.outputs.linux_archive }}
+          WINDOWS_INSTALLER: ${{ needs.verify_windows_package.outputs.installer_name }}
         run: |
           if [[ "$JOB_STATUS" == "success" ]]; then
             description="Published source-built, installable Windows and Linux packages with curated and generated changelogs, pinned dependencies, and durable checksums."
@@ -345,4 +568,5 @@ jobs:
             "$description" \
             "release-package/$WINDOWS_ARCHIVE" \
             "release-package/$LINUX_ARCHIVE" \
+            "release-package/$WINDOWS_INSTALLER" \
             release-package/SHA256SUMS

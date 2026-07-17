@@ -40,13 +40,15 @@ Patris Export is a standalone Paradox/BDE extraction, transformation, pricing, i
 
 | Platform | Artifact | Contents |
 | --- | --- | --- |
+| Windows amd64 (recommended) | \`patris-export-${artifact_label}-windows-amd64-setup.exe\` | Branded assisted installer, uninstaller, runtime, optional C SDK, configuration guide, and license |
 | Windows amd64 | \`patris-export-${artifact_label}-windows-amd64.zip\` | Executable, pxlib and MinGW runtime DLLs, C shared library/header, install guide, license, and build manifest |
 | Linux amd64 | \`patris-export-${artifact_label}-linux-amd64.tar.gz\` | Executable, bundled pxlib runtime and launcher, C shared library/header, install guide, license, and build manifest |
-| All | \`SHA256SUMS\` | SHA-256 verification manifest for both platform archives |
+| All | \`SHA256SUMS\` | SHA-256 verification manifest for the installer and both platform archives |
 
 ## Install
 
-- **Windows:** extract the entire ZIP, keep every DLL beside \`patris-export.exe\`, then run \`.\patris-export.exe --version\`.
+- **Windows (recommended):** run the assisted setup executable. It installs the runtime and uninstaller, preserves configuration during upgrades, and offers the C SDK as an optional component.
+- **Windows (portable/embedding):** extract the entire ZIP, keep every DLL beside \`patris-export.exe\`, then run \`.\patris-export.exe --version\`.
 - **Linux:** extract the tarball and run \`./patris-export-linux-amd64/run-patris-export.sh --version\`.
 - Detailed deployment, embedding, smoke-test, and upgrade instructions are included as \`INSTALL.md\` in both archives.
 

@@ -212,6 +212,7 @@ func (s *Server) setupRoutes() {
 	s.router.HandleFunc("/api/config", s.handleGetConfig).Methods("GET")
 	s.router.HandleFunc("/api/config", s.handlePutConfig).Methods("PUT")
 	s.router.HandleFunc("/api/status", s.handleGetStatus).Methods("GET")
+	s.router.HandleFunc("/api/refresh", s.handlePostRefresh).Methods("POST")
 	s.router.HandleFunc("/api/toast", s.handlePostToast).Methods("POST")
 	s.router.HandleFunc("/api/edge/upload", s.handlePostEdgeUpload).Methods("POST")
 	s.router.HandleFunc("/api/source/manifest", s.handleGetSourceManifest).Methods("GET")
@@ -827,6 +828,11 @@ func (s *Server) handlePutConfig(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleGetStatus(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, s.Status())
+}
+
+func (s *Server) handlePostRefresh(w http.ResponseWriter, r *http.Request) {
+	s.Refresh()
+	writeJSON(w, map[string]interface{}{"refreshed": true})
 }
 
 func (s *Server) handleGetSourceManifest(w http.ResponseWriter, r *http.Request) {

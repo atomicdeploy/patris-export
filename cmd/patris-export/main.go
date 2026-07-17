@@ -22,6 +22,7 @@ import (
 	"github.com/atomicdeploy/patris-export/pkg/embedded"
 	"github.com/atomicdeploy/patris-export/pkg/filecopy"
 	"github.com/atomicdeploy/patris-export/pkg/ipc"
+	"github.com/atomicdeploy/patris-export/pkg/licensing"
 	"github.com/atomicdeploy/patris-export/pkg/oneshot"
 	"github.com/atomicdeploy/patris-export/pkg/paradox"
 	"github.com/atomicdeploy/patris-export/pkg/pricingcatalog"
@@ -118,6 +119,12 @@ Supports Persian/Farsi encoding conversion and file watching.
 	rootCmd.Short = "📦 Paradox/BDE database export service for Patris81"
 	rootCmd.Long = cliIntro()
 	rootCmd.SetVersionTemplate(version.Detailed() + "\n")
+	rootCmd.PersistentPreRunE = func(cmd *cobra.Command, _ []string) error {
+		if licenseCommandBypassesEnforcement(cmd) {
+			return nil
+		}
+		return licensing.Enforce(cmd.Context())
+	}
 
 	// Global flags
 	rootCmd.PersistentFlags().StringArrayVarP(&configFiles, "config", "c", nil, "Path to patris-export config file; repeat to layer JSON/YAML/TOML files")
@@ -261,7 +268,7 @@ Set GITHUB_TOKEN for private repositories and higher API rate limits.`,
 	updateCmd.Flags().String("api-url", "", "Update from a Patris Export API base URL using /api/update/manifest")
 	updateCmd.Flags().String("manifest-url", "", "Update from an explicit Patris Export executable manifest URL")
 
-	rootCmd.AddCommand(convertCmd, infoCmd, companyCmd, viewCmd, serveCmd, stubCmd, ipcCmd, tuiCmd, updateCmd)
+	rootCmd.AddCommand(convertCmd, infoCmd, companyCmd, viewCmd, serveCmd, stubCmd, ipcCmd, tuiCmd, updateCmd, newLicenseCommand())
 
 	if err := rootCmd.Execute(); err != nil {
 		errorColor.Fprintf(os.Stderr, "❌ Error: %v\n", err)

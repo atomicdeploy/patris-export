@@ -307,7 +307,9 @@ func ResolvePaths(paths []string) []string {
 		exeDir := filepath.Dir(exe)
 		addCandidateDir(filepath.Join(exeDir, "config"))
 	}
-	discovered = append(discovered, DefaultPath())
+	defaultPath := DefaultPath()
+	addCandidateDir(filepath.Dir(defaultPath))
+	discovered = append(discovered, defaultPath)
 	return cleanPathList(discovered)
 }
 

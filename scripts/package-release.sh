@@ -116,8 +116,17 @@ chmod 0755 "$linux_stage/run-patris-export.sh"
 
 for stage in "$windows_stage" "$linux_stage"; do
     install -m 0644 "$root/docs/INSTALL-BINARIES.md" "$stage/INSTALL.md"
+    install -m 0644 "$root/docs/LICENSING.md" "$stage/LICENSING.md"
     install -m 0644 "$root/README.md" "$stage/README.md"
     install -m 0644 "$root/LICENSE" "$stage/LICENSE"
+    install -m 0644 "$root/NOTICE" "$stage/NOTICE"
+    cat > "$stage/BUILD-VARIANT.json" <<EOF
+{
+  "variant": "standard",
+  "licensing_mode": "none",
+  "license_required": false
+}
+EOF
     cat > "$stage/BUILD-MANIFEST.txt" <<EOF
 Patris Export ${RELEASE_VERSION}
 ${provenance_line}
