@@ -385,7 +385,7 @@ jobs:
           if (Test-Path -LiteralPath $installRoot) {
               $remaining = @(Get-ChildItem -LiteralPath $installRoot -Force -ErrorAction SilentlyContinue)
               if ($remaining.Count -gt 0) {
-                  throw "Uninstall left owned files in $installRoot: $($remaining.Name -join ', ')"
+                  throw "Uninstall left owned files in ${installRoot}: $($remaining.Name -join ', ')"
               }
           }
 
