@@ -4,8 +4,10 @@
 BINARY_NAME=patris-export
 BUILD_DIR=build
 
-# Version information
-VERSION?=1.0.0
+# Version information. pkg/version is the canonical source so patch releases do
+# not leave the Makefile build path reporting an older version.
+SOURCE_VERSION=$(shell sed -n 's/^[[:space:]]*Version[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' pkg/version/version.go | head -n 1)
+VERSION?=$(SOURCE_VERSION)
 BUILD_DATE?=$(shell date -u +'%Y-%m-%dT%H:%M:%SZ')
 COMMIT?=$(shell git rev-parse --short=12 HEAD 2>/dev/null || echo unknown)
 VERSION_PKG=github.com/atomicdeploy/patris-export/pkg/version
