@@ -23,6 +23,7 @@ import (
 	"github.com/atomicdeploy/patris-export/pkg/filecopy"
 	"github.com/atomicdeploy/patris-export/pkg/ipc"
 	"github.com/atomicdeploy/patris-export/pkg/licensing"
+	"github.com/atomicdeploy/patris-export/pkg/nativeui"
 	"github.com/atomicdeploy/patris-export/pkg/oneshot"
 	"github.com/atomicdeploy/patris-export/pkg/paradox"
 	"github.com/atomicdeploy/patris-export/pkg/pricingcatalog"
@@ -271,9 +272,17 @@ Set GITHUB_TOKEN for private repositories and higher API rate limits.`,
 	rootCmd.AddCommand(convertCmd, infoCmd, companyCmd, viewCmd, serveCmd, stubCmd, ipcCmd, tuiCmd, updateCmd, newLicenseCommand())
 
 	if err := rootCmd.Execute(); err != nil {
+		nativeui.ShowNativeDependencyError(err)
 		errorColor.Fprintf(os.Stderr, "❌ Error: %v\n", err)
 		os.Exit(1)
 	}
+}
+
+func exitWithError(err error, format string, args ...interface{}) {
+	message := fmt.Sprintf(format, args...)
+	nativeui.ShowNativeDependencyError(err)
+	errorColor.Println(message)
+	os.Exit(1)
 }
 
 func getenvDefault(name, fallback string) string {
@@ -586,8 +595,7 @@ func runTUI(cmd *cobra.Command, args []string) {
 		cfg.Database.Path = args[0]
 	}
 	if err := tui.Run(cfg, mgr.Path(), version.Current()); err != nil {
-		errorColor.Printf("❌ TUI error: %v\n", err)
-		os.Exit(1)
+		exitWithError(err, "❌ TUI error: %v", err)
 	}
 }
 
@@ -707,7 +715,9 @@ func runConvert(cmd *cobra.Command, args []string) {
 		select {}
 	}
 
-	convertAndSend(dbFile, "initial")
+	if _, err := convertFile(dbFile, charMap, useStdout, cfg, catalogProvider); err != nil {
+		os.Exit(1)
+	}
 }
 
 func applyConvertFlagOverrides(cmd *cobra.Command, cfg *appconfig.Config) {
@@ -776,6 +786,7 @@ func convertFile(dbFile string, charMap converter.CharMapping, useStdout bool, c
 	defer ds.Close()
 	rawRows, err := ds.GetRawRecords()
 	if err != nil {
+		nativeui.ShowNativeDependencyError(err)
 		errorColor.Printf("❌ Failed to read records: %v\n", err)
 		return recordpipe.Result{}, err
 	}
@@ -986,8 +997,7 @@ func runInfo(cmd *cobra.Command, args []string) {
 
 	db, err := paradox.Open(fileToOpen)
 	if err != nil {
-		errorColor.Printf("❌ Failed to open database: %v\n", err)
-		os.Exit(1)
+		exitWithError(err, "❌ Failed to open database: %v", err)
 	}
 	defer db.Close()
 
@@ -1105,8 +1115,7 @@ func runViewSource(cmd *cobra.Command, dbFile, outputPath string, noOpen bool, t
 		BuildVersion: version.Current(),
 	})
 	if err != nil {
-		errorColor.Printf("One-shot viewer failed: %v\n", err)
-		os.Exit(1)
+		exitWithError(err, "One-shot viewer failed: %v", err)
 	}
 	successColor.Printf("Generated one-shot viewer: %s\n", result.HTMLPath)
 	infoColor.Printf("Rows: %d  Columns: %d\n", result.Records, result.Fields)

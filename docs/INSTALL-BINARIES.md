@@ -19,8 +19,9 @@ For a portable or embedding-oriented installation:
 1. Download `patris-export-vX.Y.Z-windows-amd64.zip`.
 2. Extract the complete archive to a permanent directory such as
    `C:\Program Files\Patris Export`.
-3. Keep `patris-export.exe`, `libpxlib.dll`, and the bundled MinGW runtime
-   DLLs together. The executable is not portable without those adjacent files.
+3. Keep `libpxlib.dll` beside `patris-export.exe` for Paradox `.db` reading.
+   The executable still starts without pxlib and reports a friendly
+   native-runtime error when a `.db` read is attempted.
 4. Run `patris-export.exe --version`, then smoke-test a database:
 
    ```powershell
@@ -47,6 +48,11 @@ and is not overwritten by extracting a newer release.
 To make it system-wide, keep the extracted directory intact and symlink the
 launcher into a directory on `PATH`. The bundle also contains
 `libpatris-export.so` and `libpatris-export.h` for embedding.
+
+For custom runtime placement, set `PATRIS_EXPORT_PXLIB_LIBRARY` to an exact
+DLL/shared-object path, or set `PATRIS_EXPORT_PXLIB_ROOT` to a prefix containing
+`bin` or `lib`. Linux falls back to the normal dynamic linker search path after
+checking the executable directory and configured roots.
 
 ## Integrity verification
 

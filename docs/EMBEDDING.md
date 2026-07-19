@@ -27,7 +27,13 @@ Outputs:
 - Windows: `build/patris-export.dll` and `build/patris-export.h`
 - Linux: `build/libpatris-export.so` and `build/libpatris-export.h`
 
-The library still uses CGO and pxlib. Keep `libpxlib.dll` beside the Windows host executable or make it available through `PATH`. On Linux, keep `libpx.so` in the system linker path or set `LD_LIBRARY_PATH`.
+The library loads pxlib at runtime when `.db` data is read. Keep `libpxlib.dll`
+beside the Windows host executable, set `PATRIS_EXPORT_PXLIB_LIBRARY` to an
+exact runtime path, or set `PATRIS_EXPORT_PXLIB_ROOT` to a prefix containing
+`bin` or `lib`. On Linux, keep `libpx.so`/`libpxlib.so` beside the host binary,
+under `PATRIS_EXPORT_PXLIB_ROOT`, or in the normal dynamic linker search path.
+Missing pxlib is returned as a normal API error instead of aborting the host
+process at load time.
 
 ## Go Embedded API
 

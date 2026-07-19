@@ -6,6 +6,7 @@ require (
 	github.com/Microsoft/go-winio v0.6.2
 	github.com/charmbracelet/bubbletea v1.3.10
 	github.com/charmbracelet/lipgloss v1.1.0
+	github.com/ebitengine/purego v0.10.0
 	github.com/fatih/color v1.19.0
 	github.com/fsnotify/fsnotify v1.10.1
 	github.com/gen2brain/beeep v0.11.2
@@ -17,6 +18,7 @@ require (
 	github.com/shirou/gopsutil/v4 v4.26.6
 	github.com/spf13/cobra v1.10.2
 	github.com/xuri/excelize/v2 v2.11.0
+	golang.org/x/sys v0.46.0
 	golang.org/x/text v0.38.0
 	gopkg.in/yaml.v3 v3.0.1
 )
@@ -33,7 +35,6 @@ require (
 	github.com/charmbracelet/x/term v0.2.2 // indirect
 	github.com/clipperhouse/displaywidth v0.10.0 // indirect
 	github.com/clipperhouse/uax29/v2 v2.6.0 // indirect
-	github.com/ebitengine/purego v0.10.0 // indirect
 	github.com/erikgeiser/coninput v0.0.0-20211004153227-1c3628e74d0f // indirect
 	github.com/esiqveland/notify v0.13.3 // indirect
 	github.com/go-ole/go-ole v1.3.0 // indirect
@@ -67,5 +68,4 @@ require (
 	github.com/yusufpapurcu/wmi v1.2.4 // indirect
 	golang.org/x/crypto v0.53.0 // indirect
 	golang.org/x/net v0.56.0 // indirect
-	golang.org/x/sys v0.46.0 // indirect
 )

@@ -140,4 +140,10 @@ go build -o patris-export.exe ./cmd/patris-export
 make build-windows
 ```
 
-Make sure the pxlib DLL is in the same directory as the patris-export executable when running on Windows.
+Keep `libpxlib.dll` in the same directory as the patris-export executable for
+`.db` reading on Windows. The executable no longer imports pxlib at process
+startup, so commands such as `--version` and `help` still run if the DLL is
+missing. A foreground `.db` read reports a Patris Export native-runtime error
+and, by default, shows a Windows TaskDialog-style message with the checked
+paths. Set `PATRIS_EXPORT_NO_TASKDIALOG=1` for scripts or services that must
+never show a modal dialog.
