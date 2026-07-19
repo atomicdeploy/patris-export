@@ -33,10 +33,14 @@ Download the latest source-built release for your platform from the
 **Windows users:** Run the checksummed assisted setup executable for a normal
 installation with shortcuts, configuration-safe upgrades, and uninstall
 support. The complete Windows ZIP remains available for portable and embedding
-scenarios; keep its pxlib/MinGW DLLs beside `patris-export.exe`.
+scenarios; keep `libpxlib.dll` beside `patris-export.exe` for `.db` reading.
+If pxlib is missing, the executable still starts and reports an actionable
+native-runtime error instead of letting Windows abort with a loader dialog.
 
 **Linux users:** Extract the Linux tarball and launch it with the included
-`run-patris-export.sh` so the bundled pxlib runtime is loaded.
+`run-patris-export.sh` so the bundled pxlib runtime is loaded. If pxlib is
+missing on Linux, commands that read `.db` files fail with a normal application
+error that lists the checked library names instead of an ELF loader abort.
 
 Every release includes `SHA256SUMS`, an assisted Windows installer, an install guide, a build manifest, a
 curated changelog, and links to the exact tagged source. See
@@ -83,6 +87,13 @@ The scripts check required tools, build or reuse upstream pxlib, rebuild the web
 frontend, compile Win32 icon/version resources for Windows targets, and print an
 artifact summary. Set `PXLIB_ROOT` to use an existing pxlib install, or
 `USE_VCPKG=1` to add optional vcpkg C dependency paths.
+
+At runtime, Patris Export looks for pxlib next to the executable, under
+`PATRIS_EXPORT_PXLIB_ROOT`, under `PXLIB_ROOT`, and finally through the platform
+library search path. Set `PATRIS_EXPORT_PXLIB_LIBRARY` to force one exact DLL or
+shared-object path for troubleshooting. On Windows foreground `.db` read
+failures show a TaskDialog-style message by default; set
+`PATRIS_EXPORT_NO_TASKDIALOG=1` for scripts and services.
 
 ## 📖 Usage
 

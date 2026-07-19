@@ -15,6 +15,8 @@ def main() -> int:
 
     dll_path = pathlib.Path(sys.argv[1]).resolve(strict=True)
     database = pathlib.Path(sys.argv[2]).resolve(strict=True)
+    os.environ.setdefault("PATRIS_EXPORT_PXLIB_ROOT", str(dll_path.parent))
+    os.environ["PATH"] = str(dll_path.parent) + os.pathsep + os.environ.get("PATH", "")
     dll_directory = os.add_dll_directory(str(dll_path.parent))
     try:
         library = ctypes.WinDLL(str(dll_path))
