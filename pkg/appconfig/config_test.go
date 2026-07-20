@@ -281,6 +281,28 @@ func TestSQLExportDefaultsAndEnvironmentOverrides(t *testing.T) {
 	}
 }
 
+func TestXLSXExportDefaultsConfigAndEnvironment(t *testing.T) {
+	cfg := Default()
+	if cfg.Export.XLSXLanguage != "auto" || cfg.Export.XLSXMode != "precalculated" || !cfg.Export.XLSXZebraRows {
+		t.Fatalf("unexpected XLSX defaults: %+v", cfg.Export)
+	}
+
+	t.Setenv("PATRIS_EXPORT_XLSX_LANGUAGE", "FA")
+	t.Setenv("PATRIS_EXPORT_XLSX_MODE", "FORMULAS")
+	t.Setenv("PATRIS_EXPORT_XLSX_ZEBRA_ROWS", "false")
+	ApplyEnv(&cfg)
+	if cfg.Export.XLSXLanguage != "fa" || cfg.Export.XLSXMode != "formula" || cfg.Export.XLSXZebraRows {
+		t.Fatalf("XLSX environment was not normalized: %+v", cfg.Export)
+	}
+
+	cfg.Export.XLSXLanguage = "unsupported"
+	cfg.Export.XLSXMode = "unsupported"
+	normalize(&cfg)
+	if cfg.Export.XLSXLanguage != "auto" || cfg.Export.XLSXMode != "precalculated" {
+		t.Fatalf("invalid XLSX options did not fall back safely: %+v", cfg.Export)
+	}
+}
+
 func TestCanonicalKalaProfileAndPricingProviderDefaults(t *testing.T) {
 	cfg := Default()
 	profile, exists := cfg.Canonical.Profiles["kala.db"]

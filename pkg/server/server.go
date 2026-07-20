@@ -657,9 +657,30 @@ func (s *Server) writeRecordsXLSX(w http.ResponseWriter, r *http.Request, result
 	defer os.Remove(tempPath)
 	dataset := sourceBaseName(s.currentDBPath())
 	rtl := false
+	preferences := recordsink.XLSXPreferences{Language: "en", Mode: "precalculated", ZebraRows: true}
 	if s.config != nil {
-		rtl = s.config.Get().UI.RTLTextDirection
+		cfg := s.config.Get()
+		preferences.Language = recordsink.ResolveXLSXLanguage(cfg.Export.XLSXLanguage, cfg.UI.Language)
+		preferences.Mode = cfg.Export.XLSXMode
+		preferences.ZebraRows = cfg.Export.XLSXZebraRows
+		preferences.ColumnLabels = cfg.ColumnLabels
+		rtl = cfg.UI.RTLTextDirection || preferences.Language == "fa"
 	}
+	if value := strings.TrimSpace(r.URL.Query().Get("language")); value != "" {
+		preferences.Language = recordsink.ResolveXLSXLanguage(value, preferences.Language)
+	}
+	if value := strings.TrimSpace(r.URL.Query().Get("mode")); value != "" {
+		preferences.Mode = value
+	}
+	if value, exists := r.URL.Query()["zebra"]; exists && len(value) > 0 {
+		switch strings.ToLower(strings.TrimSpace(value[len(value)-1])) {
+		case "1", "true", "yes", "on":
+			preferences.ZebraRows = true
+		case "0", "false", "no", "off":
+			preferences.ZebraRows = false
+		}
+	}
+	rtl = rtl || preferences.Language == "fa"
 	if value, exists := r.URL.Query()["rtl"]; exists && len(value) > 0 {
 		switch strings.ToLower(strings.TrimSpace(value[len(value)-1])) {
 		case "1", "true", "yes", "rtl":
@@ -668,7 +689,7 @@ func (s *Server) writeRecordsXLSX(w http.ResponseWriter, r *http.Request, result
 			rtl = false
 		}
 	}
-	options := result.XLSXOptions(dataset, rtl)
+	options := result.XLSXOptions(dataset, rtl, preferences)
 	if err := recordsink.WriteXLSX(tempPath, result.Rows, result.KeyField, options); err != nil {
 		http.Error(w, fmt.Sprintf("Failed to encode XLSX: %v", err), http.StatusInternalServerError)
 		return

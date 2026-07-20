@@ -4,7 +4,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/atomicdeploy/patris-export/pkg/appconfig"
 	"github.com/atomicdeploy/patris-export/pkg/recordpipe"
+	"github.com/spf13/cobra"
 )
 
 func TestWatchChangeStateBuildsChangesAfterInitialBaseline(t *testing.T) {
@@ -36,5 +38,26 @@ func TestWatchChangeStateBuildsChangesAfterInitialBaseline(t *testing.T) {
 	}
 	if changes.Modified[0].Record["sku"] != "100" || changes.Modified[0].Record["title"] != "Bolt" {
 		t.Fatalf("modified watch row is incomplete: %#v", changes.Modified[0].Record)
+	}
+}
+
+func TestConvertXLSXFlagOverrides(t *testing.T) {
+	cmd := &cobra.Command{Use: "convert"}
+	cmd.Flags().StringVar(&xlsxLanguage, "xlsx-language", "", "")
+	cmd.Flags().StringVar(&xlsxMode, "xlsx-mode", "", "")
+	cmd.Flags().BoolVar(&xlsxZebraRows, "xlsx-zebra", true, "")
+	if err := cmd.Flags().Set("xlsx-language", "fa"); err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Flags().Set("xlsx-mode", "formula"); err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Flags().Set("xlsx-zebra", "false"); err != nil {
+		t.Fatal(err)
+	}
+	cfg := appconfig.Default()
+	applyConvertFlagOverrides(cmd, &cfg)
+	if cfg.Export.XLSXLanguage != "fa" || cfg.Export.XLSXMode != "formula" || cfg.Export.XLSXZebraRows {
+		t.Fatalf("XLSX CLI overrides = %+v", cfg.Export)
 	}
 }

@@ -15,6 +15,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - Copy-paste remote delivery recipes distinguish native REST/WordPress REST from JSON-RPC, legacy WordPress AJAX, and gRPC gateway adapters, including secret injection, idempotency, retry, failure, and replay guidance.
 - A dependency-free Node.js loopback adapter, local retryable mock receiver, sparse-payload tests, example configs, and a minimal gRPC HTTP-transcoding contract exercise non-native delivery without duplicating the Patris transformation pipeline.
 - The Web UI now provides localized header context menus, a full-table column-resize guide, optional sticky first-column behavior, and independently selectable warehouse columns under a two-row Warehouse Stock header.
+- Excel exports now support localized English/Persian human-readable headers, configurable pre-calculated or live-formula pricing, optional zebra rows, RTL/LTR workbook views, and one numeric column per available warehouse.
+- A macro-enabled Patris/Digitalogic business-dashboard example includes refresh, search, reset, configurable endpoints, and company-logo placement without embedding credentials.
 
 ### Changed
 
@@ -26,9 +28,14 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - Successful product-sync responses must include typed status, identity, retry, pending, and deferred fields; missing or explicit-null fields fail closed.
 - Persisted custom headers cannot use any product-sync-secret name; receiver credentials remain environment-backed only.
 - English and Persian table labels now use human-readable source and canonical field names, Persian UI text consistently uses the embedded Vazirmatn font, and warning cells remain on one compact line.
+- The Web UI's Excel action now sends the active interface language and configured formula/zebra preferences to the canonical server-side workbook writer.
 
 ### Fixed
 
+- Excel dashboard refresh now validates Code identity before mutating reviewed
+  rows, rejects empty/non-JSON Digitalogic responses, uses deterministic
+  canonical-over-legacy label precedence, and strips private Office path/author
+  metadata plus external connections from the checked-in XLSM package.
 - The pxlib reader now keeps native data as typed pointers, bounds record and string reads, serializes close against active reads, and passes `go vet` without suppressions.
 - Standalone exports no longer contain Digitalogic pricing, formula, or shipping-method fields and warnings when no pricing integration is configured.
 - Windows file-lock monitoring now uses targeted Restart Manager queries instead of overlapping system-wide handle snapshots that could exhaust committed memory.

@@ -71,6 +71,9 @@ var (
 	exportBatchSize int
 	exportReconcile string
 	exportDryRun    bool
+	xlsxLanguage    string
+	xlsxMode        string
+	xlsxZebraRows   bool
 	sendURL         string
 	sendFormat      string
 	sendMode        string
@@ -159,6 +162,9 @@ Supports Persian/Farsi encoding conversion and file watching.
 	convertCmd.Flags().IntVar(&exportBatchSize, "batch-size", 0, "Maximum rows per prepared SQL batch")
 	convertCmd.Flags().StringVar(&exportReconcile, "reconciliation", "", "SQL reconciliation mode: upsert_only (safe default) or delete_missing")
 	convertCmd.Flags().BoolVar(&exportDryRun, "dry-run", false, "Preview SQL insert/update/delete counts without changing the destination")
+	convertCmd.Flags().StringVar(&xlsxLanguage, "xlsx-language", "", "Excel header language: auto, en, or fa (auto follows the configured UI language)")
+	convertCmd.Flags().StringVar(&xlsxMode, "xlsx-mode", "", "Excel price output mode: precalculated or formula")
+	convertCmd.Flags().BoolVar(&xlsxZebraRows, "xlsx-zebra", true, "Use alternating zebra rows in Excel output")
 	convertCmd.Flags().StringVar(&sendURL, "send-url", "", "Webhook/API URL that receives initial and watch update payloads")
 	convertCmd.Flags().StringVar(&sendFormat, "send-format", "", "Send update format: json or csv")
 	convertCmd.Flags().StringVar(&sendMode, "send-mode", "", "Send update mode: changes or full")
@@ -745,6 +751,15 @@ func applyConvertFlagOverrides(cmd *cobra.Command, cfg *appconfig.Config) {
 	if cmd.Flags().Changed("dry-run") {
 		cfg.Export.DryRun = exportDryRun
 	}
+	if cmd.Flags().Changed("xlsx-language") {
+		cfg.Export.XLSXLanguage = xlsxLanguage
+	}
+	if cmd.Flags().Changed("xlsx-mode") {
+		cfg.Export.XLSXMode = xlsxMode
+	}
+	if cmd.Flags().Changed("xlsx-zebra") {
+		cfg.Export.XLSXZebraRows = xlsxZebraRows
+	}
 	if cmd.Flags().Changed("send-url") {
 		cfg.SendUpdates.URL = sendURL
 		cfg.SendUpdates.Enabled = strings.TrimSpace(sendURL) != ""
@@ -850,7 +865,13 @@ func writeConvertOutput(dbFile string, result recordpipe.Result, useStdout bool,
 		}
 	case "xlsx":
 		outputFile = filepath.Join(outputDir, baseName+".xlsx")
-		xlsxOptions := result.XLSXOptions(sourceName, cfg.UI.RTLTextDirection)
+		language := recordsink.ResolveXLSXLanguage(cfg.Export.XLSXLanguage, cfg.UI.Language)
+		xlsxOptions := result.XLSXOptions(sourceName, cfg.UI.RTLTextDirection || language == "fa", recordsink.XLSXPreferences{
+			Language:     language,
+			Mode:         cfg.Export.XLSXMode,
+			ZebraRows:    cfg.Export.XLSXZebraRows,
+			ColumnLabels: cfg.ColumnLabels,
+		})
 		if err := recordsink.WriteXLSX(outputFile, result.Rows, result.KeyField, xlsxOptions); err != nil {
 			return err
 		}
