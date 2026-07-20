@@ -18,26 +18,26 @@
     <div class="app">
         <header class="header">
             <div class="header-content">
-                <a class="brand-link" id="brandLink" href="/" title="Go to home">
+                <a class="brand-link" id="brandLink" href="/" title="Go to home" data-table-i18n-title="goHome">
                     <h1 id="appTitle"><img id="appLogo" class="app-logo" src="/static/patris-api-icon.png" alt="">Patris Export</h1>
                 </a>
                 <div class="header-actions">
-                    <button class="header-chip header-file-chip" id="headerFileChip" type="button" title="Current source file">
-                        <span>File</span>
+                    <button class="header-chip header-file-chip" id="headerFileChip" type="button" title="Current source file" data-table-i18n-title="currentSourceFile">
+                        <span data-table-i18n="file">File</span>
                         <strong id="headerFile">—</strong>
                     </button>
-                    <div class="process-status" id="processStatus">Checking Patris81...</div>
-                    <button class="status clickable-status" id="headerConnectionButton" type="button" title="Connection details">
+                    <div class="process-status" id="processStatus" data-table-i18n="checkingPatris">Checking Patris81...</div>
+                    <button class="status clickable-status" id="headerConnectionButton" type="button" title="Connection details" data-table-i18n-title="connectionDetails">
                         <span class="status-indicator" id="statusIndicator"></span>
-                        <span id="statusText">Connecting...</span>
+                        <span id="statusText" data-table-i18n="connecting">Connecting...</span>
                     </button>
-                    <button class="btn btn-icon" id="footerToggleBtn" type="button" title="Toggle footer" aria-label="Toggle footer">
+                    <button class="btn btn-icon" id="footerToggleBtn" type="button" title="Toggle footer" aria-label="Toggle footer" data-table-i18n-title="toggleFooter" data-table-i18n-aria-label="toggleFooter">
                         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16v14H4z" /><path d="M4 15h16" /></svg>
                     </button>
-                    <button class="btn btn-icon" id="settingsBtn" title="Settings" aria-label="Settings">
+                    <button class="btn btn-icon" id="settingsBtn" title="Settings" aria-label="Settings" data-table-i18n-title="settings" data-table-i18n-aria-label="settings">
                         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 15.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7z" /><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.87l.05.05a2 2 0 1 1-2.83 2.83l-.05-.05A1.7 1.7 0 0 0 15 19.4a1.7 1.7 0 0 0-1 .6 1.7 1.7 0 0 0-.4 1.05V21a2 2 0 1 1-4 0v-.08A1.7 1.7 0 0 0 8.6 19.4a1.7 1.7 0 0 0-1.87.34l-.05.05a2 2 0 1 1-2.83-2.83l.05-.05A1.7 1.7 0 0 0 4.6 15a1.7 1.7 0 0 0-.6-1 1.7 1.7 0 0 0-1.05-.4H3a2 2 0 1 1 0-4h.08A1.7 1.7 0 0 0 4.6 8.6a1.7 1.7 0 0 0-.34-1.87l-.05-.05a2 2 0 1 1 2.83-2.83l.05.05A1.7 1.7 0 0 0 9 4.6a1.7 1.7 0 0 0 1-.6 1.7 1.7 0 0 0 .4-1.05V3a2 2 0 1 1 4 0v.08A1.7 1.7 0 0 0 15.4 4.6a1.7 1.7 0 0 0 1.87-.34l.05-.05a2 2 0 1 1 2.83 2.83l-.05.05A1.7 1.7 0 0 0 19.4 9c.19.38.52.7 1 .9.31.13.65.2 1 .2H21a2 2 0 1 1 0 4h-.08a1.7 1.7 0 0 0-1.52.9z" /></svg>
                     </button>
-                    <button class="btn btn-icon" id="themeToggle" title="Toggle Theme" aria-label="Toggle theme">
+                    <button class="btn btn-icon" id="themeToggle" title="Toggle theme" aria-label="Toggle theme" data-table-i18n-title="toggleTheme" data-table-i18n-aria-label="toggleTheme">
                         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20.5 14.5A8.5 8.5 0 0 1 9.5 3.5 9 9 0 1 0 20.5 14.5z" /></svg>
                     </button>
                 </div>
@@ -46,7 +46,7 @@
 
         <div class="toolbar">
             <div class="toolbar-section">
-                <div class="catalog-switch" id="catalogSwitch" role="tablist" aria-label="Catalog record type" hidden>
+                <div class="catalog-switch" id="catalogSwitch" role="tablist" aria-label="Catalog record type" data-table-i18n-aria-label="catalogRecordType" hidden>
                     <button class="catalog-switch-option active" id="productsViewBtn" type="button" role="tab" aria-selected="true" data-catalog-view="products">
                         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7.5 12 3l8 4.5v9L12 21l-8-4.5z"/><path d="m4 7.5 8 4.5 8-4.5M12 12v9"/></svg>
                         <span data-table-i18n="products">Products</span>
@@ -58,52 +58,52 @@
                         <strong id="categoryDatasetCount">0</strong>
                     </button>
                 </div>
-                <input type="text" id="searchInput" class="search-input" placeholder="Search records..." data-table-i18n-placeholder="searchPlaceholder" aria-keyshortcuts="F2" title="Press F2 to focus search">
+                <input type="text" id="searchInput" class="search-input" placeholder="Search records..." data-table-i18n-placeholder="searchPlaceholder" aria-keyshortcuts="F2" title="Press F2 to focus search" data-table-i18n-title="searchShortcut">
                 <select id="fieldFilter" class="field-select">
                     <option value="" data-table-i18n="allFields">All fields</option>
                 </select>
             </div>
             <div class="toolbar-section">
                 <div class="export-container">
-                    <button class="btn btn-primary" id="exportBtn" type="button" title="Export data" aria-haspopup="menu" aria-controls="exportDropdown" aria-expanded="false">
+                    <button class="btn btn-primary" id="exportBtn" type="button" title="Export data" data-table-i18n-title="exportData" aria-haspopup="menu" aria-controls="exportDropdown" aria-expanded="false">
                         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12M7 10l5 5 5-5"/><path d="M4 19h16"/></svg>
                         <span data-table-i18n="export">Export</span>
                     </button>
-                    <div class="export-dropdown" id="exportDropdown" role="menu" aria-label="Export formats">
+                        <div class="export-dropdown" id="exportDropdown" role="menu" aria-label="Export formats" data-table-i18n-aria-label="exportFormats">
                         <button class="export-option" id="exportJSON" type="button" role="menuitem" data-export-format="json">
                             <span class="export-icon" aria-hidden="true"><svg class="export-svg" viewBox="0 0 24 24"><path d="M6 3h9l4 4v14H6z"/><path d="M15 3v5h5M9 12h6M9 16h6"/></svg></span>
                             <div class="export-details">
-                                <div class="export-title">Export as JSON</div>
-                                <div class="export-desc">JavaScript Object Notation</div>
+                                <div class="export-title" data-table-i18n="exportJSON">Export as JSON</div>
+                                <div class="export-desc" data-table-i18n="exportJSONDescription">JavaScript Object Notation</div>
                             </div>
                         </button>
                         <button class="export-option" id="exportCSV" type="button" role="menuitem" data-export-format="csv">
                             <span class="export-icon"><img class="mini-logo" src="/static/patris-api-icon.png" alt=""></span>
                             <div class="export-details">
-                                <div class="export-title">Export as CSV</div>
-                                <div class="export-desc">Comma-Separated Values</div>
+                                <div class="export-title" data-table-i18n="exportCSV">Export as CSV</div>
+                                <div class="export-desc" data-table-i18n="exportCSVDescription">Comma-Separated Values</div>
                             </div>
                         </button>
-                        <button class="export-option" id="exportXLSX" type="button" role="menuitem" data-export-format="xlsx" aria-label="Download canonical Excel workbook">
+                            <button class="export-option" id="exportXLSX" type="button" role="menuitem" data-export-format="xlsx" aria-label="Download canonical Excel workbook" data-table-i18n-aria-label="downloadCanonicalExcel">
                             <span class="export-icon" aria-hidden="true">
                                 <svg class="export-svg" viewBox="0 0 24 24"><path d="M5 3h10l4 4v14H5z"/><path d="M15 3v5h5M8 12l5 6m0-6-5 6"/></svg>
                             </span>
                             <div class="export-details">
-                                <div class="export-title">Download Excel workbook</div>
-                                <div class="export-desc">Canonical XLSX with provenance</div>
+                                <div class="export-title" data-table-i18n="exportExcel">Download Excel workbook</div>
+                                <div class="export-desc" data-table-i18n="exportExcelDescription">Canonical XLSX with provenance</div>
                             </div>
                         </button>
                     </div>
                 </div>
-                <button class="btn btn-secondary" id="columnsBtn" title="Manage columns">
+                <button class="btn btn-secondary" id="columnsBtn" title="Manage columns" data-table-i18n-title="manageColumns">
                     <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M9 4v16M15 4v16"/></svg>
                     <span data-table-i18n="columns">Columns</span>
                 </button>
-                <button class="btn btn-secondary" id="refreshNowBtn" title="Reload data from the source">
+                <button class="btn btn-secondary" id="refreshNowBtn" title="Refresh source" data-table-i18n-title="refreshSource">
                     <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 7v5h-5"/><path d="M4 17v-5h5"/><path d="M18 9a7 7 0 0 0-12-2l-2 5M6 15a7 7 0 0 0 12 2l2-5"/></svg>
                     <span data-table-i18n="refresh">Refresh now</span>
                 </button>
-                <button class="btn btn-secondary event-log-button" id="eventLogBtn" title="Open event log">
+                <button class="btn btn-secondary event-log-button" id="eventLogBtn" title="Open event log" data-table-i18n-title="openEventLog">
                     <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 6h12M8 12h12M8 18h12"/><path d="M4 6h.01M4 12h.01M4 18h.01"/></svg>
                     <span data-table-i18n="logs">Logs</span> <span class="event-log-count" id="eventLogCount">0</span>
                 </button>
@@ -123,7 +123,7 @@
                 </table>
                 <div class="loading" id="loading">
                     <div class="spinner"></div>
-                    <p>Loading data...</p>
+                    <p data-table-i18n="loadingData">Loading data...</p>
                 </div>
                 <div class="empty-state" id="emptyState" style="display: none;">
                     <div class="empty-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 5h16v14H4z"/><path d="m4 13 4-4h8l4 4M8 13l2 2h4l2-2"/></svg></div>
@@ -132,13 +132,14 @@
             </div>
         </div>
 
-        <div class="row-context-menu" id="rowContextMenu" role="menu" aria-label="Row actions" hidden></div>
+        <div class="row-context-menu" id="rowContextMenu" role="menu" aria-label="Actions" data-table-i18n-aria-label="actions" hidden></div>
+        <div class="column-resize-guide" id="columnResizeGuide" aria-hidden="true" hidden></div>
 
         <div class="drop-overlay" id="dropOverlay" aria-hidden="true">
             <div class="drop-card">
                 <div class="drop-icon"><img class="drop-logo" src="/static/patris-api-icon.png" alt=""></div>
-                <strong data-drop-title>Drop database file</strong>
-                <span data-drop-message>Release a .db or .json file to load it in this viewer.</span>
+                <strong data-drop-title data-table-i18n="dropDatabase">Drop database file</strong>
+                <span data-drop-message data-table-i18n="dropDatabaseDescription">Release a .db or .json file to load it in this viewer.</span>
             </div>
         </div>
 
@@ -148,28 +149,29 @@
             <div class="settings-content">
                 <div class="settings-header">
                     <div>
-                        <h2 id="settingsTitle">Settings</h2>
+                        <h2 id="settingsTitle" data-table-i18n="settings">Settings</h2>
                         <p id="settingsConfigPath" class="settings-path"></p>
                     </div>
-                    <button class="btn btn-icon" id="closeSettings" type="button" title="Close" aria-label="Close">
-                        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12" /><path d="M18 6L6 18" /></svg>
-                    </button>
+                    <div class="dialog-actions">
+                        <button class="btn btn-icon dialog-menu-btn" type="button" data-dialog-menu="settingsPanel" title="More actions" aria-label="More actions" data-table-i18n-title="moreActions" data-table-i18n-aria-label="moreActions"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/></svg></button>
+                        <button class="btn btn-icon dialog-close-btn" id="closeSettings" type="button" title="Close" aria-label="Close" data-table-i18n-title="close" data-table-i18n-aria-label="close"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12" /><path d="M18 6L6 18" /></svg></button>
+                    </div>
                 </div>
-                <div class="settings-tabs" role="tablist" aria-label="Settings sections">
-                    <button class="settings-tab active" type="button" data-settings-tab="ui">Interface</button>
-                    <button class="settings-tab" type="button" data-settings-tab="server">Server</button>
-                    <button class="settings-tab" type="button" data-settings-tab="database">Database</button>
-                    <button class="settings-tab" type="button" data-settings-tab="notifications">Notifications</button>
-                    <button class="settings-tab" type="button" data-settings-tab="runtime">Runtime</button>
+                <div class="settings-tabs" role="tablist" aria-label="Settings sections" data-table-i18n-aria-label="settingsSections">
+                    <button class="settings-tab active" type="button" data-settings-tab="ui" data-table-i18n="interface">Interface</button>
+                    <button class="settings-tab" type="button" data-settings-tab="server" data-table-i18n="server">Server</button>
+                    <button class="settings-tab" type="button" data-settings-tab="database" data-table-i18n="database">Database</button>
+                    <button class="settings-tab" type="button" data-settings-tab="notifications" data-table-i18n="notifications">Notifications</button>
+                    <button class="settings-tab" type="button" data-settings-tab="runtime" data-table-i18n="runtime">Runtime</button>
                 </div>
                 <div class="settings-body">
                     <div class="settings-pane active" data-settings-pane="ui">
                         <div class="settings-grid">
-                             <label class="field-label">Theme
+                             <label class="field-label"><span data-table-i18n="theme">Theme</span>
                                 <select id="settingsTheme" class="select-input">
-                                    <option value="system">System</option>
-                                    <option value="light">Light</option>
-                                    <option value="dark">Dark</option>
+                                    <option value="system" data-table-i18n="system">System</option>
+                                    <option value="light" data-table-i18n="light">Light</option>
+                                    <option value="dark" data-table-i18n="dark">Dark</option>
                                 </select>
                              </label>
                             <label class="field-label"><span data-table-i18n="language">Language</span>
@@ -178,7 +180,7 @@
                                     <option value="fa">فارسی</option>
                                 </select>
                             </label>
-                            <label class="field-label">Records per page
+                            <label class="field-label"><span data-table-i18n="recordsPerPage">Records per page</span>
                                 <select id="pageSize" class="select-input">
                                     <option value="25">25</option>
                                     <option value="50">50</option>
@@ -186,42 +188,43 @@
                                     <option value="500">500</option>
                                 </select>
                             </label>
-                            <label class="field-label">Notification sound
+                            <label class="field-label"><span data-table-i18n="notificationSound">Notification sound</span>
                                 <select id="notificationSoundSource" class="select-input">
-                                    <option value="external" selected>External file</option>
-                                    <option value="generated">Generated melody</option>
+                                    <option value="external" selected data-table-i18n="externalFile">External file</option>
+                                    <option value="generated" data-table-i18n="generatedMelody">Generated melody</option>
                                 </select>
                             </label>
-                            <label class="field-label">Last update
+                            <label class="field-label"><span data-table-i18n="lastUpdate">Last update</span>
                                 <select id="lastUpdateDisplayMode" class="select-input">
-                                    <option value="both">Absolute and relative</option>
-                                    <option value="absolute">Absolute</option>
-                                    <option value="relative">Relative</option>
+                                    <option value="both" data-table-i18n="absoluteRelative">Absolute and relative</option>
+                                    <option value="absolute" data-table-i18n="absolute">Absolute</option>
+                                    <option value="relative" data-table-i18n="relative">Relative</option>
                                 </select>
                             </label>
                         </div>
                         <div class="settings-group">
-                            <label class="checkbox-label"><input type="checkbox" id="showFooter" checked><span>Show footer</span></label>
-                            <label class="checkbox-label"><input type="checkbox" id="autoScrollToChanged"><span>Auto-scroll to changed items</span></label>
-                            <label class="checkbox-label"><input type="checkbox" id="highlightChanges" checked><span>Highlight changed items</span></label>
-                            <label class="checkbox-label"><input type="checkbox" id="rtlTextDirection"><span>Display table text right-to-left</span></label>
-                            <label class="checkbox-label"><input type="checkbox" id="enablePagination"><span>Enable pagination</span></label>
-                            <label class="checkbox-label"><input type="checkbox" id="playNotificationSound"><span>Play notification sound on updates</span></label>
+                            <label class="checkbox-label"><input type="checkbox" id="showFooter" checked><span data-table-i18n="showFooter">Show footer</span></label>
+                            <label class="checkbox-label"><input type="checkbox" id="autoScrollToChanged"><span data-table-i18n="autoScrollChanged">Auto-scroll to changed items</span></label>
+                            <label class="checkbox-label"><input type="checkbox" id="highlightChanges" checked><span data-table-i18n="highlightChanged">Highlight changed items</span></label>
+                            <label class="checkbox-label"><input type="checkbox" id="rtlTextDirection"><span data-table-i18n="rtlTableText">Display table text right-to-left</span></label>
+                            <label class="checkbox-label"><input type="checkbox" id="freezeFirstColumn" checked><span data-table-i18n="freezeFirstColumn">Freeze the first data column</span></label>
+                            <label class="checkbox-label"><input type="checkbox" id="enablePagination"><span data-table-i18n="enablePagination">Enable pagination</span></label>
+                            <label class="checkbox-label"><input type="checkbox" id="playNotificationSound"><span data-table-i18n="playUpdateSound">Play notification sound on updates</span></label>
                         </div>
                         <div class="settings-subsection">
                             <h3 data-table-i18n="rowColoring">Row coloring</h3>
                             <div class="settings-grid color-grid">
                                 <label class="checkbox-label color-toggle"><input type="checkbox" id="enableRowColoring" checked><span data-table-i18n="enableRowColoring">Enable row coloring rules</span></label>
-                                <label class="field-label">Group rows
+                                <label class="field-label"><span data-table-i18n="groupRows">Group rows</span>
                                     <input id="rowColorGroup" class="color-input" type="color" value="#6366f1">
                                 </label>
-                                <label class="field-label">Subgroup rows
+                                <label class="field-label"><span data-table-i18n="subgroupRows">Subgroup rows</span>
                                     <input id="rowColorSubgroup" class="color-input" type="color" value="#0ea5e9">
                                 </label>
-                                <label class="field-label">No stock text
+                                <label class="field-label"><span data-table-i18n="noStockText">No-stock text</span>
                                     <input id="rowColorNoStock" class="color-input" type="color" value="#6b7280">
                                 </label>
-                                <label class="field-label">Stock accent
+                                <label class="field-label"><span data-table-i18n="stockAccent">Stock accent</span>
                                     <input id="rowColorHasStock" class="color-input" type="color" value="#10b981">
                                 </label>
                             </div>
@@ -247,69 +250,69 @@
                             </fieldset>
                         </div>
                         <div class="button-row">
-                            <button class="btn btn-secondary" id="testNotificationSound" type="button">Test sound</button>
-                            <button class="btn btn-secondary" id="testNativeToast" type="button">Test toast</button>
+                            <button class="btn btn-secondary" id="testNotificationSound" type="button" data-table-i18n="testSound">Test sound</button>
+                            <button class="btn btn-secondary" id="testNativeToast" type="button" data-table-i18n="testToast">Test toast</button>
                         </div>
                     </div>
                     <div class="settings-pane" data-settings-pane="server">
                         <div class="settings-grid">
-                            <label class="field-label">Host
+                            <label class="field-label"><span data-table-i18n="host">Host</span>
                                 <input id="serverHost" class="text-input" type="text" autocomplete="off">
                             </label>
-                            <label class="field-label">Port
+                            <label class="field-label"><span data-table-i18n="port">Port</span>
                                 <input id="serverPort" class="text-input" type="number" min="1" max="65535">
                             </label>
-                            <label class="field-label">Debounce
+                            <label class="field-label"><span data-table-i18n="debounce">Debounce</span>
                                 <input id="serverDebounce" class="text-input" type="text" placeholder="500ms">
                             </label>
                         </div>
-                        <label class="checkbox-label"><input type="checkbox" id="serverWatch"><span>Watch source and broadcast updates</span></label>
+                        <label class="checkbox-label"><input type="checkbox" id="serverWatch"><span data-table-i18n="watchSource">Watch source and broadcast updates</span></label>
                     </div>
                     <div class="settings-pane" data-settings-pane="database">
                         <div class="settings-grid">
-                            <label class="field-label wide">Database path or URL
+                            <label class="field-label wide"><span data-table-i18n="databasePath">Database path or URL</span>
                                 <input id="databasePath" class="text-input" type="text" autocomplete="off">
                             </label>
-                            <label class="field-label wide">Custom charmap
+                            <label class="field-label wide"><span data-table-i18n="customCharmap">Custom character map</span>
                                 <input id="databaseCharmap" class="text-input" type="text" autocomplete="off">
                             </label>
                         </div>
-                        <label class="checkbox-label"><input type="checkbox" id="directAccess"><span>Read database directly without temp copy</span></label>
-                        <label class="checkbox-label"><input type="checkbox" id="rtlConversion"><span>Enable opt-in RTL conversion</span></label>
+                        <label class="checkbox-label"><input type="checkbox" id="directAccess"><span data-table-i18n="directAccess">Read database directly without a temporary copy</span></label>
+                        <label class="checkbox-label"><input type="checkbox" id="rtlConversion"><span data-table-i18n="rtlConversion">Enable opt-in RTL conversion</span></label>
                     </div>
                     <div class="settings-pane" data-settings-pane="notifications">
                         <div class="settings-grid">
-                            <label class="field-label">Max detailed rows
+                            <label class="field-label"><span data-table-i18n="maxDetailedRows">Maximum detailed rows</span>
                                 <input id="notifyMaxRows" class="text-input" type="number" min="1" max="20">
                             </label>
                         </div>
-                        <label class="checkbox-label"><input type="checkbox" id="notifyEnabled"><span>Enable event notifications</span></label>
-                        <label class="checkbox-label"><input type="checkbox" id="notifyNative"><span>Show native OS toast messages</span></label>
-                        <label class="checkbox-label"><input type="checkbox" id="notifyInApp"><span>Relay notifications to connected web clients</span></label>
-                        <label class="checkbox-label"><input type="checkbox" id="notifyClientConnected"><span>Client connected</span></label>
-                        <label class="checkbox-label"><input type="checkbox" id="notifyClientDisconnected"><span>Client disconnected</span></label>
-                        <label class="checkbox-label"><input type="checkbox" id="notifyFileUpdated"><span>Source file updated with old/new hash</span></label>
-                        <label class="checkbox-label"><input type="checkbox" id="notifyRowUpdated"><span>Rows changed</span></label>
-                        <label class="checkbox-label"><input type="checkbox" id="notifyIncludeRowValues"><span>Include old/new row values in notifications</span></label>
+                        <label class="checkbox-label"><input type="checkbox" id="notifyEnabled"><span data-table-i18n="enableNotifications">Enable event notifications</span></label>
+                        <label class="checkbox-label"><input type="checkbox" id="notifyNative"><span data-table-i18n="nativeToasts">Show native OS toast messages</span></label>
+                        <label class="checkbox-label"><input type="checkbox" id="notifyInApp"><span data-table-i18n="relayNotifications">Relay notifications to connected web clients</span></label>
+                        <label class="checkbox-label"><input type="checkbox" id="notifyClientConnected"><span data-table-i18n="clientConnected">Client connected</span></label>
+                        <label class="checkbox-label"><input type="checkbox" id="notifyClientDisconnected"><span data-table-i18n="clientDisconnected">Client disconnected</span></label>
+                        <label class="checkbox-label"><input type="checkbox" id="notifyFileUpdated"><span data-table-i18n="sourceFileUpdated">Source file updated with old/new hash</span></label>
+                        <label class="checkbox-label"><input type="checkbox" id="notifyRowUpdated"><span data-table-i18n="rowsChanged">Rows changed</span></label>
+                        <label class="checkbox-label"><input type="checkbox" id="notifyIncludeRowValues"><span data-table-i18n="includeRowValues">Include old/new row values in notifications</span></label>
                     </div>
                     <div class="settings-pane" data-settings-pane="runtime">
                         <div class="settings-grid">
-                            <label class="field-label wide">Temp directory
+                            <label class="field-label wide"><span data-table-i18n="tempDirectory">Temporary directory</span>
                                 <input id="runtimeTempDir" class="text-input" type="text" placeholder="system">
                             </label>
-                            <label class="field-label">Temp strategy
+                            <label class="field-label"><span data-table-i18n="tempStrategy">Temporary-file strategy</span>
                                 <select id="runtimeTempStrategy" class="text-input">
-                                    <option value="auto">Auto</option>
-                                    <option value="system">System temp</option>
-                                    <option value="memory">Memory temp</option>
+                                    <option value="auto" data-table-i18n="automatic">Automatic</option>
+                                    <option value="system" data-table-i18n="systemTemp">System temporary directory</option>
+                                    <option value="memory" data-table-i18n="memoryTemp">Memory temporary directory</option>
                                 </select>
                             </label>
-                            <label class="field-label">Memory temp limit (MiB)
+                            <label class="field-label"><span data-table-i18n="memoryTempLimit">Memory temporary limit (MiB)</span>
                                 <input id="runtimeTempMemoryLimitMB" class="text-input" type="number" min="1" max="4096" step="1" placeholder="100">
                             </label>
                         </div>
-                        <label class="checkbox-label"><input type="checkbox" id="runtimeDebug"><span>Enable debug tools and custom charmap previews</span></label>
-                        <p class="settings-help">Use <code>system</code> for the operating system temp directory. Auto prefers <code>/dev/shm</code> on Linux for known-size files within the memory limit.</p>
+                        <label class="checkbox-label"><input type="checkbox" id="runtimeDebug"><span data-table-i18n="debugTools">Enable debug tools and custom character-map previews</span></label>
+                        <p class="settings-help" data-table-i18n="runtimeHelp">Use system for the operating-system temporary directory. Automatic mode prefers shared memory on Linux for known-size files within the limit.</p>
                     </div>
                 </div>
             </div>
@@ -319,23 +322,24 @@
             <div class="settings-content">
                 <div class="settings-header column-manager-header">
                     <div>
-                        <h2 id="columnsTitle">Column Visibility</h2>
-                        <p class="settings-path">Show, transform, and reorder columns. Stock warehouses are managed as one grouped band.</p>
+                        <h2 id="columnsTitle" data-table-i18n="columnVisibility">Column Visibility</h2>
+                        <p class="settings-path" data-table-i18n="columnVisibilityDescription">Show, label, and reorder columns. Each warehouse remains an independent stock column.</p>
                     </div>
                     <div class="dialog-actions">
-                        <button class="btn btn-secondary" id="showAllColumns" type="button">Show all</button>
-                        <button class="btn btn-secondary" id="hideAllColumns" type="button">Hide all</button>
+                        <button class="btn btn-secondary" id="showAllColumns" type="button" data-table-i18n="showAll">Show all</button>
+                        <button class="btn btn-secondary" id="hideAllColumns" type="button" data-table-i18n="hideAll">Hide all</button>
                         <button class="btn btn-secondary" id="resetColumnWidths" type="button" data-table-i18n="resetColumnWidths">Reset widths</button>
-                        <button class="btn btn-icon dialog-close-btn" id="closeColumns" type="button" title="Close" aria-label="Close"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12" /><path d="M18 6L6 18" /></svg></button>
+                        <button class="btn btn-icon dialog-menu-btn" type="button" data-dialog-menu="columnsPanel" title="More actions" aria-label="More actions" data-table-i18n-title="moreActions" data-table-i18n-aria-label="moreActions"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/></svg></button>
+                        <button class="btn btn-icon dialog-close-btn" id="closeColumns" type="button" title="Close" aria-label="Close" data-table-i18n-title="close" data-table-i18n-aria-label="close"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12" /><path d="M18 6L6 18" /></svg></button>
                     </div>
                 </div>
                 <div class="settings-body">
                     <div class="column-manager">
                         <div class="column-manager-row column-manager-head">
-                            <span>Visible</span>
-                            <span>Source key</span>
-                            <span>Display label</span>
-                            <span>Type</span>
+                            <span data-table-i18n="visible">Visible</span>
+                            <span data-table-i18n="sourceKey">Source key</span>
+                            <span data-table-i18n="displayLabel">Display label</span>
+                            <span data-table-i18n="type">Type</span>
                         </div>
                         <div class="column-manager-rows" id="columnCheckboxes"></div>
                     </div>
@@ -347,12 +351,12 @@
             <div class="settings-content">
                 <div class="settings-header">
                     <div>
-                        <h2 id="connectionTitle">Connection Status</h2>
-                        <p class="settings-path">Live WebSocket, source, and process status.</p>
+                        <h2 id="connectionTitle" data-table-i18n="connectionStatus">Connection Status</h2>
+                        <p class="settings-path" data-table-i18n="connectionDescription">Live WebSocket, source, and process status.</p>
                     </div>
                     <div class="dialog-actions">
-                        <button class="btn btn-icon dialog-menu-btn" type="button" title="More actions" data-dialog-menu="connectionPanel" aria-label="More actions"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/></svg></button>
-                        <button class="btn btn-icon dialog-close-btn" id="closeConnection" type="button" title="Close" aria-label="Close"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12" /><path d="M18 6L6 18" /></svg></button>
+                        <button class="btn btn-icon dialog-menu-btn" type="button" title="More actions" data-dialog-menu="connectionPanel" aria-label="More actions" data-table-i18n-title="moreActions" data-table-i18n-aria-label="moreActions"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/></svg></button>
+                        <button class="btn btn-icon dialog-close-btn" id="closeConnection" type="button" title="Close" aria-label="Close" data-table-i18n-title="close" data-table-i18n-aria-label="close"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12" /><path d="M18 6L6 18" /></svg></button>
                     </div>
                 </div>
                 <div class="settings-body">
@@ -371,8 +375,8 @@
                     </div>
                     <div class="dialog-actions">
                         <button class="btn btn-secondary" id="clearEventLog" type="button" data-table-i18n="eventLogClear">Clear</button>
-                        <button class="btn btn-icon dialog-menu-btn" type="button" title="More actions" data-dialog-menu="eventLogPanel" aria-label="More actions"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/></svg></button>
-                        <button class="btn btn-icon dialog-close-btn" id="closeEventLog" type="button" title="Close" aria-label="Close"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12" /><path d="M18 6L6 18" /></svg></button>
+                        <button class="btn btn-icon dialog-menu-btn" type="button" title="More actions" data-dialog-menu="eventLogPanel" aria-label="More actions" data-table-i18n-title="moreActions" data-table-i18n-aria-label="moreActions"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/></svg></button>
+                        <button class="btn btn-icon dialog-close-btn" id="closeEventLog" type="button" title="Close" aria-label="Close" data-table-i18n-title="close" data-table-i18n-aria-label="close"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12" /><path d="M18 6L6 18" /></svg></button>
                     </div>
                 </div>
                 <div class="settings-body">
@@ -385,11 +389,14 @@
         <div class="inspector-panel" id="inspectorPanel">
             <div class="inspector-content">
                 <div class="inspector-header">
-                    <h2>Record Inspector</h2>
-                    <button class="btn btn-icon" id="closeInspector" type="button" title="Close" aria-label="Close"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12" /><path d="M18 6L6 18" /></svg></button>
+                    <h2 data-table-i18n="recordInspector">Record Inspector</h2>
+                    <div class="dialog-actions">
+                    <button class="btn btn-icon dialog-menu-btn" type="button" data-dialog-menu="inspectorPanel" title="More actions" aria-label="More actions" data-table-i18n-title="moreActions" data-table-i18n-aria-label="moreActions"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/></svg></button>
+                    <button class="btn btn-icon dialog-close-btn" id="closeInspector" type="button" title="Close" aria-label="Close" data-table-i18n-title="close" data-table-i18n-aria-label="close"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12" /><path d="M18 6L6 18" /></svg></button>
+                    </div>
                 </div>
                 <div class="inspector-body" id="inspectorBody">
-                    <p class="text-muted">Select a record to inspect</p>
+                    <p class="text-muted" data-table-i18n="selectRecord">Select a record to inspect</p>
                 </div>
             </div>
         </div>
@@ -397,20 +404,20 @@
         <footer class="footer" id="appFooter">
             <div class="footer-content">
                 <div class="footer-section">
-                    <span class="footer-label">File:</span>
+                    <span class="footer-label"><span data-table-i18n="file">File</span>:</span>
                     <span class="footer-value" id="footerFile">—</span>
                 </div>
                 <div class="footer-section">
-                    <span class="footer-label">Last Update:</span>
+                    <span class="footer-label"><span data-table-i18n="lastUpdate">Last update</span>:</span>
                     <span class="footer-value" id="footerLastUpdate">—</span>
                 </div>
                 <div class="footer-section">
-                    <span class="footer-label">Records:</span>
+                    <span class="footer-label"><span data-table-i18n="records">Records</span>:</span>
                     <span class="footer-value" id="footerRecordCount">0</span>
                 </div>
                 <div class="footer-section">
-                    <span class="footer-label">Connection:</span>
-                    <button class="status footer-status clickable-status" id="footerConnectionButton" type="button" title="Connection details">
+                    <span class="footer-label"><span data-table-i18n="connection">Connection</span>:</span>
+                    <button class="status footer-status clickable-status" id="footerConnectionButton" type="button" title="Connection details" data-table-i18n-title="connectionDetails">
                         <span class="status-indicator" id="footerStatusIndicator"></span>
                         <span class="footer-value" id="footerConnection">Connecting...</span>
                     </button>
@@ -420,7 +427,7 @@
                     <span class="process-status footer-process-status" id="footerProcessStatus">Checking Patris81...</span>
                 </div>
                 <div class="footer-section footer-actions">
-                    <button class="btn btn-icon footer-collapse" id="footerCollapseBtn" type="button" title="Hide footer" aria-label="Hide footer">
+                <button class="btn btn-icon footer-collapse" id="footerCollapseBtn" type="button" title="Hide footer" aria-label="Hide footer" data-table-i18n-title="hideFooter" data-table-i18n-aria-label="hideFooter">
                         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 9l6 6 6-6" /></svg>
                     </button>
                 </div>

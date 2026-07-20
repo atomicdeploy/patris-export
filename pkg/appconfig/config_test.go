@@ -135,6 +135,7 @@ func TestUITableUXPersistsThroughConfigPath(t *testing.T) {
 		cfg.UI.Language = "fa"
 		cfg.UI.RTLTextDirection = true
 		cfg.UI.EnableRowColoring = false
+		cfg.UI.FreezeFirstColumn = false
 		cfg.UI.ColumnWidths = map[string]int{"Code": 333, "product_code ": 444, "product_code": 211, "Name": 180, "name": 999}
 		cfg.UI.RowIconRules = []RowIconRule{{
 			ID: "missing-price", Field: "final_price", Operator: "empty",
@@ -150,8 +151,8 @@ func TestUITableUXPersistsThroughConfigPath(t *testing.T) {
 		t.Fatalf("reload failed: %v", err)
 	}
 	ui := reloaded.Get().UI
-	if ui.Language != "fa" || !ui.RTLTextDirection || ui.EnableRowColoring {
-		t.Fatalf("language, direction, or independent coloring toggle was not preserved: %+v", ui)
+	if ui.Language != "fa" || !ui.RTLTextDirection || ui.EnableRowColoring || ui.FreezeFirstColumn {
+		t.Fatalf("language, direction, coloring, or freeze toggle was not preserved: %+v", ui)
 	}
 	if ui.ColumnWidths["product_code"] != 211 || ui.ColumnWidths["name"] != 480 {
 		t.Fatalf("canonical column widths were not persisted and clamped: %+v", ui.ColumnWidths)

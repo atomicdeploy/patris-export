@@ -1,6 +1,55 @@
 export const MIN_COLUMN_WIDTH = 80;
 export const MAX_COLUMN_WIDTH = 480;
 export const COLUMN_RESIZE_STEP = 12;
+export const WAREHOUSE_FIELD_PREFIX = 'warehouse_stock::';
+
+const COLUMN_LABELS = Object.freeze({
+    product_code: Object.freeze({ en: 'Code', fa: 'کد' }),
+    category_code: Object.freeze({ en: 'Category Code', fa: 'کد دسته‌بندی' }),
+    name: Object.freeze({ en: 'Name', fa: 'نام' }),
+    part_number: Object.freeze({ en: 'Part Number', fa: 'پارت نامبر' }),
+    serial: Object.freeze({ en: 'Serial Number', fa: 'شماره سریال' }),
+    unit: Object.freeze({ en: 'Unit', fa: 'واحد' }),
+    sale_price_source: Object.freeze({ en: 'Sale Price', fa: 'قیمت فروش' }),
+    purchase_price_source: Object.freeze({ en: 'Purchase Price', fa: 'قیمت خرید' }),
+    total_stock: Object.freeze({ en: 'Total Stock', fa: 'موجودی کل' }),
+    minimum_stock: Object.freeze({ en: 'Minimum Stock', fa: 'حداقل موجودی' }),
+    foreign_currency: Object.freeze({ en: 'Foreign Currency', fa: 'ارز خارجی' }),
+    foreign_price: Object.freeze({ en: 'Foreign Price', fa: 'قیمت ارزی' }),
+    weight_grams: Object.freeze({ en: 'Weight (g)', fa: 'وزن (گرم)' }),
+    location: Object.freeze({ en: 'Location', fa: 'مکان' }),
+    shipping_method_id: Object.freeze({ en: 'Shipping Method', fa: 'روش حمل' }),
+    import_freight_method_id: Object.freeze({ en: 'Shipping Method', fa: 'روش حمل' }),
+    shipping_price_per_kg: Object.freeze({ en: 'Shipping Rate per kg', fa: 'نرخ حمل هر کیلوگرم' }),
+    shipping_price_per_kg_currency: Object.freeze({ en: 'Shipping Rate Currency (CNY/IRR)', fa: 'ارز نرخ حمل (یوان/ریال)' }),
+    markup_percent: Object.freeze({ en: 'Profit Margin (%)', fa: 'حاشیه سود (درصد)' }),
+    irt_per_cny: Object.freeze({ en: 'CNY Rate (IRT)', fa: 'نرخ یوان (تومان)' }),
+    pricing_catalog_revision: Object.freeze({ en: 'Pricing Revision', fa: 'نسخه قیمت‌گذاری' }),
+    pricing_catalog_status: Object.freeze({ en: 'Pricing Status', fa: 'وضعیت قیمت‌گذاری' }),
+    currency_effective_date: Object.freeze({ en: 'Currency Effective Date', fa: 'تاریخ اعمال نرخ ارز' }),
+    final_price: Object.freeze({ en: 'Final Price (IRT)', fa: 'قیمت نهایی (تومان)' }),
+    formula_version: Object.freeze({ en: 'Formula Version', fa: 'نسخه فرمول' }),
+    source_updated_at: Object.freeze({ en: 'Updated At', fa: 'زمان به‌روزرسانی' }),
+    warnings: Object.freeze({ en: 'Warnings', fa: 'هشدارها' }),
+    record_hash: Object.freeze({ en: 'Record Hash', fa: 'هش رکورد' }),
+    description: Object.freeze({ en: 'Description', fa: 'شرح' }),
+    sharh: Object.freeze({ en: 'Description', fa: 'شرح' }),
+    sharh1: Object.freeze({ en: 'Description', fa: 'شرح' }),
+    sharh2: Object.freeze({ en: 'Additional Description', fa: 'شرح تکمیلی' }),
+    allanbar: Object.freeze({ en: 'Total Stock', fa: 'موجودی کل' }),
+    dates: Object.freeze({ en: 'Updated Date', fa: 'تاریخ به‌روزرسانی' }),
+    forosh: Object.freeze({ en: 'Sale Price', fa: 'قیمت فروش' }),
+    invahed: Object.freeze({ en: 'Units per Package', fa: 'تعداد در واحد' }),
+    kharyd: Object.freeze({ en: 'Purchase Price', fa: 'قیمت خرید' }),
+    kharyd_e: Object.freeze({ en: 'Purchase Price (E)', fa: 'قیمت خرید (E)' }),
+    sefaresh: Object.freeze({ en: 'Minimum Stock', fa: 'حد سفارش' }),
+    tedad_k: Object.freeze({ en: 'Package Quantity', fa: 'تعداد بسته' }),
+    vahed: Object.freeze({ en: 'Unit', fa: 'واحد' })
+});
+
+const LEGACY_DEFAULT_COLUMN_LABELS = new Set([
+    'anbar', 'code', 'name', 'stock', 'warehouse', 'warehouse stock'
+]);
 
 export const ROW_ICON_NAMES = [
     'warning',
@@ -67,6 +116,20 @@ const TABLE_MESSAGES = {
     en: {
         products: 'Products',
         categories: 'Categories',
+        settings: 'Settings',
+        goHome: 'Go to home',
+        currentSourceFile: 'Current source file',
+        connectionDetails: 'Connection details',
+        toggleFooter: 'Toggle footer',
+        hideFooter: 'Hide footer',
+        toggleTheme: 'Toggle theme',
+        catalogRecordType: 'Catalog record type',
+        searchShortcut: 'Press F2 to focus search',
+        exportData: 'Export data',
+        exportFormats: 'Export formats',
+        downloadCanonicalExcel: 'Download canonical Excel workbook',
+        settingsSections: 'Settings sections',
+        recordInspector: 'Record Inspector',
         export: 'Export',
         columns: 'Columns',
         refresh: 'Refresh now',
@@ -96,6 +159,8 @@ const TABLE_MESSAGES = {
         eventLogDetailsExpired: 'Detailed row values were compacted; the original counts remain available.',
         total: 'Total',
         filtered: 'Filtered',
+        records: 'Records',
+        connection: 'Connection',
         allFields: 'All fields',
         all: 'All',
         any: 'Any',
@@ -118,15 +183,182 @@ const TABLE_MESSAGES = {
         selectedCount: '{count} selected',
         clearFilters: 'Clear',
         clearAllFilters: 'Clear all filters',
+        filterColumn: 'Filter {column}',
+        filterColumnText: 'Filter {column} text',
+        exactOrRangeFilter: '{column} exact or range filter',
+        openRangeOptions: 'Open {column} range options',
+        minimumColumn: 'Minimum {column}',
+        maximumColumn: 'Maximum {column}',
+        minimum: 'Minimum',
+        maximum: 'Maximum',
+        from: 'From',
+        to: 'To',
+        sampledRange: 'Sampled range: {minimum} to {maximum}',
+        sampledValue: 'All sampled values are {value}',
+        exactRangeHelp: 'Type an exact value, a range such as {minimum}-{maximum}, >=value, or <=value',
+        jalaliDateFormat: 'Jalali date, YY.MM.DD',
+        jalaliDateFrom: 'From {column} Jalali date',
+        jalaliDateTo: 'To {column} Jalali date',
+        jalaliDatePicker: 'Open {column} Jalali date picker',
+        noJalaliDates: 'No valid Jalali dates detected',
+        invalidJalaliDate: 'Use YY.MM.DD',
+        filterCodeType: 'Filter Code type',
+        filterCodeSegments: 'Filter Code group segments',
         resizeColumn: 'Resize {column} column',
         resizeHelp: 'Use Left and Right Arrow keys to resize. Press Home or double-click to reset.',
         resetColumnWidths: 'Reset widths',
+        resetColumnWidth: 'Reset column width',
         widthsReset: 'Column widths reset',
+        warehouseStock: 'Warehouse Stock',
+        warehouseVisibility: 'Warehouse visibility',
+        warehouseColumn: 'Warehouse {name}',
+        columnVisibility: 'Column Visibility',
+        columnVisibilityDescription: 'Show, label, and reorder columns. Each warehouse remains an independent stock column.',
+        visible: 'Visible',
+        sourceKey: 'Source key',
+        displayLabel: 'Display label',
+        type: 'Type',
+        showAll: 'Show all',
+        hideAll: 'Hide all',
+        alwaysVisible: 'Always visible',
+        sortAscending: 'Sort ascending',
+        sortDescending: 'Sort descending',
+        hideColumn: 'Hide column',
+        manageColumns: 'Manage columns',
+        headerActions: 'Column actions for {column}',
+        moreActions: 'More actions',
+        openSettings: 'Open settings',
+        openColumns: 'Open columns',
+        openConnection: 'Open connection status',
+        openEventLog: 'Open event log',
+        refreshSource: 'Refresh source',
+        copyStatus: 'Copy connection status',
+        copyEventLog: 'Copy event log JSON',
+        statusCopied: 'Connection status copied to the clipboard.',
+        eventLogCopied: 'Event log copied to the clipboard.',
+        freezeFirstColumn: 'Freeze the first data column',
         copied: 'Copied',
         codeCopied: 'Product code copied to the clipboard.',
         jsonCopied: 'Row JSON copied to the clipboard.',
         copyFailed: 'Clipboard access failed',
+        error: 'Error',
+        couldNotLoadPage: 'Could not load page.',
+        settingsSaveFailed: 'Settings save failed',
+        loadingSource: 'Loading source...',
+        uploadingSource: 'Uploading the file and switching connected viewers.',
+        unsupportedFile: 'Unsupported file',
+        unsupportedFileHelp: 'Drop a .db or .json file to switch the active source.',
+        sourceLoaded: 'Source loaded',
+        sourceLoadedMessage: '{file} is now active ({count} records).',
+        sourceSwitchFailed: 'Source switch failed',
+        updatingUI: 'Updating UI...',
+        updatingInterface: 'Updating interface',
+        updatingInterfaceMessage: 'A newer embedded web UI is available. Reloading now.',
+        nativeToastUnavailable: 'Native toast unavailable',
+        toastRequestFailed: 'Toast request failed',
+        refreshing: 'Refreshing...',
+        refreshRequested: 'Refresh requested',
+        refreshRequestedMessage: 'The backend is reloading the data source.',
+        refreshed: 'Refreshed',
+        refreshedMessage: 'Data was reloaded over HTTP.',
+        refreshFailed: 'Refresh failed',
+        settingsReloaded: 'Settings reloaded',
+        settingsReloadedMessage: 'Configuration file changes were applied.',
+        excelExportStarted: 'Excel export started',
+        excelExportStartedMessage: 'The canonical workbook includes records and non-secret provenance metadata.',
+        soundTest: 'Sound test',
+        soundTestMessage: 'Notification audio was triggered.',
+        patrisRunning: 'Patris81 running ({count})',
+        patrisNotRunning: 'Patris81 not running',
+        databaseLockedCount: 'DB locked ({count})',
+        databaseUnlocked: 'DB unlocked',
+        invalidNumberRange: 'Use a number, min-max, >=min, or <=max',
         language: 'Language',
+        file: 'File',
+        checkingPatris: 'Checking Patris81...',
+        connecting: 'Connecting...',
+        connected: 'Connected',
+        disconnected: 'Disconnected',
+        open: 'Open',
+        closing: 'Closing',
+        closed: 'Closed',
+        unknown: 'Unknown',
+        exportJSON: 'Export as JSON',
+        exportJSONDescription: 'JavaScript Object Notation',
+        exportCSV: 'Export as CSV',
+        exportCSVDescription: 'Comma-Separated Values',
+        exportExcel: 'Download Excel workbook',
+        exportExcelDescription: 'Canonical XLSX with provenance',
+        loadingData: 'Loading data...',
+        dropDatabase: 'Drop database file',
+        dropDatabaseDescription: 'Release a .db or .json file to load it in this viewer.',
+        interface: 'Interface',
+        server: 'Server',
+        database: 'Database',
+        notifications: 'Notifications',
+        runtime: 'Runtime',
+        theme: 'Theme',
+        system: 'System',
+        light: 'Light',
+        dark: 'Dark',
+        recordsPerPage: 'Records per page',
+        notificationSound: 'Notification sound',
+        externalFile: 'External file',
+        generatedMelody: 'Generated melody',
+        lastUpdate: 'Last update',
+        absoluteRelative: 'Absolute and relative',
+        absolute: 'Absolute',
+        relative: 'Relative',
+        showFooter: 'Show footer',
+        autoScrollChanged: 'Auto-scroll to changed items',
+        highlightChanged: 'Highlight changed items',
+        rtlTableText: 'Display table text right-to-left',
+        enablePagination: 'Enable pagination',
+        playUpdateSound: 'Play notification sound on updates',
+        groupRows: 'Group rows',
+        subgroupRows: 'Subgroup rows',
+        noStockText: 'No-stock text',
+        stockAccent: 'Stock accent',
+        testSound: 'Test sound',
+        testToast: 'Test toast',
+        host: 'Host',
+        port: 'Port',
+        debounce: 'Debounce',
+        watchSource: 'Watch source and broadcast updates',
+        databasePath: 'Database path or URL',
+        customCharmap: 'Custom character map',
+        directAccess: 'Read database directly without a temporary copy',
+        rtlConversion: 'Enable opt-in RTL conversion',
+        maxDetailedRows: 'Maximum detailed rows',
+        enableNotifications: 'Enable event notifications',
+        nativeToasts: 'Show native OS toast messages',
+        relayNotifications: 'Relay notifications to connected web clients',
+        clientConnected: 'Client connected',
+        clientDisconnected: 'Client disconnected',
+        sourceFileUpdated: 'Source file updated with old/new hash',
+        rowsChanged: 'Rows changed',
+        includeRowValues: 'Include old/new row values in notifications',
+        tempDirectory: 'Temporary directory',
+        tempStrategy: 'Temporary-file strategy',
+        automatic: 'Automatic',
+        systemTemp: 'System temporary directory',
+        memoryTemp: 'Memory temporary directory',
+        memoryTempLimit: 'Memory temporary limit (MiB)',
+        debugTools: 'Enable debug tools and custom character-map previews',
+        runtimeHelp: 'Use system for the operating-system temporary directory. Automatic mode prefers shared memory on Linux for known-size files within the limit.',
+        connectionStatus: 'Connection Status',
+        connectionDescription: 'Live WebSocket, source, and process status.',
+        status: 'Status',
+        webSocket: 'WebSocket',
+        source: 'Source',
+        databaseLock: 'Database lock',
+        running: 'Running',
+        notRunning: 'Not running',
+        locked: 'Locked',
+        unlocked: 'Unlocked',
+        notStarted: 'Not started',
+        selectRecord: 'Select a record to inspect',
+        close: 'Close',
         rowIcons: 'Conditional row icons',
         rowIconsHelp: 'The first enabled rule that matches a transformed canonical key wins.',
         enableRowIcons: 'Show conditional row icons',
@@ -178,6 +410,20 @@ const TABLE_MESSAGES = {
     fa: {
         products: 'محصولات',
         categories: 'دسته‌بندی‌ها',
+        settings: 'تنظیمات',
+        goHome: 'رفتن به صفحه اصلی',
+        currentSourceFile: 'فایل منبع فعلی',
+        connectionDetails: 'جزئیات اتصال',
+        toggleFooter: 'نمایش یا پنهان‌کردن نوار پایین',
+        hideFooter: 'پنهان‌کردن نوار پایین',
+        toggleTheme: 'تغییر پوسته',
+        catalogRecordType: 'نوع رکورد فهرست',
+        searchShortcut: 'برای تمرکز روی جست‌وجو F2 را بزنید',
+        exportData: 'خروجی گرفتن از داده‌ها',
+        exportFormats: 'قالب‌های خروجی',
+        downloadCanonicalExcel: 'دریافت فایل اکسل استاندارد',
+        settingsSections: 'بخش‌های تنظیمات',
+        recordInspector: 'بررسی رکورد',
         export: 'خروجی',
         columns: 'ستون‌ها',
         refresh: 'به‌روزرسانی',
@@ -207,6 +453,8 @@ const TABLE_MESSAGES = {
         eventLogDetailsExpired: 'جزئیات ردیف‌ها فشرده شده‌اند؛ شمارش اصلی همچنان در دسترس است.',
         total: 'کل',
         filtered: 'فیلترشده',
+        records: 'رکوردها',
+        connection: 'اتصال',
         allFields: 'همه فیلدها',
         all: 'همه',
         any: 'هر مقدار',
@@ -229,15 +477,182 @@ const TABLE_MESSAGES = {
         selectedCount: '{count} انتخاب‌شده',
         clearFilters: 'پاک‌کردن',
         clearAllFilters: 'پاک‌کردن همه فیلترها',
+        filterColumn: 'فیلتر ستون {column}',
+        filterColumnText: 'فیلتر متنی ستون {column}',
+        exactOrRangeFilter: 'فیلتر دقیق یا بازه‌ای ستون {column}',
+        openRangeOptions: 'بازکردن گزینه‌های بازه ستون {column}',
+        minimumColumn: 'کمینه {column}',
+        maximumColumn: 'بیشینه {column}',
+        minimum: 'کمینه',
+        maximum: 'بیشینه',
+        from: 'از',
+        to: 'تا',
+        sampledRange: 'بازه نمونه: {minimum} تا {maximum}',
+        sampledValue: 'همه مقادیر نمونه {value} هستند',
+        exactRangeHelp: 'یک مقدار دقیق، بازه‌ای مانند {minimum}-{maximum}، >=مقدار یا <=مقدار وارد کنید',
+        jalaliDateFormat: 'تاریخ شمسی با قالب YY.MM.DD',
+        jalaliDateFrom: 'تاریخ شمسی شروع ستون {column}',
+        jalaliDateTo: 'تاریخ شمسی پایان ستون {column}',
+        jalaliDatePicker: 'بازکردن انتخابگر تاریخ شمسی ستون {column}',
+        noJalaliDates: 'تاریخ شمسی معتبری پیدا نشد',
+        invalidJalaliDate: 'از قالب YY.MM.DD استفاده کنید',
+        filterCodeType: 'فیلتر نوع کد',
+        filterCodeSegments: 'فیلتر بخش‌های گروه کد',
         resizeColumn: 'تغییر اندازه ستون {column}',
         resizeHelp: 'برای تغییر اندازه از کلیدهای جهت استفاده کنید. برای بازنشانی Home را بزنید یا دوبار کلیک کنید.',
         resetColumnWidths: 'بازنشانی عرض‌ها',
+        resetColumnWidth: 'بازنشانی عرض ستون',
         widthsReset: 'عرض ستون‌ها بازنشانی شد',
+        warehouseStock: 'موجودی انبارها',
+        warehouseVisibility: 'نمایش انبارها',
+        warehouseColumn: 'انبار {name}',
+        columnVisibility: 'نمایش ستون‌ها',
+        columnVisibilityDescription: 'ستون‌ها را نمایش دهید، نام‌گذاری و مرتب کنید. موجودی هر انبار در ستون مستقل می‌ماند.',
+        visible: 'نمایش',
+        sourceKey: 'کلید منبع',
+        displayLabel: 'عنوان نمایشی',
+        type: 'نوع',
+        showAll: 'نمایش همه',
+        hideAll: 'پنهان‌کردن همه',
+        alwaysVisible: 'همیشه نمایش داده می‌شود',
+        sortAscending: 'مرتب‌سازی صعودی',
+        sortDescending: 'مرتب‌سازی نزولی',
+        hideColumn: 'پنهان‌کردن ستون',
+        manageColumns: 'مدیریت ستون‌ها',
+        headerActions: 'عملیات ستون {column}',
+        moreActions: 'عملیات بیشتر',
+        openSettings: 'بازکردن تنظیمات',
+        openColumns: 'بازکردن ستون‌ها',
+        openConnection: 'نمایش وضعیت اتصال',
+        openEventLog: 'بازکردن گزارش رویدادها',
+        refreshSource: 'به‌روزرسانی منبع',
+        copyStatus: 'کپی وضعیت اتصال',
+        copyEventLog: 'کپی JSON گزارش رویدادها',
+        statusCopied: 'وضعیت اتصال در کلیپ‌بورد کپی شد.',
+        eventLogCopied: 'JSON گزارش رویدادها در کلیپ‌بورد کپی شد.',
+        freezeFirstColumn: 'ثابت نگه‌داشتن اولین ستون داده',
         copied: 'کپی شد',
         codeCopied: 'کد محصول در کلیپ‌بورد کپی شد.',
         jsonCopied: 'JSON ردیف در کلیپ‌بورد کپی شد.',
         copyFailed: 'دسترسی به کلیپ‌بورد ناموفق بود',
+        error: 'خطا',
+        couldNotLoadPage: 'بارگذاری صفحه ممکن نشد.',
+        settingsSaveFailed: 'ذخیره تنظیمات ناموفق بود',
+        loadingSource: 'در حال بارگذاری منبع...',
+        uploadingSource: 'فایل در حال بارگذاری و نمایشگرهای متصل در حال تغییر منبع هستند.',
+        unsupportedFile: 'فایل پشتیبانی نمی‌شود',
+        unsupportedFileHelp: 'برای تغییر منبع فعال، یک فایل db. یا json. را رها کنید.',
+        sourceLoaded: 'منبع بارگذاری شد',
+        sourceLoadedMessage: '{file} اکنون فعال است ({count} رکورد).',
+        sourceSwitchFailed: 'تغییر منبع ناموفق بود',
+        updatingUI: 'در حال به‌روزرسانی رابط...',
+        updatingInterface: 'به‌روزرسانی رابط کاربری',
+        updatingInterfaceMessage: 'نسخه جدیدتری از رابط توکار موجود است؛ صفحه اکنون بازخوانی می‌شود.',
+        nativeToastUnavailable: 'اعلان بومی در دسترس نیست',
+        toastRequestFailed: 'درخواست اعلان ناموفق بود',
+        refreshing: 'در حال به‌روزرسانی...',
+        refreshRequested: 'به‌روزرسانی درخواست شد',
+        refreshRequestedMessage: 'بخش پشتیبان در حال بارگذاری دوباره منبع داده است.',
+        refreshed: 'به‌روزرسانی شد',
+        refreshedMessage: 'داده‌ها از طریق HTTP دوباره بارگذاری شدند.',
+        refreshFailed: 'به‌روزرسانی ناموفق بود',
+        settingsReloaded: 'تنظیمات دوباره بارگذاری شد',
+        settingsReloadedMessage: 'تغییرات فایل تنظیمات اعمال شد.',
+        excelExportStarted: 'ساخت خروجی اکسل آغاز شد',
+        excelExportStartedMessage: 'فایل استاندارد شامل رکوردها و اطلاعات غیرمحرمانه منبع است.',
+        soundTest: 'آزمایش صدا',
+        soundTestMessage: 'صدای اعلان پخش شد.',
+        patrisRunning: 'Patris81 در حال اجرا است ({count})',
+        patrisNotRunning: 'Patris81 اجرا نشده است',
+        databaseLockedCount: 'پایگاه داده قفل است ({count})',
+        databaseUnlocked: 'پایگاه داده آزاد است',
+        invalidNumberRange: 'یک عدد، بازه کمینه-بیشینه، >=کمینه یا <=بیشینه وارد کنید',
         language: 'زبان',
+        file: 'فایل',
+        checkingPatris: 'در حال بررسی Patris81...',
+        connecting: 'در حال اتصال...',
+        connected: 'متصل',
+        disconnected: 'قطع‌شده',
+        open: 'باز',
+        closing: 'در حال بسته‌شدن',
+        closed: 'بسته',
+        unknown: 'نامشخص',
+        exportJSON: 'خروجی JSON',
+        exportJSONDescription: 'قالب تبادل داده جاوااسکریپت',
+        exportCSV: 'خروجی CSV',
+        exportCSVDescription: 'مقادیر جداشده با ویرگول',
+        exportExcel: 'دریافت فایل اکسل',
+        exportExcelDescription: 'فایل استاندارد XLSX همراه با اطلاعات منبع',
+        loadingData: 'در حال بارگذاری داده‌ها...',
+        dropDatabase: 'فایل پایگاه داده را رها کنید',
+        dropDatabaseDescription: 'فایل db. یا json. را برای بارگذاری در این نمایشگر رها کنید.',
+        interface: 'رابط کاربری',
+        server: 'سرور',
+        database: 'پایگاه داده',
+        notifications: 'اعلان‌ها',
+        runtime: 'اجرای برنامه',
+        theme: 'پوسته',
+        system: 'سیستم',
+        light: 'روشن',
+        dark: 'تیره',
+        recordsPerPage: 'تعداد رکورد در صفحه',
+        notificationSound: 'صدای اعلان',
+        externalFile: 'فایل خارجی',
+        generatedMelody: 'آهنگ تولیدشده',
+        lastUpdate: 'آخرین به‌روزرسانی',
+        absoluteRelative: 'زمان دقیق و نسبی',
+        absolute: 'زمان دقیق',
+        relative: 'زمان نسبی',
+        showFooter: 'نمایش نوار پایین',
+        autoScrollChanged: 'حرکت خودکار به موارد تغییریافته',
+        highlightChanged: 'برجسته‌کردن موارد تغییریافته',
+        rtlTableText: 'نمایش متن جدول از راست به چپ',
+        enablePagination: 'فعال‌کردن صفحه‌بندی',
+        playUpdateSound: 'پخش صدای اعلان هنگام به‌روزرسانی',
+        groupRows: 'ردیف‌های گروه',
+        subgroupRows: 'ردیف‌های زیرگروه',
+        noStockText: 'متن کالای ناموجود',
+        stockAccent: 'نشان موجودی',
+        testSound: 'آزمایش صدا',
+        testToast: 'آزمایش اعلان',
+        host: 'میزبان',
+        port: 'درگاه',
+        debounce: 'تأخیر تجمیع',
+        watchSource: 'پایش منبع و ارسال به‌روزرسانی‌ها',
+        databasePath: 'مسیر یا نشانی پایگاه داده',
+        customCharmap: 'نگاشت نویسه سفارشی',
+        directAccess: 'خواندن مستقیم پایگاه داده بدون کپی موقت',
+        rtlConversion: 'فعال‌کردن اختیاری تبدیل راست‌به‌چپ',
+        maxDetailedRows: 'بیشترین ردیف دارای جزئیات',
+        enableNotifications: 'فعال‌کردن اعلان رویدادها',
+        nativeToasts: 'نمایش اعلان بومی سیستم‌عامل',
+        relayNotifications: 'ارسال اعلان به کاربران وب متصل',
+        clientConnected: 'کاربر متصل شد',
+        clientDisconnected: 'کاربر قطع شد',
+        sourceFileUpdated: 'فایل منبع با هش قبلی و جدید به‌روز شد',
+        rowsChanged: 'ردیف‌ها تغییر کردند',
+        includeRowValues: 'افزودن مقادیر قبلی و جدید ردیف‌ها به اعلان',
+        tempDirectory: 'پوشه موقت',
+        tempStrategy: 'روش استفاده از فضای موقت',
+        automatic: 'خودکار',
+        systemTemp: 'پوشه موقت سیستم',
+        memoryTemp: 'فضای موقت حافظه',
+        memoryTempLimit: 'سقف حافظه موقت (مگابایت)',
+        debugTools: 'فعال‌کردن ابزارهای اشکال‌زدایی و پیش‌نمایش نگاشت نویسه',
+        runtimeHelp: 'برای پوشه موقت سیستم‌عامل از system استفاده کنید. حالت خودکار در لینوکس برای فایل‌های دارای اندازه مشخص و در محدوده مجاز، حافظه اشتراکی را ترجیح می‌دهد.',
+        connectionStatus: 'وضعیت اتصال',
+        connectionDescription: 'وضعیت زنده وب‌سوکت، منبع و فرایند برنامه.',
+        status: 'وضعیت',
+        webSocket: 'وب‌سوکت',
+        source: 'منبع',
+        databaseLock: 'قفل پایگاه داده',
+        running: 'در حال اجرا',
+        notRunning: 'اجرا نشده',
+        locked: 'قفل‌شده',
+        unlocked: 'آزاد',
+        notStarted: 'شروع نشده',
+        selectRecord: 'برای بررسی، یک رکورد را انتخاب کنید',
+        close: 'بستن',
         rowIcons: 'آیکون شرطی ردیف',
         rowIconsHelp: 'اولین قانون فعال که با کلید استاندارد تبدیل‌شده مطابقت داشته باشد اعمال می‌شود.',
         enableRowIcons: 'نمایش آیکون‌های شرطی ردیف',
@@ -327,6 +742,17 @@ export function tableText(language, key, values = {}) {
         (text, [name, value]) => text.replaceAll(`{${name}}`, String(value)),
         template
     );
+}
+
+export function tableTranslationCoverage() {
+    const englishKeys = Object.keys(TABLE_MESSAGES.en);
+    const persianKeys = Object.keys(TABLE_MESSAGES.fa);
+    return {
+        english: englishKeys.length,
+        persian: persianKeys.length,
+        missingEnglish: persianKeys.filter(key => !Object.prototype.hasOwnProperty.call(TABLE_MESSAGES.en, key)),
+        missingPersian: englishKeys.filter(key => !Object.prototype.hasOwnProperty.call(TABLE_MESSAGES.fa, key))
+    };
 }
 
 export function iconMarkup(name, className = '') {
@@ -431,10 +857,93 @@ export function rovingTabIndexes(visibleKeys, preferredKey) {
     return (visibleKeys || []).map(key => key === active ? 0 : -1);
 }
 
+export function warehouseColumnField(name) {
+    return `${WAREHOUSE_FIELD_PREFIX}${encodeURIComponent(String(name ?? '').trim())}`;
+}
+
+export function warehouseColumnName(field) {
+    const source = String(field || '');
+    if (source.startsWith(WAREHOUSE_FIELD_PREFIX)) {
+        try {
+            return decodeURIComponent(source.slice(WAREHOUSE_FIELD_PREFIX.length));
+        } catch {
+            return source.slice(WAREHOUSE_FIELD_PREFIX.length);
+        }
+    }
+    const legacy = source.match(/^ANBAR(\d+)$/i);
+    return legacy ? legacy[1] : '';
+}
+
+export function isWarehouseColumnField(field) {
+    return String(field || '').startsWith(WAREHOUSE_FIELD_PREFIX) || /^ANBAR\d+$/i.test(String(field || ''));
+}
+
+export function deriveGridFields(records) {
+    const rows = Array.isArray(records) ? records.filter(record => record && typeof record === 'object') : [];
+    const sourceFields = [];
+    const seenFields = new Set();
+    const warehouseNames = new Set();
+    let legacyWarehouseCount = 0;
+
+    rows.forEach(record => {
+        Object.keys(record).forEach(field => {
+            if (!seenFields.has(field)) {
+                seenFields.add(field);
+                sourceFields.push(field);
+            }
+        });
+        if (record.warehouse_stock && typeof record.warehouse_stock === 'object' && !Array.isArray(record.warehouse_stock)) {
+            Object.keys(record.warehouse_stock).forEach(name => warehouseNames.add(name));
+        }
+        if (Array.isArray(record.ANBAR)) legacyWarehouseCount = Math.max(legacyWarehouseCount, record.ANBAR.length);
+    });
+
+    const identityField = sourceFields.includes('Code') ? 'Code'
+        : sourceFields.includes('product_code') ? 'product_code'
+            : sourceFields.includes('category_code') ? 'category_code' : sourceFields[0];
+    const nameField = sourceFields.find(field => canonicalColumnKey(field) === 'name');
+    const hiddenSources = new Set(['ANBAR', 'warehouse_stock']);
+    if (identityField === 'Code') hiddenSources.add('product_code');
+    const regularFields = sourceFields.filter(field => field !== identityField && field !== nameField && !hiddenSources.has(field));
+    const warehouseFields = warehouseNames.size > 0
+        ? [...warehouseNames]
+            .sort((left, right) => left.localeCompare(right, undefined, { numeric: true, sensitivity: 'base' }))
+            .map(warehouseColumnField)
+        : Array.from({ length: legacyWarehouseCount }, (_, index) => `ANBAR${index + 1}`);
+
+    return [identityField, nameField, ...regularFields, ...warehouseFields].filter(Boolean);
+}
+
+export function localizedColumnLabel(field, language = 'en', configuredLabel = '') {
+    const locale = tableLanguage(language);
+    const warehouse = warehouseColumnName(field);
+    if (warehouse) return warehouse;
+
+    const source = String(field || '').trim();
+    const canonical = canonicalColumnKey(source).toLowerCase();
+    const configured = String(configuredLabel || '').trim();
+    const humanized = humanizeColumnKey(source);
+    const configuredIsGenerated = configured.localeCompare(source, undefined, { sensitivity: 'base' }) === 0
+        || configured.localeCompare(humanized, undefined, { sensitivity: 'base' }) === 0;
+    if (configured && !configuredIsGenerated && !LEGACY_DEFAULT_COLUMN_LABELS.has(configured.toLowerCase())) return configured;
+    if (COLUMN_LABELS[canonical]) return COLUMN_LABELS[canonical][locale];
+    return humanized;
+}
+
+function humanizeColumnKey(field) {
+    return String(field || '')
+        .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+        .replace(/[_-]+/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .replace(/\b\w/g, letter => letter.toUpperCase());
+}
+
 export function defaultColumnWidth(field) {
     if (field === 'Code' || field === 'product_code') return 156;
     if (field === 'Name' || field === 'name') return 240;
-    if (/^ANBAR\d+$/i.test(field)) return 92;
+    if (isWarehouseColumnField(field)) return 112;
+    if (String(field).toLowerCase() === 'warnings') return 190;
     if (/description|warning|sharh|title|name/i.test(field)) return 220;
     return 144;
 }

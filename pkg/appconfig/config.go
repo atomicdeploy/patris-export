@@ -136,6 +136,7 @@ type UIConfig struct {
 	RowColorNoStock         string            `json:"row_color_no_stock" yaml:"row_color_no_stock" toml:"row_color_no_stock"`
 	RowColorHasStock        string            `json:"row_color_has_stock" yaml:"row_color_has_stock" toml:"row_color_has_stock"`
 	EnableRowIcons          bool              `json:"enable_row_icons" yaml:"enable_row_icons" toml:"enable_row_icons"`
+	FreezeFirstColumn       bool              `json:"freeze_first_column" yaml:"freeze_first_column" toml:"freeze_first_column"`
 	ColumnWidths            map[string]int    `json:"column_widths" yaml:"column_widths" toml:"column_widths"`
 	RowIconRules            []RowIconRule     `json:"row_icon_rules" yaml:"row_icon_rules" toml:"row_icon_rules"`
 	RowIconFallback         RowIconAppearance `json:"row_icon_fallback" yaml:"row_icon_fallback" toml:"row_icon_fallback"`
@@ -228,6 +229,7 @@ func Default() Config {
 			RowColorNoStock:         "#6b7280",
 			RowColorHasStock:        "#10b981",
 			EnableRowIcons:          true,
+			FreezeFirstColumn:       true,
 			ColumnWidths:            map[string]int{},
 			RowIconRules:            defaultRowIconRules(),
 			RowIconFallback: RowIconAppearance{
@@ -237,9 +239,10 @@ func Default() Config {
 			},
 		},
 		ColumnLabels: map[string]string{
-			"Code":  "Code",
-			"Name":  "Name",
-			"ANBAR": "Warehouse",
+			"Code":            "Code",
+			"Name":            "Name",
+			"ANBAR":           "Warehouse Stock",
+			"warehouse_stock": "Warehouse Stock",
 		},
 	}
 }

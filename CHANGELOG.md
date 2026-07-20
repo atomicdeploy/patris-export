@@ -14,6 +14,7 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   identify the selected backend and static packages omit the pxlib runtime DLL.
 - Copy-paste remote delivery recipes distinguish native REST/WordPress REST from JSON-RPC, legacy WordPress AJAX, and gRPC gateway adapters, including secret injection, idempotency, retry, failure, and replay guidance.
 - A dependency-free Node.js loopback adapter, local retryable mock receiver, sparse-payload tests, example configs, and a minimal gRPC HTTP-transcoding contract exercise non-native delivery without duplicating the Patris transformation pipeline.
+- The Web UI now provides localized header context menus, a full-table column-resize guide, optional sticky first-column behavior, and independently selectable warehouse columns under a two-row Warehouse Stock header.
 
 ### Changed
 
@@ -24,6 +25,7 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - Missing source/reference values are omitted, while `null` is preserved only when explicitly supplied upstream.
 - Successful product-sync responses must include typed status, identity, retry, pending, and deferred fields; missing or explicit-null fields fail closed.
 - Persisted custom headers cannot use any product-sync-secret name; receiver credentials remain environment-backed only.
+- English and Persian table labels now use human-readable source and canonical field names, Persian UI text consistently uses the embedded Vazirmatn font, and warning cells remain on one compact line.
 
 ### Fixed
 
@@ -33,6 +35,7 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - CGO and ALM build tags now compose instead of replacing one another, and
   static builds fail early with an actionable message when their pxlib archive
   is unavailable.
+- Dialog More menus now perform their advertised actions with consistent spacing, and warehouse stock is no longer collapsed into pill badges.
 
 ## [1.2.0] - 2026-07-17
 
