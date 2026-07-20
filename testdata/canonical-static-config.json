@@ -18,7 +18,8 @@
           {
             "id": "air_express",
             "enabled": true,
-            "price_per_kg_cny": 120
+            "price_per_kg": 120,
+            "currency": "CNY"
           }
         ],
         "assignments": {

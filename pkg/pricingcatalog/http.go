@@ -26,6 +26,9 @@ type catalogSnapshot struct {
 	methods               map[string]Method
 	explicitNulls         map[string]bool
 	methodPriceNulls      map[string]bool
+	methodCurrencyNulls   map[string]bool
+	methodPairPresent     map[string]bool
+	methodPairIncomplete  map[string]bool
 	fetchedAt             time.Time
 	warnings              []string
 }
@@ -410,9 +413,19 @@ func (p *httpProvider) resolve(ctx context.Context, code string, run *prefetchRu
 	if !exists {
 		resolution.Warnings = append(resolution.Warnings, "shipping_method_unknown")
 	} else {
-		resolution.ShippingPricePerKgCNY = cloneDecimal(method.PricePerKgCNY)
+		if catalog.methodPairPresent[resolution.MethodID] {
+			resolution.ShippingPricePerKg = cloneDecimal(method.PricePerKg)
+			resolution.ShippingPricePerKgCurrency = method.Currency
+			resolution.ShippingPricePairPresent = true
+		}
+		if catalog.methodPairIncomplete[resolution.MethodID] {
+			resolution.Warnings = append(resolution.Warnings, "shipping_price_per_kg_pair_incomplete")
+		}
 		if catalog.methodPriceNulls[resolution.MethodID] {
-			resolution.ExplicitNulls["shipping_price_per_kg_cny"] = true
+			resolution.ExplicitNulls["shipping_price_per_kg"] = true
+		}
+		if catalog.methodCurrencyNulls[resolution.MethodID] {
+			resolution.ExplicitNulls["shipping_price_per_kg_currency"] = true
 		}
 		if method.Enabled != nil && !*method.Enabled {
 			resolution.Warnings = append(resolution.Warnings, "shipping_method_disabled")
@@ -799,12 +812,24 @@ func (p *httpProvider) fetchCatalog(ctx context.Context) (*catalogSnapshot, erro
 	}
 	methods := make(map[string]Method, len(wire.Methods))
 	methodPriceNulls := make(map[string]bool)
+	methodCurrencyNulls := make(map[string]bool)
+	methodPairPresent := make(map[string]bool)
+	methodPairIncomplete := make(map[string]bool)
 	for index, method := range wire.Methods {
 		method.ID = strings.TrimSpace(method.ID)
+		method.Currency = normalizeShippingCurrency(method.Currency)
 		if method.ID != "" {
 			methods[method.ID] = method
-			if index < len(rawCatalog.Methods) && explicitJSONNulls(rawCatalog.Methods[index], "price_per_kg_cny")["price_per_kg_cny"] {
-				methodPriceNulls[method.ID] = true
+			if index < len(rawCatalog.Methods) {
+				var rawMethod map[string]json.RawMessage
+				_ = json.Unmarshal(rawCatalog.Methods[index], &rawMethod)
+				_, pricePresent := rawMethod["price_per_kg"]
+				_, currencyPresent := rawMethod["currency"]
+				methodPairPresent[method.ID] = pricePresent && currencyPresent
+				methodPairIncomplete[method.ID] = pricePresent != currencyPresent
+				nulls := explicitJSONNulls(rawCatalog.Methods[index], "price_per_kg", "currency")
+				methodPriceNulls[method.ID] = nulls["price_per_kg"]
+				methodCurrencyNulls[method.ID] = nulls["currency"]
 			}
 		}
 	}
@@ -816,6 +841,9 @@ func (p *httpProvider) fetchCatalog(ctx context.Context) (*catalogSnapshot, erro
 		methods:               methods,
 		explicitNulls:         explicitNulls,
 		methodPriceNulls:      methodPriceNulls,
+		methodCurrencyNulls:   methodCurrencyNulls,
+		methodPairPresent:     methodPairPresent,
+		methodPairIncomplete:  methodPairIncomplete,
 		warnings:              normalizedStrings(warnings),
 	}, nil
 }
@@ -1227,9 +1255,12 @@ func cloneCatalog(value *catalogSnapshot) *catalogSnapshot {
 	copy.warnings = append([]string(nil), value.warnings...)
 	copy.explicitNulls = cloneBoolMap(value.explicitNulls)
 	copy.methodPriceNulls = cloneBoolMap(value.methodPriceNulls)
+	copy.methodCurrencyNulls = cloneBoolMap(value.methodCurrencyNulls)
+	copy.methodPairPresent = cloneBoolMap(value.methodPairPresent)
+	copy.methodPairIncomplete = cloneBoolMap(value.methodPairIncomplete)
 	copy.methods = make(map[string]Method, len(value.methods))
 	for key, method := range value.methods {
-		method.PricePerKgCNY = cloneDecimal(method.PricePerKgCNY)
+		method.PricePerKg = cloneDecimal(method.PricePerKg)
 		if method.Enabled != nil {
 			enabled := *method.Enabled
 			method.Enabled = &enabled
