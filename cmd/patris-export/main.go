@@ -164,7 +164,7 @@ Supports Persian/Farsi encoding conversion and file watching.
 	convertCmd.Flags().StringVar(&sendMode, "send-mode", "", "Send update mode: changes or full")
 	convertCmd.Flags().StringVar(&sendCommand, "send-command", "", "Command to run for initial/watch updates; payload is written to stdin")
 	convertCmd.Flags().BoolVar(&sendInitial, "send-initial", true, "Send a full initial payload before watch updates")
-	convertCmd.Flags().StringVar(&sendSecretEnv, "send-product-sync-secret-env", "", "Environment-variable name containing the header-only Digitalogic product-sync secret")
+	convertCmd.Flags().StringVar(&sendSecretEnv, "send-product-sync-secret-env", "", "Environment-variable name containing the header-only product-sync secret")
 	convertCmd.Flags().IntVar(&sendAttempts, "send-retry-attempts", 0, "Total HTTP delivery attempts (default 1; use retries only with idempotent receivers)")
 	convertCmd.Flags().StringVar(&sendBackoff, "send-retry-backoff", "", "Delay between retryable HTTP delivery attempts (for example 1s)")
 

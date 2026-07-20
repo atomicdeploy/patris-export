@@ -37,10 +37,10 @@ type Config struct {
 	Command              []string          `json:"command,omitempty" yaml:"command,omitempty" toml:"command,omitempty"`
 }
 
-const productSyncSecretHeader = "X-Digitalogic-Product-Sync-Secret"
+const productSyncSecretHeader = "X-Patris-Product-Sync-Secret"
 
 // Receiver-reported product counts use a stable, architecture-independent
-// bound. The Digitalogic receiver may enforce a lower storage bound, but a
+// bound. A receiver may enforce a lower storage bound, but a
 // response above this limit is never safe to accept as delivery state.
 const maxReceiverReportedProducts uint64 = 1<<31 - 1
 
@@ -179,7 +179,7 @@ func Dispatch(ctx context.Context, cfg Config, event Event) error {
 }
 
 // DispatchWithResult sends through the shared HTTP/command update path and
-// returns Digitalogic receiver state when the destination supplies it.
+// returns product-sync receiver state when the destination supplies it.
 func DispatchWithResult(ctx context.Context, cfg Config, event Event) (DeliveryResult, error) {
 	cfg = Normalize(cfg)
 	if !cfg.Enabled {
@@ -332,8 +332,8 @@ func applyHeaders(req *http.Request, cfg Config, event Event, contract *canonica
 
 func validateSecretConfig(cfg Config, event Event) error {
 	for key := range cfg.Headers {
-		if strings.EqualFold(strings.TrimSpace(key), productSyncSecretHeader) {
-			return fmt.Errorf("%s is reserved; set product_sync_secret_env to an environment-variable name instead of storing the secret in headers", productSyncSecretHeader)
+		if isProductSyncSecretHeader(key) {
+			return fmt.Errorf("product-sync secret headers are reserved; set product_sync_secret_env to an environment-variable name instead of storing the secret in headers")
 		}
 	}
 	if cfg.ProductSyncSecretEnv == "" {
@@ -344,7 +344,7 @@ func validateSecretConfig(cfg Config, event Event) error {
 	}
 	contract := selectedContract(cfg, event)
 	if cfg.URL == "" || cfg.Format != "json" || contract == nil || contract.Schema != canonical.ContractName {
-		return fmt.Errorf("product_sync_secret_env requires an HTTP JSON digitalogic.product-sync contract destination")
+		return fmt.Errorf("product_sync_secret_env requires an HTTP JSON patris.product-sync contract destination")
 	}
 	endpoint, err := url.Parse(cfg.URL)
 	if err != nil || (endpoint.Scheme != "http" && endpoint.Scheme != "https") || endpoint.Host == "" {
@@ -357,6 +357,11 @@ func validateSecretConfig(cfg Config, event Event) error {
 		return fmt.Errorf("product-sync destination requires HTTPS except for loopback test or development hosts")
 	}
 	return nil
+}
+
+func isProductSyncSecretHeader(key string) bool {
+	key = strings.ToLower(strings.TrimSpace(key))
+	return key == "product-sync-secret" || strings.HasSuffix(key, "-product-sync-secret")
 }
 
 func isLoopbackHost(host string) bool {
@@ -389,17 +394,19 @@ func resolveProductSyncSecret(cfg Config) (string, error) {
 	return secret, nil
 }
 
+type receiverResponseData struct {
+	Status                 json.RawMessage `json:"status"`
+	EventID                json.RawMessage `json:"event_id"`
+	Retryable              json.RawMessage `json:"retryable"`
+	PendingProducts        json.RawMessage `json:"pending_products"`
+	DeferredProducts       json.RawMessage `json:"deferred_products"`
+	DeferredReconciliation json.RawMessage `json:"deferred_reconciliation"`
+}
+
 type receiverResponse struct {
-	Success *bool  `json:"success"`
-	Code    string `json:"code"`
-	Data    struct {
-		Status                 string          `json:"status"`
-		EventID                string          `json:"event_id"`
-		Retryable              bool            `json:"retryable"`
-		PendingProducts        int             `json:"pending_products"`
-		DeferredProducts       json.RawMessage `json:"deferred_products"`
-		DeferredReconciliation json.RawMessage `json:"deferred_reconciliation"`
-	} `json:"data"`
+	Success *bool                `json:"success"`
+	Code    string               `json:"code"`
+	Data    receiverResponseData `json:"data"`
 	Details struct {
 		Retryable bool `json:"retryable"`
 	} `json:"details"`
@@ -412,33 +419,24 @@ func classifyHTTPResponse(result DeliveryResult, body []byte, contract *canonica
 	receiverRejected := false
 	var receiverStateError error
 	if decodedOK {
-		deferredProducts, err := receiverProductCount(decoded.Data.DeferredProducts)
-		if err == nil {
-			err = validateDeferredReconciliation(decoded.Data.DeferredReconciliation, deferredProducts)
-		}
-		if err != nil {
-			receiverStateError = err
-		} else {
-			result.Status = safeToken(decoded.Data.Status)
-			result.EventID = safeToken(decoded.Data.EventID)
-			result.PendingProducts = decoded.Data.PendingProducts
-			result.DeferredProducts = deferredProducts
-			result.Retryable = decoded.Data.Retryable
-			if contract != nil && result.EventID != "" && result.EventID != contract.EventID {
+		if *decoded.Success {
+			if err := applySuccessfulReceiverState(&result, decoded.Data); err != nil {
+				receiverStateError = err
+			} else if contract != nil && result.EventID != contract.EventID {
 				result.Retryable = false
 				return result, errReceiverIdentityMismatch
+			} else if err := validateReceiverState(result); err != nil {
+				result.Retryable = false
+				return result, err
 			}
-			if *decoded.Success {
-				if err := validateReceiverState(result); err != nil {
-					result.Retryable = false
-					return result, err
-				}
-			} else {
-				receiverRejected = true
-				result.Retryable = decoded.Data.Retryable || decoded.Details.Retryable
-				if result.Status == "" {
-					result.Status = safeToken(decoded.Code)
-				}
+		} else {
+			receiverRejected = true
+			status, _ := receiverString(decoded.Data.Status)
+			retryable, _ := receiverBool(decoded.Data.Retryable)
+			result.Status = safeToken(status)
+			result.Retryable = retryable || decoded.Details.Retryable
+			if result.Status == "" {
+				result.Status = safeToken(decoded.Code)
 			}
 		}
 	}
@@ -464,12 +462,81 @@ func classifyHTTPResponse(result DeliveryResult, body []byte, contract *canonica
 	return result, nil
 }
 
+func applySuccessfulReceiverState(result *DeliveryResult, data receiverResponseData) error {
+	status, err := requiredReceiverString(data.Status)
+	if err != nil {
+		return err
+	}
+	eventID, err := requiredReceiverString(data.EventID)
+	if err != nil {
+		return err
+	}
+	retryable, err := requiredReceiverBool(data.Retryable)
+	if err != nil {
+		return err
+	}
+	pendingProducts, err := requiredReceiverProductCount(data.PendingProducts)
+	if err != nil {
+		return err
+	}
+	deferredProducts, err := requiredReceiverProductCount(data.DeferredProducts)
+	if err != nil {
+		return err
+	}
+	if err := validateDeferredReconciliation(data.DeferredReconciliation, deferredProducts); err != nil {
+		return err
+	}
+
+	result.Status = status
+	result.EventID = eventID
+	result.Retryable = retryable
+	result.PendingProducts = pendingProducts
+	result.DeferredProducts = deferredProducts
+	if result.Status == "" || result.EventID == "" {
+		return errReceiverStateInvalid
+	}
+	return nil
+}
+
+func requiredReceiverString(raw json.RawMessage) (string, error) {
+	value, err := receiverString(raw)
+	if err != nil || value == "" {
+		return "", errReceiverStateInvalid
+	}
+	return value, nil
+}
+
+func receiverString(raw json.RawMessage) (string, error) {
+	raw = bytes.TrimSpace(raw)
+	if len(raw) == 0 || bytes.Equal(raw, []byte("null")) {
+		return "", errReceiverStateInvalid
+	}
+	var value string
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return "", errReceiverStateInvalid
+	}
+	return strings.TrimSpace(value), nil
+}
+
+func requiredReceiverBool(raw json.RawMessage) (bool, error) {
+	return receiverBool(raw)
+}
+
+func receiverBool(raw json.RawMessage) (bool, error) {
+	raw = bytes.TrimSpace(raw)
+	if len(raw) == 0 || bytes.Equal(raw, []byte("null")) {
+		return false, errReceiverStateInvalid
+	}
+	var value bool
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return false, errReceiverStateInvalid
+	}
+	return value, nil
+}
+
 func receiverProductCount(raw json.RawMessage) (int, error) {
 	raw = bytes.TrimSpace(raw)
-	if len(raw) == 0 {
-		return 0, nil
-	}
-	if bytes.Equal(raw, []byte("null")) {
+	if len(raw) == 0 || bytes.Equal(raw, []byte("null")) {
 		return 0, errReceiverStateInvalid
 	}
 	var count uint64

@@ -181,7 +181,7 @@ func TestDispatchHTTPReportsNonSuccessStatus(t *testing.T) {
 	}
 }
 
-func TestDispatchCanonicalContractUsesDirectDigitalogicEnvelope(t *testing.T) {
+func TestDispatchCanonicalContractUsesDirectProductSyncEnvelope(t *testing.T) {
 	var body []byte
 	headers := http.Header{}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -219,9 +219,9 @@ func TestDispatchCanonicalContractUsesDirectDigitalogicEnvelope(t *testing.T) {
 	}
 }
 
-func TestDispatchDigitalogicRetriesIdenticalEventAndSurfacesRecovery(t *testing.T) {
+func TestDispatchProductSyncRetriesIdenticalEventAndSurfacesRecovery(t *testing.T) {
 	const secret = "test-product-sync-secret-must-not-be-persisted"
-	t.Setenv("DIGITALOGIC_PRODUCT_SYNC_TEST_SECRET", secret)
+	t.Setenv("PATRIS_PRODUCT_SYNC_TEST_SECRET", secret)
 
 	product := canonical.Product{ProductCode: "113007045", RecordHash: "sha256:record"}
 	contract := canonical.NewEnvelope([]canonical.Product{product}, "kala.db", "patris-office", time.Unix(1, 0))
@@ -250,7 +250,7 @@ func TestDispatchDigitalogicRetriesIdenticalEventAndSurfacesRecovery(t *testing.
 		switch attempts {
 		case 1:
 			w.WriteHeader(http.StatusServiceUnavailable)
-			fmt.Fprintf(w, `{"success":false,"code":"digitalogic_product_sync_busy","details":{"retryable":true}}`)
+			fmt.Fprintf(w, `{"success":false,"code":"receiver_product_sync_busy","details":{"retryable":true}}`)
 		case 2:
 			fmt.Fprintf(w, `{"success":true,"data":{"status":"partially_applied","event_id":%q,"retryable":true,"pending_products":1,"deferred_products":2}}`, contract.EventID)
 		default:
@@ -261,7 +261,7 @@ func TestDispatchDigitalogicRetriesIdenticalEventAndSurfacesRecovery(t *testing.
 
 	cfg := Config{
 		Enabled: true, URL: server.URL, Format: "json", Mode: "changes", RequireContract: true,
-		RetryAttempts: 3, RetryBackoff: "1ns", ProductSyncSecretEnv: "DIGITALOGIC_PRODUCT_SYNC_TEST_SECRET",
+		RetryAttempts: 3, RetryBackoff: "1ns", ProductSyncSecretEnv: "PATRIS_PRODUCT_SYNC_TEST_SECRET",
 		Headers: map[string]string{
 			"X-Patris-Contract": "spoofed",
 			"X-Patris-Event-ID": "spoofed",
@@ -288,8 +288,8 @@ func TestDispatchDigitalogicRetriesIdenticalEventAndSurfacesRecovery(t *testing.
 	}
 }
 
-func TestDispatchDigitalogicTerminalDeferredProductsDoNotRetry(t *testing.T) {
-	t.Setenv("DIGITALOGIC_PRODUCT_SYNC_TEST_SECRET", "terminal-deferred")
+func TestDispatchProductSyncTerminalDeferredProductsDoNotRetry(t *testing.T) {
+	t.Setenv("PATRIS_PRODUCT_SYNC_TEST_SECRET", "terminal-deferred")
 	contract := canonical.NewEnvelope(nil, "kala.db", "patris-office", time.Unix(1, 0))
 	var attempts int
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -301,7 +301,7 @@ func TestDispatchDigitalogicTerminalDeferredProductsDoNotRetry(t *testing.T) {
 
 	result, err := DispatchWithResult(t.Context(), Config{
 		Enabled: true, URL: server.URL, Format: "json", RequireContract: true,
-		RetryAttempts: 3, RetryBackoff: "1ns", ProductSyncSecretEnv: "DIGITALOGIC_PRODUCT_SYNC_TEST_SECRET",
+		RetryAttempts: 3, RetryBackoff: "1ns", ProductSyncSecretEnv: "PATRIS_PRODUCT_SYNC_TEST_SECRET",
 	}, Event{Type: "initial", Source: "kala.db", Contract: contract})
 	if err != nil {
 		t.Fatalf("terminal deferred reconciliation was rejected: %v", err)
@@ -314,9 +314,9 @@ func TestDispatchDigitalogicTerminalDeferredProductsDoNotRetry(t *testing.T) {
 	}
 }
 
-func TestDispatchDigitalogicPartialExhaustionIsSafeToLog(t *testing.T) {
+func TestDispatchProductSyncPartialExhaustionIsSafeToLog(t *testing.T) {
 	const secret = "must-never-appear-in-errors"
-	t.Setenv("DIGITALOGIC_PRODUCT_SYNC_TEST_SECRET", secret)
+	t.Setenv("PATRIS_PRODUCT_SYNC_TEST_SECRET", secret)
 	contract := canonical.NewEnvelope(nil, "kala.db", "patris-office", time.Unix(1, 0))
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -326,7 +326,7 @@ func TestDispatchDigitalogicPartialExhaustionIsSafeToLog(t *testing.T) {
 
 	result, err := DispatchWithResult(t.Context(), Config{
 		Enabled: true, URL: server.URL, Format: "json", RequireContract: true,
-		RetryAttempts: 2, RetryBackoff: "1ns", ProductSyncSecretEnv: "DIGITALOGIC_PRODUCT_SYNC_TEST_SECRET",
+		RetryAttempts: 2, RetryBackoff: "1ns", ProductSyncSecretEnv: "PATRIS_PRODUCT_SYNC_TEST_SECRET",
 	}, Event{Type: "initial", Source: "kala.db", Contract: contract})
 	if err == nil {
 		t.Fatal("expected retry exhaustion")
@@ -349,7 +349,7 @@ func TestDispatchDigitalogicPartialExhaustionIsSafeToLog(t *testing.T) {
 
 func TestDispatchDoesNotForwardProductSyncSecretAcrossRedirect(t *testing.T) {
 	const secret = "redirect-sensitive-secret"
-	t.Setenv("DIGITALOGIC_PRODUCT_SYNC_TEST_SECRET", secret)
+	t.Setenv("PATRIS_PRODUCT_SYNC_TEST_SECRET", secret)
 	contract := canonical.NewEnvelope(nil, "kala.db", "patris-office", time.Unix(1, 0))
 	var redirectedSecret string
 	var targetCalls int
@@ -367,7 +367,7 @@ func TestDispatchDoesNotForwardProductSyncSecretAcrossRedirect(t *testing.T) {
 
 	err := Dispatch(t.Context(), Config{
 		Enabled: true, URL: origin.URL, Format: "json", RequireContract: true,
-		ProductSyncSecretEnv: "DIGITALOGIC_PRODUCT_SYNC_TEST_SECRET",
+		ProductSyncSecretEnv: "PATRIS_PRODUCT_SYNC_TEST_SECRET",
 	}, Event{Type: "initial", Contract: contract})
 	if err == nil || !strings.Contains(err.Error(), "HTTP 307") {
 		t.Fatalf("redirect was not rejected: %v", err)
@@ -378,24 +378,24 @@ func TestDispatchDoesNotForwardProductSyncSecretAcrossRedirect(t *testing.T) {
 }
 
 func TestDispatchRequiresReceiverEventIdentityInStrictProductSyncResponse(t *testing.T) {
-	t.Setenv("DIGITALOGIC_PRODUCT_SYNC_TEST_SECRET", "strict-response")
+	t.Setenv("PATRIS_PRODUCT_SYNC_TEST_SECRET", "strict-response")
 	contract := canonical.NewEnvelope(nil, "kala.db", "patris-office", time.Unix(1, 0))
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprint(w, `{"success":true,"data":{"status":"accepted","retryable":false,"pending_products":0}}`)
+		fmt.Fprint(w, `{"success":true,"data":{"status":"accepted","retryable":false,"pending_products":0,"deferred_products":0}}`)
 	}))
 	defer server.Close()
 
 	err := Dispatch(t.Context(), Config{
 		Enabled: true, URL: server.URL, Format: "json", RequireContract: true,
-		ProductSyncSecretEnv: "DIGITALOGIC_PRODUCT_SYNC_TEST_SECRET",
+		ProductSyncSecretEnv: "PATRIS_PRODUCT_SYNC_TEST_SECRET",
 	}, Event{Type: "initial", Contract: contract})
-	if err == nil || !strings.Contains(err.Error(), "missing product-sync delivery state") {
+	if err == nil || !strings.Contains(err.Error(), "inconsistent product-sync delivery state") {
 		t.Fatalf("missing receiver event identity was accepted: %v", err)
 	}
 }
 
-func TestClassifyDigitalogicReceiverStateMachine(t *testing.T) {
+func TestClassifyProductSyncReceiverStateMachine(t *testing.T) {
 	contract := canonical.NewEnvelope(nil, "kala.db", "patris-office", time.Unix(1, 0))
 	tests := []struct {
 		name      string
@@ -416,6 +416,7 @@ func TestClassifyDigitalogicReceiverStateMachine(t *testing.T) {
 		{name: "terminal pending", status: "recovered", pending: 1, wantError: true},
 		{name: "partial not retryable", status: "partially_applied", pending: 1, wantError: true},
 		{name: "partial without pending", status: "retry_pending", retryable: true, wantError: true},
+		{name: "punctuated status", status: "accep!ted", wantError: true},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -434,22 +435,54 @@ func TestClassifyDigitalogicReceiverStateMachine(t *testing.T) {
 	}
 }
 
-func TestClassifyDigitalogicReceiverDefaultsOmittedDeferredProductsToZero(t *testing.T) {
+func TestClassifyProductSyncReceiverDoesNotNormalizeEventIdentity(t *testing.T) {
 	contract := canonical.NewEnvelope(nil, "kala.db", "patris-office", time.Unix(1, 0))
-	body := fmt.Appendf(nil, `{"success":true,"data":{"status":"accepted","event_id":%q,"retryable":false,"pending_products":0}}`, contract.EventID)
+	alteredEventID := strings.Replace(contract.EventID, ":", ": ", 1)
+	body := fmt.Appendf(nil, `{"success":true,"data":{"status":"accepted","event_id":%q,"retryable":false,"pending_products":0,"deferred_products":0}}`, alteredEventID)
 	result, err := classifyHTTPResponse(DeliveryResult{HTTPStatus: http.StatusOK, Attempts: 1}, body, contract, true)
-	if err != nil || result.DeferredProducts != 0 {
-		t.Fatalf("omitted deferred count was not compatible: result=%+v err=%v", result, err)
+	if !errors.Is(err, errReceiverIdentityMismatch) || result.EventID != alteredEventID || result.Retryable {
+		t.Fatalf("altered receiver event identity was normalized or accepted: result=%+v err=%v", result, err)
 	}
+}
 
-	body = fmt.Appendf(nil, `{"success":true,"data":{"status":"accepted","event_id":%q,"retryable":false,"pending_products":0,"deferred_products":%d}}`, contract.EventID, maxReceiverReportedProducts)
-	result, err = classifyHTTPResponse(DeliveryResult{HTTPStatus: http.StatusOK, Attempts: 1}, body, contract, true)
+func TestClassifyProductSyncReceiverRequiresPresentNonNullStateFields(t *testing.T) {
+	contract := canonical.NewEnvelope(nil, "kala.db", "patris-office", time.Unix(1, 0))
+	valid := fmt.Sprintf(`{"success":true,"data":{"status":"accepted","event_id":%q,"retryable":false,"pending_products":0,"deferred_products":0}}`, contract.EventID)
+	tests := []struct {
+		name string
+		body string
+	}{
+		{name: "missing status", body: strings.Replace(valid, `"status":"accepted",`, "", 1)},
+		{name: "null status", body: strings.Replace(valid, `"status":"accepted"`, `"status":null`, 1)},
+		{name: "missing event id", body: strings.Replace(valid, fmt.Sprintf(`"event_id":%q,`, contract.EventID), "", 1)},
+		{name: "null event id", body: strings.Replace(valid, fmt.Sprintf(`"event_id":%q`, contract.EventID), `"event_id":null`, 1)},
+		{name: "missing retryable", body: strings.Replace(valid, `"retryable":false,`, "", 1)},
+		{name: "null retryable", body: strings.Replace(valid, `"retryable":false`, `"retryable":null`, 1)},
+		{name: "missing pending products", body: strings.Replace(valid, `"pending_products":0,`, "", 1)},
+		{name: "null pending products", body: strings.Replace(valid, `"pending_products":0`, `"pending_products":null`, 1)},
+		{name: "missing deferred products", body: strings.Replace(valid, `,"deferred_products":0`, "", 1)},
+		{name: "null deferred products", body: strings.Replace(valid, `"deferred_products":0`, `"deferred_products":null`, 1)},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			result, err := classifyHTTPResponse(DeliveryResult{HTTPStatus: http.StatusOK, Attempts: 1}, []byte(test.body), contract, true)
+			if !errors.Is(err, errReceiverStateInvalid) || result.Retryable {
+				t.Fatalf("missing or null receiver state was not rejected: result=%+v err=%v body=%s", result, err, test.body)
+			}
+		})
+	}
+}
+
+func TestClassifyProductSyncReceiverAcceptsMaximumBoundedProductCounts(t *testing.T) {
+	contract := canonical.NewEnvelope(nil, "kala.db", "patris-office", time.Unix(1, 0))
+	body := fmt.Appendf(nil, `{"success":true,"data":{"status":"accepted","event_id":%q,"retryable":false,"pending_products":0,"deferred_products":%d}}`, contract.EventID, maxReceiverReportedProducts)
+	result, err := classifyHTTPResponse(DeliveryResult{HTTPStatus: http.StatusOK, Attempts: 1}, body, contract, true)
 	if err != nil || uint64(result.DeferredProducts) != maxReceiverReportedProducts {
 		t.Fatalf("maximum bounded deferred count was not accepted: result=%+v err=%v", result, err)
 	}
 }
 
-func TestClassifyDigitalogicReceiverRejectsInvalidDeferredProductCounts(t *testing.T) {
+func TestClassifyProductSyncReceiverRejectsInvalidDeferredProductCounts(t *testing.T) {
 	contract := canonical.NewEnvelope(nil, "kala.db", "patris-office", time.Unix(1, 0))
 	tests := []struct {
 		name  string
@@ -473,7 +506,7 @@ func TestClassifyDigitalogicReceiverRejectsInvalidDeferredProductCounts(t *testi
 	}
 }
 
-func TestClassifyDigitalogicReceiverRejectsInconsistentDeferredReconciliation(t *testing.T) {
+func TestClassifyProductSyncReceiverRejectsInconsistentDeferredReconciliation(t *testing.T) {
 	contract := canonical.NewEnvelope(nil, "kala.db", "patris-office", time.Unix(1, 0))
 	detailObjects := strings.TrimSuffix(strings.Repeat(`{},`, maxReceiverDeferredDetails+1), ",")
 	tests := []struct {
@@ -517,12 +550,20 @@ func TestDispatchGenericWebhookIgnoresProductSyncReceiverFields(t *testing.T) {
 
 func TestDispatchRejectsPersistedProductSyncSecretHeader(t *testing.T) {
 	contract := canonical.NewEnvelope(nil, "kala.db", "patris-office", time.Unix(1, 0))
-	err := Dispatch(t.Context(), Config{
-		Enabled: true, URL: "https://example.invalid", Format: "json",
-		Headers: map[string]string{"x-digitalogic-product-sync-secret": "plaintext"},
-	}, Event{Type: "initial", Contract: contract})
-	if err == nil || !strings.Contains(err.Error(), "product_sync_secret_env") {
-		t.Fatalf("persisted receiver secret was not rejected: %v", err)
+	for _, header := range []string{
+		"x-patris-product-sync-secret",
+		"x-ReTiReD-PrOdUcT-SyNc-SeCrEt",
+		"Product-Sync-Secret",
+	} {
+		t.Run(header, func(t *testing.T) {
+			err := Dispatch(t.Context(), Config{
+				Enabled: true, URL: "https://example.invalid", Format: "json",
+				Headers: map[string]string{header: "plaintext"},
+			}, Event{Type: "initial", Contract: contract})
+			if err == nil || !strings.Contains(err.Error(), "product_sync_secret_env") {
+				t.Fatalf("persisted receiver secret header %q was not rejected: %v", header, err)
+			}
+		})
 	}
 }
 
@@ -530,7 +571,7 @@ func TestDispatchRequiresConfiguredProductSyncSecretEnvironmentValue(t *testing.
 	contract := canonical.NewEnvelope(nil, "kala.db", "patris-office", time.Unix(1, 0))
 	err := Dispatch(t.Context(), Config{
 		Enabled: true, URL: "https://example.invalid", Format: "json",
-		ProductSyncSecretEnv: "DIGITALOGIC_PRODUCT_SYNC_MISSING_SECRET",
+		ProductSyncSecretEnv: "PATRIS_PRODUCT_SYNC_MISSING_SECRET",
 	}, Event{Type: "initial", Contract: contract})
 	if err == nil || !strings.Contains(err.Error(), "missing or empty") {
 		t.Fatalf("missing receiver secret did not fail closed: %v", err)
@@ -538,11 +579,11 @@ func TestDispatchRequiresConfiguredProductSyncSecretEnvironmentValue(t *testing.
 }
 
 func TestDispatchRejectsProductSyncDestinationQueryAuthentication(t *testing.T) {
-	t.Setenv("DIGITALOGIC_PRODUCT_SYNC_TEST_SECRET", "header-only")
+	t.Setenv("PATRIS_PRODUCT_SYNC_TEST_SECRET", "header-only")
 	contract := canonical.NewEnvelope(nil, "kala.db", "patris-office", time.Unix(1, 0))
 	err := Dispatch(t.Context(), Config{
 		Enabled: true, URL: "https://example.invalid/product-sync?token=legacy", Format: "json",
-		ProductSyncSecretEnv: "DIGITALOGIC_PRODUCT_SYNC_TEST_SECRET",
+		ProductSyncSecretEnv: "PATRIS_PRODUCT_SYNC_TEST_SECRET",
 	}, Event{Type: "initial", Contract: contract})
 	if err == nil || !strings.Contains(err.Error(), "header-only") {
 		t.Fatalf("query authentication was not rejected: %v", err)
@@ -550,11 +591,11 @@ func TestDispatchRejectsProductSyncDestinationQueryAuthentication(t *testing.T) 
 }
 
 func TestDispatchRejectsRemotePlainHTTPProductSyncDestination(t *testing.T) {
-	t.Setenv("DIGITALOGIC_PRODUCT_SYNC_TEST_SECRET", "https-only")
+	t.Setenv("PATRIS_PRODUCT_SYNC_TEST_SECRET", "https-only")
 	contract := canonical.NewEnvelope(nil, "kala.db", "patris-office", time.Unix(1, 0))
 	err := Dispatch(t.Context(), Config{
-		Enabled: true, URL: "http://digitalogic.example/wp-json/digitalogic/patris/product-sync", Format: "json",
-		ProductSyncSecretEnv: "DIGITALOGIC_PRODUCT_SYNC_TEST_SECRET",
+		Enabled: true, URL: "http://receiver.example/wp-json/receiver/patris/product-sync", Format: "json",
+		ProductSyncSecretEnv: "PATRIS_PRODUCT_SYNC_TEST_SECRET",
 	}, Event{Type: "initial", Contract: contract})
 	if err == nil || !strings.Contains(err.Error(), "requires HTTPS") {
 		t.Fatalf("remote plaintext destination was not rejected: %v", err)
@@ -666,7 +707,7 @@ func TestDispatchCommandReceivesChangePayloadAndMetadata(t *testing.T) {
 }
 
 func TestCommandSinkDoesNotInheritHTTPProductSyncSecret(t *testing.T) {
-	const secretEnv = "DIGITALOGIC_PRODUCT_SYNC_TEST_SECRET"
+	const secretEnv = "PATRIS_PRODUCT_SYNC_TEST_SECRET"
 	t.Setenv("GO_WANT_UPDATEOUT_HELPER", "1")
 	t.Setenv(secretEnv, "must-not-reach-command")
 	t.Setenv("UPDATEOUT_FORBIDDEN_ENV_NAME", secretEnv)
@@ -678,7 +719,7 @@ func TestCommandSinkDoesNotInheritHTTPProductSyncSecret(t *testing.T) {
 			t.Errorf("HTTP sink did not receive its dedicated secret")
 		}
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprintf(w, `{"success":true,"data":{"status":"accepted","event_id":%q,"retryable":false,"pending_products":0}}`, contract.EventID)
+		fmt.Fprintf(w, `{"success":true,"data":{"status":"accepted","event_id":%q,"retryable":false,"pending_products":0,"deferred_products":0}}`, contract.EventID)
 	}))
 	defer server.Close()
 

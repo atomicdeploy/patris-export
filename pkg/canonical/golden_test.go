@@ -18,7 +18,7 @@ func TestSyntheticProductSyncGoldenFixture(t *testing.T) {
 		t.Fatal(err)
 	}
 	actual := append(encoded, '\n')
-	path := filepath.Join("..", "..", "testdata", "digitalogic-product-sync.synthetic.json")
+	path := filepath.Join("..", "..", "testdata", "patris-product-sync.synthetic.json")
 	if os.Getenv("UPDATE_GOLDEN") == "1" {
 		if err := os.WriteFile(path, actual, 0o644); err != nil {
 			t.Fatal(err)
