@@ -60,6 +60,20 @@ jobs:
     - name: Build Windows artifacts
       shell: cmd
       run: build.cmd --target windows-native --ci --no-assets
+
+    - name: Test optional pxlib backends
+      shell: pwsh
+      run: |
+        $pxlibRoot = (Resolve-Path ".deps\pxlib-windows-native").Path
+        $env:CGO_ENABLED = "1"
+        $env:CC = "C:\msys64\mingw64\bin\gcc.exe"
+        $env:CGO_CFLAGS = "-I$pxlibRoot\include"
+        $env:CGO_LDFLAGS = "-L$pxlibRoot\lib -L$pxlibRoot\bin"
+        $env:PATH = "$pxlibRoot\bin;C:\msys64\mingw64\bin;$env:PATH"
+        go test -count=1 -tags pxlib_cgo ./pkg/paradox
+        if ($LASTEXITCODE -ne 0) { throw "Direct-CGO pxlib tests failed." }
+        go test -count=1 -tags "pxlib_cgo,pxlib_cgo_static" ./pkg/paradox
+        if ($LASTEXITCODE -ne 0) { throw "Static-CGO pxlib tests failed." }
     
     - name: Test Windows executable
       shell: bash

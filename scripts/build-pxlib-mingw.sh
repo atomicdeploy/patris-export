@@ -56,6 +56,10 @@ if [ ! -f "$PREFIX/include/paradox.h" ]; then
 fi
 find "$BUILD_DIR" -maxdepth 3 \( -name 'libpx*.a' -o -name 'libpx*.dll.a' \) -exec cp {} "$PREFIX/lib/" \; 2>/dev/null || true
 find "$BUILD_DIR" -maxdepth 3 -name '*.dll' -exec cp {} "$PREFIX/bin/" \; 2>/dev/null || true
+static_objects="$(find "$BUILD_DIR" -path '*/CMakeFiles/pxlib.dir/objects.a' -print -quit)"
+if [ -n "$static_objects" ]; then
+    cp "$static_objects" "$PREFIX/lib/libpxlib_static.a"
+fi
 
 if ls "$PREFIX/lib"/libpx.* >/dev/null 2>&1 && ! ls "$PREFIX/lib"/libpxlib.* >/dev/null 2>&1; then
     for lib in "$PREFIX/lib"/libpx.*; do

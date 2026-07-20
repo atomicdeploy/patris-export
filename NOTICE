@@ -1,6 +1,16 @@
 Patris Export
 Copyright (c) 2025-2026 Atomic Deploy
 
+Patris Export can optionally use pxlib, maintained by Uwe Steinmann and other
+contributors:
+
+https://github.com/steinm/pxlib
+
+The exact upstream revision is recorded in dependencies/pxlib.ref and in build
+manifests. pxlib retains its upstream copyright and license terms; review the
+COPYING file and source-file notices from that pinned revision when packaging
+or distributing a build, particularly the optional static-link variant.
+
 The optional `alm_compat` build profile derives its hardware-identifier and
 license-key workflow from AHK_ALM:
 

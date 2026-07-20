@@ -4,6 +4,8 @@ param(
     [string]$PxlibRef = $env:PXLIB_REF,
     [string]$PatrisDb = "C:\Patris\data4\kala.db",
     [string]$Version = $env:VERSION,
+    [ValidateSet("dynamic", "cgo", "cgo-static")]
+    [string]$PxlibBackend = $(if ($env:PATRIS_EXPORT_PXLIB_BACKEND) { $env:PATRIS_EXPORT_PXLIB_BACKEND } else { "dynamic" }),
     [switch]$SkipPxlibBuild,
     [switch]$SkipPromote
 )
@@ -71,9 +73,14 @@ if ($almEnabled -and $almAppID -notmatch '^[A-Za-z0-9._:@+\-]{6,128}$') {
 }
 $buildVariant = if ($almEnabled) { "alm-compat" } else { "standard" }
 $licensingMode = if ($almEnabled) { "alm_compat_utf8_v1" } else { "none" }
-$deployRoot = if ($almEnabled) { Join-Path $AtomicDeployRoot "deploy\alm-compat" } else { Join-Path $AtomicDeployRoot "deploy" }
+$PxlibBackend = $PxlibBackend.ToLowerInvariant()
+$baseDeployRoot = if ($almEnabled) { Join-Path $AtomicDeployRoot "deploy\alm-compat" } else { Join-Path $AtomicDeployRoot "deploy" }
+$deployRoot = if ($PxlibBackend -eq "dynamic") { $baseDeployRoot } else { Join-Path $baseDeployRoot $PxlibBackend }
 $stageParent = Join-Path $AtomicDeployRoot "build"
 $stageName = if ($almEnabled) { "patris-export-windows-amd64-alm-compat" } else { "patris-export-windows-amd64" }
+if ($PxlibBackend -ne "dynamic") {
+    $stageName += "-$PxlibBackend"
+}
 $stageRoot = Join-Path $stageParent $stageName
 $vcpkgRoot = $(if ($env:VCPKG_ROOT) { $env:VCPKG_ROOT } else { Join-Path $depsRoot "vcpkg" })
 $vcpkgTriplet = $(if ($env:VCPKG_DEFAULT_TRIPLET) { $env:VCPKG_DEFAULT_TRIPLET } else { "x64-windows" })
@@ -185,6 +192,10 @@ endif()
     Copy-Item (Join-Path $pxlibBuild "*.a") (Join-Path $pxlibInstall "lib") -ErrorAction SilentlyContinue
     Copy-Item (Join-Path $pxlibBuild "*.dll.a") (Join-Path $pxlibInstall "lib") -ErrorAction SilentlyContinue
     Copy-Item (Join-Path $pxlibBuild "*.dll") (Join-Path $pxlibInstall "bin") -ErrorAction SilentlyContinue
+    $pxlibObjects = Join-Path $pxlibBuild "CMakeFiles\pxlib.dir\objects.a"
+    if (Test-Path $pxlibObjects) {
+        Copy-Item $pxlibObjects (Join-Path $pxlibInstall "lib\libpxlib_static.a") -Force
+    }
 }
 
 if (-not (Test-Path (Join-Path $pxlibInstall "include\paradox.h"))) {
@@ -197,6 +208,9 @@ if (-not (Test-Path (Join-Path $pxlibInstall "include\paradox.h"))) {
     } else {
         throw "pxlib build did not produce include\paradox.h and PXLIB_ROOT is not set."
     }
+}
+if ($PxlibBackend -eq "cgo-static" -and -not (Test-Path (Join-Path $pxlibInstall "lib\libpxlib_static.a"))) {
+    throw "The cgo-static backend requires lib\libpxlib_static.a. Re-run without -SkipPxlibBuild or provide a complete PXLIB_ROOT."
 }
 
 Push-Location $repoRoot
@@ -237,10 +251,18 @@ try {
     }
 
     $linkerFlags = "-X $versionPkg.Version=$Version -X $versionPkg.BuildDate=$buildDate -X $versionPkg.Commit=$commit"
-    $tagArguments = @()
+    $buildTags = @()
+    switch ($PxlibBackend) {
+        "cgo" { $buildTags += "pxlib_cgo" }
+        "cgo-static" { $buildTags += @("pxlib_cgo", "pxlib_cgo_static") }
+    }
     if ($almEnabled) {
-        $tagArguments = @("-tags", "alm_compat")
+        $buildTags += "alm_compat"
         $linkerFlags += " -X $licensingPkg.almAppID=$almAppID"
+    }
+    $tagArguments = @()
+    if ($buildTags.Count -gt 0) {
+        $tagArguments = @("-tags", ($buildTags -join ","))
     }
 
     $outExe = Join-Path $resolvedStageRoot "patris-export-windows-amd64.exe"
@@ -255,7 +277,9 @@ try {
         throw "The Windows shared-library build did not produce patris-export.h."
     }
 
-    Copy-Item (Join-Path $pxlibInstall "bin\*.dll") $resolvedStageRoot -ErrorAction SilentlyContinue
+    if ($PxlibBackend -ne "cgo-static") {
+        Copy-Item (Join-Path $pxlibInstall "bin\*.dll") $resolvedStageRoot -ErrorAction SilentlyContinue
+    }
     $gccBin = Split-Path -Parent $gcc
     foreach ($runtimeDll in @("libgcc_s_seh-1.dll", "libwinpthread-1.dll", "libstdc++-6.dll")) {
         $runtimePath = (& $gcc "-print-file-name=$runtimeDll" | Select-Object -First 1).Trim()
@@ -271,6 +295,7 @@ try {
         variant = $buildVariant
         licensing_mode = $licensingMode
         license_required = [bool]$almEnabled
+        native_backend = $PxlibBackend
     } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $resolvedStageRoot "BUILD-VARIANT.json") -Encoding utf8
 
     $documentation = [ordered]@{
@@ -288,6 +313,7 @@ try {
     @(
         "Patris Export $Version",
         "Build variant: $buildVariant",
+        "Native pxlib backend: $PxlibBackend",
         "Licensing mode: $licensingMode",
         "Source commit: $commit",
         "pxlib source commit: $pxlibCommit",
@@ -300,7 +326,6 @@ try {
         "patris-export.exe",
         "patris-export.dll",
         "patris-export.h",
-        "libpxlib.dll",
         "libgcc_s_seh-1.dll",
         "libstdc++-6.dll",
         "libwinpthread-1.dll",
@@ -313,6 +338,9 @@ try {
         "CHANGELOG.md",
         "BUILD-MANIFEST.txt"
     )
+    if ($PxlibBackend -ne "cgo-static") {
+        $requiredFiles += "libpxlib.dll"
+    }
     foreach ($requiredFile in $requiredFiles) {
         if (-not (Test-Path -LiteralPath (Join-Path $resolvedStageRoot $requiredFile))) {
             throw "Clean Windows staging build is missing required file: $requiredFile"

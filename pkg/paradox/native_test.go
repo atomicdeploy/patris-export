@@ -3,11 +3,22 @@ package paradox
 import (
 	"errors"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 )
 
+func TestNativeBackendIsExplicit(t *testing.T) {
+	backend := NativeBackend()
+	if backend != "runtime-dynamic" && !strings.HasPrefix(backend, "cgo-") {
+		t.Fatalf("unexpected native backend %q", backend)
+	}
+}
+
 func TestOpenReportsMissingNativeRuntime(t *testing.T) {
+	if NativeBackend() != "runtime-dynamic" {
+		t.Skip("missing-runtime discovery belongs to the runtime-dynamic backend")
+	}
 	t.Setenv("PATRIS_EXPORT_PXLIB_LIBRARY", filepath.Join(t.TempDir(), "missing-pxlib-runtime.dll"))
 	resetNativeLoaderForTest()
 	t.Cleanup(resetNativeLoaderForTest)

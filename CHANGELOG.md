@@ -7,6 +7,18 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Added
+
+- Opt-in `cgo` and `cgo-static` pxlib backends now complement the default
+  runtime-dynamic loader across Make, shell, and local Windows builds; manifests
+  identify the selected backend and static packages omit the pxlib runtime DLL.
+
+### Fixed
+
+- CGO and ALM build tags now compose instead of replacing one another, and
+  static builds fail early with an actionable message when their pxlib archive
+  is unavailable.
+
 ## [1.2.0] - 2026-07-17
 
 ### Added

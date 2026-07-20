@@ -27,13 +27,19 @@ Outputs:
 - Windows: `build/patris-export.dll` and `build/patris-export.h`
 - Linux: `build/libpatris-export.so` and `build/libpatris-export.h`
 
-The library loads pxlib at runtime when `.db` data is read. Keep `libpxlib.dll`
+By default, the library loads pxlib at runtime when `.db` data is read. Keep `libpxlib.dll`
 beside the Windows host executable, set `PATRIS_EXPORT_PXLIB_LIBRARY` to an
 exact runtime path, or set `PATRIS_EXPORT_PXLIB_ROOT` to a prefix containing
 `bin` or `lib`. On Linux, keep `libpx.so`/`libpxlib.so` beside the host binary,
 under `PATRIS_EXPORT_PXLIB_ROOT`, or in the normal dynamic linker search path.
 Missing pxlib is returned as a normal API error instead of aborting the host
 process at load time.
+
+Hosts that prefer a normal CGO link can build with `PXLIB_BACKEND=cgo`; hosts
+that must not deploy a separate pxlib DLL/shared object can use
+`PXLIB_BACKEND=cgo-static`. These choices change only how pxlib is linked, not
+the C ABI exported by Patris Export. See
+[native pxlib backend choices](NATIVE-PXLIB-BACKENDS.md).
 
 ## Go Embedded API
 

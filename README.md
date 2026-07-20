@@ -81,6 +81,8 @@ Useful build variants:
 ./build.sh --target windows-cross
 ./build.sh --target all --test
 ./build.sh --target linux --skip-pxlib
+./build.sh --target linux --pxlib-backend cgo
+./build.sh --target linux --pxlib-backend cgo-static
 ```
 
 The scripts check required tools, build or reuse upstream pxlib, rebuild the web
@@ -88,7 +90,15 @@ frontend, compile Win32 icon/version resources for Windows targets, and print an
 artifact summary. Set `PXLIB_ROOT` to use an existing pxlib install, or
 `USE_VCPKG=1` to add optional vcpkg C dependency paths.
 
-At runtime, Patris Export looks for pxlib next to the executable, under
+The pxlib backend defaults to `dynamic`, which discovers and loads pxlib only
+when a Paradox database is opened. `--pxlib-backend cgo` directly links the
+pxlib shared library through CGO, while `--pxlib-backend cgo-static` embeds the
+source-built pxlib objects so a separate pxlib runtime library is not needed.
+All three modes use the same Go reader and return the same records. See
+[native pxlib backend choices](docs/NATIVE-PXLIB-BACKENDS.md) for Windows,
+Linux, native-build, and cross-build commands.
+
+In the default `dynamic` build, Patris Export looks for pxlib next to the executable, under
 `PATRIS_EXPORT_PXLIB_ROOT`, under `PXLIB_ROOT`, and finally through the platform
 library search path. Set `PATRIS_EXPORT_PXLIB_LIBRARY` to force one exact DLL or
 shared-object path for troubleshooting. On Windows foreground `.db` read

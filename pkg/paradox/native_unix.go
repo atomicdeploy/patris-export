@@ -1,4 +1,4 @@
-//go:build darwin || freebsd || linux || netbsd
+//go:build (darwin || freebsd || linux || netbsd) && !pxlib_cgo
 
 package paradox
 
