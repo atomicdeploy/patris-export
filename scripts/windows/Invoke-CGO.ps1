@@ -4,7 +4,9 @@ param(
     [string[]]$Command,
     [string]$AtomicDeployRoot = "$env:USERPROFILE\Desktop\AtomicDeploy",
     [string]$PxlibRoot = $env:PXLIB_ROOT,
-    [string]$WinLibsBin
+    [string]$WinLibsBin,
+    [ValidateSet("dynamic", "cgo", "cgo-static")]
+    [string]$PxlibBackend = $(if ($env:PATRIS_EXPORT_PXLIB_BACKEND) { $env:PATRIS_EXPORT_PXLIB_BACKEND } else { "dynamic" })
 )
 
 $ErrorActionPreference = "Stop"
@@ -47,15 +49,19 @@ if (-not $PxlibRoot) {
     $PxlibRoot = Join-Path $AtomicDeployRoot "deps\pxlib-install-windows"
 }
 $PxlibRoot = Resolve-ExistingPath "pxlib root" @($PxlibRoot)
+$PxlibBackend = $PxlibBackend.ToLowerInvariant()
 
 if (-not (Test-Path (Join-Path $PxlibRoot "include\paradox.h"))) {
     throw "pxlib header not found: $(Join-Path $PxlibRoot "include\paradox.h")"
 }
-if (-not (Test-Path (Join-Path $PxlibRoot "lib\libpxlib.dll.a"))) {
+if ($PxlibBackend -eq "cgo" -and -not (Test-Path (Join-Path $PxlibRoot "lib\libpxlib.dll.a"))) {
     throw "pxlib import library not found: $(Join-Path $PxlibRoot "lib\libpxlib.dll.a")"
 }
-if (-not (Test-Path (Join-Path $PxlibRoot "bin\libpxlib.dll"))) {
+if ($PxlibBackend -ne "cgo-static" -and -not (Test-Path (Join-Path $PxlibRoot "bin\libpxlib.dll"))) {
     throw "pxlib runtime DLL not found: $(Join-Path $PxlibRoot "bin\libpxlib.dll")"
+}
+if ($PxlibBackend -eq "cgo-static" -and -not (Test-Path (Join-Path $PxlibRoot "lib\libpxlib_static.a"))) {
+    throw "The cgo-static backend requires $(Join-Path $PxlibRoot 'lib\libpxlib_static.a')."
 }
 
 if (-not $WinLibsBin) {
@@ -76,6 +82,10 @@ $env:PXLIB_ROOT = $PxlibRoot
 $env:CGO_CFLAGS = "-I$PxlibRoot\include"
 $env:CGO_LDFLAGS = "-L$PxlibRoot\lib -L$PxlibRoot\bin"
 $env:PATH = "$(Join-Path $PxlibRoot "bin");$WinLibsBin;$(Split-Path -Parent $go);$env:PATH"
+switch ($PxlibBackend) {
+    "cgo" { $env:GOFLAGS = "$($env:GOFLAGS) -tags=pxlib_cgo".Trim() }
+    "cgo-static" { $env:GOFLAGS = "$($env:GOFLAGS) -tags=pxlib_cgo,pxlib_cgo_static".Trim() }
+}
 
 if (-not $Command -or $Command.Count -eq 0) {
     $Command = @("go", "test", "./...")
@@ -95,6 +105,8 @@ Write-Host "CC=$env:CC"
 Write-Host "PXLIB_ROOT=$env:PXLIB_ROOT"
 Write-Host "CGO_CFLAGS=$env:CGO_CFLAGS"
 Write-Host "CGO_LDFLAGS=$env:CGO_LDFLAGS"
+Write-Host "PXLIB_BACKEND=$PxlibBackend"
+Write-Host "GOFLAGS=$env:GOFLAGS"
 Write-Host "PATH prepended: $(Join-Path $PxlibRoot "bin");$WinLibsBin;$(Split-Path -Parent $go)"
 Write-Host "Running: $exe $($args -join ' ')"
 

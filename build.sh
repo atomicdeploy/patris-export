@@ -26,6 +26,8 @@ BUILD_VARIANT="standard"
 LICENSING_MODE="none"
 LICENSE_REQUIRED="false"
 GO_BUILD_TAG_ARGS=()
+PXLIB_BACKEND="${PATRIS_EXPORT_PXLIB_BACKEND:-dynamic}"
+BUILD_TAGS=()
 ALM_LDFLAG=""
 
 if [ -t 1 ]; then
@@ -57,6 +59,7 @@ Options:
   --target <name>     Build target: current, linux, windows-cross, windows-native, windows, all
   --ci                CI mode: deterministic paths and non-interactive output
   --skip-pxlib        Use existing CGO/PXLIB_ROOT settings instead of building upstream pxlib
+  --pxlib-backend <b> Select dynamic, cgo, or cgo-static (default: dynamic)
   --no-web            Skip npm install and web frontend build
   --no-assets         Skip optional asset regeneration
   --test              Run go test ./... after building
@@ -66,6 +69,7 @@ Environment:
   VERSION             Version string embedded in the binary (default: pkg/version/version.go)
   PXLIB_ROOT          Existing pxlib install prefix to use
   PXLIB_REPO/PXLIB_REF Override upstream pxlib source and ref
+  PATRIS_EXPORT_PXLIB_BACKEND Default backend for --pxlib-backend
   USE_VCPKG=1         Adds VCPKG_ROOT installed include/lib/bin paths as optional C dependency paths
   ENABLE_ALM=1        Build the optional Windows ALM compatibility variant
   ALM_APP_ID          Required public derivation identifier when ENABLE_ALM=1
@@ -111,7 +115,8 @@ write_variant_manifest() {
 {
   "variant": "$BUILD_VARIANT",
   "licensing_mode": "$LICENSING_MODE",
-  "license_required": $LICENSE_REQUIRED
+  "license_required": $LICENSE_REQUIRED,
+  "native_backend": "$PXLIB_BACKEND"
 }
 EOF
 }
@@ -133,6 +138,15 @@ while [ "$#" -gt 0 ]; do
             ;;
         --skip-pxlib)
             SKIP_PXLIB=1
+            shift
+            ;;
+        --pxlib-backend)
+            [ "$#" -ge 2 ] || fail "--pxlib-backend requires a value"
+            PXLIB_BACKEND="$2"
+            shift 2
+            ;;
+        --pxlib-backend=*)
+            PXLIB_BACKEND="${1#*=}"
             shift
             ;;
         --no-web|--skip-web)
@@ -164,6 +178,13 @@ if [ "$TARGET" = "current" ]; then
         TARGET="linux"
     fi
 fi
+
+case "$PXLIB_BACKEND" in
+    dynamic) ;;
+    cgo) BUILD_TAGS+=(pxlib_cgo) ;;
+    cgo-static) BUILD_TAGS+=(pxlib_cgo pxlib_cgo_static) ;;
+    *) fail "--pxlib-backend must be dynamic, cgo, or cgo-static" ;;
+esac
 if [ "$TARGET" = "windows" ]; then
     if is_windows_shell; then
         TARGET="windows-native"
@@ -182,8 +203,12 @@ if [[ "${ENABLE_ALM:-0}" =~ ^(1|true|yes|on)$ ]]; then
     BUILD_VARIANT="alm-compat"
     LICENSING_MODE="alm_compat_utf8_v1"
     LICENSE_REQUIRED="true"
-    GO_BUILD_TAG_ARGS=(-tags alm_compat)
+    BUILD_TAGS+=(alm_compat)
     ALM_LDFLAG=" -X $LICENSING_PKG.almAppID=$ALM_APP_ID"
+fi
+if [ "${#BUILD_TAGS[@]}" -gt 0 ]; then
+    joined_tags="$(IFS=,; printf '%s' "${BUILD_TAGS[*]}")"
+    GO_BUILD_TAG_ARGS=(-tags "$joined_tags")
 fi
 
 if [ "$TARGET" = "all" ]; then
@@ -192,6 +217,7 @@ if [ "$TARGET" = "all" ]; then
     [ "$SKIP_WEB" = "1" ] && extra+=(--no-web)
     [ "$SKIP_ASSETS" = "1" ] && extra+=(--no-assets)
     [ "$SKIP_PXLIB" = "1" ] && extra+=(--skip-pxlib)
+    extra+=(--pxlib-backend "$PXLIB_BACKEND")
     "$0" --target linux "${extra[@]}"
     "$0" --target windows-cross "${extra[@]}"
     exit 0
@@ -207,6 +233,7 @@ step "🏗️  Patris Export build"
 log "Target: ${BOLD}$TARGET${RESET}"
 log "Version: ${VERSION}  Commit: ${COMMIT}  Date: ${BUILD_DATE}"
 log "Variant: ${BUILD_VARIANT}  Licensing: ${LICENSING_MODE}"
+log "pxlib backend: ${PXLIB_BACKEND}"
 
 need git "Git is required for version metadata and upstream pxlib fetches."
     need go "Install Go 1.25 or newer."
@@ -291,6 +318,7 @@ prepare_linux_pxlib() {
     step "📦 Building upstream pxlib for Linux"
     local prefix="$DEPS_DIR/pxlib-linux"
     bash "$ROOT_DIR/scripts/build-pxlib-linux.sh" "$prefix"
+    export PXLIB_ROOT="$prefix"
     export CGO_CFLAGS="-I$prefix/include ${CGO_CFLAGS:-}"
     export CGO_LDFLAGS="-L$prefix/lib ${CGO_LDFLAGS:-}"
     export LD_LIBRARY_PATH="$prefix/lib:${LD_LIBRARY_PATH:-}"
@@ -320,6 +348,15 @@ prepare_windows_pxlib() {
     export PXLIB_ROOT="$prefix"
     export CGO_CFLAGS="-I$(to_windows_path "$prefix")/include ${CGO_CFLAGS:-}"
     export CGO_LDFLAGS="-L$(to_windows_path "$prefix")/lib -L$(to_windows_path "$prefix")/bin ${CGO_LDFLAGS:-}"
+}
+
+require_pxlib_backend_artifact() {
+    [ "$PXLIB_BACKEND" = "cgo-static" ] || return 0
+    local library_name="$1"
+    local root="${PXLIB_ROOT:-}"
+    [ -n "$root" ] || fail "The cgo-static backend requires PXLIB_ROOT or a pxlib build managed by this helper."
+    [ -f "$root/lib/$library_name" ] || \
+        fail "The cgo-static backend requires $root/lib/$library_name. Rebuild pxlib without --skip-pxlib or provide a complete PXLIB_ROOT."
 }
 
 copy_windows_dlls() {
@@ -355,8 +392,9 @@ compile_windows_resources() {
 
 build_linux() {
     prepare_linux_pxlib
+    require_pxlib_backend_artifact libpx_static.a
     step "🐧 Building Linux executable and shared library"
-    make ENABLE_ALM="${ENABLE_ALM:-0}" ALM_APP_ID="${ALM_APP_ID:-}" build-linux build-lib-linux
+    make ENABLE_ALM="${ENABLE_ALM:-0}" ALM_APP_ID="${ALM_APP_ID:-}" PXLIB_BACKEND="$PXLIB_BACKEND" build-linux build-lib-linux
     run_tests
 }
 
@@ -365,6 +403,7 @@ build_windows_cross() {
     need x86_64-w64-mingw32-windres "Install mingw-w64 windres."
     export CC=x86_64-w64-mingw32-gcc
     prepare_windows_pxlib "$DEPS_DIR/pxlib-windows"
+    require_pxlib_backend_artifact libpxlib_static.a
     use_optional_vcpkg
     run_assets
     run_web
@@ -384,6 +423,7 @@ build_windows_native() {
     [ -n "$windres_name" ] || fail "Required tool not found: windres."
     export CC="${CC:-gcc}"
     prepare_windows_pxlib "$DEPS_DIR/pxlib-windows-native"
+    require_pxlib_backend_artifact libpxlib_static.a
     use_optional_vcpkg
     run_assets
     run_web

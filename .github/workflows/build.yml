@@ -49,6 +49,12 @@ jobs:
       shell: bash
       run: bash ./build.sh --target linux --ci --skip-pxlib --no-assets
 
+    - name: Test optional pxlib backends
+      shell: bash
+      run: |
+        go test -count=1 -tags pxlib_cgo ./pkg/paradox
+        go test -count=1 -tags 'pxlib_cgo,pxlib_cgo_static' ./pkg/paradox
+
     - name: Collect and smoke-test Linux runtime
       shell: bash
       run: |
