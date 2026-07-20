@@ -133,13 +133,13 @@ patris-export convert kala.db \
   --reconciliation delete_missing \
   --dry-run
 
-# Watch and send canonical JSON changes to the Digitalogic receiver.
-# DIGITALOGIC_PRODUCT_SYNC_SECRET is injected into the process environment by
+# Watch and send canonical JSON changes to a configured receiver.
+# PATRIS_PRODUCT_SYNC_SECRET is injected into the process environment by
 # the deployment secret manager; only its variable name appears here.
 patris-export convert kala.db -f json -w \
-  --send-url https://digitalogic.example/wp-json/digitalogic/patris/product-sync \
+  --send-url https://receiver.example/wp-json/receiver/patris/product-sync \
   --send-mode changes \
-  --send-product-sync-secret-env DIGITALOGIC_PRODUCT_SYNC_SECRET \
+  --send-product-sync-secret-env PATRIS_PRODUCT_SYNC_SECRET \
   --send-retry-attempts 3 \
   --send-retry-backoff 2s
 ```
@@ -560,7 +560,7 @@ widths, and the independent row-coloring toggle are persisted under `ui` in the
 normal Patris Export config file rather than in a separate table-settings file.
 
 For a configured canonical dataset, `GET /api/product-sync` returns the full
-living `digitalogic.product-sync` envelope. Missing source/reference values are
+current `patris.product-sync` envelope. Missing source/reference values are
 omitted; `null` is reserved for an explicitly supplied upstream null.
 `/api/records` deliberately remains the Code-keyed product-row collection used
 by the viewer and embedded records API. `GET

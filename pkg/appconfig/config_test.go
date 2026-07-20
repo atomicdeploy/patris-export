@@ -271,14 +271,14 @@ func TestEnvironmentCanRequireCanonicalOutboundContract(t *testing.T) {
 	t.Setenv("PATRIS_EXPORT_SEND_ALLOW_RAW", "false")
 	t.Setenv("PATRIS_EXPORT_SEND_RETRY_ATTEMPTS", "3")
 	t.Setenv("PATRIS_EXPORT_SEND_RETRY_BACKOFF", "250ms")
-	t.Setenv("PATRIS_EXPORT_SEND_PRODUCT_SYNC_SECRET_ENV", "DIGITALOGIC_PRODUCT_SYNC_SECRET")
-	t.Setenv("DIGITALOGIC_PRODUCT_SYNC_SECRET", "must-not-enter-config")
+	t.Setenv("PATRIS_EXPORT_SEND_PRODUCT_SYNC_SECRET_ENV", "PATRIS_PRODUCT_SYNC_SECRET")
+	t.Setenv("PATRIS_PRODUCT_SYNC_SECRET", "must-not-enter-config")
 	cfg := Default()
 	ApplyEnv(&cfg)
 	if !cfg.SendUpdates.RequireContract || cfg.SendUpdates.AllowRaw || cfg.SendUpdates.RetryAttempts != 3 || cfg.SendUpdates.RetryBackoff != "250ms" {
 		t.Fatalf("outbound safety environment overrides were not applied: %+v", cfg.SendUpdates)
 	}
-	if cfg.SendUpdates.ProductSyncSecretEnv != "DIGITALOGIC_PRODUCT_SYNC_SECRET" {
+	if cfg.SendUpdates.ProductSyncSecretEnv != "PATRIS_PRODUCT_SYNC_SECRET" {
 		t.Fatalf("product-sync secret environment reference was not applied: %+v", cfg.SendUpdates)
 	}
 	encoded, err := json.Marshal(cfg)

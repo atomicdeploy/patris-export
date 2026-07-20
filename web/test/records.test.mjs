@@ -18,7 +18,7 @@ test('normalizes Code-keyed API rows without treating metadata as records', () =
 
 test('consumes product-sync products and ignores envelope metadata', () => {
     const rows = normalizeRecordsPayload({
-        schema: 'digitalogic.product-sync',
+        schema: 'patris.product-sync',
         event_id: 'sha256:event',
         products: [
             { product_code: '102001011', name: 'LM75' },
@@ -37,7 +37,7 @@ test('normalizes keyed and contract category rows using the shared Code alias', 
     }).map(row => row.Code), ['101', '101001']);
 
     const rows = normalizeCategoriesPayload({
-        schema: 'digitalogic.product-sync',
+        schema: 'patris.product-sync',
         categories: [{ category_code: '102', name: 'Sensors', depth: 1 }]
     });
     assert.deepEqual(rows, [{ category_code: '102', name: 'Sensors', depth: 1, Code: '102' }]);

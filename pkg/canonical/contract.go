@@ -13,7 +13,7 @@ import (
 )
 
 const (
-	ContractName  = "digitalogic.product-sync"
+	ContractName  = "patris.product-sync"
 	FormulaID     = "landed_price"
 	LocalCurrency = "IRT"
 )

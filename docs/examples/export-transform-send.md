@@ -153,20 +153,20 @@ and the complete transformed `record`, so downstream upserts do not need to
 reconstruct unchanged fields.
 
 For a canonical profile and JSON delivery, the webhook body is the direct,
-living `digitalogic.product-sync` envelope instead of this generic wrapper.
+current `patris.product-sync` envelope instead of this generic wrapper.
 It carries deterministic event identity, complete changed products, and
 deleted-Code tombstones. CSV delivery retains the generic tabular change form.
 
 The existing HTTP sink serves webhook and REST destinations, including HTTP
-adapters that accept the direct JSON envelope; there is no second Digitalogic
-or JSON-RPC delivery implementation. For the Digitalogic receiver, point it
-at:
+adapters that accept the direct JSON envelope; there is no second
+receiver-specific or JSON-RPC delivery implementation. Point it at the
+configured receiver's product-sync route:
 
 ```text
-POST https://digitalogic.example/wp-json/digitalogic/patris/product-sync
+POST https://receiver.example/wp-json/receiver/patris/product-sync
 ```
 
-The dedicated `X-Digitalogic-Product-Sync-Secret` value is resolved only at
+The dedicated `X-Patris-Product-Sync-Secret` value is resolved only at
 request time from the environment variable named by
 `product_sync_secret_env`. Inject that environment variable through the
 service/process secret manager. Never put the value in the config `headers`
@@ -188,14 +188,14 @@ configured event source.
 
 Raw-mode outbound delivery fails closed by default. `send_updates.allow_raw`
 must be explicitly enabled for a trusted, non-integration destination; never
-enable it for Digitalogic or another product-sync consumer.
+enable it for a product-sync consumer or others.
 
 ```powershell
 patris-export convert C:\Patris\data4\kala.db -f json -w `
-  --send-url https://digitalogic.example/wp-json/digitalogic/patris/product-sync `
+  --send-url https://receiver.example/wp-json/receiver/patris/product-sync `
   --send-format json `
   --send-mode changes `
-  --send-product-sync-secret-env DIGITALOGIC_PRODUCT_SYNC_SECRET `
+  --send-product-sync-secret-env PATRIS_PRODUCT_SYNC_SECRET `
   --send-retry-attempts 3 `
   --send-retry-backoff 2s
 ```
@@ -212,7 +212,7 @@ Config equivalent:
 {
   "send_updates": {
     "enabled": true,
-    "url": "https://digitalogic.example/wp-json/digitalogic/patris/product-sync",
+    "url": "https://receiver.example/wp-json/receiver/patris/product-sync",
     "method": "POST",
     "format": "json",
     "mode": "changes",
@@ -221,7 +221,7 @@ Config equivalent:
     "timeout": "10s",
     "retry_attempts": 3,
     "retry_backoff": "2s",
-    "product_sync_secret_env": "DIGITALOGIC_PRODUCT_SYNC_SECRET",
+    "product_sync_secret_env": "PATRIS_PRODUCT_SYNC_SECRET",
     "headers": {
       "X-Integration-Name": "patris-office"
     }
@@ -229,31 +229,33 @@ Config equivalent:
 }
 ```
 
-Set `require_contract` for every Digitalogic-compatible integration target.
+Set `require_contract` for every product-sync integration target.
 It rejects generic transformed rows as well as raw rows, and it also rejects
 CSV, so a missing profile or disabled canonical stage cannot leak legacy Patris
 fields through a seemingly non-raw update.
 
 The default is one HTTP attempt, preserving generic webhook behavior. Opt in
-to retries only for an idempotent receiver. Digitalogic retries are safe:
+to retries only for an idempotent receiver. Product-sync retries are safe:
 Patris encodes the envelope once and reuses the exact bytes, event ID, identity
 headers, and secret for every attempt. Network failures, HTTP 408/425/429 and
 selected 5xx transients, and receiver responses with `retryable: true`,
 `partially_applied`, or `retry_pending` are retried. The receiver's
 `accepted`, `already_current`, `replayed`, or `recovered` state is surfaced in
-the CLI/server log. Those terminal states may also report a bounded,
-non-negative `deferred_products` count for Codes that require later catalog
+the CLI/server log. Those terminal states also report a bounded, non-negative
+`deferred_products` count for Codes that require later catalog
 reconciliation (for example, a product that does not exist in WooCommerce or
 an exact Code/SKU collision that must not be guessed). Deferred reconciliation
 is durable receiver work, not a delivery failure: it is logged as a count only
-and does not cause another HTTP attempt. A missing `deferred_products` field is
-treated as zero for compatibility with existing receivers.
+and does not cause another HTTP attempt. Current successful responses must
+include `status`, `event_id`, `retryable`, `pending_products`, and
+`deferred_products`; omission and explicit `null` both fail closed rather than
+being converted to empty strings, `false`, or zero.
 
 The receiver may include a sibling `deferred_reconciliation` summary containing
 native integer `missing`, `ambiguous`, and `details_truncated` counts plus at
 most 100 detail objects. Patris validates that missing plus ambiguous, and the
 detail count plus truncated count, both equal `deferred_products`; it then
-discards the detail objects. The summary is optional for replaceable receivers,
+discards the detail objects. The summary is optional in the current standard,
 and neither its product Codes nor reason details enter logs or delivery errors.
 
 Only `pending_products` represents transient apply work and causes a retry.
@@ -263,8 +265,8 @@ terminal state with `retryable: false` and `pending_products: 0`, even if a
 nonzero deferred count remains. Exhaustion reports only the sanitized endpoint
 and structured status/attempt/pending/deferred counts; query strings, response
 bodies, product identities, request headers, and credential values are never
-included. This distinction is paired with the bounded reconciliation state in
-`atomicdeploy/digitalogic-wp#64`.
+included. This distinction is paired with bounded reconciliation state in each
+receiver.
 
 Typed receiver responses fail closed unless their state is internally
 consistent: terminal states require zero pending products and

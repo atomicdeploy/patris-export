@@ -557,7 +557,7 @@ func TestCanonicalKalaParityAcrossRESTCSVXLSXAndWebSocket(t *testing.T) {
 	if contractRecorder.Code != http.StatusOK {
 		t.Fatalf("contract status = %d: %s", contractRecorder.Code, contractRecorder.Body.String())
 	}
-	if contentType := contractRecorder.Header().Get("Content-Type"); !strings.HasPrefix(contentType, "application/vnd.digitalogic.product-sync+json") {
+	if contentType := contractRecorder.Header().Get("Content-Type"); !strings.HasPrefix(contentType, "application/vnd.patris.product-sync+json") {
 		t.Fatalf("unexpected contract content type %q", contentType)
 	}
 	var envelope canonical.Envelope

@@ -33,7 +33,7 @@ never become a destructive zero or a generated JSON `null`. Duplicate Codes are
 quarantined from the contract.
 
 Raw `Sharh1`, `Sharh2`, `FOROSH`, `KHARYD`, `ALLANBAR`, and `ANBAR*` keys never
-cross the `digitalogic.product-sync` boundary.
+cross the `patris.product-sync` boundary.
 
 The wire boundary is sparse. A key that was never received or derived from a
 real value is omitted from JSON and from the union of CSV/XLSX/SQL columns. A
@@ -44,8 +44,8 @@ when static pricing is explicitly populated or a Digitalogic endpoint is
 configured. The only shipping names are `shipping_method_id`,
 `shipping_price_per_kg_cny`, and `shipping_methods`.
 
-This is a living, versionless integration standard. The current field set and
-routes are the only supported shape; producers and consumers change together.
+This is a living integration standard. The current field set and routes are the
+only supported shape; producers and consumers change together.
 Unknown fields fail closed rather than selecting a compatibility branch. See
 [`INTEGRATION-STANDARD.md`](INTEGRATION-STANDARD.md) for the maintenance policy.
 
@@ -118,7 +118,7 @@ values fail closed. A `global_default` value must exactly match the shared
 default snapshot.
 
 Outbound delivery uses only the dedicated `/patris/product-sync` receiver. It
-validates the current `digitalogic.product-sync` shape, merges update envelopes,
+validates the current `patris.product-sync` shape, merges update envelopes,
 honours `deleted_codes`, and deduplicates `event_id`. Do not point canonical
 delivery at `/patris/push` or another full-replacement parser.
 
@@ -196,10 +196,10 @@ adds explicit warnings.
 
 ## Transport contract
 
-Canonical JSON and JSON webhooks use the living
-`digitalogic.product-sync` shape. There is no schema version field, route
-version, formula revision, or compatibility negotiation. Category and exclusion
-projections are part of the current shape without exposing raw Patris fields.
+Canonical JSON and JSON webhooks use the current `patris.product-sync` shape.
+Retired shapes and compatibility negotiation are not accepted. Category and
+exclusion projections are part of the current shape without exposing raw Patris
+fields.
 
 `event_id` covers the validated `generated_at` value as well as the sorted
 record hashes and tombstones. Identical content generated at a later time is a
@@ -218,12 +218,12 @@ the same table, filtering, column, context-menu, accessibility, and RTL logic.
 ![Canonical landed-pricing row in the records viewer](screenshots/canonical-product-sync-viewer.png)
 
 Cross-project contract verification uses the entirely synthetic two-product
-fixture at `testdata/digitalogic-product-sync.synthetic.json`; production
+fixture at `testdata/patris-product-sync.synthetic.json`; production
 exports and catalog values must never be committed as golden fixtures.
 
 ```json
 {
-  "schema": "digitalogic.product-sync",
+  "schema": "patris.product-sync",
   "event_type": "snapshot",
   "event_id": "sha256:...",
   "local_currency": "IRT",
@@ -308,13 +308,15 @@ integers. Both SQL sinks add newly introduced columns on later exports.
 
 ![Accessible canonical XLSX download action](screenshots/canonical-xlsx-export-menu.png)
 
-For direct delivery to Digitalogic, use the existing HTTP update sink with
+For direct delivery to a receiver, use the existing HTTP update sink with
 `require_contract: true`, the dedicated `/patris/product-sync` endpoint, and a
 `product_sync_secret_env` reference. The secret value is read from that named
 environment variable at request time and sent only in
-`X-Digitalogic-Product-Sync-Secret`; it is not copied into persisted config or
-delivery logs or inherited by an optional command sink. Remote secret-bearing
-destinations require HTTPS. The sink preserves the canonical `X-Patris-*`
+`X-Patris-Product-Sync-Secret`; it is not copied into persisted config or
+delivery logs or inherited by an optional command sink. Custom header names
+ending in `product-sync-secret` are rejected so a retired header cannot retain
+or transmit a persisted credential. Remote secret-bearing destinations require
+HTTPS. The sink preserves the canonical `X-Patris-*`
 identity headers and uses contract `source.id` instead of the local database
 path for `X-Patris-Source`. It parses the WordPress REST response, surfaces
 apply state, and can retry the identical event when the receiver reports

@@ -29,7 +29,7 @@ func TestCanonicalXLSXRoundTripPreservesTypesLayoutAndMetadata(t *testing.T) {
 	options := XLSXOptions{
 		RightToLeft: true,
 		Metadata: XLSXMetadata{
-			Schema:         "digitalogic.product-sync",
+			Schema:         "patris.product-sync",
 			FormulaID:      "landed_price",
 			LocalCurrency:  "IRT",
 			SourceID:       "patris-office",
@@ -96,7 +96,7 @@ func TestCanonicalXLSXRoundTripPreservesTypesLayoutAndMetadata(t *testing.T) {
 	}
 	metadata := metadataValues(metadataRows)
 	for key, want := range map[string]string{
-		"schema":          "digitalogic.product-sync",
+		"schema":          "patris.product-sync",
 		"formula_id":      "landed_price",
 		"source_id":       "patris-office",
 		"source_dataset":  "kala.db",

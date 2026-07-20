@@ -1,14 +1,13 @@
 # Living Integration Standard
 
-Patris Export, Digitalogic-WP, and Ashko-WP share one current integration
-standard. It is intentionally versionless while all producers, receivers, and
-deployments remain under coordinated control.
+Patris Export and others share one current integration standard while all
+producers, receivers, and deployments remain under coordinated control.
 
 ## Rules
 
-- `schema` identifies a document kind; it does not select a version.
-- Routes contain no version segment. Producers and consumers are deployed as a
-  coordinated change when the shape evolves.
+- `schema` identifies the current document kind.
+- Producers and consumers are deployed as a coordinated change when the shape
+  evolves.
 - Unknown fields and obsolete aliases fail closed. There are no compatibility
   branches for earlier payload shapes.
 - Missing source or reference data omits the corresponding key.
@@ -26,9 +25,9 @@ deployments remain under coordinated control.
 
 ## Change process
 
-An integration change updates producer code, both WordPress consumers, fixtures,
+An integration change updates producer code, all configured receivers, fixtures,
 tests, endpoint documentation, and deployment configuration together. The
 cutover sends a full snapshot after resetting receiver state when event identity
-or payload meaning changes. Software release versions and internal database
-migration counters may still be used for packaging and deployment mechanics;
-they are not wire-contract versions.
+or payload meaning changes. Software release identifiers and internal database
+migration counters remain packaging and deployment mechanics, outside the wire
+contract.

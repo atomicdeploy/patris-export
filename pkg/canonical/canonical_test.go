@@ -285,7 +285,7 @@ func TestIntegratedProfilePreservesExplicitReferenceNulls(t *testing.T) {
 
 func TestProductSyncDecoderRejectsUnknownFields(t *testing.T) {
 	var envelope Envelope
-	if err := json.Unmarshal([]byte(`{"schema":"digitalogic.product-sync","obsolete_field":true}`), &envelope); err == nil {
+	if err := json.Unmarshal([]byte(`{"schema":"patris.product-sync","obsolete_field":true}`), &envelope); err == nil {
 		t.Fatal("unknown envelope field was silently accepted")
 	}
 	var product Product
@@ -296,10 +296,10 @@ func TestProductSyncDecoderRejectsUnknownFields(t *testing.T) {
 	if err := json.Unmarshal([]byte(`{"category_code":"A","obsolete_field":true}`), &category); err == nil {
 		t.Fatal("unknown category field was silently accepted")
 	}
-	if err := json.Unmarshal([]byte(`{"schema":"digitalogic.product-sync","source":{"id":"A","obsolete_field":true}}`), &envelope); err == nil {
+	if err := json.Unmarshal([]byte(`{"schema":"patris.product-sync","source":{"id":"A","obsolete_field":true}}`), &envelope); err == nil {
 		t.Fatal("unknown source field was silently accepted")
 	}
-	if err := json.Unmarshal([]byte(`{"schema":"digitalogic.product-sync","deleted_codes":[{"product_code":"A","deleted":true,"obsolete_field":true}]}`), &envelope); err == nil {
+	if err := json.Unmarshal([]byte(`{"schema":"patris.product-sync","deleted_codes":[{"product_code":"A","deleted":true,"obsolete_field":true}]}`), &envelope); err == nil {
 		t.Fatal("unknown tombstone field was silently accepted")
 	}
 }
