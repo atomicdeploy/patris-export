@@ -4,7 +4,7 @@ package paradox
 
 /*
 #cgo windows LDFLAGS: -lpxlib
-#cgo linux freebsd netbsd LDFLAGS: -lpx
+#cgo linux freebsd netbsd LDFLAGS: -lpx -lm
 #cgo darwin LDFLAGS: -lpx
 */
 import "C"
