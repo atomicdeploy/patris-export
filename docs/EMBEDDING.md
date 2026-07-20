@@ -6,6 +6,13 @@ Patris Export can run in three modes:
 - Embedded Go mode: import `github.com/atomicdeploy/patris-export/pkg/embedded` and call the engine directly from a host application.
 - Loadable library mode: build `patris-export.dll` on Windows or `libpatris-export.so` on Linux and call the C ABI from C#, Electron native modules, Python `ctypes`, or another host.
 
+Supported Electron, Tauri, and WebView2 renderer/host contracts, the typed
+method allowlist, security boundary, runtime fallback order, tests, and
+standalone/unified installer layout are documented in
+[`integrations/javascript/README.md`](../integrations/javascript/README.md).
+Those adapters call this ABI or the existing executable/REST transports; they
+do not implement a parallel transformation engine.
+
 The embedded and IPC APIs use the same backend as the standalone server, so records, config, process/file-lock status, notifications, and live update events stay consistent.
 
 ## Build The Loadable Library
