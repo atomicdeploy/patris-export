@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"sort"
 	"strings"
 	"time"
@@ -12,12 +13,9 @@ import (
 )
 
 const (
-	ContractName          = "digitalogic.product-sync"
-	ContractVersion       = "1.1"
-	LegacyContractVersion = "1.0"
-	FormulaVersion        = "landed_price_v1"
-	FormulaRevision       = "1.0.0"
-	LocalCurrency         = "IRT"
+	ContractName  = "digitalogic.product-sync"
+	FormulaID     = "landed_price"
+	LocalCurrency = "IRT"
 )
 
 type Source struct {
@@ -26,44 +24,108 @@ type Source struct {
 	Revision string `json:"revision"`
 }
 
+func (source *Source) UnmarshalJSON(data []byte) error {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	if err := rejectUnknownJSONFields(raw, "product-sync source", []string{"id", "dataset", "revision"}); err != nil {
+		return err
+	}
+	type sourceAlias Source
+	var decoded sourceAlias
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	*source = Source(decoded)
+	return nil
+}
+
 type Tombstone struct {
 	ProductCode string `json:"product_code"`
 	Deleted     bool   `json:"deleted"`
 }
 
+func (tombstone *Tombstone) UnmarshalJSON(data []byte) error {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	if err := rejectUnknownJSONFields(raw, "product tombstone", []string{"product_code", "deleted"}); err != nil {
+		return err
+	}
+	type tombstoneAlias Tombstone
+	var decoded tombstoneAlias
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	*tombstone = Tombstone(decoded)
+	return nil
+}
+
 type Envelope struct {
 	Schema           string      `json:"schema"`
-	SchemaVersion    string      `json:"schema_version"`
-	Event            string      `json:"event"`
 	EventType        string      `json:"event_type"`
 	EventID          string      `json:"event_id"`
 	LocalCurrency    string      `json:"local_currency,omitempty"`
 	FormulaID        string      `json:"formula_id,omitempty"`
-	FormulaRevision  string      `json:"formula_revision,omitempty"`
-	FormulaVersion   string      `json:"formula_version,omitempty"`
 	Source           Source      `json:"source"`
 	GeneratedAt      string      `json:"generated_at"`
 	Products         []Product   `json:"products"`
-	Categories       []Category  `json:"categories,omitempty"`
-	ExcludedCodes    []string    `json:"excluded_codes,omitempty"`
+	Categories       []Category  `json:"categories"`
+	ExcludedCodes    []string    `json:"excluded_codes"`
 	DeletedCodes     []Tombstone `json:"deleted_codes,omitempty"`
-	QuarantinedCodes []string    `json:"quarantined_codes,omitempty"`
-	Warnings         []string    `json:"warnings,omitempty"`
+	QuarantinedCodes []string    `json:"quarantined_codes"`
+	Warnings         []string    `json:"warnings"`
+}
+
+func (envelope *Envelope) UnmarshalJSON(data []byte) error {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	if err := rejectUnknownJSONFields(raw, "product-sync envelope", []string{
+		"schema", "event_type", "event_id", "local_currency", "formula_id", "source",
+		"generated_at", "products", "categories", "excluded_codes", "deleted_codes",
+		"quarantined_codes", "warnings",
+	}); err != nil {
+		return err
+	}
+	type envelopeAlias Envelope
+	var decoded envelopeAlias
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	*envelope = Envelope(decoded)
+	return nil
+}
+
+func rejectUnknownJSONFields(raw map[string]json.RawMessage, kind string, allowed []string) error {
+	known := make(map[string]struct{}, len(allowed))
+	for _, field := range allowed {
+		known[field] = struct{}{}
+	}
+	for field := range raw {
+		if _, exists := known[field]; !exists {
+			return fmt.Errorf("%s contains unknown field %q", kind, field)
+		}
+	}
+	return nil
 }
 
 func NewEnvelope(rows []Product, source, sourceID string, generatedAt time.Time, quarantinedCodes ...string) *Envelope {
-	return newEnvelope(rows, nil, nil, ContractVersion, source, sourceID, generatedAt, quarantinedCodes...)
+	return newEnvelope(rows, nil, nil, source, sourceID, generatedAt, quarantinedCodes...)
 }
 
 func NewEnvelopeWithCategories(rows []Product, categories []Category, source, sourceID string, generatedAt time.Time, quarantinedCodes ...string) *Envelope {
-	return newEnvelope(rows, categories, nil, ContractVersion, source, sourceID, generatedAt, quarantinedCodes...)
+	return newEnvelope(rows, categories, nil, source, sourceID, generatedAt, quarantinedCodes...)
 }
 
 func NewCatalogEnvelope(rows []Product, categories []Category, excludedCodes []string, source, sourceID string, generatedAt time.Time, quarantinedCodes ...string) *Envelope {
-	return newEnvelope(rows, categories, excludedCodes, ContractVersion, source, sourceID, generatedAt, quarantinedCodes...)
+	return newEnvelope(rows, categories, excludedCodes, source, sourceID, generatedAt, quarantinedCodes...)
 }
 
-func newEnvelope(rows []Product, categories []Category, excludedCodes []string, version, source, sourceID string, generatedAt time.Time, quarantinedCodes ...string) *Envelope {
+func newEnvelope(rows []Product, categories []Category, excludedCodes []string, source, sourceID string, generatedAt time.Time, quarantinedCodes ...string) *Envelope {
 	if generatedAt.IsZero() {
 		generatedAt = time.Now()
 	}
@@ -83,19 +145,16 @@ func newEnvelope(rows []Product, categories []Category, excludedCodes []string, 
 	}
 	envelope := &Envelope{
 		Schema:           ContractName,
-		SchemaVersion:    version,
-		Event:            ContractName,
 		EventType:        "snapshot",
 		LocalCurrency:    LocalCurrency,
-		FormulaID:        FormulaVersion,
-		FormulaRevision:  FormulaRevision,
-		FormulaVersion:   FormulaVersion,
+		FormulaID:        FormulaID,
 		Source:           Source{ID: sourceID, Dataset: sourceBaseName(source), Revision: revision},
 		GeneratedAt:      generatedAt.UTC().Format(time.RFC3339Nano),
 		Products:         products,
 		Categories:       categories,
 		ExcludedCodes:    excludedCodes,
 		QuarantinedCodes: quarantinedCodes,
+		Warnings:         normalizedWarnings(nil),
 	}
 	for _, code := range quarantinedCodes {
 		envelope.Warnings = append(envelope.Warnings, "duplicate_product_code:"+code)
@@ -151,13 +210,9 @@ func ChangeEnvelope(snapshot *Envelope, changes *recorddiff.ChangeSet) *Envelope
 
 	envelope := &Envelope{
 		Schema:           snapshot.Schema,
-		SchemaVersion:    snapshot.SchemaVersion,
-		Event:            snapshot.Event,
 		EventType:        "update",
 		LocalCurrency:    snapshot.LocalCurrency,
 		FormulaID:        snapshot.FormulaID,
-		FormulaRevision:  snapshot.FormulaRevision,
-		FormulaVersion:   snapshot.FormulaVersion,
 		Source:           snapshot.Source,
 		GeneratedAt:      snapshot.GeneratedAt,
 		Products:         products,
@@ -165,7 +220,7 @@ func ChangeEnvelope(snapshot *Envelope, changes *recorddiff.ChangeSet) *Envelope
 		ExcludedCodes:    append([]string(nil), snapshot.ExcludedCodes...),
 		DeletedCodes:     deleted,
 		QuarantinedCodes: append([]string(nil), snapshot.QuarantinedCodes...),
-		Warnings:         append([]string(nil), snapshot.Warnings...),
+		Warnings:         normalizedWarnings(snapshot.Warnings),
 	}
 	envelope.EventID = eventID(envelope)
 	return envelope
@@ -192,18 +247,16 @@ func sourceRevision(products []Product, categories []Category, excludedCodes, qu
 func eventID(envelope *Envelope) string {
 	type identity struct {
 		Schema           string      `json:"schema"`
-		SchemaVersion    string      `json:"schema_version"`
 		EventType        string      `json:"event_type"`
 		LocalCurrency    string      `json:"local_currency"`
 		FormulaID        string      `json:"formula_id"`
-		FormulaRevision  string      `json:"formula_revision"`
 		Source           Source      `json:"source"`
 		GeneratedAt      string      `json:"generated_at"`
 		Products         []string    `json:"products"`
-		Categories       []string    `json:"categories,omitempty"`
-		ExcludedCodes    []string    `json:"excluded_codes,omitempty"`
+		Categories       []string    `json:"categories"`
+		ExcludedCodes    []string    `json:"excluded_codes"`
 		DeletedCodes     []Tombstone `json:"deleted_codes,omitempty"`
-		QuarantinedCodes []string    `json:"quarantined_codes,omitempty"`
+		QuarantinedCodes []string    `json:"quarantined_codes"`
 	}
 	hashes := make([]string, 0, len(envelope.Products))
 	for _, product := range envelope.Products {
@@ -216,8 +269,8 @@ func eventID(envelope *Envelope) string {
 	}
 	sort.Strings(categoryHashes)
 	material, _ := json.Marshal(identity{
-		Schema: envelope.Schema, SchemaVersion: envelope.SchemaVersion, EventType: envelope.EventType,
-		LocalCurrency: envelope.LocalCurrency, FormulaID: envelope.FormulaID, FormulaRevision: envelope.FormulaRevision,
+		Schema: envelope.Schema, EventType: envelope.EventType,
+		LocalCurrency: envelope.LocalCurrency, FormulaID: envelope.FormulaID,
 		Source: envelope.Source, GeneratedAt: envelope.GeneratedAt, Products: hashes, Categories: categoryHashes, ExcludedCodes: envelope.ExcludedCodes,
 		DeletedCodes: envelope.DeletedCodes, QuarantinedCodes: envelope.QuarantinedCodes,
 	})
@@ -249,6 +302,10 @@ func cloneCategories(values []Category) []Category {
 	result := make([]Category, 0, len(values))
 	for _, value := range values {
 		copy := value
+		copy.fieldPresence = make(map[string]fieldPresence, len(value.fieldPresence))
+		for key, state := range value.fieldPresence {
+			copy.fieldPresence[key] = state
+		}
 		if value.Warnings != nil {
 			copy.Warnings = append(make([]string, 0, len(value.Warnings)), value.Warnings...)
 		}

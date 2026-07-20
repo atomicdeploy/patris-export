@@ -590,7 +590,7 @@ func (s *Server) handleGetCategories(w http.ResponseWriter, _ *http.Request) {
 	}
 }
 
-// handleGetProductSyncContract exposes the versioned integration envelope
+// handleGetProductSyncContract exposes the living integration envelope
 // without changing the long-standing row collection returned by /api/records.
 func (s *Server) handleGetProductSyncContract(w http.ResponseWriter, _ *http.Request) {
 	result, err := s.RecordResult()
@@ -602,7 +602,7 @@ func (s *Server) handleGetProductSyncContract(w http.ResponseWriter, _ *http.Req
 		http.Error(w, "canonical product-sync contract is not available for this dataset", http.StatusNotFound)
 		return
 	}
-	w.Header().Set("Content-Type", "application/vnd.digitalogic.product-sync+json; version="+result.Contract.SchemaVersion)
+	w.Header().Set("Content-Type", "application/vnd.digitalogic.product-sync+json")
 	if err := json.NewEncoder(w).Encode(result.Contract); err != nil {
 		http.Error(w, fmt.Sprintf("Failed to encode product-sync contract: %v", err), http.StatusInternalServerError)
 	}

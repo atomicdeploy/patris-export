@@ -10,7 +10,9 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 ### Changed
 
 - Canonical JSON, CSV, HTTP, spreadsheet, SQL, and outbound-update rows now share a sparse field boundary: never-received values are omitted while explicitly received nulls remain null.
-- Shipping integration output uses `shipping_method_id` and `shipping_price_per_kg_cny`; legacy freight-named catalog and assignment keys remain accepted as input during migration.
+- Product-sync is now a single living, versionless standard with strict current-field decoding; obsolete aliases and compatibility branches are rejected.
+- Shipping integration uses only `shipping_method_id` and `shipping_price_per_kg_cny`.
+- Missing source/reference values are omitted, while `null` is preserved only when explicitly supplied upstream.
 
 ### Fixed
 
@@ -20,7 +22,7 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Added
 
-- Canonical catalog contract v1.1 separates typed, hashed category hierarchy rows and reserved accounting/service exclusions from commerce products, and assigns every product an explicit structural `category_code`.
+- The canonical catalog separates typed, hashed category hierarchy rows and reserved accounting/service exclusions from commerce products, and assigns every product an explicit structural `category_code`.
 - `GET /api/categories` and an accessible Products/Categories segmented view expose the hierarchy through the existing filterable, resizable, RTL-aware data grid.
 
 ### Changed

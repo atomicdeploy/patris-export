@@ -539,7 +539,7 @@ func TestCanonicalKalaParityAcrossRESTCSVXLSXAndWebSocket(t *testing.T) {
 	if len(keyedProducts) != 292 {
 		t.Fatalf("canonical /api/records returned %d top-level entries, want 292 leaf product rows", len(keyedProducts))
 	}
-	for _, metadata := range []string{"schema", "schema_version", "event", "event_id", "products"} {
+	for _, metadata := range []string{"schema", "event_id", "products"} {
 		if _, leaked := keyedProducts[metadata]; leaked {
 			t.Fatalf("canonical envelope metadata %q was exposed as a viewer row", metadata)
 		}
@@ -566,8 +566,8 @@ func TestCanonicalKalaParityAcrossRESTCSVXLSXAndWebSocket(t *testing.T) {
 	}
 	contractRESTProduct := canonicalTypedProductByCode(t, envelope.Products, "102001011")
 	assertJSONEquivalent(t, "records and dedicated contract", restProduct, contractRESTProduct)
-	if envelope.SchemaVersion != canonical.ContractVersion || len(envelope.Categories) != 54 {
-		t.Fatalf("canonical contract version/categories = %s/%d, want %s/54", envelope.SchemaVersion, len(envelope.Categories), canonical.ContractVersion)
+	if envelope.Schema != canonical.ContractName || len(envelope.Categories) != 54 {
+		t.Fatalf("canonical contract schema/categories = %s/%d, want %s/54", envelope.Schema, len(envelope.Categories), canonical.ContractName)
 	}
 
 	categoriesRequest := httptest.NewRequest(http.MethodGet, "/api/categories", nil)
@@ -629,12 +629,10 @@ func TestCanonicalKalaParityAcrossRESTCSVXLSXAndWebSocket(t *testing.T) {
 		}
 	}
 	for key, want := range map[string]string{
-		"schema":           envelope.Schema,
-		"schema_version":   envelope.SchemaVersion,
-		"formula_id":       envelope.FormulaID,
-		"formula_revision": envelope.FormulaRevision,
-		"source_dataset":   envelope.Source.Dataset,
-		"source_revision":  envelope.Source.Revision,
+		"schema":          envelope.Schema,
+		"formula_id":      envelope.FormulaID,
+		"source_dataset":  envelope.Source.Dataset,
+		"source_revision": envelope.Source.Revision,
 	} {
 		if metadata[key] != want {
 			_ = book.Close()

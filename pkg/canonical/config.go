@@ -8,7 +8,7 @@ import (
 	"github.com/atomicdeploy/patris-export/pkg/pricingcatalog"
 )
 
-const ProfileKalaV1 = "kala_v1"
+const ProfileKala = "kala"
 
 type Config struct {
 	Enabled  bool                     `json:"enabled" yaml:"enabled" toml:"enabled"`
@@ -26,7 +26,7 @@ func DefaultConfig() Config {
 	return Config{
 		Enabled: true,
 		Profiles: map[string]ProfileConfig{
-			"kala.db": {Type: ProfileKalaV1},
+			"kala.db": {Type: ProfileKala},
 		},
 		Pricing: pricingcatalog.DefaultConfig(),
 	}
@@ -60,7 +60,7 @@ func ProfileFor(source string, cfg Config) (ProfileConfig, bool) {
 	if !ok || (profile.Enabled != nil && !*profile.Enabled) {
 		return ProfileConfig{}, false
 	}
-	return profile, profile.Type == ProfileKalaV1
+	return profile, profile.Type == ProfileKala
 }
 
 func sourceBaseName(source string) string {

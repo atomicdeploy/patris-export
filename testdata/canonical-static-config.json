@@ -4,7 +4,7 @@
     "source_id": "test-fixture",
     "profiles": {
       "kala.db": {
-        "type": "kala_v1"
+        "type": "kala"
       }
     },
     "pricing": {

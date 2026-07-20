@@ -46,7 +46,6 @@ var canonicalXLSXFields = []string{
 	"pricing_catalog_status",
 	"currency_effective_date",
 	"final_price",
-	"formula_version",
 	"source_updated_at",
 	"warnings",
 	"record_hash",
@@ -56,17 +55,14 @@ var canonicalXLSXFields = []string{
 // workbook Metadata sheet. It deliberately cannot carry arbitrary config,
 // credentials, source paths, or raw Patris fields.
 type XLSXMetadata struct {
-	Schema          string
-	SchemaVersion   string
-	FormulaID       string
-	FormulaRevision string
-	FormulaVersion  string
-	LocalCurrency   string
-	SourceID        string
-	SourceDataset   string
-	SourceRevision  string
-	GeneratedAt     string
-	Warnings        []string
+	Schema         string
+	FormulaID      string
+	LocalCurrency  string
+	SourceID       string
+	SourceDataset  string
+	SourceRevision string
+	GeneratedAt    string
+	Warnings       []string
 }
 
 type XLSXOptions struct {
@@ -105,9 +101,6 @@ func normalizeXLSXOptions(values []XLSXOptions) XLSXOptions {
 	}
 	if strings.TrimSpace(options.Metadata.Schema) == "" {
 		options.Metadata.Schema = "patris-export.records"
-	}
-	if strings.TrimSpace(options.Metadata.SchemaVersion) == "" {
-		options.Metadata.SchemaVersion = "1"
 	}
 	if strings.TrimSpace(options.Metadata.GeneratedAt) == "" {
 		options.Metadata.GeneratedAt = time.Now().UTC().Format(time.RFC3339Nano)
@@ -401,10 +394,7 @@ func writeMetadataWorksheet(book *excelize.File, options XLSXOptions) error {
 	rows := [][2]string{
 		{"Property", "Value"},
 		{"schema", options.Metadata.Schema},
-		{"schema_version", options.Metadata.SchemaVersion},
 		{"formula_id", options.Metadata.FormulaID},
-		{"formula_revision", options.Metadata.FormulaRevision},
-		{"formula_version", options.Metadata.FormulaVersion},
 		{"local_currency", options.Metadata.LocalCurrency},
 		{"source_id", options.Metadata.SourceID},
 		{"source_dataset", safeDatasetName(options.Metadata.SourceDataset)},

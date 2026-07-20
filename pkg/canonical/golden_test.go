@@ -18,7 +18,7 @@ func TestSyntheticProductSyncGoldenFixture(t *testing.T) {
 		t.Fatal(err)
 	}
 	actual := append(encoded, '\n')
-	path := filepath.Join("..", "..", "testdata", "digitalogic-product-sync-v1.synthetic.json")
+	path := filepath.Join("..", "..", "testdata", "digitalogic-product-sync.synthetic.json")
 	if os.Getenv("UPDATE_GOLDEN") == "1" {
 		if err := os.WriteFile(path, actual, 0o644); err != nil {
 			t.Fatal(err)
@@ -42,7 +42,7 @@ func syntheticGoldenEnvelope() *Envelope {
 	cfg := DefaultConfig()
 	cfg.SourceID = "synthetic-fixture"
 	cfg.Pricing = pricingcatalog.Config{Mode: pricingcatalog.ModeStatic, Static: pricingcatalog.StaticConfig{
-		Revision:              "synthetic-catalog-v1",
+		Revision:              "synthetic-catalog",
 		CNYToIRT:              &fx,
 		CurrencyEffectiveDate: "2026-01-01",
 		SelectedWarehouses:    []string{"1", "2"},

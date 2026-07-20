@@ -211,7 +211,7 @@ func TestSQLExportDefaultsAndEnvironmentOverrides(t *testing.T) {
 func TestCanonicalKalaProfileAndPricingProviderDefaults(t *testing.T) {
 	cfg := Default()
 	profile, exists := cfg.Canonical.Profiles["kala.db"]
-	if !cfg.Canonical.Enabled || !exists || profile.Type != "kala_v1" {
+	if !cfg.Canonical.Enabled || !exists || profile.Type != "kala" {
 		t.Fatalf("kala canonical profile is not enabled by default: %+v", cfg.Canonical)
 	}
 	if cfg.Canonical.Pricing.Mode != "static" {
@@ -220,7 +220,7 @@ func TestCanonicalKalaProfileAndPricingProviderDefaults(t *testing.T) {
 }
 
 func TestApplyEnvConfiguresDigitalogicWithoutStoringCredentials(t *testing.T) {
-	t.Setenv("PATRIS_EXPORT_DIGITALOGIC_URL", "https://digitalogic.example/wp-json/digitalogic/v1/")
+	t.Setenv("PATRIS_EXPORT_DIGITALOGIC_URL", "https://digitalogic.example/wp-json/digitalogic/")
 	t.Setenv("PATRIS_EXPORT_DIGITALOGIC_USERNAME_ENV", "DIGITALOGIC_KEY")
 	t.Setenv("PATRIS_EXPORT_DIGITALOGIC_PASSWORD_ENV", "DIGITALOGIC_SECRET")
 	t.Setenv("PATRIS_EXPORT_DIGITALOGIC_BEARER_ENV", "DIGITALOGIC_PRICING_READ_TOKEN")
@@ -235,7 +235,7 @@ func TestApplyEnvConfiguresDigitalogicWithoutStoringCredentials(t *testing.T) {
 	cfg := Default()
 	ApplyEnv(&cfg)
 	digitalogic := cfg.Canonical.Pricing.Digitalogic
-	if cfg.Canonical.Pricing.Mode != "digitalogic" || digitalogic.BaseURL != "https://digitalogic.example/wp-json/digitalogic/v1" {
+	if cfg.Canonical.Pricing.Mode != "digitalogic" || digitalogic.BaseURL != "https://digitalogic.example/wp-json/digitalogic" {
 		t.Fatalf("Digitalogic pricing provider was not selected: %+v", cfg.Canonical.Pricing)
 	}
 	if digitalogic.UsernameEnv != "DIGITALOGIC_KEY" || digitalogic.PasswordEnv != "DIGITALOGIC_SECRET" || digitalogic.BearerTokenEnv != "DIGITALOGIC_PRICING_READ_TOKEN" || digitalogic.FreshFor != "2m" || digitalogic.MaxStale != "30m" || digitalogic.Timeout != "20s" || digitalogic.BatchSize != 250 {
@@ -251,7 +251,7 @@ func TestApplyEnvConfiguresDigitalogicWithoutStoringCredentials(t *testing.T) {
 }
 
 func TestApplyEnvBoundsDigitalogicPricingBatchSizeAndTimeout(t *testing.T) {
-	t.Setenv("PATRIS_EXPORT_DIGITALOGIC_URL", "https://digitalogic.example/wp-json/digitalogic/v1/")
+	t.Setenv("PATRIS_EXPORT_DIGITALOGIC_URL", "https://digitalogic.example/wp-json/digitalogic/")
 	t.Setenv("PATRIS_EXPORT_PRICING_TIMEOUT", "not-a-duration")
 	t.Setenv("PATRIS_EXPORT_PRICING_BATCH_SIZE", "501")
 

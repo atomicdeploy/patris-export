@@ -15,24 +15,20 @@ import (
 func (result Result) XLSXOptions(dataset string, rightToLeft bool) recordsink.XLSXOptions {
 	metadata := recordsink.XLSXMetadata{
 		Schema:        "patris-export.records",
-		SchemaVersion: "1",
 		SourceDataset: filepath.Base(strings.TrimSpace(dataset)),
 		GeneratedAt:   time.Now().UTC().Format(time.RFC3339Nano),
 	}
 	if result.Contract != nil {
 		contract := result.Contract
 		metadata = recordsink.XLSXMetadata{
-			Schema:          contract.Schema,
-			SchemaVersion:   contract.SchemaVersion,
-			FormulaID:       contract.FormulaID,
-			FormulaRevision: contract.FormulaRevision,
-			FormulaVersion:  contract.FormulaVersion,
-			LocalCurrency:   contract.LocalCurrency,
-			SourceID:        contract.Source.ID,
-			SourceDataset:   contract.Source.Dataset,
-			SourceRevision:  contract.Source.Revision,
-			GeneratedAt:     contract.GeneratedAt,
-			Warnings:        workbookWarnings(result),
+			Schema:         contract.Schema,
+			FormulaID:      contract.FormulaID,
+			LocalCurrency:  contract.LocalCurrency,
+			SourceID:       contract.Source.ID,
+			SourceDataset:  contract.Source.Dataset,
+			SourceRevision: contract.Source.Revision,
+			GeneratedAt:    contract.GeneratedAt,
+			Warnings:       workbookWarnings(result),
 		}
 	}
 	return recordsink.XLSXOptions{RightToLeft: rightToLeft, Metadata: metadata}

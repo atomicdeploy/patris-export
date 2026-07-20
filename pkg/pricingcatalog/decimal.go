@@ -11,7 +11,7 @@ import (
 
 // Decimal preserves the exact base-10 token supplied by configuration or the
 // Digitalogic API. It deliberately does not pass pricing inputs through an
-// IEEE-754 float before landed_price_v1 evaluates them.
+// IEEE-754 float before landed_price evaluates them.
 type Decimal string
 
 func NewDecimal(value string) (*Decimal, error) {

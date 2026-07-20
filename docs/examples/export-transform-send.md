@@ -2,7 +2,7 @@
 
 `patris-export` runs one shared record pipeline for CLI exports, the REST API,
 WebSocket updates, watch-mode webhooks, and SQL/Excel outputs. `kala.db` selects
-the fixed `kala_v1` canonical contract by default; the mapping examples below
+the fixed `kala` canonical contract by default; the mapping examples below
 apply to other datasets, or to `kala.db` after explicitly setting
 `PATRIS_EXPORT_CANONICAL=0`. See [the canonical contract](../CANONICAL-PRODUCT-SYNC.md).
 
@@ -152,18 +152,18 @@ and `deleted` entries. Modified entries include both the changed field values
 and the complete transformed `record`, so downstream upserts do not need to
 reconstruct unchanged fields.
 
-For a canonical profile and JSON delivery, the webhook body is the direct
-versioned `digitalogic.product-sync` envelope instead of this generic wrapper.
+For a canonical profile and JSON delivery, the webhook body is the direct,
+living `digitalogic.product-sync` envelope instead of this generic wrapper.
 It carries deterministic event identity, complete changed products, and
 deleted-Code tombstones. CSV delivery retains the generic tabular change form.
 
 The existing HTTP sink serves webhook and REST destinations, including HTTP
 adapters that accept the direct JSON envelope; there is no second Digitalogic
-or JSON-RPC delivery implementation. For the Digitalogic v1 receiver, point it
+or JSON-RPC delivery implementation. For the Digitalogic receiver, point it
 at:
 
 ```text
-POST https://digitalogic.example/wp-json/digitalogic/v1/patris/product-sync
+POST https://digitalogic.example/wp-json/digitalogic/patris/product-sync
 ```
 
 The dedicated `X-Digitalogic-Product-Sync-Secret` value is resolved only at
@@ -178,10 +178,10 @@ accepted only for loopback test/development hosts. If the optional command sink
 is also enabled, the HTTP receiver secret is removed from that child process's
 environment.
 
-Patris writes `X-Patris-Event`, `X-Patris-Source`, `X-Patris-Contract`,
-`X-Patris-Contract-Version`, and `X-Patris-Event-ID` after custom headers, so
-configuration cannot replace the canonical body identity. The receiver checks
-the contract/version/event ID headers against the body. For canonical events,
+Patris writes `X-Patris-Event`, `X-Patris-Source`, `X-Patris-Contract`, and
+`X-Patris-Event-ID` after custom headers, so configuration cannot replace the
+canonical body identity. The receiver checks the contract and event-ID headers
+against the body. For canonical events,
 `X-Patris-Source` is the public contract `source.id`; the local database path
 is never sent in that header. Generic non-contract webhooks retain their
 configured event source.
@@ -192,7 +192,7 @@ enable it for Digitalogic or another product-sync consumer.
 
 ```powershell
 patris-export convert C:\Patris\data4\kala.db -f json -w `
-  --send-url https://digitalogic.example/wp-json/digitalogic/v1/patris/product-sync `
+  --send-url https://digitalogic.example/wp-json/digitalogic/patris/product-sync `
   --send-format json `
   --send-mode changes `
   --send-product-sync-secret-env DIGITALOGIC_PRODUCT_SYNC_SECRET `
@@ -212,7 +212,7 @@ Config equivalent:
 {
   "send_updates": {
     "enabled": true,
-    "url": "https://digitalogic.example/wp-json/digitalogic/v1/patris/product-sync",
+    "url": "https://digitalogic.example/wp-json/digitalogic/patris/product-sync",
     "method": "POST",
     "format": "json",
     "mode": "changes",
@@ -235,7 +235,7 @@ CSV, so a missing profile or disabled canonical stage cannot leak legacy Patris
 fields through a seemingly non-raw update.
 
 The default is one HTTP attempt, preserving generic webhook behavior. Opt in
-to retries only for an idempotent receiver. Digitalogic v1 retries are safe:
+to retries only for an idempotent receiver. Digitalogic retries are safe:
 Patris encodes the envelope once and reuses the exact bytes, event ID, identity
 headers, and secret for every attempt. Network failures, HTTP 408/425/429 and
 selected 5xx transients, and receiver responses with `retryable: true`,

@@ -47,13 +47,13 @@ func canonicalTestConfig(code string) (Config, pricingcatalog.Provider) {
 	return cfg, pricingcatalog.NewProvider(cfg.Pricing)
 }
 
-func TestLandedPriceV1ExactWorkbookFixture(t *testing.T) {
-	got, err := LandedPriceV1("240", "120", "24.5", "30", "29000")
+func TestLandedPriceExactWorkbookFixture(t *testing.T) {
+	got, err := LandedPrice("240", "120", "24.5", "30", "29000")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if got != 2009410 {
-		t.Fatalf("landed_price_v1 = %d, want 2009410", got)
+		t.Fatalf("landed_price = %d, want 2009410", got)
 	}
 }
 
@@ -95,13 +95,13 @@ func TestSharh1ExtraNumericSlotsAreAmbiguousAndNull(t *testing.T) {
 	}
 }
 
-func TestLandedPriceV1RoundsOnceHalfUpAndRejectsInvalidInput(t *testing.T) {
-	got, err := LandedPriceV1("0", "0", "0.005", "0", "100")
+func TestLandedPriceRoundsOnceHalfUpAndRejectsInvalidInput(t *testing.T) {
+	got, err := LandedPrice("0", "0", "0.005", "0", "100")
 	if err != nil || got != 1 {
 		t.Fatalf("half-up result = %d, %v; want 1", got, err)
 	}
 	for _, invalid := range []string{"", "NaN", "Inf", "-1", "1e999999"} {
-		if _, err := LandedPriceV1(invalid, "1", "1", "1", "1"); err == nil {
+		if _, err := LandedPrice(invalid, "1", "1", "1", "1"); err == nil {
 			t.Fatalf("invalid decimal %q was accepted", invalid)
 		}
 	}
@@ -141,18 +141,18 @@ func TestKalaProfileTransformsPersianFixtureWithoutRawBoundaryFields(t *testing.
 	if !strings.Contains(product["location"].(string), "قفسه 12") {
 		t.Fatalf("location was not retained and digit-normalized: %q", product["location"])
 	}
-	if warnings, exists := product["warnings"]; exists {
-		t.Fatalf("empty warnings field was not omitted: %v", warnings)
+	if warnings, exists := product["warnings"]; !exists || len(warnings.([]string)) != 0 {
+		t.Fatalf("evaluated empty warnings field was not preserved: %v", warnings)
 	}
 	for _, forbidden := range []string{"Sharh1", "Sharh2", "FOROSH", "KHARYD", "ALLANBAR", "ANBAR", "Code"} {
 		if _, exists := product[forbidden]; exists {
 			t.Fatalf("raw field %q crossed product-sync boundary: %#v", forbidden, product)
 		}
 	}
-	if envelope.Schema != ContractName || envelope.SchemaVersion != ContractVersion || envelope.Source.Dataset != "kala.db" || envelope.Source.ID != "kala.db" {
+	if envelope.Schema != ContractName || envelope.Source.Dataset != "kala.db" || envelope.Source.ID != "kala.db" {
 		t.Fatalf("unexpected contract/source: %+v", envelope)
 	}
-	if envelope.LocalCurrency != LocalCurrency || envelope.FormulaID != FormulaVersion || envelope.FormulaRevision != FormulaRevision {
+	if envelope.LocalCurrency != LocalCurrency || envelope.FormulaID != FormulaID {
 		t.Fatalf("currency/formula contract is incomplete: %+v", envelope)
 	}
 	if !strings.HasPrefix(product["record_hash"].(string), "sha256:") || !strings.HasPrefix(envelope.Source.Revision, "sha256:") || !strings.HasPrefix(envelope.EventID, "sha256:") {
@@ -171,7 +171,7 @@ func TestKalaProfileOmitsUnavailableStandalonePricingAndIntegrationFields(t *tes
 	}}
 	products, _ := Transform(context.Background(), rows, "kala.db", cfg, provider, time.Time{})
 	product := products[0]
-	for _, absent := range []string{"foreign_price", "weight_grams", "shipping_method_id", "shipping_price_per_kg_cny", "markup_percent", "irt_per_cny", "final_price", "formula_version", "pricing_catalog_status"} {
+	for _, absent := range []string{"foreign_price", "weight_grams", "shipping_method_id", "shipping_price_per_kg_cny", "markup_percent", "irt_per_cny", "final_price", "pricing_catalog_status"} {
 		if _, exists := product[absent]; exists {
 			t.Fatalf("standalone output included unavailable field %q: %#v", absent, product)
 		}
@@ -212,6 +212,9 @@ func TestKalaProfilePreservesExplicitNullButOmitsNeverReceivedFields(t *testing.
 			t.Fatalf("never-received field %q was emitted: %#v", field, row)
 		}
 	}
+	if value, exists := row["serial"]; !exists || value != "" {
+		t.Fatalf("explicit empty serial was not preserved: %#v", row)
+	}
 	encoded, err := json.Marshal(envelope)
 	if err != nil {
 		t.Fatal(err)
@@ -219,6 +222,85 @@ func TestKalaProfilePreservesExplicitNullButOmitsNeverReceivedFields(t *testing.
 	text := string(encoded)
 	if !strings.Contains(text, `"name":null`) || strings.Contains(text, `"shipping_method_id"`) || strings.Contains(text, `"formula_id"`) {
 		t.Fatalf("sparse JSON contract is wrong: %s", text)
+	}
+}
+
+func TestIntegratedProfileOmitsDerivedUnavailableFinalPrice(t *testing.T) {
+	fx := pricingcatalog.Decimal("30000")
+	cfg := DefaultConfig()
+	cfg.Pricing = pricingcatalog.Config{
+		Mode: pricingcatalog.ModeStatic,
+		Static: pricingcatalog.StaticConfig{
+			CNYToIRT: &fx,
+		},
+	}
+	rows, envelope := Transform(context.Background(), []map[string]interface{}{{
+		"Code": "NO-PRICE", "warehouse_stock": map[string]interface{}{},
+	}}, "kala.db", cfg, nil, time.Unix(1, 0))
+	if _, exists := rows[0]["final_price"]; exists {
+		t.Fatalf("derived unavailable final_price must be absent, not null: %#v", rows[0])
+	}
+	stock, exists := rows[0]["warehouse_stock"]
+	if !exists || !reflect.DeepEqual(stock, map[string]interface{}{}) {
+		t.Fatalf("explicit empty warehouse object was not preserved: %#v", rows[0])
+	}
+	encoded, err := json.Marshal(envelope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), `"final_price":null`) {
+		t.Fatalf("derived missing value leaked as explicit null: %s", encoded)
+	}
+}
+
+func TestIntegratedProfilePreservesExplicitReferenceNulls(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/integration/catalog" {
+			fmt.Fprint(w, `{"data":{"schema":"digitalogic.integration-catalog","revision":"r1","currency":{"local":"IRT","cny_to_local":null,"cny_to_irt":null,"effective_date":null,"warnings":[]},"pricing":{"formula_id":"landed_price"},"selected_warehouses":[],"shipping_methods":[{"id":"air","price_per_kg_cny":null}]}}`)
+			return
+		}
+		if r.URL.Path == "/integration/pricing-assignments/batch" {
+			fmt.Fprint(w, `{"data":{"schema":"digitalogic.pricing-assignment-batch","requested_count":1,"resolved_count":1,"error_count":0,"maximum_codes":500,"default_percentage_markup":{"schema":"digitalogic.default-percentage-markup","configured":false,"type":"percentage","profit_percent":null,"source":"unset","revision":"r1"},"results":[{"code":"NULL-REFERENCE","status":"ok","assignment":{"code":"NULL-REFERENCE","shipping_method_id":"air","profit_percent":null,"profit_percent_source":"unset","pricing_warnings":["markup_percent_missing"]}}]}}`)
+			return
+		}
+		fmt.Fprint(w, `{"data":{"shipping_method_id":"air","profit_percent":null,"profit_percent_source":"unset","pricing_warnings":["markup_percent_missing"]}}`)
+	}))
+	defer server.Close()
+
+	cfg := DefaultConfig()
+	cfg.Pricing = pricingcatalog.Config{Mode: pricingcatalog.ModeDigitalogic, Digitalogic: pricingcatalog.DigitalogicConfig{BaseURL: server.URL}}
+	rows, _ := Transform(context.Background(), []map[string]interface{}{{
+		"Code": "NULL-REFERENCE", "foreign_price": "2", "weight_grams": "3",
+	}}, "kala.db", cfg, pricingcatalog.NewProvider(cfg.Pricing), time.Unix(1, 0))
+	for _, field := range []string{"irt_per_cny", "currency_effective_date", "shipping_price_per_kg_cny", "markup_percent"} {
+		if value, exists := rows[0][field]; !exists || value != nil {
+			t.Fatalf("explicit reference null %q was not preserved: %#v", field, rows[0])
+		}
+	}
+	if _, exists := rows[0]["final_price"]; exists {
+		t.Fatalf("derived unavailable final_price must remain absent: %#v", rows[0])
+	}
+}
+
+func TestProductSyncDecoderRejectsUnknownFields(t *testing.T) {
+	var envelope Envelope
+	if err := json.Unmarshal([]byte(`{"schema":"digitalogic.product-sync","obsolete_field":true}`), &envelope); err == nil {
+		t.Fatal("unknown envelope field was silently accepted")
+	}
+	var product Product
+	if err := json.Unmarshal([]byte(`{"product_code":"A","obsolete_field":true}`), &product); err == nil {
+		t.Fatal("unknown product field was silently accepted")
+	}
+	var category Category
+	if err := json.Unmarshal([]byte(`{"category_code":"A","obsolete_field":true}`), &category); err == nil {
+		t.Fatal("unknown category field was silently accepted")
+	}
+	if err := json.Unmarshal([]byte(`{"schema":"digitalogic.product-sync","source":{"id":"A","obsolete_field":true}}`), &envelope); err == nil {
+		t.Fatal("unknown source field was silently accepted")
+	}
+	if err := json.Unmarshal([]byte(`{"schema":"digitalogic.product-sync","deleted_codes":[{"product_code":"A","deleted":true,"obsolete_field":true}]}`), &envelope); err == nil {
+		t.Fatal("unknown tombstone field was silently accepted")
 	}
 }
 
@@ -277,7 +359,7 @@ func TestCatalogFetchTimeDoesNotChangeRecordOrEventIdentity(t *testing.T) {
 	fx := pricingcatalog.Decimal("29000")
 	base := pricingcatalog.Resolution{
 		CatalogRevision: "r1", CatalogStatus: "fresh", MethodID: "air",
-		FreightCNYPerKg: &freight, MarkupPercent: &markup, IRTPerCNY: &fx,
+		ShippingPricePerKgCNY: &freight, MarkupPercent: &markup, IRTPerCNY: &fx,
 	}
 	cfg := DefaultConfig()
 	row := []map[string]interface{}{{"Code": "A", "Sharh1": "0 0 0 24.5", "Sharh2": "240 g", "ALLANBAR": 1}}
@@ -309,59 +391,6 @@ func TestChangeEnvelopeCarriesDeterministicDeletedCodeTombstone(t *testing.T) {
 	}
 }
 
-func TestDigitalogicProfileBoundsConcurrentAssignmentReads(t *testing.T) {
-	var catalogRequests int32
-	var active int32
-	var maximum int32
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		if r.URL.Path == "/integration/catalog" {
-			atomic.AddInt32(&catalogRequests, 1)
-			fmt.Fprint(w, `{"data":{"schema":"digitalogic.integration-catalog","schema_version":"1.0.0","revision":"r1","currency":{"local":"IRT","cny_to_local":29000,"cny_to_irt":29000},"pricing":{"formula_id":"landed_price_v1","formula_revision":"1.0.0"},"import_freight_methods":[{"id":"air","price_per_kg_cny":120}]}}`)
-			return
-		}
-		if r.URL.Path == "/pricing-assignments/batch" {
-			http.NotFound(w, r)
-			return
-		}
-		current := atomic.AddInt32(&active, 1)
-		for {
-			seen := atomic.LoadInt32(&maximum)
-			if current <= seen || atomic.CompareAndSwapInt32(&maximum, seen, current) {
-				break
-			}
-		}
-		time.Sleep(20 * time.Millisecond)
-		atomic.AddInt32(&active, -1)
-		fmt.Fprint(w, `{"data":{"import_freight_method_id":"air","profit_percent":30}}`)
-	}))
-	defer server.Close()
-
-	cfg := DefaultConfig()
-	cfg.Pricing = pricingcatalog.Config{
-		Mode: pricingcatalog.ModeDigitalogic,
-		Digitalogic: pricingcatalog.DigitalogicConfig{
-			BaseURL: server.URL, MaxConcurrency: 3, FreshFor: "1m", MaxStale: "1h",
-		},
-	}
-	rows := make([]map[string]interface{}, 10)
-	for index := range rows {
-		rows[index] = map[string]interface{}{
-			"Code": fmt.Sprintf("P-%02d", index), "Sharh1": "0 0 0 24.5", "Sharh2": "240 گرم", "ALLANBAR": 1,
-		}
-	}
-	products, _ := Transform(context.Background(), rows, "kala.db", cfg, pricingcatalog.NewProvider(cfg.Pricing), time.Now())
-	if len(products) != len(rows) {
-		t.Fatalf("products = %d, want %d", len(products), len(rows))
-	}
-	if got := atomic.LoadInt32(&catalogRequests); got != 1 {
-		t.Fatalf("concurrent resolvers fetched catalog %d times, want 1", got)
-	}
-	if got := atomic.LoadInt32(&maximum); got < 2 || got > 3 {
-		t.Fatalf("assignment concurrency = %d, want 2..3", got)
-	}
-}
-
 func TestDigitalogicProfilePrefetches1002CodesInThreeBatchRequests(t *testing.T) {
 	var catalogRequests int32
 	var batchRequests int32
@@ -371,8 +400,8 @@ func TestDigitalogicProfilePrefetches1002CodesInThreeBatchRequests(t *testing.T)
 		switch r.URL.Path {
 		case "/integration/catalog":
 			atomic.AddInt32(&catalogRequests, 1)
-			fmt.Fprint(w, `{"data":{"schema":"digitalogic.integration-catalog","schema_version":"1.0.0","revision":"r1","currency":{"local":"IRT","cny_to_local":29000,"cny_to_irt":29000},"pricing":{"formula_id":"landed_price_v1","formula_revision":"1.0.0"},"import_freight_methods":[{"id":"air","price_per_kg_cny":120}]}}`)
-		case "/pricing-assignments/batch":
+			fmt.Fprint(w, `{"data":{"schema":"digitalogic.integration-catalog","revision":"r1","currency":{"local":"IRT","cny_to_local":29000,"cny_to_irt":29000},"pricing":{"formula_id":"landed_price"},"shipping_methods":[{"id":"air","price_per_kg_cny":120}]}}`)
+		case "/integration/pricing-assignments/batch":
 			atomic.AddInt32(&batchRequests, 1)
 			var request struct {
 				Codes []string `json:"codes"`
@@ -384,21 +413,21 @@ func TestDigitalogicProfilePrefetches1002CodesInThreeBatchRequests(t *testing.T)
 			for _, code := range request.Codes {
 				results = append(results, map[string]interface{}{
 					"code": code, "status": "ok", "assignment": map[string]interface{}{
-						"code": code, "import_freight_method_id": "air", "profit_percent": "30", "profit_percent_source": "global_default", "pricing_warnings": []string{},
+						"code": code, "shipping_method_id": "air", "profit_percent": "30", "profit_percent_source": "global_default", "pricing_warnings": []string{},
 					},
 				})
 			}
 			_ = json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "data": map[string]interface{}{
-				"schema": "digitalogic.pricing-assignment-batch", "schema_version": "1.0.0",
+				"schema":          "digitalogic.pricing-assignment-batch",
 				"requested_count": len(request.Codes), "resolved_count": len(request.Codes), "error_count": 0, "maximum_codes": 500,
 				"default_percentage_markup": map[string]interface{}{
-					"schema": "digitalogic.default-percentage-markup", "schema_version": "1.0.0", "configured": true, "type": "percentage", "profit_percent": "30", "source": "global_default", "revision": "rev-30",
+					"schema": "digitalogic.default-percentage-markup", "configured": true, "type": "percentage", "profit_percent": "30", "source": "global_default", "revision": "rev-30",
 				},
 				"results": results,
 			}})
 		default:
 			atomic.AddInt32(&singleRequests, 1)
-			fmt.Fprint(w, `{"data":{"import_freight_method_id":"air","profit_percent":30}}`)
+			fmt.Fprint(w, `{"data":{"shipping_method_id":"air","profit_percent":30}}`)
 		}
 	}))
 	defer server.Close()

@@ -29,17 +29,14 @@ func TestCanonicalXLSXRoundTripPreservesTypesLayoutAndMetadata(t *testing.T) {
 	options := XLSXOptions{
 		RightToLeft: true,
 		Metadata: XLSXMetadata{
-			Schema:          "digitalogic.product-sync",
-			SchemaVersion:   "1.0",
-			FormulaID:       "landed_price_v1",
-			FormulaRevision: "1.0.0",
-			FormulaVersion:  "landed_price_v1",
-			LocalCurrency:   "IRT",
-			SourceID:        "patris-office",
-			SourceDataset:   `C:\Patris\data4\kala.db`,
-			SourceRevision:  "sha256:fixture-revision",
-			GeneratedAt:     "2026-07-16T12:00:00Z",
-			Warnings:        []string{"weight_inferred", "weight_inferred", "foreign_price_inferred"},
+			Schema:         "digitalogic.product-sync",
+			FormulaID:      "landed_price",
+			LocalCurrency:  "IRT",
+			SourceID:       "patris-office",
+			SourceDataset:  `C:\Patris\data4\kala.db`,
+			SourceRevision: "sha256:fixture-revision",
+			GeneratedAt:    "2026-07-16T12:00:00Z",
+			Warnings:       []string{"weight_inferred", "weight_inferred", "foreign_price_inferred"},
 		},
 	}
 	if err := WriteXLSX(path, rows, "product_code", options); err != nil {
@@ -99,14 +96,12 @@ func TestCanonicalXLSXRoundTripPreservesTypesLayoutAndMetadata(t *testing.T) {
 	}
 	metadata := metadataValues(metadataRows)
 	for key, want := range map[string]string{
-		"schema":           "digitalogic.product-sync",
-		"schema_version":   "1.0",
-		"formula_id":       "landed_price_v1",
-		"formula_revision": "1.0.0",
-		"source_id":        "patris-office",
-		"source_dataset":   "kala.db",
-		"source_revision":  "sha256:fixture-revision",
-		"generated_at":     "2026-07-16T12:00:00Z",
+		"schema":          "digitalogic.product-sync",
+		"formula_id":      "landed_price",
+		"source_id":       "patris-office",
+		"source_dataset":  "kala.db",
+		"source_revision": "sha256:fixture-revision",
+		"generated_at":    "2026-07-16T12:00:00Z",
 	} {
 		if metadata[key] != want {
 			t.Errorf("metadata[%s] = %q, want %q", key, metadata[key], want)
