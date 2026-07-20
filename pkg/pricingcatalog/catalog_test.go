@@ -23,6 +23,40 @@ func decimalText(value *Decimal) string {
 	return value.String()
 }
 
+func TestConfiguredDistinguishesStandaloneFromActivePricing(t *testing.T) {
+	if Configured(DefaultConfig()) {
+		t.Fatal("the empty default static config must remain standalone")
+	}
+	if Configured(Config{Mode: ModeDigitalogic}) {
+		t.Fatal("a Digitalogic mode without an endpoint is not active")
+	}
+	if !Configured(Config{Mode: ModeDigitalogic, Digitalogic: DigitalogicConfig{BaseURL: "https://example.test"}}) {
+		t.Fatal("a configured Digitalogic endpoint was not treated as active")
+	}
+	if !Configured(Config{Mode: ModeStatic, Static: StaticConfig{Methods: []Method{{ID: "air"}}}}) {
+		t.Fatal("explicit static shipping data was not treated as active")
+	}
+}
+
+func TestNormalizeAcceptsLegacyFreightKeysButMarshalsCanonicalShippingKeys(t *testing.T) {
+	var cfg Config
+	if err := json.Unmarshal([]byte(`{"mode":"static","static":{"import_freight_methods":[{"id":"air"}],"assignments":{"A":{"import_freight_method_id":"air"}}}}`), &cfg); err != nil {
+		t.Fatal(err)
+	}
+	cfg = Normalize(cfg)
+	if len(cfg.Static.Methods) != 1 || cfg.Static.Assignments["A"].MethodID != "air" {
+		t.Fatalf("legacy freight aliases were not normalized: %+v", cfg.Static)
+	}
+	encoded, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(encoded)
+	if !strings.Contains(text, `"shipping_methods"`) || !strings.Contains(text, `"shipping_method_id"`) || strings.Contains(text, `"import_freight"`) {
+		t.Fatalf("normalized config did not use canonical shipping keys: %s", text)
+	}
+}
+
 func TestStaticProviderResolvesExactCodeAndDefaults(t *testing.T) {
 	provider := NewProvider(Config{
 		Mode: ModeStatic,
@@ -54,7 +88,7 @@ func TestStaticProviderResolvesExactCodeAndDefaults(t *testing.T) {
 
 	missing := provider.Resolve(context.Background(), "missing")
 	warnings := strings.Join(missing.Warnings, ",")
-	for _, expected := range []string{"freight_rate_missing", "import_freight_method_missing", "markup_percent_missing"} {
+	for _, expected := range []string{"shipping_price_per_kg_missing", "shipping_method_missing", "markup_percent_missing"} {
 		if !strings.Contains(warnings, expected) {
 			t.Fatalf("missing warning %q in %v", expected, missing.Warnings)
 		}
@@ -83,7 +117,7 @@ func TestStaticProviderRejectsNonFinitePricingInputs(t *testing.T) {
 	if resolution.IRTPerCNY != nil || resolution.FreightCNYPerKg != nil || resolution.MarkupPercent != nil {
 		t.Fatalf("non-finite static inputs were retained: %+v", resolution)
 	}
-	for _, warning := range []string{"fx_rate_missing", "freight_rate_missing", "markup_percent_missing"} {
+	for _, warning := range []string{"fx_rate_missing", "shipping_price_per_kg_missing", "markup_percent_missing"} {
 		if !contains(resolution.Warnings, warning) {
 			t.Fatalf("missing %s in %v", warning, resolution.Warnings)
 		}
@@ -100,9 +134,9 @@ func TestHTTPProviderCachesCatalogAndAssignmentsWithinFreshnessLimit(t *testing.
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {
 		case "/integration/catalog":
-			fmt.Fprint(w, `{"success":true,"data":{"schema":"digitalogic.integration-catalog","schema_version":"1.0.0","revision":"sha256:test","currency":{"local":"IRT","cny_to_local":29000,"cny_to_irt":29000,"effective_date":"2026-07-16"},"pricing":{"formula_id":"landed_price_v1","formula_revision":"1.0.0"},"selected_warehouses":["1","6"],"import_freight_methods":[{"id":"air_express","enabled":true,"price_per_kg_cny":120}]}}`)
+			fmt.Fprint(w, `{"success":true,"data":{"schema":"digitalogic.integration-catalog","schema_version":"1.0.0","revision":"sha256:test","currency":{"local":"IRT","cny_to_local":29000,"cny_to_irt":29000,"effective_date":"2026-07-16"},"pricing":{"formula_id":"landed_price_v1","formula_revision":"1.0.0"},"selected_warehouses":["1","6"],"shipping_methods":[{"id":"air_express","enabled":true,"price_per_kg_cny":120}]}}`)
 		case "/products/by-code/A/import-pricing":
-			fmt.Fprint(w, `{"success":true,"data":{"import_freight_method_id":"air_express","markup":{"profit_percent":30,"warning":null},"pricing_warnings":[]}}`)
+			fmt.Fprint(w, `{"success":true,"data":{"shipping_method_id":"air_express","markup":{"profit_percent":30,"warning":null},"pricing_warnings":[]}}`)
 		default:
 			http.NotFound(w, r)
 		}

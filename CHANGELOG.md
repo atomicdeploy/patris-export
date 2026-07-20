@@ -7,6 +7,15 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Changed
+
+- Canonical JSON, CSV, HTTP, spreadsheet, SQL, and outbound-update rows now share a sparse field boundary: never-received values are omitted while explicitly received nulls remain null.
+- Shipping integration output uses `shipping_method_id` and `shipping_price_per_kg_cny`; legacy freight-named catalog and assignment keys remain accepted as input during migration.
+
+### Fixed
+
+- Standalone exports no longer contain Digitalogic pricing, formula, or shipping-method fields and warnings when no pricing integration is configured.
+
 ## [1.2.0] - 2026-07-17
 
 ### Added

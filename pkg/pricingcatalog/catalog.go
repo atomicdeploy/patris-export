@@ -39,7 +39,8 @@ type StaticConfig struct {
 	CNYToIRT              *Decimal              `json:"cny_to_irt,omitempty" yaml:"cny_to_irt,omitempty" toml:"cny_to_irt,omitempty"`
 	CurrencyEffectiveDate string                `json:"currency_effective_date,omitempty" yaml:"currency_effective_date,omitempty" toml:"currency_effective_date,omitempty"`
 	SelectedWarehouses    []string              `json:"selected_warehouses,omitempty" yaml:"selected_warehouses,omitempty" toml:"selected_warehouses,omitempty"`
-	Methods               []Method              `json:"import_freight_methods,omitempty" yaml:"import_freight_methods,omitempty" toml:"import_freight_methods,omitempty"`
+	Methods               []Method              `json:"shipping_methods,omitempty" yaml:"shipping_methods,omitempty" toml:"shipping_methods,omitempty"`
+	LegacyMethods         []Method              `json:"import_freight_methods,omitempty" yaml:"import_freight_methods,omitempty" toml:"import_freight_methods,omitempty"`
 	Assignments           map[string]Assignment `json:"assignments,omitempty" yaml:"assignments,omitempty" toml:"assignments,omitempty"`
 	DefaultAssignment     *Assignment           `json:"default_assignment,omitempty" yaml:"default_assignment,omitempty" toml:"default_assignment,omitempty"`
 }
@@ -69,8 +70,9 @@ type Method struct {
 }
 
 type Assignment struct {
-	MethodID      string   `json:"import_freight_method_id,omitempty" yaml:"import_freight_method_id,omitempty" toml:"import_freight_method_id,omitempty"`
-	ProfitPercent *Decimal `json:"profit_percent,omitempty" yaml:"profit_percent,omitempty" toml:"profit_percent,omitempty"`
+	MethodID       string   `json:"shipping_method_id,omitempty" yaml:"shipping_method_id,omitempty" toml:"shipping_method_id,omitempty"`
+	LegacyMethodID string   `json:"import_freight_method_id,omitempty" yaml:"import_freight_method_id,omitempty" toml:"import_freight_method_id,omitempty"`
+	ProfitPercent  *Decimal `json:"profit_percent,omitempty" yaml:"profit_percent,omitempty" toml:"profit_percent,omitempty"`
 }
 
 // Resolution is the complete set of external inputs needed by
@@ -115,8 +117,19 @@ func Normalize(cfg Config) Config {
 	cfg.Static.Revision = strings.TrimSpace(cfg.Static.Revision)
 	cfg.Static.CurrencyEffectiveDate = strings.TrimSpace(cfg.Static.CurrencyEffectiveDate)
 	cfg.Static.SelectedWarehouses = normalizedStrings(cfg.Static.SelectedWarehouses)
+	if len(cfg.Static.LegacyMethods) > 0 {
+		cfg.Static.Methods = append(append([]Method(nil), cfg.Static.LegacyMethods...), cfg.Static.Methods...)
+		cfg.Static.LegacyMethods = nil
+	}
 	if cfg.Static.Assignments == nil {
 		cfg.Static.Assignments = map[string]Assignment{}
+	}
+	for code, assignment := range cfg.Static.Assignments {
+		cfg.Static.Assignments[code] = normalizeAssignment(assignment)
+	}
+	if cfg.Static.DefaultAssignment != nil {
+		assignment := normalizeAssignment(*cfg.Static.DefaultAssignment)
+		cfg.Static.DefaultAssignment = &assignment
 	}
 
 	d := &cfg.Digitalogic
@@ -157,6 +170,31 @@ func Normalize(cfg Config) Config {
 	return cfg
 }
 
+// Configured reports whether pricing/shipping input is intentionally active.
+// The default empty static config is standalone mode and must not leak an
+// integration-shaped schema into exported rows.
+func Configured(cfg Config) bool {
+	cfg = Normalize(cfg)
+	switch cfg.Mode {
+	case ModeDigitalogic:
+		return strings.TrimSpace(cfg.Digitalogic.BaseURL) != ""
+	case ModeStatic:
+		static := cfg.Static
+		return static.CNYToIRT != nil || strings.TrimSpace(static.CurrencyEffectiveDate) != "" || len(static.SelectedWarehouses) > 0 || len(static.Methods) > 0 || len(static.Assignments) > 0 || static.DefaultAssignment != nil
+	default:
+		return false
+	}
+}
+
+func normalizeAssignment(value Assignment) Assignment {
+	if strings.TrimSpace(value.MethodID) == "" {
+		value.MethodID = value.LegacyMethodID
+	}
+	value.MethodID = strings.TrimSpace(value.MethodID)
+	value.LegacyMethodID = ""
+	return value
+}
+
 func NewProvider(cfg Config) Provider {
 	cfg = Normalize(cfg)
 	switch cfg.Mode {
@@ -174,7 +212,7 @@ type disabledProvider struct{}
 func (disabledProvider) Resolve(context.Context, string) Resolution {
 	return finishResolution(Resolution{
 		CatalogStatus: "disabled",
-		Warnings:      []string{"pricing_catalog_disabled", "import_freight_method_missing"},
+		Warnings:      []string{"pricing_catalog_disabled", "shipping_method_missing"},
 	})
 }
 
@@ -215,17 +253,17 @@ func (p *staticProvider) Resolve(_ context.Context, code string) Resolution {
 		IRTPerCNY:             cloneDecimal(p.config.CNYToIRT),
 	}
 	if !ok || strings.TrimSpace(assignment.MethodID) == "" {
-		resolution.Warnings = append(resolution.Warnings, "import_freight_method_missing")
+		resolution.Warnings = append(resolution.Warnings, "shipping_method_missing")
 	} else {
 		resolution.MethodID = strings.TrimSpace(assignment.MethodID)
 		resolution.MarkupPercent = cloneDecimal(assignment.ProfitPercent)
 		method, exists := p.methods[resolution.MethodID]
 		if !exists {
-			resolution.Warnings = append(resolution.Warnings, "import_freight_method_unknown")
+			resolution.Warnings = append(resolution.Warnings, "shipping_method_unknown")
 		} else {
 			resolution.FreightCNYPerKg = cloneDecimal(method.PricePerKgCNY)
 			if method.Enabled != nil && !*method.Enabled {
-				resolution.Warnings = append(resolution.Warnings, "import_freight_method_disabled")
+				resolution.Warnings = append(resolution.Warnings, "shipping_method_disabled")
 			}
 		}
 	}
@@ -236,7 +274,7 @@ func finishResolution(value Resolution) Resolution {
 	value.MarkupPercentSource = strings.TrimSpace(value.MarkupPercentSource)
 	if !validPositive(value.FreightCNYPerKg) {
 		value.FreightCNYPerKg = nil
-		value.Warnings = append(value.Warnings, "freight_rate_missing")
+		value.Warnings = append(value.Warnings, "shipping_price_per_kg_missing")
 	}
 	if !validNonNegative(value.MarkupPercent) {
 		value.MarkupPercent = nil

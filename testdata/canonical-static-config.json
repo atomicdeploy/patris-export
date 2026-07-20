@@ -14,7 +14,7 @@
         "cny_to_irt": 29000,
         "currency_effective_date": "2026-07-16",
         "selected_warehouses": ["1"],
-        "import_freight_methods": [
+        "shipping_methods": [
           {
             "id": "air_express",
             "enabled": true,
@@ -23,7 +23,7 @@
         ],
         "assignments": {
           "102001011": {
-            "import_freight_method_id": "air_express",
+            "shipping_method_id": "air_express",
             "profit_percent": 30
           }
         }
