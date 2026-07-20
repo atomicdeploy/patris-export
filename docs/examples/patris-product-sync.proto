@@ -1,0 +1,30 @@
+syntax = "proto3";
+
+package patris.delivery.v1;
+
+option go_package = "example.invalid/patris/delivery/v1;patrisdeliveryv1";
+
+import "google/api/annotations.proto";
+import "google/protobuf/struct.proto";
+
+// ProductSync keeps the Patris canonical envelope as the only product schema.
+// The gateway maps the complete HTTP JSON body into ApplyRequest.envelope.
+service ProductSync {
+  rpc Apply(ApplyRequest) returns (ApplyResponse) {
+    option (google.api.http) = {
+      post: "/v1/patris:apply"
+      body: "envelope"
+    };
+  }
+}
+
+message ApplyRequest {
+  google.protobuf.Struct envelope = 1;
+}
+
+message ApplyResponse {
+  string status = 1;
+  string event_id = 2;
+  bool retryable = 3;
+  uint32 pending_products = 4;
+}

@@ -162,6 +162,8 @@ See [the canonical product-sync contract](docs/CANONICAL-PRODUCT-SYNC.md) and
 `kala.db` pricing, Digitalogic, freshness, and payload details. See
 [docs/examples/export-transform-send.md](docs/examples/export-transform-send.md)
 for generic dataset mapping, SQL/MySQL DSN examples, and command delivery mode.
+For copy-paste REST, JSON-RPC, gRPC-gateway, and WordPress AJAX recipes, use
+[Remote Update Delivery](docs/REMOTE-API-EXAMPLES.md).
 
 ### Output to STDOUT
 

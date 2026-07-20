@@ -166,6 +166,10 @@ configured receiver's product-sync route:
 POST https://receiver.example/wp-json/receiver/patris/product-sync
 ```
 
+For complete native REST, JSON-RPC adapter, WordPress AJAX adapter, gRPC
+gateway, authentication, retry, and local mock-receiver recipes, see
+[Remote Update Delivery](../REMOTE-API-EXAMPLES.md).
+
 The dedicated `X-Patris-Product-Sync-Secret` value is resolved only at
 request time from the environment variable named by
 `product_sync_secret_env`. Inject that environment variable through the

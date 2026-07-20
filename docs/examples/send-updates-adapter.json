@@ -1,0 +1,25 @@
+{
+  "canonical": {
+    "enabled": true,
+    "source_id": "patris-office",
+    "profiles": {
+      "kala.db": {
+        "type": "kala_v1"
+      }
+    }
+  },
+  "send_updates": {
+    "enabled": true,
+    "url": "http://127.0.0.1:18081/ingest",
+    "method": "POST",
+    "format": "json",
+    "mode": "changes",
+    "initial": true,
+    "allow_raw": false,
+    "require_contract": true,
+    "timeout": "10s",
+    "retry_attempts": 3,
+    "retry_backoff": "2s",
+    "product_sync_secret_env": "PATRIS_ADAPTER_INGRESS_SECRET"
+  }
+}

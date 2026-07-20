@@ -12,6 +12,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - Opt-in `cgo` and `cgo-static` pxlib backends now complement the default
   runtime-dynamic loader across Make, shell, and local Windows builds; manifests
   identify the selected backend and static packages omit the pxlib runtime DLL.
+- Copy-paste remote delivery recipes distinguish native REST/WordPress REST from JSON-RPC, legacy WordPress AJAX, and gRPC gateway adapters, including secret injection, idempotency, retry, failure, and replay guidance.
+- A dependency-free Node.js loopback adapter, local retryable mock receiver, sparse-payload tests, example configs, and a minimal gRPC HTTP-transcoding contract exercise non-native delivery without duplicating the Patris transformation pipeline.
 
 ### Changed
 

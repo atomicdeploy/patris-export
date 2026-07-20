@@ -1,4 +1,4 @@
-.PHONY: build build-linux build-windows build-all build-lib build-lib-linux build-lib-windows clean test run install install-linux uninstall-linux help deps build-web assets variant-manifest alm-current-guard alm-linux-guard
+.PHONY: build build-linux build-windows build-all build-lib build-lib-linux build-lib-windows clean test test-delivery-examples run install install-linux uninstall-linux help deps build-web assets variant-manifest alm-current-guard alm-linux-guard
 
 # Binary names
 BINARY_NAME=patris-export
@@ -152,9 +152,12 @@ install-linux: ## Install Linux binary and systemd service (requires root)
 uninstall-linux: ## Remove Linux binary and systemd service (requires root)
 	@sudo ./scripts/install-linux.sh uninstall
 
-test: ## Run tests
+test: test-delivery-examples ## Run tests
 	@echo "🧪 Running tests..."
 	go test $(GO_BUILD_TAG_ARGS) -v ./...
+
+test-delivery-examples: ## Test dependency-free remote delivery adapters
+	node --test scripts/examples/patris-delivery-adapter.test.cjs
 
 clean: ## Clean build artifacts
 	@echo "🧹 Cleaning..."
