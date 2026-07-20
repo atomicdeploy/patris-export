@@ -193,9 +193,15 @@ func (db *Database) GetRecords() ([]Record, error) {
 				continue
 			}
 
-			value := getFieldValue((*pxVal)(unsafe.Pointer(values[j])), fieldType(fieldPtr))
+			field := cString(fieldName(fieldPtr))
+			nativeValue := (*pxVal)(unsafe.Pointer(values[j]))
+			if nativeValue.isNull != 0 {
+				record[field] = nil
+				continue
+			}
+			value := getFieldValue(nativeValue, fieldType(fieldPtr))
 			if value != nil {
-				record[cString(fieldName(fieldPtr))] = value
+				record[field] = value
 			}
 		}
 

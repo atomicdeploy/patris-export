@@ -37,10 +37,10 @@ type Envelope struct {
 	Event            string      `json:"event"`
 	EventType        string      `json:"event_type"`
 	EventID          string      `json:"event_id"`
-	LocalCurrency    string      `json:"local_currency"`
-	FormulaID        string      `json:"formula_id"`
-	FormulaRevision  string      `json:"formula_revision"`
-	FormulaVersion   string      `json:"formula_version"`
+	LocalCurrency    string      `json:"local_currency,omitempty"`
+	FormulaID        string      `json:"formula_id,omitempty"`
+	FormulaRevision  string      `json:"formula_revision,omitempty"`
+	FormulaVersion   string      `json:"formula_version,omitempty"`
 	Source           Source      `json:"source"`
 	GeneratedAt      string      `json:"generated_at"`
 	Products         []Product   `json:"products"`
@@ -270,6 +270,14 @@ func cloneProduct(value Product) Product {
 	copy.WarehouseStock = make(map[string]float64, len(value.WarehouseStock))
 	for key, stock := range value.WarehouseStock {
 		copy.WarehouseStock[key] = stock
+	}
+	copy.fieldPresence = make(map[string]fieldPresence, len(value.fieldPresence))
+	for key, state := range value.fieldPresence {
+		copy.fieldPresence[key] = state
+	}
+	copy.warehouseNulls = make(map[string]bool, len(value.warehouseNulls))
+	for key, isNull := range value.warehouseNulls {
+		copy.warehouseNulls[key] = isNull
 	}
 	if value.Warnings != nil {
 		copy.Warnings = append(make([]string, 0, len(value.Warnings)), value.Warnings...)

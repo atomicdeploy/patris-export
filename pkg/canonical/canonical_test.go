@@ -141,8 +141,8 @@ func TestKalaProfileTransformsPersianFixtureWithoutRawBoundaryFields(t *testing.
 	if !strings.Contains(product["location"].(string), "قفسه 12") {
 		t.Fatalf("location was not retained and digit-normalized: %q", product["location"])
 	}
-	if warnings := product["warnings"].([]string); len(warnings) != 0 {
-		t.Fatalf("unexpected warnings: %v", warnings)
+	if warnings, exists := product["warnings"]; exists {
+		t.Fatalf("empty warnings field was not omitted: %v", warnings)
 	}
 	for _, forbidden := range []string{"Sharh1", "Sharh2", "FOROSH", "KHARYD", "ALLANBAR", "ANBAR", "Code"} {
 		if _, exists := product[forbidden]; exists {
@@ -160,7 +160,7 @@ func TestKalaProfileTransformsPersianFixtureWithoutRawBoundaryFields(t *testing.
 	}
 }
 
-func TestKalaProfileWithholdsMissingOrAmbiguousPricingInsteadOfZero(t *testing.T) {
+func TestKalaProfileOmitsUnavailableStandalonePricingAndIntegrationFields(t *testing.T) {
 	cfg := DefaultConfig()
 	provider := pricingcatalog.NewProvider(pricingcatalog.Config{Mode: pricingcatalog.ModeNone})
 	rows := []map[string]interface{}{{
@@ -171,14 +171,54 @@ func TestKalaProfileWithholdsMissingOrAmbiguousPricingInsteadOfZero(t *testing.T
 	}}
 	products, _ := Transform(context.Background(), rows, "kala.db", cfg, provider, time.Time{})
 	product := products[0]
-	if product["foreign_price"] != nil || product["weight_grams"] != nil || product["final_price"] != nil {
-		t.Fatalf("missing/ambiguous inputs became destructive values: %#v", product)
+	for _, absent := range []string{"foreign_price", "weight_grams", "shipping_method_id", "shipping_price_per_kg_cny", "markup_percent", "irt_per_cny", "final_price", "formula_version", "pricing_catalog_status"} {
+		if _, exists := product[absent]; exists {
+			t.Fatalf("standalone output included unavailable field %q: %#v", absent, product)
+		}
 	}
 	warnings := strings.Join(product["warnings"].([]string), ",")
-	for _, expected := range []string{"foreign_price_missing", "weight_ambiguous", "import_freight_method_missing", "freight_rate_missing", "fx_rate_missing", "final_price_unavailable"} {
+	for _, expected := range []string{"foreign_price_missing", "weight_ambiguous"} {
 		if !strings.Contains(warnings, expected) {
 			t.Fatalf("missing warning %q in %s", expected, warnings)
 		}
+	}
+	for _, unrelated := range []string{"shipping_method", "shipping_price", "fx_rate", "final_price"} {
+		if strings.Contains(warnings, unrelated) {
+			t.Fatalf("standalone output included integration warning %q in %s", unrelated, warnings)
+		}
+	}
+}
+
+func TestKalaProfilePreservesExplicitNullButOmitsNeverReceivedFields(t *testing.T) {
+	cfg := DefaultConfig()
+	rows, envelope := Transform(context.Background(), []map[string]interface{}{{
+		"Code": "NULL-1", "Name": nil, "Serial": "", "FOROSH": nil, "warehouse_stock": map[string]interface{}{"1": nil}, "ALLANBAR": 0,
+	}}, "kala.db", cfg, nil, time.Unix(1, 0))
+	if len(rows) != 1 {
+		t.Fatalf("rows = %d, want 1", len(rows))
+	}
+	row := rows[0]
+	for _, field := range []string{"name", "sale_price_source"} {
+		if value, exists := row[field]; !exists || value != nil {
+			t.Fatalf("explicit null %q was not preserved: %#v", field, row)
+		}
+	}
+	stock, ok := row["warehouse_stock"].(map[string]interface{})
+	if !ok || stock["1"] != nil {
+		t.Fatalf("explicit warehouse null was not preserved: %#v", row["warehouse_stock"])
+	}
+	for _, field := range []string{"unit", "minimum_stock", "shipping_method_id", "final_price"} {
+		if _, exists := row[field]; exists {
+			t.Fatalf("never-received field %q was emitted: %#v", field, row)
+		}
+	}
+	encoded, err := json.Marshal(envelope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(encoded)
+	if !strings.Contains(text, `"name":null`) || strings.Contains(text, `"shipping_method_id"`) || strings.Contains(text, `"formula_id"`) {
+		t.Fatalf("sparse JSON contract is wrong: %s", text)
 	}
 }
 
@@ -381,8 +421,8 @@ func TestDigitalogicProfilePrefetches1002CodesInThreeBatchRequests(t *testing.T)
 		t.Fatalf("products = %d, want %d", len(products), len(rows))
 	}
 	for index, product := range products {
-		if got := product["import_freight_method_id"]; got != "air" {
-			t.Fatalf("product %d import_freight_method_id = %v, want air; scoped prefetch result was lost", index, got)
+		if got := product["shipping_method_id"]; got != "air" {
+			t.Fatalf("product %d shipping_method_id = %v, want air; scoped prefetch result was lost", index, got)
 		}
 	}
 	if got := atomic.LoadInt32(&catalogRequests); got != 1 {

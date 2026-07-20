@@ -933,7 +933,7 @@ func canonicalFieldKind(field string) valueKind {
 	switch strings.ToLower(strings.TrimSpace(field)) {
 	case "final_price":
 		return valueKindInteger
-	case "sale_price_source", "purchase_price_source", "total_stock", "minimum_stock", "foreign_price", "weight_grams", "freight_cny_per_kg", "markup_percent", "irt_per_cny":
+	case "sale_price_source", "purchase_price_source", "total_stock", "minimum_stock", "foreign_price", "weight_grams", "shipping_price_per_kg_cny", "markup_percent", "irt_per_cny":
 		return valueKindReal
 	default:
 		return valueKindUnknown

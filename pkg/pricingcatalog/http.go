@@ -71,7 +71,8 @@ type prefetchedProvider struct {
 
 type assignmentWire struct {
 	Code            string   `json:"code"`
-	MethodID        string   `json:"import_freight_method_id"`
+	MethodID        string   `json:"shipping_method_id"`
+	LegacyMethodID  string   `json:"import_freight_method_id"`
 	ProfitPercent   *Decimal `json:"profit_percent"`
 	ProfitSource    string   `json:"profit_percent_source"`
 	PricingWarnings []string `json:"pricing_warnings"`
@@ -83,7 +84,8 @@ type assignmentWire struct {
 
 type batchAssignmentWire struct {
 	Code            string          `json:"code"`
-	MethodID        string          `json:"import_freight_method_id"`
+	MethodID        string          `json:"shipping_method_id"`
+	LegacyMethodID  string          `json:"import_freight_method_id"`
 	ProfitPercent   *batchDecimal   `json:"profit_percent"`
 	ProfitSource    string          `json:"profit_percent_source"`
 	PricingWarnings []string        `json:"pricing_warnings"`
@@ -399,7 +401,7 @@ func (p *httpProvider) resolve(ctx context.Context, code string, run *prefetchRu
 		resolution.Warnings = append(resolution.Warnings, "product_pricing_assignment_stale")
 	}
 	if assignment == nil || strings.TrimSpace(assignment.assignment.MethodID) == "" {
-		resolution.Warnings = append(resolution.Warnings, "import_freight_method_missing")
+		resolution.Warnings = append(resolution.Warnings, "shipping_method_missing")
 		return finishResolution(resolution)
 	}
 
@@ -408,11 +410,11 @@ func (p *httpProvider) resolve(ctx context.Context, code string, run *prefetchRu
 	resolution.MarkupPercentSource = assignment.profitSource
 	method, exists := catalog.methods[resolution.MethodID]
 	if !exists {
-		resolution.Warnings = append(resolution.Warnings, "import_freight_method_unknown")
+		resolution.Warnings = append(resolution.Warnings, "shipping_method_unknown")
 	} else {
 		resolution.FreightCNYPerKg = cloneDecimal(method.PricePerKgCNY)
 		if method.Enabled != nil && !*method.Enabled {
-			resolution.Warnings = append(resolution.Warnings, "import_freight_method_disabled")
+			resolution.Warnings = append(resolution.Warnings, "shipping_method_disabled")
 		}
 	}
 	return finishResolution(resolution)
@@ -740,7 +742,8 @@ func (p *httpProvider) fetchCatalog(ctx context.Context) (*catalogSnapshot, erro
 			FormulaID       string `json:"formula_id"`
 			FormulaRevision string `json:"formula_revision"`
 		} `json:"pricing"`
-		Methods []Method `json:"import_freight_methods"`
+		Methods       []Method `json:"shipping_methods"`
+		LegacyMethods []Method `json:"import_freight_methods"`
 	}
 	if err := p.getJSON(ctx, p.config.CatalogPath, &wire); err != nil {
 		return nil, err
@@ -774,8 +777,12 @@ func (p *httpProvider) fetchCatalog(ctx context.Context) (*catalogSnapshot, erro
 	if !schemaCompatible || !revisionCompatible || !formulaCompatible || !localIsIRT || !validPositive(irtPerCNY) || !fxContractCompatible {
 		irtPerCNY = nil
 	}
-	methods := make(map[string]Method, len(wire.Methods))
-	for _, method := range wire.Methods {
+	methodsWire := wire.Methods
+	if len(methodsWire) == 0 {
+		methodsWire = wire.LegacyMethods
+	}
+	methods := make(map[string]Method, len(methodsWire))
+	for _, method := range methodsWire {
 		method.ID = strings.TrimSpace(method.ID)
 		if method.ID != "" {
 			methods[method.ID] = method
@@ -826,7 +833,7 @@ func assignmentSnapshotFromWire(wire assignmentWire) assignmentSnapshot {
 		warnings = append(warnings, wire.Markup.Warning)
 	}
 	return assignmentSnapshot{
-		assignment:   Assignment{MethodID: strings.TrimSpace(wire.MethodID), ProfitPercent: cloneDecimal(profit)},
+		assignment:   Assignment{MethodID: wireMethodID(wire.MethodID, wire.LegacyMethodID), ProfitPercent: cloneDecimal(profit)},
 		profitSource: strings.TrimSpace(wire.ProfitSource),
 		warnings:     normalizedStrings(warnings),
 	}
@@ -919,7 +926,7 @@ func (p *httpProvider) fetchAssignmentBatch(ctx context.Context, codes []string)
 			profit := assignment.ProfitPercent.decimal()
 			snapshot := assignmentSnapshot{
 				assignment: Assignment{
-					MethodID:      strings.TrimSpace(assignment.MethodID),
+					MethodID:      wireMethodID(assignment.MethodID, assignment.LegacyMethodID),
 					ProfitPercent: cloneDecimal(profit),
 				},
 				profitSource: strings.TrimSpace(assignment.ProfitSource),
@@ -974,6 +981,13 @@ func (p *httpProvider) fetchAssignmentBatch(ctx context.Context, codes []string)
 		return batchAssignmentPage{}, &contractError{reason: "batch status counts do not match the envelope"}
 	}
 	return batchAssignmentPage{defaultMarkup: defaultMarkup, results: results}, nil
+}
+
+func wireMethodID(canonical, legacy string) string {
+	if value := strings.TrimSpace(canonical); value != "" {
+		return value
+	}
+	return strings.TrimSpace(legacy)
 }
 
 func validateBatchDefaultMarkup(markup batchDefaultMarkup) error {

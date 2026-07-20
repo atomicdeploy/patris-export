@@ -13,11 +13,17 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   runtime-dynamic loader across Make, shell, and local Windows builds; manifests
   identify the selected backend and static packages omit the pxlib runtime DLL.
 
+### Changed
+
+- Canonical JSON, CSV, HTTP, spreadsheet, SQL, and outbound-update rows now share a sparse field boundary: never-received values are omitted while explicitly received nulls remain null.
+- Shipping integration output uses `shipping_method_id` and `shipping_price_per_kg_cny`; legacy freight-named catalog and assignment keys remain accepted as input during migration.
+
 ### Fixed
 
 - CGO and ALM build tags now compose instead of replacing one another, and
   static builds fail early with an actionable message when their pxlib archive
   is unavailable.
+- Standalone exports no longer contain Digitalogic pricing, formula, or shipping-method fields and warnings when no pricing integration is configured.
 
 ## [1.2.0] - 2026-07-17
 

@@ -77,8 +77,8 @@ func TestBuildKalaProfileAgainstRealLegacyDatabaseFixture(t *testing.T) {
 	if fmt.Sprint(product["foreign_price"]) != "2.75" || fmt.Sprint(product["weight_grams"]) != "1.84" || product["total_stock"] != 20.0 || product["final_price"] != int64(111999) {
 		t.Fatalf("real legacy fields were not parsed correctly: %#v", product)
 	}
-	if warnings := product["warnings"].([]string); len(warnings) != 0 {
-		t.Fatalf("known real fixture produced warnings: %v", warnings)
+	if warnings, exists := product["warnings"]; exists {
+		t.Fatalf("known real fixture produced or retained an empty warning field: %v", warnings)
 	}
 	for _, raw := range []string{"Sharh1", "Sharh2", "FOROSH", "KHARYD", "ALLANBAR", "ANBAR"} {
 		if _, exists := product[raw]; exists {
