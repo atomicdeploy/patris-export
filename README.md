@@ -118,7 +118,7 @@ patris-export --raw convert kala.db -f json -o raw-output/
 # Excel workbook using the transformed row shape.
 patris-export convert kala.db -f xlsx -o output/
 
-# SQLite export using the built-in canonical kala_v1 profile.
+# SQLite export using the built-in canonical kala profile.
 patris-export convert kala.db \
   -f sqlite \
   --sqlite-path output/patris-products.sqlite \
@@ -133,18 +133,19 @@ patris-export convert kala.db \
   --reconciliation delete_missing \
   --dry-run
 
-# Watch and send canonical JSON changes to the Digitalogic v1 receiver.
+# Watch and send canonical JSON changes to the Digitalogic receiver.
 # DIGITALOGIC_PRODUCT_SYNC_SECRET is injected into the process environment by
 # the deployment secret manager; only its variable name appears here.
 patris-export convert kala.db -f json -w \
-  --send-url https://digitalogic.example/wp-json/digitalogic/v1/patris/product-sync \
+  --send-url https://digitalogic.example/wp-json/digitalogic/patris/product-sync \
   --send-mode changes \
   --send-product-sync-secret-env DIGITALOGIC_PRODUCT_SYNC_SECRET \
   --send-retry-attempts 3 \
   --send-retry-backoff 2s
 ```
 
-See [the canonical product-sync contract](docs/CANONICAL-PRODUCT-SYNC.md) for
+See [the canonical product-sync contract](docs/CANONICAL-PRODUCT-SYNC.md) and
+[living integration policy](docs/INTEGRATION-STANDARD.md) for
 `kala.db` pricing, Digitalogic, freshness, and payload details. See
 [docs/examples/export-transform-send.md](docs/examples/export-transform-send.md)
 for generic dataset mapping, SQL/MySQL DSN examples, and command delivery mode.
@@ -559,9 +560,10 @@ widths, and the independent row-coloring toggle are persisted under `ui` in the
 normal Patris Export config file rather than in a separate table-settings file.
 
 For a configured canonical dataset, `GET /api/product-sync` returns the full
-versioned `digitalogic.product-sync` envelope. `/api/records` deliberately
-remains the Code-keyed product-row collection used by the viewer and embedded
-records API. Contract v1.1 carries category rows separately: `GET
+living `digitalogic.product-sync` envelope. Missing source/reference values are
+omitted; `null` is reserved for an explicitly supplied upstream null.
+`/api/records` deliberately remains the Code-keyed product-row collection used
+by the viewer and embedded records API. `GET
 /api/categories` returns the Code-keyed hierarchy, and the viewer reuses the
 same table controls through its Products/Categories switch. Products include
 their explicit `category_code`; reserved accounting and service rows appear in

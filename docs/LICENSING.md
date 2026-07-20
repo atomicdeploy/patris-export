@@ -80,7 +80,7 @@ Key: 7933A7D613DD83057C736E645C0116509F7B0DEDB433976A0CF618BCCA7C5DC7
 Although a stale comment in AHK_ALM's
 [AutoHotkey v2 hash helper](https://github.com/Rayan-Refoua/AHK_ALM/blob/main/libs/BcryptHash_ahk2.ahk)
 mentions UTF-16, its active string branch calls `StrPut(item, "UTF-8")`. Patris
-Export follows that executable behavior exactly. The explicit versioned profile
+Export follows that executable behavior exactly. The fixed compatibility profile
 and golden test prevent a future comment or implementation change from silently
 altering the compatibility contract.
 

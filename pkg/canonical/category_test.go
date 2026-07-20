@@ -35,12 +35,16 @@ func TestTransformSeparatesPatrisHierarchyFromLeafProducts(t *testing.T) {
 	}
 	wantCategoryCodes := []string{"101001", "102", "109", ""}
 	for index, row := range productRows {
-		if got := row["category_code"]; got != wantCategoryCodes[index] {
+		got, exists := row["category_code"]
+		if wantCategoryCodes[index] == "" && !exists {
+			continue
+		}
+		if got != wantCategoryCodes[index] {
 			t.Fatalf("product %s category = %#v, want %q", row["product_code"], got, wantCategoryCodes[index])
 		}
 	}
-	if envelope.SchemaVersion != ContractVersion {
-		t.Fatalf("schema version = %q, want %q", envelope.SchemaVersion, ContractVersion)
+	if envelope.Schema != ContractName {
+		t.Fatalf("schema = %q, want %q", envelope.Schema, ContractName)
 	}
 	if len(envelope.Categories) != 5 {
 		t.Fatalf("categories = %d, want 5", len(envelope.Categories))

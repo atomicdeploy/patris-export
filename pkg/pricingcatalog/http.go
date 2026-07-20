@@ -24,15 +24,18 @@ type catalogSnapshot struct {
 	selectedWarehouses    []string
 	irtPerCNY             *Decimal
 	methods               map[string]Method
+	explicitNulls         map[string]bool
+	methodPriceNulls      map[string]bool
 	fetchedAt             time.Time
 	warnings              []string
 }
 
 type assignmentSnapshot struct {
-	assignment   Assignment
-	profitSource string
-	warnings     []string
-	fetchedAt    time.Time
+	assignment    Assignment
+	profitSource  string
+	warnings      []string
+	explicitNulls map[string]bool
+	fetchedAt     time.Time
 }
 
 type assignmentEntry struct {
@@ -71,23 +74,18 @@ type prefetchedProvider struct {
 
 type assignmentWire struct {
 	Code            string   `json:"code"`
-	MethodID        string   `json:"import_freight_method_id"`
+	MethodID        string   `json:"shipping_method_id"`
 	ProfitPercent   *Decimal `json:"profit_percent"`
 	ProfitSource    string   `json:"profit_percent_source"`
 	PricingWarnings []string `json:"pricing_warnings"`
-	Markup          struct {
-		ProfitPercent *Decimal `json:"profit_percent"`
-		Warning       string   `json:"warning"`
-	} `json:"markup"`
 }
 
 type batchAssignmentWire struct {
-	Code            string          `json:"code"`
-	MethodID        string          `json:"import_freight_method_id"`
-	ProfitPercent   *batchDecimal   `json:"profit_percent"`
-	ProfitSource    string          `json:"profit_percent_source"`
-	PricingWarnings []string        `json:"pricing_warnings"`
-	LegacyMarkup    json.RawMessage `json:"markup"`
+	Code            string        `json:"code"`
+	MethodID        string        `json:"shipping_method_id"`
+	ProfitPercent   *batchDecimal `json:"profit_percent"`
+	ProfitSource    string        `json:"profit_percent_source"`
+	PricingWarnings []string      `json:"pricing_warnings"`
 }
 
 type batchDecimal struct {
@@ -95,13 +93,12 @@ type batchDecimal struct {
 }
 
 type batchDefaultMarkup struct {
-	schema        string
-	schemaVersion string
-	configured    bool
-	typeName      string
-	profit        *Decimal
-	source        string
-	revision      string
+	schema     string
+	configured bool
+	typeName   string
+	profit     *Decimal
+	source     string
+	revision   string
 }
 
 type batchAssignmentPage struct {
@@ -262,7 +259,7 @@ func validateBaseURL(value string) string {
 // Prefetch stages uncached assignments in bounded request-order chunks and
 // returns a transform-scoped result barrier. Pages become visible only after
 // their shared default-markup contract agrees. Fresh failure backoff blocks an
-// unsafe repeat batch/single path for the current freshness window.
+// unsafe repeated request path for the current freshness window.
 func (p *httpProvider) Prefetch(ctx context.Context, codes []string) Provider {
 	if p.configError != "" || len(codes) == 0 {
 		return p
@@ -343,12 +340,7 @@ func (p *httpProvider) Prefetch(ctx context.Context, codes []string) Provider {
 	if batchErr != nil {
 		pendingOutcomes = make(map[string]prefetchOutcome, len(pending))
 		warning := batchFailureWarning(batchErr)
-		allowSingle := false
-		if isUnsupportedBatchEndpoint(batchErr) {
-			warning = "pricing_assignment_batch_unsupported"
-			allowSingle = true
-		}
-		backoff := prefetchDiagnostic{warnings: []string{warning}, fetchedAt: now, allowSingle: allowSingle}
+		backoff := prefetchDiagnostic{warnings: []string{warning}, fetchedAt: now}
 		batchBackoff = &backoff
 		for _, code := range pending {
 			diagnostic := clonePrefetchDiagnostic(backoff)
@@ -391,6 +383,7 @@ func (p *httpProvider) resolve(ctx context.Context, code string, run *prefetchRu
 	resolution.CurrencyEffectiveDate = catalog.currencyEffectiveDate
 	resolution.SelectedWarehouses = append([]string(nil), catalog.selectedWarehouses...)
 	resolution.IRTPerCNY = cloneDecimal(catalog.irtPerCNY)
+	resolution.ExplicitNulls = cloneBoolMap(catalog.explicitNulls)
 	resolution.Warnings = append(resolution.Warnings, catalog.warnings...)
 
 	assignment, assignmentStatus, assignmentWarnings := p.resolveAssignment(ctx, code, run)
@@ -398,8 +391,15 @@ func (p *httpProvider) resolve(ctx context.Context, code string, run *prefetchRu
 	if assignmentStatus == "stale" {
 		resolution.Warnings = append(resolution.Warnings, "product_pricing_assignment_stale")
 	}
+	if assignment != nil {
+		for field, isNull := range assignment.explicitNulls {
+			if isNull {
+				resolution.ExplicitNulls[field] = true
+			}
+		}
+	}
 	if assignment == nil || strings.TrimSpace(assignment.assignment.MethodID) == "" {
-		resolution.Warnings = append(resolution.Warnings, "import_freight_method_missing")
+		resolution.Warnings = append(resolution.Warnings, "shipping_method_missing")
 		return finishResolution(resolution)
 	}
 
@@ -408,11 +408,14 @@ func (p *httpProvider) resolve(ctx context.Context, code string, run *prefetchRu
 	resolution.MarkupPercentSource = assignment.profitSource
 	method, exists := catalog.methods[resolution.MethodID]
 	if !exists {
-		resolution.Warnings = append(resolution.Warnings, "import_freight_method_unknown")
+		resolution.Warnings = append(resolution.Warnings, "shipping_method_unknown")
 	} else {
-		resolution.FreightCNYPerKg = cloneDecimal(method.PricePerKgCNY)
+		resolution.ShippingPricePerKgCNY = cloneDecimal(method.PricePerKgCNY)
+		if catalog.methodPriceNulls[resolution.MethodID] {
+			resolution.ExplicitNulls["shipping_price_per_kg_cny"] = true
+		}
 		if method.Enabled != nil && !*method.Enabled {
-			resolution.Warnings = append(resolution.Warnings, "import_freight_method_disabled")
+			resolution.Warnings = append(resolution.Warnings, "shipping_method_disabled")
 		}
 	}
 	return finishResolution(resolution)
@@ -687,6 +690,7 @@ func (p *httpProvider) freshPrefetchDiagnosticLocked(code string, now time.Time)
 func cloneAssignmentSnapshot(value assignmentSnapshot) assignmentSnapshot {
 	value.assignment.ProfitPercent = cloneDecimal(value.assignment.ProfitPercent)
 	value.warnings = append([]string(nil), value.warnings...)
+	value.explicitNulls = cloneBoolMap(value.explicitNulls)
 	return value
 }
 
@@ -714,7 +718,7 @@ func cloneBatchDefaultMarkup(value batchDefaultMarkup) batchDefaultMarkup {
 }
 
 func equalBatchDefaultMarkup(left, right batchDefaultMarkup) bool {
-	if left.schema != right.schema || left.schemaVersion != right.schemaVersion || left.configured != right.configured || left.typeName != right.typeName || left.source != right.source || left.revision != right.revision {
+	if left.schema != right.schema || left.configured != right.configured || left.typeName != right.typeName || left.source != right.source || left.revision != right.revision {
 		return false
 	}
 	if left.profit == nil || right.profit == nil {
@@ -726,7 +730,6 @@ func equalBatchDefaultMarkup(left, right batchDefaultMarkup) bool {
 func (p *httpProvider) fetchCatalog(ctx context.Context) (*catalogSnapshot, error) {
 	var wire struct {
 		Schema             string   `json:"schema"`
-		SchemaVersion      string   `json:"schema_version"`
 		Revision           string   `json:"revision"`
 		SelectedWarehouses []string `json:"selected_warehouses"`
 		Currency           struct {
@@ -737,16 +740,36 @@ func (p *httpProvider) fetchCatalog(ctx context.Context) (*catalogSnapshot, erro
 			Warnings      []string `json:"warnings"`
 		} `json:"currency"`
 		Pricing struct {
-			FormulaID       string `json:"formula_id"`
-			FormulaRevision string `json:"formula_revision"`
+			FormulaID string `json:"formula_id"`
 		} `json:"pricing"`
-		Methods []Method `json:"import_freight_methods"`
+		Methods []Method `json:"shipping_methods"`
 	}
-	if err := p.getJSON(ctx, p.config.CatalogPath, &wire); err != nil {
+	raw, err := p.getJSON(ctx, p.config.CatalogPath, &wire)
+	if err != nil {
 		return nil, err
 	}
+	explicitNulls := explicitJSONNulls(raw, "revision")
+	if explicitNulls["revision"] {
+		delete(explicitNulls, "revision")
+		explicitNulls["pricing_catalog_revision"] = true
+	}
+	var rawCatalog struct {
+		Currency json.RawMessage   `json:"currency"`
+		Methods  []json.RawMessage `json:"shipping_methods"`
+	}
+	_ = json.Unmarshal(raw, &rawCatalog)
+	for field, isNull := range explicitJSONNulls(rawCatalog.Currency, "cny_to_irt", "effective_date") {
+		if isNull {
+			switch field {
+			case "cny_to_irt":
+				explicitNulls["irt_per_cny"] = true
+			case "effective_date":
+				explicitNulls["currency_effective_date"] = true
+			}
+		}
+	}
 	warnings := append([]string(nil), wire.Currency.Warnings...)
-	schemaCompatible := wire.Schema == "digitalogic.integration-catalog" && majorVersion(wire.SchemaVersion) == "1"
+	schemaCompatible := wire.Schema == "digitalogic.integration-catalog"
 	if !schemaCompatible {
 		warnings = append(warnings, "pricing_catalog_schema_incompatible")
 	}
@@ -754,7 +777,7 @@ func (p *httpProvider) fetchCatalog(ctx context.Context) (*catalogSnapshot, erro
 	if !revisionCompatible {
 		warnings = append(warnings, "pricing_catalog_revision_missing")
 	}
-	formulaCompatible := strings.TrimSpace(wire.Pricing.FormulaID) == "landed_price_v1" && majorVersion(wire.Pricing.FormulaRevision) == "1"
+	formulaCompatible := strings.TrimSpace(wire.Pricing.FormulaID) == "landed_price"
 	if !formulaCompatible {
 		warnings = append(warnings, "pricing_formula_incompatible")
 	}
@@ -775,10 +798,14 @@ func (p *httpProvider) fetchCatalog(ctx context.Context) (*catalogSnapshot, erro
 		irtPerCNY = nil
 	}
 	methods := make(map[string]Method, len(wire.Methods))
-	for _, method := range wire.Methods {
+	methodPriceNulls := make(map[string]bool)
+	for index, method := range wire.Methods {
 		method.ID = strings.TrimSpace(method.ID)
 		if method.ID != "" {
 			methods[method.ID] = method
+			if index < len(rawCatalog.Methods) && explicitJSONNulls(rawCatalog.Methods[index], "price_per_kg_cny")["price_per_kg_cny"] {
+				methodPriceNulls[method.ID] = true
+			}
 		}
 	}
 	return &catalogSnapshot{
@@ -787,16 +814,10 @@ func (p *httpProvider) fetchCatalog(ctx context.Context) (*catalogSnapshot, erro
 		selectedWarehouses:    normalizedStrings(wire.SelectedWarehouses),
 		irtPerCNY:             irtPerCNY,
 		methods:               methods,
+		explicitNulls:         explicitNulls,
+		methodPriceNulls:      methodPriceNulls,
 		warnings:              normalizedStrings(warnings),
 	}, nil
-}
-
-func majorVersion(value string) string {
-	value = strings.TrimSpace(strings.TrimPrefix(strings.ToLower(value), "v"))
-	if index := strings.IndexByte(value, '.'); index >= 0 {
-		value = value[:index]
-	}
-	return value
 }
 
 func withinAge(now, fetchedAt time.Time, limit time.Duration) bool {
@@ -810,39 +831,61 @@ func withinAge(now, fetchedAt time.Time, limit time.Duration) bool {
 func (p *httpProvider) fetchAssignment(ctx context.Context, code string) (assignmentSnapshot, error) {
 	path := strings.ReplaceAll(p.config.AssignmentPath, "{code}", url.PathEscape(code))
 	var wire assignmentWire
-	if err := p.getJSON(ctx, path, &wire); err != nil {
+	raw, err := p.getJSON(ctx, path, &wire)
+	if err != nil {
 		return assignmentSnapshot{}, err
 	}
-	return assignmentSnapshotFromWire(wire), nil
+	return assignmentSnapshotFromWire(wire, raw), nil
 }
 
-func assignmentSnapshotFromWire(wire assignmentWire) assignmentSnapshot {
+func assignmentSnapshotFromWire(wire assignmentWire, raw json.RawMessage) assignmentSnapshot {
 	profit := wire.ProfitPercent
-	if wire.Markup.ProfitPercent != nil {
-		profit = wire.Markup.ProfitPercent
-	}
 	warnings := append([]string(nil), wire.PricingWarnings...)
-	if strings.TrimSpace(wire.Markup.Warning) != "" {
-		warnings = append(warnings, wire.Markup.Warning)
-	}
 	return assignmentSnapshot{
-		assignment:   Assignment{MethodID: strings.TrimSpace(wire.MethodID), ProfitPercent: cloneDecimal(profit)},
-		profitSource: strings.TrimSpace(wire.ProfitSource),
-		warnings:     normalizedStrings(warnings),
+		assignment:    Assignment{MethodID: strings.TrimSpace(wire.MethodID), ProfitPercent: cloneDecimal(profit)},
+		profitSource:  strings.TrimSpace(wire.ProfitSource),
+		warnings:      normalizedStrings(warnings),
+		explicitNulls: mapAssignmentNulls(explicitJSONNulls(raw, "shipping_method_id", "profit_percent")),
 	}
+}
+
+func explicitJSONNulls(raw json.RawMessage, fields ...string) map[string]bool {
+	result := make(map[string]bool)
+	if len(raw) == 0 {
+		return result
+	}
+	var object map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &object); err != nil {
+		return result
+	}
+	for _, field := range fields {
+		if value, exists := object[field]; exists && bytes.Equal(bytes.TrimSpace(value), []byte("null")) {
+			result[field] = true
+		}
+	}
+	return result
+}
+
+func mapAssignmentNulls(values map[string]bool) map[string]bool {
+	result := make(map[string]bool)
+	if values["shipping_method_id"] {
+		result["shipping_method_id"] = true
+	}
+	if values["profit_percent"] {
+		result["markup_percent"] = true
+	}
+	return result
 }
 
 func (p *httpProvider) fetchAssignmentBatch(ctx context.Context, codes []string) (batchAssignmentPage, error) {
 	var wire struct {
 		Schema         string `json:"schema"`
-		SchemaVersion  string `json:"schema_version"`
 		RequestedCount int    `json:"requested_count"`
 		ResolvedCount  int    `json:"resolved_count"`
 		ErrorCount     int    `json:"error_count"`
 		MaximumCodes   int    `json:"maximum_codes"`
 		DefaultMarkup  struct {
 			Schema        string        `json:"schema"`
-			SchemaVersion string        `json:"schema_version"`
 			Configured    bool          `json:"configured"`
 			Type          string        `json:"type"`
 			ProfitPercent *batchDecimal `json:"profit_percent"`
@@ -860,25 +903,24 @@ func (p *httpProvider) fetchAssignmentBatch(ctx context.Context, codes []string)
 			} `json:"error"`
 		} `json:"results"`
 	}
-	if err := p.postJSON(ctx, p.config.BatchAssignmentPath, struct {
+	if _, err := p.postJSON(ctx, p.config.BatchAssignmentPath, struct {
 		Codes []string `json:"codes"`
 	}{Codes: codes}, &wire); err != nil {
 		return batchAssignmentPage{}, err
 	}
-	if wire.Schema != "digitalogic.pricing-assignment-batch" || majorVersion(wire.SchemaVersion) != "1" {
+	if wire.Schema != "digitalogic.pricing-assignment-batch" {
 		return batchAssignmentPage{}, &contractError{reason: "incompatible batch schema"}
 	}
-	if wire.DefaultMarkup.Schema != "digitalogic.default-percentage-markup" || majorVersion(wire.DefaultMarkup.SchemaVersion) != "1" {
+	if wire.DefaultMarkup.Schema != "digitalogic.default-percentage-markup" {
 		return batchAssignmentPage{}, &contractError{reason: "incompatible default-markup schema"}
 	}
 	defaultMarkup := batchDefaultMarkup{
-		schema:        wire.DefaultMarkup.Schema,
-		schemaVersion: wire.DefaultMarkup.SchemaVersion,
-		configured:    wire.DefaultMarkup.Configured,
-		typeName:      wire.DefaultMarkup.Type,
-		profit:        wire.DefaultMarkup.ProfitPercent.decimal(),
-		source:        wire.DefaultMarkup.Source,
-		revision:      wire.DefaultMarkup.Revision,
+		schema:     wire.DefaultMarkup.Schema,
+		configured: wire.DefaultMarkup.Configured,
+		typeName:   wire.DefaultMarkup.Type,
+		profit:     wire.DefaultMarkup.ProfitPercent.decimal(),
+		source:     wire.DefaultMarkup.Source,
+		revision:   wire.DefaultMarkup.Revision,
 	}
 	if err := validateBatchDefaultMarkup(defaultMarkup); err != nil {
 		return batchAssignmentPage{}, err
@@ -904,14 +946,11 @@ func (p *httpProvider) fetchAssignmentBatch(ctx context.Context, codes []string)
 				return batchAssignmentPage{}, &contractError{reason: "successful batch result omitted its assignment"}
 			}
 			var assignment batchAssignmentWire
-			if err := json.Unmarshal(result.Assignment, &assignment); err != nil {
+			if err := decodeStrictJSON(result.Assignment, &assignment); err != nil {
 				return batchAssignmentPage{}, &contractError{reason: "successful batch assignment is malformed"}
 			}
 			if assignment.Code != result.Code {
 				return batchAssignmentPage{}, &contractError{reason: "successful batch assignment Code mismatch"}
-			}
-			if len(assignment.LegacyMarkup) > 0 && !bytes.Equal(bytes.TrimSpace(assignment.LegacyMarkup), []byte("null")) {
-				return batchAssignmentPage{}, &contractError{reason: "successful batch assignment used the legacy nested markup projection"}
 			}
 			if err := validateBatchAssignmentMarkup(assignment, defaultMarkup); err != nil {
 				return batchAssignmentPage{}, err
@@ -922,8 +961,9 @@ func (p *httpProvider) fetchAssignmentBatch(ctx context.Context, codes []string)
 					MethodID:      strings.TrimSpace(assignment.MethodID),
 					ProfitPercent: cloneDecimal(profit),
 				},
-				profitSource: strings.TrimSpace(assignment.ProfitSource),
-				warnings:     normalizedStrings(assignment.PricingWarnings),
+				profitSource:  strings.TrimSpace(assignment.ProfitSource),
+				warnings:      normalizedStrings(assignment.PricingWarnings),
+				explicitNulls: mapAssignmentNulls(explicitJSONNulls(result.Assignment, "shipping_method_id", "profit_percent")),
 			}
 			results = append(results, batchAssignmentResult{code: result.Code, snapshot: &snapshot})
 		case "error":
@@ -1030,25 +1070,25 @@ func validBatchPercentage(value *Decimal) bool {
 	return ok && parsed.Sign() >= 0 && parsed.Cmp(big.NewRat(1000, 1)) <= 0
 }
 
-func (p *httpProvider) getJSON(ctx context.Context, path string, target interface{}) error {
+func (p *httpProvider) getJSON(ctx context.Context, path string, target interface{}) (json.RawMessage, error) {
 	return p.doJSON(ctx, http.MethodGet, path, nil, target)
 }
 
-func (p *httpProvider) postJSON(ctx context.Context, path string, payload, target interface{}) error {
+func (p *httpProvider) postJSON(ctx context.Context, path string, payload, target interface{}) (json.RawMessage, error) {
 	body, err := json.Marshal(payload)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if int64(len(body)) > p.config.MaxResponseBytes {
-		return errRequestTooLarge
+		return nil, errRequestTooLarge
 	}
 	return p.doJSON(ctx, http.MethodPost, path, body, target)
 }
 
-func (p *httpProvider) doJSON(ctx context.Context, method, path string, body []byte, target interface{}) error {
+func (p *httpProvider) doJSON(ctx context.Context, method, path string, body []byte, target interface{}) (json.RawMessage, error) {
 	endpoint, err := joinURL(p.config.BaseURL, path)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	var reader io.Reader
 	if len(body) > 0 {
@@ -1056,7 +1096,7 @@ func (p *httpProvider) doJSON(ctx context.Context, method, path string, body []b
 	}
 	req, err := http.NewRequestWithContext(ctx, method, endpoint, reader)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("User-Agent", "patris-export")
@@ -1066,53 +1106,71 @@ func (p *httpProvider) doJSON(ctx context.Context, method, path string, body []b
 	if p.config.BearerTokenEnv != "" {
 		token := strings.TrimSpace(os.Getenv(p.config.BearerTokenEnv))
 		if token == "" {
-			return errCredentialUnavailable
+			return nil, errCredentialUnavailable
 		}
 		req.Header.Set("Authorization", "Bearer "+token)
 	} else if p.config.UsernameEnv != "" || p.config.PasswordEnv != "" {
 		username := os.Getenv(p.config.UsernameEnv)
 		password := os.Getenv(p.config.PasswordEnv)
 		if p.config.UsernameEnv == "" || p.config.PasswordEnv == "" || username == "" || password == "" {
-			return errCredentialUnavailable
+			return nil, errCredentialUnavailable
 		}
 		req.SetBasicAuth(username, password)
 	}
 	resp, err := p.client.Do(req)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1024))
-		return &remoteStatusError{status: resp.StatusCode}
+		return nil, &remoteStatusError{status: resp.StatusCode}
 	}
 	responseReader := io.LimitReader(resp.Body, p.config.MaxResponseBytes+1)
 	data, err := io.ReadAll(responseReader)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if int64(len(data)) > p.config.MaxResponseBytes {
-		return errResponseTooLarge
+		return nil, errResponseTooLarge
 	}
 	var envelope struct {
 		Success *bool           `json:"success"`
 		Data    json.RawMessage `json:"data"`
 	}
-	if err := json.Unmarshal(data, &envelope); err == nil && len(envelope.Data) > 0 {
-		if envelope.Success != nil && !*envelope.Success {
-			return &contractError{reason: "remote API reported failure"}
+	var outer map[string]json.RawMessage
+	if err := json.Unmarshal(data, &outer); err == nil {
+		_, wrapped := outer["data"]
+		if wrapped {
+			if err := decodeStrictJSON(data, &envelope); err != nil {
+				return nil, &contractError{reason: "JSON wrapper decode failed"}
+			}
+			if len(envelope.Data) == 0 || bytes.Equal(bytes.TrimSpace(envelope.Data), []byte("null")) {
+				return nil, &contractError{reason: "remote API omitted response data"}
+			}
+			if envelope.Success != nil && !*envelope.Success {
+				return nil, &contractError{reason: "remote API reported failure"}
+			}
+			data = envelope.Data
 		}
-		data = envelope.Data
 	}
-	if err := json.Unmarshal(data, target); err != nil {
-		return &contractError{reason: "JSON decode failed"}
+	if err := decodeStrictJSON(data, target); err != nil {
+		return nil, &contractError{reason: "JSON decode failed"}
 	}
-	return nil
+	return json.RawMessage(append([]byte(nil), data...)), nil
 }
 
-func isUnsupportedBatchEndpoint(err error) bool {
-	var status *remoteStatusError
-	return errors.As(err, &status) && (status.status == http.StatusNotFound || status.status == http.StatusMethodNotAllowed || status.status == http.StatusNotImplemented)
+func decodeStrictJSON(data []byte, target interface{}) error {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(target); err != nil {
+		return err
+	}
+	var trailing interface{}
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		return fmt.Errorf("JSON document has trailing values")
+	}
+	return nil
 }
 
 func batchFailureWarning(err error) string {
@@ -1167,6 +1225,8 @@ func cloneCatalog(value *catalogSnapshot) *catalogSnapshot {
 	copy.selectedWarehouses = append([]string(nil), value.selectedWarehouses...)
 	copy.irtPerCNY = cloneDecimal(value.irtPerCNY)
 	copy.warnings = append([]string(nil), value.warnings...)
+	copy.explicitNulls = cloneBoolMap(value.explicitNulls)
+	copy.methodPriceNulls = cloneBoolMap(value.methodPriceNulls)
 	copy.methods = make(map[string]Method, len(value.methods))
 	for key, method := range value.methods {
 		method.PricePerKgCNY = cloneDecimal(method.PricePerKgCNY)
@@ -1177,6 +1237,14 @@ func cloneCatalog(value *catalogSnapshot) *catalogSnapshot {
 		copy.methods[key] = method
 	}
 	return &copy
+}
+
+func cloneBoolMap(values map[string]bool) map[string]bool {
+	copy := make(map[string]bool, len(values))
+	for key, value := range values {
+		copy[key] = value
+	}
+	return copy
 }
 
 func decimalEqual(left, right *Decimal) bool {

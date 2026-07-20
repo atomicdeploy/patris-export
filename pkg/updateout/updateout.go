@@ -323,7 +323,6 @@ func applyHeaders(req *http.Request, cfg Config, event Event, contract *canonica
 	req.Header.Set("X-Patris-Source", source)
 	if contract != nil {
 		req.Header.Set("X-Patris-Contract", contract.Schema)
-		req.Header.Set("X-Patris-Contract-Version", contract.SchemaVersion)
 		req.Header.Set("X-Patris-Event-ID", contract.EventID)
 	}
 	if secret != "" {

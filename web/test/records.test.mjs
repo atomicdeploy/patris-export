@@ -19,7 +19,6 @@ test('normalizes Code-keyed API rows without treating metadata as records', () =
 test('consumes product-sync products and ignores envelope metadata', () => {
     const rows = normalizeRecordsPayload({
         schema: 'digitalogic.product-sync',
-        schema_version: '1.0',
         event_id: 'sha256:event',
         products: [
             { product_code: '102001011', name: 'LM75' },

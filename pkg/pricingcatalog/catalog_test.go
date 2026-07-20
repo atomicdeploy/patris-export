@@ -23,6 +23,40 @@ func decimalText(value *Decimal) string {
 	return value.String()
 }
 
+func TestConfiguredDistinguishesStandaloneFromActivePricing(t *testing.T) {
+	if Configured(DefaultConfig()) {
+		t.Fatal("the empty default static config must remain standalone")
+	}
+	if Configured(Config{Mode: ModeDigitalogic}) {
+		t.Fatal("a Digitalogic mode without an endpoint is not active")
+	}
+	if !Configured(Config{Mode: ModeDigitalogic, Digitalogic: DigitalogicConfig{BaseURL: "https://example.test"}}) {
+		t.Fatal("a configured Digitalogic endpoint was not treated as active")
+	}
+	if !Configured(Config{Mode: ModeStatic, Static: StaticConfig{Methods: []Method{{ID: "air"}}}}) {
+		t.Fatal("explicit static shipping data was not treated as active")
+	}
+}
+
+func TestNormalizeUsesCurrentShippingKeys(t *testing.T) {
+	var cfg Config
+	if err := json.Unmarshal([]byte(`{"mode":"static","static":{"shipping_methods":[{"id":"air"}],"assignments":{"A":{"shipping_method_id":"air"}}}}`), &cfg); err != nil {
+		t.Fatal(err)
+	}
+	cfg = Normalize(cfg)
+	if len(cfg.Static.Methods) != 1 || cfg.Static.Assignments["A"].MethodID != "air" {
+		t.Fatalf("current shipping values were not normalized: %+v", cfg.Static)
+	}
+	encoded, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(encoded)
+	if !strings.Contains(text, `"shipping_methods"`) || !strings.Contains(text, `"shipping_method_id"`) {
+		t.Fatalf("normalized config did not use canonical shipping keys: %s", text)
+	}
+}
+
 func TestStaticProviderResolvesExactCodeAndDefaults(t *testing.T) {
 	provider := NewProvider(Config{
 		Mode: ModeStatic,
@@ -39,7 +73,7 @@ func TestStaticProviderResolvesExactCodeAndDefaults(t *testing.T) {
 	})
 
 	resolution := provider.Resolve(context.Background(), "113007045")
-	if resolution.MethodID != "air_express" || decimalText(resolution.FreightCNYPerKg) != "120" {
+	if resolution.MethodID != "air_express" || decimalText(resolution.ShippingPricePerKgCNY) != "120" {
 		t.Fatalf("unexpected freight resolution: %+v", resolution)
 	}
 	if decimalText(resolution.MarkupPercent) != "30" || decimalText(resolution.IRTPerCNY) != "29000" {
@@ -54,7 +88,7 @@ func TestStaticProviderResolvesExactCodeAndDefaults(t *testing.T) {
 
 	missing := provider.Resolve(context.Background(), "missing")
 	warnings := strings.Join(missing.Warnings, ",")
-	for _, expected := range []string{"freight_rate_missing", "import_freight_method_missing", "markup_percent_missing"} {
+	for _, expected := range []string{"shipping_price_per_kg_missing", "shipping_method_missing", "markup_percent_missing"} {
 		if !strings.Contains(warnings, expected) {
 			t.Fatalf("missing warning %q in %v", expected, missing.Warnings)
 		}
@@ -80,10 +114,10 @@ func TestStaticProviderRejectsNonFinitePricingInputs(t *testing.T) {
 		Assignments: map[string]Assignment{"A": {MethodID: "air", ProfitPercent: &nan}},
 	}})
 	resolution := provider.Resolve(context.Background(), "A")
-	if resolution.IRTPerCNY != nil || resolution.FreightCNYPerKg != nil || resolution.MarkupPercent != nil {
+	if resolution.IRTPerCNY != nil || resolution.ShippingPricePerKgCNY != nil || resolution.MarkupPercent != nil {
 		t.Fatalf("non-finite static inputs were retained: %+v", resolution)
 	}
-	for _, warning := range []string{"fx_rate_missing", "freight_rate_missing", "markup_percent_missing"} {
+	for _, warning := range []string{"fx_rate_missing", "shipping_price_per_kg_missing", "markup_percent_missing"} {
 		if !contains(resolution.Warnings, warning) {
 			t.Fatalf("missing %s in %v", warning, resolution.Warnings)
 		}
@@ -100,9 +134,9 @@ func TestHTTPProviderCachesCatalogAndAssignmentsWithinFreshnessLimit(t *testing.
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {
 		case "/integration/catalog":
-			fmt.Fprint(w, `{"success":true,"data":{"schema":"digitalogic.integration-catalog","schema_version":"1.0.0","revision":"sha256:test","currency":{"local":"IRT","cny_to_local":29000,"cny_to_irt":29000,"effective_date":"2026-07-16"},"pricing":{"formula_id":"landed_price_v1","formula_revision":"1.0.0"},"selected_warehouses":["1","6"],"import_freight_methods":[{"id":"air_express","enabled":true,"price_per_kg_cny":120}]}}`)
-		case "/products/by-code/A/import-pricing":
-			fmt.Fprint(w, `{"success":true,"data":{"import_freight_method_id":"air_express","markup":{"profit_percent":30,"warning":null},"pricing_warnings":[]}}`)
+			fmt.Fprint(w, `{"success":true,"data":{"schema":"digitalogic.integration-catalog","revision":"sha256:test","currency":{"local":"IRT","cny_to_local":29000,"cny_to_irt":29000,"effective_date":"2026-07-16"},"pricing":{"formula_id":"landed_price"},"selected_warehouses":["1","6"],"shipping_methods":[{"id":"air_express","enabled":true,"price_per_kg_cny":120}]}}`)
+		case "/integration/products/by-code/A/pricing":
+			fmt.Fprint(w, `{"success":true,"data":{"shipping_method_id":"air_express","profit_percent":30,"profit_percent_source":"product_override","pricing_warnings":[]}}`)
 		default:
 			http.NotFound(w, r)
 		}
@@ -122,7 +156,7 @@ func TestHTTPProviderCachesCatalogAndAssignmentsWithinFreshnessLimit(t *testing.
 	}
 	mu.Lock()
 	defer mu.Unlock()
-	if requests["/integration/catalog"] != 1 || requests["/products/by-code/A/import-pricing"] != 1 {
+	if requests["/integration/catalog"] != 1 || requests["/integration/products/by-code/A/pricing"] != 1 {
 		t.Fatalf("fresh values were not cached: %#v", requests)
 	}
 }
@@ -136,10 +170,10 @@ func TestHTTPProviderUsesCacheOnlyInsideExplicitMaxStale(t *testing.T) {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		if r.URL.Path == "/integration/catalog" {
-			fmt.Fprint(w, `{"data":{"schema":"digitalogic.integration-catalog","schema_version":"1.0.0","revision":"sha256:test","currency":{"local":"IRT","cny_to_local":29000,"cny_to_irt":29000},"pricing":{"formula_id":"landed_price_v1","formula_revision":"1.0.0"},"import_freight_methods":[{"id":"air","enabled":true,"price_per_kg_cny":100}]}}`)
+			fmt.Fprint(w, `{"data":{"schema":"digitalogic.integration-catalog","revision":"sha256:test","currency":{"local":"IRT","cny_to_local":29000,"cny_to_irt":29000},"pricing":{"formula_id":"landed_price"},"shipping_methods":[{"id":"air","enabled":true,"price_per_kg_cny":100}]}}`)
 			return
 		}
-		fmt.Fprint(w, `{"data":{"import_freight_method_id":"air","profit_percent":10}}`)
+		fmt.Fprint(w, `{"data":{"shipping_method_id":"air","profit_percent":10}}`)
 	}))
 	defer server.Close()
 
@@ -154,13 +188,13 @@ func TestHTTPProviderUsesCacheOnlyInsideExplicitMaxStale(t *testing.T) {
 	fail = true
 	now = now.Add(2 * time.Minute)
 	stale := provider.Resolve(context.Background(), "A")
-	if stale.FreightCNYPerKg == nil || !contains(stale.Warnings, "pricing_catalog_stale") || !contains(stale.Warnings, "product_pricing_assignment_stale") {
+	if stale.ShippingPricePerKgCNY == nil || !contains(stale.Warnings, "pricing_catalog_stale") || !contains(stale.Warnings, "product_pricing_assignment_stale") {
 		t.Fatalf("bounded stale cache was not used: %+v", stale)
 	}
 
 	now = now.Add(20 * time.Minute)
 	expired := provider.Resolve(context.Background(), "A")
-	if expired.FreightCNYPerKg != nil || !contains(expired.Warnings, "pricing_catalog_unavailable") {
+	if expired.ShippingPricePerKgCNY != nil || !contains(expired.Warnings, "pricing_catalog_unavailable") {
 		t.Fatalf("expired cache was used outside max_stale: %+v", expired)
 	}
 }
@@ -205,8 +239,8 @@ func TestHTTPProviderRunBarrierSurvivesPersistentCacheEviction(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {
 		case "/integration/catalog":
-			fmt.Fprint(w, `{"data":{"schema":"digitalogic.integration-catalog","schema_version":"1.0.0","revision":"r1","currency":{"local":"IRT","cny_to_local":1,"cny_to_irt":1},"pricing":{"formula_id":"landed_price_v1","formula_revision":"1.0.0"},"import_freight_methods":[{"id":"air","price_per_kg_cny":1}]}}`)
-		case "/pricing-assignments/batch":
+			fmt.Fprint(w, `{"data":{"schema":"digitalogic.integration-catalog","revision":"r1","currency":{"local":"IRT","cny_to_local":1,"cny_to_irt":1},"pricing":{"formula_id":"landed_price"},"shipping_methods":[{"id":"air","price_per_kg_cny":1}]}}`)
+		case "/integration/pricing-assignments/batch":
 			batchRequests++
 			var request struct {
 				Codes []string `json:"codes"`
@@ -228,15 +262,15 @@ func TestHTTPProviderRunBarrierSurvivesPersistentCacheEviction(t *testing.T) {
 				resolvedCount++
 				results = append(results, map[string]interface{}{
 					"code": code, "status": "ok", "assignment": map[string]interface{}{
-						"code": code, "import_freight_method_id": "air", "profit_percent": "30", "profit_percent_source": "global_default", "pricing_warnings": []string{},
+						"code": code, "shipping_method_id": "air", "profit_percent": "30", "profit_percent_source": "global_default", "pricing_warnings": []string{},
 					},
 				})
 			}
 			_ = json.NewEncoder(w).Encode(map[string]interface{}{"data": map[string]interface{}{
-				"schema": "digitalogic.pricing-assignment-batch", "schema_version": "1.0.0",
+				"schema":          "digitalogic.pricing-assignment-batch",
 				"requested_count": len(request.Codes), "resolved_count": resolvedCount, "error_count": len(request.Codes) - resolvedCount, "maximum_codes": 500,
 				"default_percentage_markup": map[string]interface{}{
-					"schema": "digitalogic.default-percentage-markup", "schema_version": "1.0.0", "configured": true, "type": "percentage", "profit_percent": "30", "source": "global_default", "revision": "rev-30",
+					"schema": "digitalogic.default-percentage-markup", "configured": true, "type": "percentage", "profit_percent": "30", "source": "global_default", "revision": "rev-30",
 				},
 				"results": results,
 			}})
@@ -295,10 +329,10 @@ func TestHTTPProviderBoundsAssignmentCache(t *testing.T) {
 		counts[r.URL.Path]++
 		w.Header().Set("Content-Type", "application/json")
 		if r.URL.Path == "/integration/catalog" {
-			fmt.Fprint(w, `{"data":{"schema":"digitalogic.integration-catalog","schema_version":"1.0.0","revision":"r1","currency":{"local":"IRT","cny_to_local":1,"cny_to_irt":1},"pricing":{"formula_id":"landed_price_v1","formula_revision":"1.0.0"},"import_freight_methods":[{"id":"air","price_per_kg_cny":1}]}}`)
+			fmt.Fprint(w, `{"data":{"schema":"digitalogic.integration-catalog","revision":"r1","currency":{"local":"IRT","cny_to_local":1,"cny_to_irt":1},"pricing":{"formula_id":"landed_price"},"shipping_methods":[{"id":"air","price_per_kg_cny":1}]}}`)
 			return
 		}
-		fmt.Fprint(w, `{"data":{"import_freight_method_id":"air","profit_percent":0}}`)
+		fmt.Fprint(w, `{"data":{"shipping_method_id":"air","profit_percent":0}}`)
 	}))
 	defer server.Close()
 
@@ -306,13 +340,13 @@ func TestHTTPProviderBoundsAssignmentCache(t *testing.T) {
 	provider.Resolve(context.Background(), "A")
 	provider.Resolve(context.Background(), "B")
 	provider.Resolve(context.Background(), "A")
-	if counts["/products/by-code/A/import-pricing"] != 2 {
+	if counts["/integration/products/by-code/A/pricing"] != 2 {
 		t.Fatalf("LRU did not evict the oldest assignment: %#v", counts)
 	}
 }
 
 func TestHTTPProviderBatchPrefetchUsesGoldenContractAndSharedAuth(t *testing.T) {
-	fixture, err := os.ReadFile("../../testdata/digitalogic-pricing-assignment-batch-v1.golden.json")
+	fixture, err := os.ReadFile("../../testdata/digitalogic-pricing-assignment-batch.golden.json")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -323,13 +357,13 @@ func TestHTTPProviderBatchPrefetchUsesGoldenContractAndSharedAuth(t *testing.T) 
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {
 		case "/integration/catalog":
-			fmt.Fprint(w, `{"data":{"schema":"digitalogic.integration-catalog","schema_version":"1.0.0","revision":"r1","currency":{"local":"IRT","cny_to_local":29000,"cny_to_irt":29000},"pricing":{"formula_id":"landed_price_v1","formula_revision":"1.0.0"},"import_freight_methods":[{"id":"air_express","price_per_kg_cny":120}]}}`)
-		case "/pricing-assignments/batch":
+			fmt.Fprint(w, `{"data":{"schema":"digitalogic.integration-catalog","revision":"r1","currency":{"local":"IRT","cny_to_local":29000,"cny_to_irt":29000},"pricing":{"formula_id":"landed_price"},"shipping_methods":[{"id":"air_express","price_per_kg_cny":120}]}}`)
+		case "/integration/pricing-assignments/batch":
 			batchRequests++
 			fmt.Fprintf(w, `{"success":true,"data":%s}`, fixture)
 		default:
 			singleRequests++
-			fmt.Fprint(w, `{"data":{"code":"unexpected","import_freight_method_id":"air_express","profit_percent":"30"}}`)
+			fmt.Fprint(w, `{"data":{"code":"unexpected","shipping_method_id":"air_express","profit_percent":"30"}}`)
 		}
 	}))
 	defer server.Close()
@@ -345,7 +379,7 @@ func TestHTTPProviderBatchPrefetchUsesGoldenContractAndSharedAuth(t *testing.T) 
 	if batchRequests != 1 || singleRequests != 0 {
 		t.Fatalf("requests: batch=%d single=%d, want 1/0", batchRequests, singleRequests)
 	}
-	if resolved.MethodID != "air_express" || decimalText(resolved.MarkupPercent) != "30" || resolved.MarkupPercentSource != "global_default" || decimalText(resolved.FreightCNYPerKg) != "120" {
+	if resolved.MethodID != "air_express" || decimalText(resolved.MarkupPercent) != "30" || resolved.MarkupPercentSource != "global_default" || decimalText(resolved.ShippingPricePerKgCNY) != "120" {
 		t.Fatalf("golden assignment did not resolve exactly: %+v", resolved)
 	}
 	if !contains(missing.Warnings, "product_pricing_assignment_not_found") {
@@ -380,9 +414,9 @@ func TestHTTPProviderBatchPreservesExactProductOverrideSource(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {
 		case "/integration/catalog":
-			fmt.Fprint(w, `{"data":{"schema":"digitalogic.integration-catalog","schema_version":"1.0.0","revision":"r1","currency":{"local":"IRT","cny_to_local":29000,"cny_to_irt":29000},"pricing":{"formula_id":"landed_price_v1","formula_revision":"1.0.0"},"import_freight_methods":[{"id":"air","price_per_kg_cny":120}]}}`)
-		case "/pricing-assignments/batch":
-			fmt.Fprint(w, `{"data":{"schema":"digitalogic.pricing-assignment-batch","schema_version":"1.0.0","requested_count":1,"resolved_count":1,"error_count":0,"maximum_codes":500,"default_percentage_markup":{"schema":"digitalogic.default-percentage-markup","schema_version":"1.0.0","configured":true,"type":"percentage","profit_percent":"30","source":"global_default","revision":"rev-30"},"results":[{"code":"EXACT","status":"ok","assignment":{"code":"EXACT","import_freight_method_id":"air","profit_percent":"12.500000000001","profit_percent_source":"product_override","pricing_warnings":[]}}]}}`)
+			fmt.Fprint(w, `{"data":{"schema":"digitalogic.integration-catalog","revision":"r1","currency":{"local":"IRT","cny_to_local":29000,"cny_to_irt":29000},"pricing":{"formula_id":"landed_price"},"shipping_methods":[{"id":"air","price_per_kg_cny":120}]}}`)
+		case "/integration/pricing-assignments/batch":
+			fmt.Fprint(w, `{"data":{"schema":"digitalogic.pricing-assignment-batch","requested_count":1,"resolved_count":1,"error_count":0,"maximum_codes":500,"default_percentage_markup":{"schema":"digitalogic.default-percentage-markup","configured":true,"type":"percentage","profit_percent":"30","source":"global_default","revision":"rev-30"},"results":[{"code":"EXACT","status":"ok","assignment":{"code":"EXACT","shipping_method_id":"air","profit_percent":"12.500000000001","profit_percent_source":"product_override","pricing_warnings":[]}}]}}`)
 		default:
 			t.Fatalf("unexpected single-Code request: %s", r.URL.Path)
 		}
@@ -403,12 +437,12 @@ func TestHTTPProviderRetryableBatchResultFallsBackToSingleResolver(t *testing.T)
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {
 		case "/integration/catalog":
-			fmt.Fprint(w, `{"data":{"schema":"digitalogic.integration-catalog","schema_version":"1.0.0","revision":"r1","currency":{"local":"IRT","cny_to_local":1,"cny_to_irt":1},"pricing":{"formula_id":"landed_price_v1","formula_revision":"1.0.0"},"import_freight_methods":[{"id":"air","price_per_kg_cny":1}]}}`)
-		case "/pricing-assignments/batch":
-			fmt.Fprint(w, `{"data":{"schema":"digitalogic.pricing-assignment-batch","schema_version":"1.0.0","requested_count":1,"resolved_count":0,"error_count":1,"maximum_codes":500,"default_percentage_markup":{"schema":"digitalogic.default-percentage-markup","schema_version":"1.0.0","configured":false,"type":"percentage","source":"unset","revision":"rev-unset"},"results":[{"code":"A","status":"error","error":{"code":"digitalogic_pricing_temporarily_unavailable","http_status":503,"retryable":true}}]}}`)
+			fmt.Fprint(w, `{"data":{"schema":"digitalogic.integration-catalog","revision":"r1","currency":{"local":"IRT","cny_to_local":1,"cny_to_irt":1},"pricing":{"formula_id":"landed_price"},"shipping_methods":[{"id":"air","price_per_kg_cny":1}]}}`)
+		case "/integration/pricing-assignments/batch":
+			fmt.Fprint(w, `{"data":{"schema":"digitalogic.pricing-assignment-batch","requested_count":1,"resolved_count":0,"error_count":1,"maximum_codes":500,"default_percentage_markup":{"schema":"digitalogic.default-percentage-markup","configured":false,"type":"percentage","source":"unset","revision":"rev-unset"},"results":[{"code":"A","status":"error","error":{"code":"digitalogic_pricing_temporarily_unavailable","http_status":503,"retryable":true}}]}}`)
 		default:
 			singleRequests++
-			fmt.Fprint(w, `{"data":{"code":"A","import_freight_method_id":"air","profit_percent":"7.25","profit_percent_source":"product_override","pricing_warnings":[]}}`)
+			fmt.Fprint(w, `{"data":{"code":"A","shipping_method_id":"air","profit_percent":"7.25","profit_percent_source":"product_override","pricing_warnings":[]}}`)
 		}
 	}))
 	defer server.Close()
@@ -427,9 +461,9 @@ func TestHTTPProviderRejectsInconsistentBatchMarkupSource(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {
 		case "/integration/catalog":
-			fmt.Fprint(w, `{"data":{"schema":"digitalogic.integration-catalog","schema_version":"1.0.0","revision":"r1","currency":{"local":"IRT","cny_to_local":1,"cny_to_irt":1},"pricing":{"formula_id":"landed_price_v1","formula_revision":"1.0.0"},"import_freight_methods":[{"id":"air","price_per_kg_cny":1}]}}`)
-		case "/pricing-assignments/batch":
-			fmt.Fprint(w, `{"data":{"schema":"digitalogic.pricing-assignment-batch","schema_version":"1.0.0","requested_count":1,"resolved_count":1,"error_count":0,"maximum_codes":500,"default_percentage_markup":{"schema":"digitalogic.default-percentage-markup","schema_version":"1.0.0","configured":true,"type":"percentage","profit_percent":"30","source":"global_default","revision":"rev-30"},"results":[{"code":"A","status":"ok","assignment":{"code":"A","import_freight_method_id":"air","profit_percent":"31","profit_percent_source":"global_default","pricing_warnings":[]}}]}}`)
+			fmt.Fprint(w, `{"data":{"schema":"digitalogic.integration-catalog","revision":"r1","currency":{"local":"IRT","cny_to_local":1,"cny_to_irt":1},"pricing":{"formula_id":"landed_price"},"shipping_methods":[{"id":"air","price_per_kg_cny":1}]}}`)
+		case "/integration/pricing-assignments/batch":
+			fmt.Fprint(w, `{"data":{"schema":"digitalogic.pricing-assignment-batch","requested_count":1,"resolved_count":1,"error_count":0,"maximum_codes":500,"default_percentage_markup":{"schema":"digitalogic.default-percentage-markup","configured":true,"type":"percentage","profit_percent":"30","source":"global_default","revision":"rev-30"},"results":[{"code":"A","status":"ok","assignment":{"code":"A","shipping_method_id":"air","profit_percent":"31","profit_percent_source":"global_default","pricing_warnings":[]}}]}}`)
 		default:
 			singleRequests++
 		}
@@ -467,10 +501,10 @@ func TestHTTPProviderRejectsInvalidBatchDecimalsAndMissingDefaultRevision(t *tes
 				w.Header().Set("Content-Type", "application/json")
 				switch r.URL.Path {
 				case "/integration/catalog":
-					fmt.Fprint(w, `{"data":{"schema":"digitalogic.integration-catalog","schema_version":"1.0.0","revision":"r1","currency":{"local":"IRT","cny_to_local":1,"cny_to_irt":1},"pricing":{"formula_id":"landed_price_v1","formula_revision":"1.0.0"},"import_freight_methods":[]}}`)
-				case "/pricing-assignments/batch":
+					fmt.Fprint(w, `{"data":{"schema":"digitalogic.integration-catalog","revision":"r1","currency":{"local":"IRT","cny_to_local":1,"cny_to_irt":1},"pricing":{"formula_id":"landed_price"},"shipping_methods":[]}}`)
+				case "/integration/pricing-assignments/batch":
 					batchRequests++
-					fmt.Fprintf(w, `{"data":{"schema":"digitalogic.pricing-assignment-batch","schema_version":"1.0.0","requested_count":1,"resolved_count":1,"error_count":0,"maximum_codes":500,"default_percentage_markup":{"schema":"digitalogic.default-percentage-markup","schema_version":"1.0.0","configured":true,"type":"percentage","profit_percent":%s,"source":"global_default","revision":%q},"results":[{"code":"A","status":"ok","assignment":{"code":"A","import_freight_method_id":"air","profit_percent":%s,"profit_percent_source":"%s","pricing_warnings":[]}}]}}`, test.defaultProfit, test.revision, test.assignmentProfit, test.assignmentSource)
+					fmt.Fprintf(w, `{"data":{"schema":"digitalogic.pricing-assignment-batch","requested_count":1,"resolved_count":1,"error_count":0,"maximum_codes":500,"default_percentage_markup":{"schema":"digitalogic.default-percentage-markup","configured":true,"type":"percentage","profit_percent":%s,"source":"global_default","revision":%q},"results":[{"code":"A","status":"ok","assignment":{"code":"A","shipping_method_id":"air","profit_percent":%s,"profit_percent_source":"%s","pricing_warnings":[]}}]}}`, test.defaultProfit, test.revision, test.assignmentProfit, test.assignmentSource)
 				default:
 					singleRequests++
 				}
@@ -493,8 +527,8 @@ func TestHTTPProviderCommitsChunksAtomicallyAfterDefaultRevisionAgreement(t *tes
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {
 		case "/integration/catalog":
-			fmt.Fprint(w, `{"data":{"schema":"digitalogic.integration-catalog","schema_version":"1.0.0","revision":"r1","currency":{"local":"IRT","cny_to_local":1,"cny_to_irt":1},"pricing":{"formula_id":"landed_price_v1","formula_revision":"1.0.0"},"import_freight_methods":[{"id":"air","price_per_kg_cny":1}]}}`)
-		case "/pricing-assignments/batch":
+			fmt.Fprint(w, `{"data":{"schema":"digitalogic.integration-catalog","revision":"r1","currency":{"local":"IRT","cny_to_local":1,"cny_to_irt":1},"pricing":{"formula_id":"landed_price"},"shipping_methods":[{"id":"air","price_per_kg_cny":1}]}}`)
+		case "/integration/pricing-assignments/batch":
 			batchRequests++
 			var request struct {
 				Codes []string `json:"codes"`
@@ -509,14 +543,14 @@ func TestHTTPProviderCommitsChunksAtomicallyAfterDefaultRevisionAgreement(t *tes
 				revision = "rev-31"
 			}
 			_ = json.NewEncoder(w).Encode(map[string]interface{}{"data": map[string]interface{}{
-				"schema": "digitalogic.pricing-assignment-batch", "schema_version": "1.0.0",
+				"schema":          "digitalogic.pricing-assignment-batch",
 				"requested_count": 1, "resolved_count": 1, "error_count": 0, "maximum_codes": 500,
 				"default_percentage_markup": map[string]interface{}{
-					"schema": "digitalogic.default-percentage-markup", "schema_version": "1.0.0", "configured": true, "type": "percentage", "profit_percent": profit, "source": "global_default", "revision": revision,
+					"schema": "digitalogic.default-percentage-markup", "configured": true, "type": "percentage", "profit_percent": profit, "source": "global_default", "revision": revision,
 				},
 				"results": []map[string]interface{}{{
 					"code": code, "status": "ok", "assignment": map[string]interface{}{
-						"code": code, "import_freight_method_id": "air", "profit_percent": profit, "profit_percent_source": "global_default", "pricing_warnings": []string{},
+						"code": code, "shipping_method_id": "air", "profit_percent": profit, "profit_percent_source": "global_default", "pricing_warnings": []string{},
 					},
 				}},
 			}})
@@ -545,18 +579,18 @@ func TestHTTPProviderCommitsChunksAtomicallyAfterDefaultRevisionAgreement(t *tes
 	}
 }
 
-func TestHTTPProviderBatchUnsupportedFallsBackWithDiagnostic(t *testing.T) {
+func TestHTTPProviderMissingBatchEndpointFailsClosed(t *testing.T) {
 	var singleRequests int
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {
 		case "/integration/catalog":
-			fmt.Fprint(w, `{"data":{"schema":"digitalogic.integration-catalog","schema_version":"1.0.0","revision":"r1","currency":{"local":"IRT","cny_to_local":1,"cny_to_irt":1},"pricing":{"formula_id":"landed_price_v1","formula_revision":"1.0.0"},"import_freight_methods":[{"id":"air","price_per_kg_cny":1}]}}`)
-		case "/pricing-assignments/batch":
+			fmt.Fprint(w, `{"data":{"schema":"digitalogic.integration-catalog","revision":"r1","currency":{"local":"IRT","cny_to_local":1,"cny_to_irt":1},"pricing":{"formula_id":"landed_price"},"shipping_methods":[{"id":"air","price_per_kg_cny":1}]}}`)
+		case "/integration/pricing-assignments/batch":
 			http.NotFound(w, r)
 		default:
 			singleRequests++
-			fmt.Fprint(w, `{"data":{"import_freight_method_id":"air","profit_percent":"0"}}`)
+			fmt.Fprint(w, `{"data":{"shipping_method_id":"air","profit_percent":"0"}}`)
 		}
 	}))
 	defer server.Close()
@@ -564,9 +598,59 @@ func TestHTTPProviderBatchUnsupportedFallsBackWithDiagnostic(t *testing.T) {
 	provider := newHTTPProvider(DigitalogicConfig{BaseURL: server.URL}, server.Client(), time.Now)
 	provider.Prefetch(context.Background(), []string{"A"})
 	resolved := provider.Resolve(context.Background(), "A")
-	if singleRequests != 1 || !contains(resolved.Warnings, "pricing_assignment_batch_unsupported") {
-		t.Fatalf("unsupported batch fallback was not explicit and safe: requests=%d resolution=%+v", singleRequests, resolved)
+	if singleRequests != 0 || !contains(resolved.Warnings, "pricing_assignment_batch_http_failed") {
+		t.Fatalf("missing current batch endpoint did not fail closed: requests=%d resolution=%+v", singleRequests, resolved)
 	}
+}
+
+func TestHTTPProviderRejectsObsoleteAndUnknownContractFields(t *testing.T) {
+	t.Run("catalog field", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, `{"data":{"schema":"digitalogic.integration-catalog","schema_version":"1.1","revision":"r1","currency":{"local":"IRT","cny_to_local":1,"cny_to_irt":1},"pricing":{"formula_id":"landed_price"},"shipping_methods":[]}}`)
+		}))
+		defer server.Close()
+
+		resolved := newHTTPProvider(DigitalogicConfig{BaseURL: server.URL}, server.Client(), time.Now).Resolve(context.Background(), "A")
+		if !contains(resolved.Warnings, "pricing_catalog_fetch_failed") || resolved.IRTPerCNY != nil {
+			t.Fatalf("obsolete catalog field was accepted: %+v", resolved)
+		}
+	})
+
+	t.Run("wrapper field", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, `{"data":{"schema":"digitalogic.integration-catalog"},"unexpected":true}`)
+		}))
+		defer server.Close()
+
+		resolved := newHTTPProvider(DigitalogicConfig{BaseURL: server.URL}, server.Client(), time.Now).Resolve(context.Background(), "A")
+		if !contains(resolved.Warnings, "pricing_catalog_fetch_failed") {
+			t.Fatalf("unknown wrapper field was accepted: %+v", resolved)
+		}
+	})
+
+	t.Run("batch assignment field", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			switch r.URL.Path {
+			case "/integration/catalog":
+				fmt.Fprint(w, `{"data":{"schema":"digitalogic.integration-catalog","revision":"r1","currency":{"local":"IRT","cny_to_local":1,"cny_to_irt":1},"pricing":{"formula_id":"landed_price"},"shipping_methods":[{"id":"air","price_per_kg_cny":1}]}}`)
+			case "/integration/pricing-assignments/batch":
+				fmt.Fprint(w, `{"data":{"schema":"digitalogic.pricing-assignment-batch","requested_count":1,"resolved_count":1,"error_count":0,"maximum_codes":500,"default_percentage_markup":{"schema":"digitalogic.default-percentage-markup","configured":true,"type":"percentage","profit_percent":"30","source":"global_default","revision":"r1"},"results":[{"code":"A","status":"ok","assignment":{"code":"A","shipping_method_id":"air","profit_percent":"30","profit_percent_source":"global_default","pricing_warnings":[],"freight_cny_per_kg":"1"}}]}}`)
+			default:
+				t.Fatal("strict batch failure must not fall back to another route")
+			}
+		}))
+		defer server.Close()
+
+		provider := newHTTPProvider(DigitalogicConfig{BaseURL: server.URL}, server.Client(), time.Now)
+		scoped := provider.Prefetch(context.Background(), []string{"A"})
+		resolved := scoped.Resolve(context.Background(), "A")
+		if !contains(resolved.Warnings, "pricing_assignment_batch_contract_invalid") || resolved.MethodID != "" {
+			t.Fatalf("unknown batch assignment field was accepted: %+v", resolved)
+		}
+	})
 }
 
 func TestHTTPProviderMalformedBatchFailsClosedWithoutSingleRequests(t *testing.T) {
@@ -575,12 +659,12 @@ func TestHTTPProviderMalformedBatchFailsClosedWithoutSingleRequests(t *testing.T
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {
 		case "/integration/catalog":
-			fmt.Fprint(w, `{"data":{"schema":"digitalogic.integration-catalog","schema_version":"1.0.0","revision":"r1","currency":{"local":"IRT","cny_to_local":1,"cny_to_irt":1},"pricing":{"formula_id":"landed_price_v1","formula_revision":"1.0.0"},"import_freight_methods":[{"id":"air","price_per_kg_cny":1}]}}`)
-		case "/pricing-assignments/batch":
-			fmt.Fprint(w, `{"data":{"schema":"wrong","schema_version":"1.0.0","results":[]}}`)
+			fmt.Fprint(w, `{"data":{"schema":"digitalogic.integration-catalog","revision":"r1","currency":{"local":"IRT","cny_to_local":1,"cny_to_irt":1},"pricing":{"formula_id":"landed_price"},"shipping_methods":[{"id":"air","price_per_kg_cny":1}]}}`)
+		case "/integration/pricing-assignments/batch":
+			fmt.Fprint(w, `{"data":{"schema":"wrong","results":[]}}`)
 		default:
 			singleRequests++
-			fmt.Fprint(w, `{"data":{"import_freight_method_id":"air","profit_percent":"0"}}`)
+			fmt.Fprint(w, `{"data":{"shipping_method_id":"air","profit_percent":"0"}}`)
 		}
 	}))
 	defer server.Close()
@@ -610,8 +694,8 @@ func TestHTTPProviderFreshFailClosedDiagnosticBacksOffAcrossPrefetchRuns(t *test
 				w.Header().Set("Content-Type", "application/json")
 				switch r.URL.Path {
 				case "/integration/catalog":
-					fmt.Fprint(w, `{"data":{"schema":"digitalogic.integration-catalog","schema_version":"1.0.0","revision":"r1","currency":{"local":"IRT","cny_to_local":1,"cny_to_irt":1},"pricing":{"formula_id":"landed_price_v1","formula_revision":"1.0.0"},"import_freight_methods":[]}}`)
-				case "/pricing-assignments/batch":
+					fmt.Fprint(w, `{"data":{"schema":"digitalogic.integration-catalog","revision":"r1","currency":{"local":"IRT","cny_to_local":1,"cny_to_irt":1},"pricing":{"formula_id":"landed_price"},"shipping_methods":[]}}`)
+				case "/integration/pricing-assignments/batch":
 					batchRequests++
 					switch test.mode {
 					case "auth":
@@ -624,7 +708,7 @@ func TestHTTPProviderFreshFailClosedDiagnosticBacksOffAcrossPrefetchRuns(t *test
 						}
 						_ = connection.Close()
 					case "malformed":
-						fmt.Fprint(w, `{"data":{"schema":"wrong","schema_version":"1.0.0","results":[]}}`)
+						fmt.Fprint(w, `{"data":{"schema":"wrong","results":[]}}`)
 					}
 				default:
 					singleRequests++
@@ -655,9 +739,9 @@ func TestHTTPProviderBatchAmbiguityIsAuthoritative(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {
 		case "/integration/catalog":
-			fmt.Fprint(w, `{"data":{"schema":"digitalogic.integration-catalog","schema_version":"1.0.0","revision":"r1","currency":{"local":"IRT","cny_to_local":1,"cny_to_irt":1},"pricing":{"formula_id":"landed_price_v1","formula_revision":"1.0.0"},"import_freight_methods":[]}}`)
-		case "/pricing-assignments/batch":
-			fmt.Fprint(w, `{"data":{"schema":"digitalogic.pricing-assignment-batch","schema_version":"1.0.0","requested_count":1,"resolved_count":0,"error_count":1,"maximum_codes":500,"default_percentage_markup":{"schema":"digitalogic.default-percentage-markup","schema_version":"1.0.0","configured":false,"type":"percentage","source":"unset","revision":"rev-unset"},"results":[{"code":"COLLISION","status":"error","error":{"code":"digitalogic_product_code_ambiguous","http_status":409,"retryable":false}}]}}`)
+			fmt.Fprint(w, `{"data":{"schema":"digitalogic.integration-catalog","revision":"r1","currency":{"local":"IRT","cny_to_local":1,"cny_to_irt":1},"pricing":{"formula_id":"landed_price"},"shipping_methods":[]}}`)
+		case "/integration/pricing-assignments/batch":
+			fmt.Fprint(w, `{"data":{"schema":"digitalogic.pricing-assignment-batch","requested_count":1,"resolved_count":0,"error_count":1,"maximum_codes":500,"default_percentage_markup":{"schema":"digitalogic.default-percentage-markup","configured":false,"type":"percentage","source":"unset","revision":"rev-unset"},"results":[{"code":"COLLISION","status":"error","error":{"code":"digitalogic_product_code_ambiguous","http_status":409,"retryable":false}}]}}`)
 		default:
 			singleRequests++
 		}
@@ -678,13 +762,13 @@ func TestHTTPProviderBatchFailureUsesOnlyBoundedStaleAssignment(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {
 		case "/integration/catalog":
-			fmt.Fprint(w, `{"data":{"schema":"digitalogic.integration-catalog","schema_version":"1.0.0","revision":"r1","currency":{"local":"IRT","cny_to_local":1,"cny_to_irt":1},"pricing":{"formula_id":"landed_price_v1","formula_revision":"1.0.0"},"import_freight_methods":[{"id":"air","price_per_kg_cny":1}]}}`)
-		case "/pricing-assignments/batch":
+			fmt.Fprint(w, `{"data":{"schema":"digitalogic.integration-catalog","revision":"r1","currency":{"local":"IRT","cny_to_local":1,"cny_to_irt":1},"pricing":{"formula_id":"landed_price"},"shipping_methods":[{"id":"air","price_per_kg_cny":1}]}}`)
+		case "/integration/pricing-assignments/batch":
 			batchRequests++
 			http.Error(w, "offline", http.StatusServiceUnavailable)
 		default:
 			singleRequests++
-			fmt.Fprint(w, `{"data":{"code":"A","import_freight_method_id":"air","profit_percent":"5","profit_percent_source":"product_override","pricing_warnings":[]}}`)
+			fmt.Fprint(w, `{"data":{"code":"A","shipping_method_id":"air","profit_percent":"5","profit_percent_source":"product_override","pricing_warnings":[]}}`)
 		}
 	}))
 	defer server.Close()
@@ -731,8 +815,8 @@ func TestHTTPProviderBatchAuthAndBodyLimitsFailClosed(t *testing.T) {
 				w.Header().Set("Content-Type", "application/json")
 				switch r.URL.Path {
 				case "/integration/catalog":
-					fmt.Fprint(w, `{"data":{"schema":"digitalogic.integration-catalog","schema_version":"1.0.0","revision":"r1","currency":{"local":"IRT","cny_to_local":1,"cny_to_irt":1},"pricing":{"formula_id":"landed_price_v1","formula_revision":"1.0.0"},"import_freight_methods":[]}}`)
-				case "/pricing-assignments/batch":
+					fmt.Fprint(w, `{"data":{"schema":"digitalogic.integration-catalog","revision":"r1","currency":{"local":"IRT","cny_to_local":1,"cny_to_irt":1},"pricing":{"formula_id":"landed_price"},"shipping_methods":[]}}`)
+				case "/integration/pricing-assignments/batch":
 					batchRequests++
 					test.batchResponse(w)
 				default:
@@ -752,7 +836,7 @@ func TestHTTPProviderBatchAuthAndBodyLimitsFailClosed(t *testing.T) {
 }
 
 func TestJoinURLRejectsOriginChangesAndAbsolutePaths(t *testing.T) {
-	base := "https://example.test/wp-json/digitalogic/v1"
+	base := "https://example.test/wp-json/digitalogic"
 	for _, path := range []string{
 		"https://evil.test/catalog",
 		"//evil.test/catalog",
@@ -763,22 +847,22 @@ func TestJoinURLRejectsOriginChangesAndAbsolutePaths(t *testing.T) {
 			t.Fatalf("joinURL(%q) unexpectedly resolved to %q", path, resolved)
 		}
 	}
-	resolved, err := joinURL(base, "products/by-code/A%2FB/import-pricing")
+	resolved, err := joinURL(base, "integration/products/by-code/A%2FB/pricing")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if resolved != "https://example.test/wp-json/digitalogic/v1/products/by-code/A%2FB/import-pricing" {
+	if resolved != "https://example.test/wp-json/digitalogic/integration/products/by-code/A%2FB/pricing" {
 		t.Fatalf("encoded Code path changed: %q", resolved)
 	}
 }
 
 func TestHTTPProviderRejectsUntrustedConfiguredPathsBeforeRequest(t *testing.T) {
 	for name, cfg := range map[string]DigitalogicConfig{
-		"absolute catalog":        {BaseURL: "https://example.test/wp-json/digitalogic/v1", CatalogPath: "https://evil.test/catalog"},
-		"scheme relative catalog": {BaseURL: "https://example.test/wp-json/digitalogic/v1", CatalogPath: "//evil.test/catalog"},
-		"assignment without Code": {BaseURL: "https://example.test/wp-json/digitalogic/v1", AssignmentPath: "products/import-pricing"},
-		"absolute assignment":     {BaseURL: "https://example.test/wp-json/digitalogic/v1", AssignmentPath: "https://evil.test/{code}"},
-		"absolute batch":          {BaseURL: "https://example.test/wp-json/digitalogic/v1", BatchAssignmentPath: "https://evil.test/batch"},
+		"absolute catalog":        {BaseURL: "https://example.test/wp-json/digitalogic", CatalogPath: "https://evil.test/catalog"},
+		"scheme relative catalog": {BaseURL: "https://example.test/wp-json/digitalogic", CatalogPath: "//evil.test/catalog"},
+		"assignment without Code": {BaseURL: "https://example.test/wp-json/digitalogic", AssignmentPath: "products/pricing"},
+		"absolute assignment":     {BaseURL: "https://example.test/wp-json/digitalogic", AssignmentPath: "https://evil.test/{code}"},
+		"absolute batch":          {BaseURL: "https://example.test/wp-json/digitalogic", BatchAssignmentPath: "https://evil.test/batch"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			resolution := newHTTPProvider(cfg, nil, time.Now).Resolve(context.Background(), "A")
@@ -794,11 +878,11 @@ func TestHTTPProviderEncodesProductCodeAsOnePathSegment(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		if r.URL.Path == "/integration/catalog" {
-			fmt.Fprint(w, `{"data":{"schema":"digitalogic.integration-catalog","schema_version":"1.0.0","revision":"r1","currency":{"local":"IRT","cny_to_local":1,"cny_to_irt":1},"pricing":{"formula_id":"landed_price_v1","formula_revision":"1.0.0"},"import_freight_methods":[{"id":"air","price_per_kg_cny":1}]}}`)
+			fmt.Fprint(w, `{"data":{"schema":"digitalogic.integration-catalog","revision":"r1","currency":{"local":"IRT","cny_to_local":1,"cny_to_irt":1},"pricing":{"formula_id":"landed_price"},"shipping_methods":[{"id":"air","price_per_kg_cny":1}]}}`)
 			return
 		}
 		assignmentEscapedPath = r.URL.EscapedPath()
-		fmt.Fprint(w, `{"data":{"import_freight_method_id":"air","profit_percent":0}}`)
+		fmt.Fprint(w, `{"data":{"shipping_method_id":"air","profit_percent":0}}`)
 	}))
 	defer server.Close()
 
@@ -841,16 +925,14 @@ func TestHTTPProviderFailsClosedOnStatusAndResponseLimit(t *testing.T) {
 func TestHTTPProviderWithholdsFXForIncompatibleCatalogContracts(t *testing.T) {
 	tests := []struct {
 		name            string
-		schemaVersion   string
+		schema          string
 		localCurrency   string
 		formulaID       string
-		formulaRevision string
 		expectedWarning string
 	}{
-		{name: "schema major", schemaVersion: "2.0.0", localCurrency: "IRT", formulaID: "landed_price_v1", formulaRevision: "1.0.0", expectedWarning: "pricing_catalog_schema_incompatible"},
-		{name: "local currency", schemaVersion: "1.0.0", localCurrency: "USD", formulaID: "landed_price_v1", formulaRevision: "1.0.0", expectedWarning: "pricing_local_currency_not_irt"},
-		{name: "formula id", schemaVersion: "1.0.0", localCurrency: "IRT", formulaID: "landed_price_v2", formulaRevision: "1.0.0", expectedWarning: "pricing_formula_incompatible"},
-		{name: "formula revision", schemaVersion: "1.0.0", localCurrency: "IRT", formulaID: "landed_price_v1", formulaRevision: "2.0.0", expectedWarning: "pricing_formula_incompatible"},
+		{name: "schema", schema: "wrong", localCurrency: "IRT", formulaID: "landed_price", expectedWarning: "pricing_catalog_schema_incompatible"},
+		{name: "local currency", schema: "digitalogic.integration-catalog", localCurrency: "USD", formulaID: "landed_price", expectedWarning: "pricing_local_currency_not_irt"},
+		{name: "formula id", schema: "digitalogic.integration-catalog", localCurrency: "IRT", formulaID: "wrong", expectedWarning: "pricing_formula_incompatible"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -858,14 +940,14 @@ func TestHTTPProviderWithholdsFXForIncompatibleCatalogContracts(t *testing.T) {
 				w.Header().Set("Content-Type", "application/json")
 				if r.URL.Path == "/integration/catalog" {
 					_ = json.NewEncoder(w).Encode(map[string]interface{}{"data": map[string]interface{}{
-						"schema": "digitalogic.integration-catalog", "schema_version": test.schemaVersion, "revision": "r1",
-						"currency":               map[string]interface{}{"local": test.localCurrency, "cny_to_local": 29000, "cny_to_irt": 29000},
-						"pricing":                map[string]interface{}{"formula_id": test.formulaID, "formula_revision": test.formulaRevision},
-						"import_freight_methods": []map[string]interface{}{{"id": "air", "price_per_kg_cny": 120}},
+						"schema": test.schema, "revision": "r1",
+						"currency":         map[string]interface{}{"local": test.localCurrency, "cny_to_local": 29000, "cny_to_irt": 29000},
+						"pricing":          map[string]interface{}{"formula_id": test.formulaID},
+						"shipping_methods": []map[string]interface{}{{"id": "air", "price_per_kg_cny": 120}},
 					}})
 					return
 				}
-				fmt.Fprint(w, `{"data":{"import_freight_method_id":"air","profit_percent":30}}`)
+				fmt.Fprint(w, `{"data":{"shipping_method_id":"air","profit_percent":30}}`)
 			}))
 			defer server.Close()
 
@@ -874,7 +956,7 @@ func TestHTTPProviderWithholdsFXForIncompatibleCatalogContracts(t *testing.T) {
 			if resolution.IRTPerCNY != nil || !contains(resolution.Warnings, test.expectedWarning) || !contains(resolution.Warnings, "fx_rate_missing") {
 				t.Fatalf("incompatible catalog was allowed to price: %+v", resolution)
 			}
-			if resolution.FreightCNYPerKg == nil || resolution.MarkupPercent == nil {
+			if resolution.ShippingPricePerKgCNY == nil || resolution.MarkupPercent == nil {
 				t.Fatalf("non-FX catalog data should remain observable: %+v", resolution)
 			}
 		})
@@ -891,14 +973,14 @@ func TestHTTPProviderRequiresConsistentNonNullCNYToIRT(t *testing.T) {
 				w.Header().Set("Content-Type", "application/json")
 				if r.URL.Path == "/integration/catalog" {
 					_ = json.NewEncoder(w).Encode(map[string]interface{}{"data": map[string]interface{}{
-						"schema": "digitalogic.integration-catalog", "schema_version": "1.0.0", "revision": "r1",
-						"currency":               currency,
-						"pricing":                map[string]interface{}{"formula_id": "landed_price_v1", "formula_revision": "1.0.0"},
-						"import_freight_methods": []map[string]interface{}{{"id": "air", "price_per_kg_cny": 120}},
+						"schema": "digitalogic.integration-catalog", "revision": "r1",
+						"currency":         currency,
+						"pricing":          map[string]interface{}{"formula_id": "landed_price"},
+						"shipping_methods": []map[string]interface{}{{"id": "air", "price_per_kg_cny": 120}},
 					}})
 					return
 				}
-				fmt.Fprint(w, `{"data":{"import_freight_method_id":"air","profit_percent":30}}`)
+				fmt.Fprint(w, `{"data":{"shipping_method_id":"air","profit_percent":30}}`)
 			}))
 			defer server.Close()
 			resolution := newHTTPProvider(DigitalogicConfig{BaseURL: server.URL}, server.Client(), time.Now).Resolve(context.Background(), "A")
@@ -920,10 +1002,10 @@ func TestHTTPProviderConfiguredTimeoutAllowsSlowBatch(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {
 		case "/integration/catalog":
-			fmt.Fprint(w, `{"data":{"schema":"digitalogic.integration-catalog","schema_version":"1.0.0","revision":"r1","currency":{"local":"IRT","cny_to_local":25300,"cny_to_irt":25300},"pricing":{"formula_id":"landed_price_v1","formula_revision":"1.0.0"},"import_freight_methods":[{"id":"air","price_per_kg_cny":85}]}}`)
-		case "/pricing-assignments/batch":
+			fmt.Fprint(w, `{"data":{"schema":"digitalogic.integration-catalog","revision":"r1","currency":{"local":"IRT","cny_to_local":25300,"cny_to_irt":25300},"pricing":{"formula_id":"landed_price"},"shipping_methods":[{"id":"air","price_per_kg_cny":85}]}}`)
+		case "/integration/pricing-assignments/batch":
 			time.Sleep(75 * time.Millisecond)
-			fmt.Fprint(w, `{"data":{"schema":"digitalogic.pricing-assignment-batch","schema_version":"1.0.0","requested_count":1,"resolved_count":1,"error_count":0,"maximum_codes":500,"default_percentage_markup":{"schema":"digitalogic.default-percentage-markup","schema_version":"1.0.0","configured":true,"type":"percentage","profit_percent":"30","source":"global_default","revision":"rev-30"},"results":[{"code":"A","status":"ok","assignment":{"code":"A","import_freight_method_id":"air","profit_percent":"30","profit_percent_source":"global_default","pricing_warnings":[]}}]}}`)
+			fmt.Fprint(w, `{"data":{"schema":"digitalogic.pricing-assignment-batch","requested_count":1,"resolved_count":1,"error_count":0,"maximum_codes":500,"default_percentage_markup":{"schema":"digitalogic.default-percentage-markup","configured":true,"type":"percentage","profit_percent":"30","source":"global_default","revision":"rev-30"},"results":[{"code":"A","status":"ok","assignment":{"code":"A","shipping_method_id":"air","profit_percent":"30","profit_percent_source":"global_default","pricing_warnings":[]}}]}}`)
 		default:
 			http.NotFound(w, r)
 		}

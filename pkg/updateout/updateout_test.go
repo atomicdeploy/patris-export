@@ -191,7 +191,7 @@ func TestDispatchCanonicalContractUsesDirectDigitalogicEnvelope(t *testing.T) {
 	}))
 	defer server.Close()
 
-	product := canonical.Product{ProductCode: "113007045", FormulaVersion: canonical.FormulaVersion, RecordHash: "sha256:record"}
+	product := canonical.Product{ProductCode: "113007045", RecordHash: "sha256:record"}
 	contract := canonical.NewEnvelope([]canonical.Product{product}, "kala.db", "patris-office", time.Unix(1, 0))
 	err := Dispatch(t.Context(), Config{Enabled: true, URL: server.URL, Format: "json", Mode: "changes"}, Event{
 		Type: "update", Source: "kala.db", KeyField: "product_code",
@@ -201,7 +201,7 @@ func TestDispatchCanonicalContractUsesDirectDigitalogicEnvelope(t *testing.T) {
 	if err != nil {
 		t.Fatalf("canonical dispatch failed: %v", err)
 	}
-	if headers.Get("X-Patris-Contract") != canonical.ContractName || headers.Get("X-Patris-Contract-Version") != canonical.ContractVersion || headers.Get("X-Patris-Event-ID") != contract.EventID {
+	if headers.Get("X-Patris-Contract") != canonical.ContractName || headers.Get("X-Patris-Event-ID") != contract.EventID {
 		t.Fatalf("contract identity headers missing: %v", headers)
 	}
 	var decoded canonical.Envelope
@@ -223,7 +223,7 @@ func TestDispatchDigitalogicRetriesIdenticalEventAndSurfacesRecovery(t *testing.
 	const secret = "test-product-sync-secret-must-not-be-persisted"
 	t.Setenv("DIGITALOGIC_PRODUCT_SYNC_TEST_SECRET", secret)
 
-	product := canonical.Product{ProductCode: "113007045", FormulaVersion: canonical.FormulaVersion, RecordHash: "sha256:record"}
+	product := canonical.Product{ProductCode: "113007045", RecordHash: "sha256:record"}
 	contract := canonical.NewEnvelope([]canonical.Product{product}, "kala.db", "patris-office", time.Unix(1, 0))
 	var bodies [][]byte
 	var attempts int
@@ -236,9 +236,6 @@ func TestDispatchDigitalogicRetriesIdenticalEventAndSurfacesRecovery(t *testing.
 		}
 		if got := r.Header.Get("X-Patris-Contract"); got != canonical.ContractName {
 			t.Errorf("contract header = %q", got)
-		}
-		if got := r.Header.Get("X-Patris-Contract-Version"); got != canonical.ContractVersion {
-			t.Errorf("contract version header = %q", got)
 		}
 		if got := r.Header.Get("X-Patris-Event-ID"); got != contract.EventID {
 			t.Errorf("event identity header = %q", got)
@@ -266,11 +263,10 @@ func TestDispatchDigitalogicRetriesIdenticalEventAndSurfacesRecovery(t *testing.
 		Enabled: true, URL: server.URL, Format: "json", Mode: "changes", RequireContract: true,
 		RetryAttempts: 3, RetryBackoff: "1ns", ProductSyncSecretEnv: "DIGITALOGIC_PRODUCT_SYNC_TEST_SECRET",
 		Headers: map[string]string{
-			"X-Patris-Contract":         "spoofed",
-			"X-Patris-Contract-Version": "spoofed",
-			"X-Patris-Event-ID":         "spoofed",
-			"X-Patris-Event":            "spoofed",
-			"X-Patris-Source":           "spoofed",
+			"X-Patris-Contract": "spoofed",
+			"X-Patris-Event-ID": "spoofed",
+			"X-Patris-Event":    "spoofed",
+			"X-Patris-Source":   "spoofed",
 		},
 	}
 	result, err := DispatchWithResult(t.Context(), cfg, Event{Type: "update", Source: `C:\Patris\data4\kala.db`, Contract: contract})
@@ -557,7 +553,7 @@ func TestDispatchRejectsRemotePlainHTTPProductSyncDestination(t *testing.T) {
 	t.Setenv("DIGITALOGIC_PRODUCT_SYNC_TEST_SECRET", "https-only")
 	contract := canonical.NewEnvelope(nil, "kala.db", "patris-office", time.Unix(1, 0))
 	err := Dispatch(t.Context(), Config{
-		Enabled: true, URL: "http://digitalogic.example/wp-json/digitalogic/v1/patris/product-sync", Format: "json",
+		Enabled: true, URL: "http://digitalogic.example/wp-json/digitalogic/patris/product-sync", Format: "json",
 		ProductSyncSecretEnv: "DIGITALOGIC_PRODUCT_SYNC_TEST_SECRET",
 	}, Event{Type: "initial", Contract: contract})
 	if err == nil || !strings.Contains(err.Error(), "requires HTTPS") {

@@ -1,6 +1,6 @@
 # Canonical `kala.db` Product and Pricing Contract
 
-`kala.db` uses the built-in `kala_v1` dataset profile by default. The profile is
+`kala.db` uses the built-in `kala` dataset profile by default. The profile is
 one stage inside `recordpipe.Build`; CLI exports, REST, WebSocket, webhooks,
 XLSX, SQLite, and MySQL do not have separate transformation implementations.
 Raw mode remains available for diagnostics.
@@ -14,25 +14,40 @@ warehouses, and parses:
 - grams and the remaining storage location from `Sharh2`;
 - serial, unit, source sale/purchase prices, minimum stock, and selected
   warehouse stock;
-- the product-specific import-freight method and percentage markup;
-- `landed_price_v1` with exact decimal arithmetic and one final half-up round.
+- the product-specific shipping method and percentage markup;
+- `landed_price` with exact decimal arithmetic and one final half-up round.
 
 The formula is:
 
 ```text
-round_once((foreign_CNY + weight_g / 1000 * freight_CNY_per_kg)
+round_once((foreign_CNY + weight_g / 1000 * shipping_price_per_kg_CNY)
   * (1 + markup_percent / 100) * IRT_per_CNY)
 ```
 
 The reference fixture `24.5 CNY + 240 g at 120 CNY/kg`, with `30%` markup and
 `29,000 IRT/CNY`, is `2,009,410 IRT`.
 
-Missing or conflicting price, weight, method, freight, markup, or FX values
-produce `final_price: null` and sorted machine-readable warnings. They never
-become a destructive zero. Duplicate Codes are quarantined from the contract.
+Missing or conflicting price, weight, shipping method, shipping price, markup,
+or FX values omit `final_price` and add sorted machine-readable warnings. They
+never become a destructive zero or a generated JSON `null`. Duplicate Codes are
+quarantined from the contract.
 
 Raw `Sharh1`, `Sharh2`, `FOROSH`, `KHARYD`, `ALLANBAR`, and `ANBAR*` keys never
 cross the `digitalogic.product-sync` boundary.
+
+The wire boundary is sparse. A key that was never received or derived from a
+real value is omitted from JSON and from the union of CSV/XLSX/SQL columns. A
+JSON `null` is emitted only when the source or pricing reference explicitly
+supplied `null`; it is never shorthand for missing, unavailable, invalid, or
+unparseable data. Pricing, formula, and shipping-method keys are emitted only
+when static pricing is explicitly populated or a Digitalogic endpoint is
+configured. The only shipping names are `shipping_method_id`,
+`shipping_price_per_kg_cny`, and `shipping_methods`.
+
+This is a living, versionless integration standard. The current field set and
+routes are the only supported shape; producers and consumers change together.
+Unknown fields fail closed rather than selecting a compatibility branch. See
+[`INTEGRATION-STANDARD.md`](INTEGRATION-STANDARD.md) for the maintenance policy.
 
 ## Offline/static pricing
 
@@ -44,7 +59,7 @@ Static mode is the standalone default. It works without WordPress or a network:
     "enabled": true,
     "source_id": "patris-office",
     "profiles": {
-      "kala.db": {"type": "kala_v1"}
+      "kala.db": {"type": "kala"}
     },
     "pricing": {
       "mode": "static",
@@ -53,12 +68,12 @@ Static mode is the standalone default. It works without WordPress or a network:
         "cny_to_irt": 29000,
         "currency_effective_date": "2026-07-16",
         "selected_warehouses": ["1", "2", "6"],
-        "import_freight_methods": [
+        "shipping_methods": [
           {"id": "air_express", "enabled": true, "price_per_kg_cny": 120}
         ],
         "assignments": {
           "113007045": {
-            "import_freight_method_id": "air_express",
+            "shipping_method_id": "air_express",
             "profit_percent": 30
           }
         }
@@ -72,13 +87,13 @@ Static mode is the standalone default. It works without WordPress or a network:
 
 Digitalogic mode reads, but does not mutate:
 
-- `GET /wp-json/digitalogic/v1/integration/catalog` for FX, selected
-  warehouses, and freight methods;
-- `POST /wp-json/digitalogic/v1/pricing-assignments/batch` for ordered,
-  versioned assignment prefetches of at most 500 unique Codes;
-- `GET /wp-json/digitalogic/v1/products/by-code/{code}/import-pricing` for the
-  exact Code/SKU method and percentage markup when an older compatible provider
-  does not expose the batch contract.
+- `GET /wp-json/digitalogic/integration/catalog` for FX, selected warehouses,
+  and shipping methods;
+- `POST /wp-json/digitalogic/integration/pricing-assignments/batch` for ordered
+  assignment prefetches of at most 500 unique Codes;
+- `GET /wp-json/digitalogic/integration/products/by-code/{code}/pricing` for an
+  exact Code/SKU lookup, including an explicitly retryable per-Code batch
+  result.
 
 Canonical transform collects unique, non-quarantined Codes before its normal
 per-record resolution, prefetches them in bounded request-order chunks, and
@@ -102,12 +117,10 @@ unquoted numbers, exponent notation, redundant formatting, and over-scale
 values fail closed. A `global_default` value must exactly match the shared
 default snapshot.
 
-Live outbound delivery to the current Digitalogic `/patris/push` receiver must
-remain disabled; this branch does not enable or deploy it. That receiver must first
-validate `digitalogic.product-sync` v1, merge update envelopes, honour
-`deleted_codes`, and deduplicate `event_id`; its legacy full-replacement parser
-would truncate a snapshot when given a delta. Keep delivery pointed at a
-contract-aware staging receiver until that follow-up is merged and verified.
+Outbound delivery uses only the dedicated `/patris/product-sync` receiver. It
+validates the current `digitalogic.product-sync` shape, merges update envelopes,
+honours `deleted_codes`, and deduplicates `event_id`. Do not point canonical
+delivery at `/patris/push` or another full-replacement parser.
 
 Credentials are read from named environment variables; secret values are not
 stored in the Patris config:
@@ -116,13 +129,13 @@ stored in the Patris config:
 {
   "canonical": {
     "enabled": true,
-    "profiles": {"kala.db": {"type": "kala_v1"}},
+    "profiles": {"kala.db": {"type": "kala"}},
     "pricing": {
       "mode": "digitalogic",
       "digitalogic": {
-        "base_url": "https://digitalogic.ir/wp-json/digitalogic/v1",
+        "base_url": "https://digitalogic.ir/wp-json/digitalogic",
         "bearer_token_env": "DIGITALOGIC_PRICING_READ_TOKEN",
-        "batch_assignment_path": "pricing-assignments/batch",
+        "batch_assignment_path": "integration/pricing-assignments/batch",
         "batch_size": 500,
         "fresh_for": "5m",
         "max_stale": "1h",
@@ -145,7 +158,7 @@ patris-export serve C:\Patris\data4\kala.db
 
 `PATRIS_EXPORT_PRICING_TIMEOUT` and `PATRIS_EXPORT_PRICING_BATCH_SIZE` override
 the same normalized Digitalogic provider used by file configuration. Batch
-size is capped at the remote contract maximum of 500. The 15-second timeout
+size is capped at the endpoint maximum of 500. The 15-second timeout
 default leaves headroom for a production 500-Code response without changing
 the bounded request count or enabling single-Code fallback.
 
@@ -156,48 +169,37 @@ configured credential environment variables must be populated, and cached
 values are usable only inside `max_stale`. One `bearer_token_env` supplies the
 same read token to the exact integration-catalog GET and assignment-batch POST;
 the batch request otherwise reuses the existing HTTP client, timeout, TLS
-rules, redirect policy, and response limit. Basic authentication and the
-single-Code route remain compatibility options for replaceable older providers,
-not the production least-privilege path.
-
-HTTP 404, 405, or 501 from the batch route means a replaceable/older provider
-does not support prefetch; Patris safely falls back to existing bounded
-single-Code resolution and emits `pricing_assignment_batch_unsupported`.
-Authentication failures, other HTTP/transport failures, oversized responses,
-malformed schemas, changed result order/Codes, and inconsistent result counts
-fail closed for that freshness window. Fresh fail-closed diagnostics are
+rules, redirect policy, and response limit. The batch endpoint is required for
+canonical transforms. A missing endpoint, authentication or transport failure,
+oversized response, unknown field, malformed schema, changed result order/Code,
+or inconsistent result count fails closed for that freshness window. Fresh
+fail-closed diagnostics are
 honored by later prefetch runs, including when the per-Code diagnostic LRU is
 smaller than a transform, so repeated transforms do not hammer a failing batch
 route. Typed not-found and ambiguous-Code results are cached as authoritative
 empty assignments, never retried through a different lookup path. Only a
 per-Code server error explicitly marked `retryable: true` with a 5xx status may
-fall back to the existing single-Code resolver. Cached stale assignments may
+use the current exact-Code endpoint. Cached stale assignments may
 still be used only within `max_stale`, with explicit warnings; recent catalog
 failures are also backed off for the freshness window so an outage cannot
 recreate an N+1 catalog storm.
 Static/standalone mode implements no prefetch capability and makes no remote
 requests.
 
-Production rollout depends on the pending Digitalogic least-privilege
-credential work in issue #60. Once implemented and deployed, its dedicated
-pricing-input bearer must authorize exactly the integration-catalog GET and
-assignment-batch POST, not the legacy single-Code route or any write route. Do
-not reuse Patris push or product-sync write secrets. Deploy the compatible
-Digitalogic endpoint and that read credential before enabling production
-prefetch, then reference the one credential through `bearer_token_env`.
-
-Patris calculates only when the catalog is
-`digitalogic.integration-catalog` major version 1, `currency.local` is `IRT`,
-`currency.cny_to_irt` is valid, and `pricing.formula_id` plus its major
-revision are compatible with `landed_price_v1`. Schema, currency, or formula
-mismatches force null final prices and explicit compatibility warnings.
+The dedicated pricing-input bearer should authorize only the catalog, batch,
+and exact-Code read routes, never a write route. Do not reuse a product-sync
+write secret. Patris calculates only when the schema is exactly
+`digitalogic.integration-catalog`, `currency.local` is `IRT`,
+`currency.cny_to_irt` is valid, and `pricing.formula_id` is exactly
+`landed_price`. A schema, currency, or formula mismatch omits `final_price` and
+adds explicit warnings.
 
 ## Transport contract
 
-Canonical JSON and JSON webhooks use `digitalogic.product-sync` version `1.1`.
-Receivers that support major version 1 can continue accepting v1.0 product-only
-envelopes; v1.1 adds exact category and exclusion projections without exposing
-raw Patris fields.
+Canonical JSON and JSON webhooks use the living
+`digitalogic.product-sync` shape. There is no schema version field, route
+version, formula revision, or compatibility negotiation. Category and exclusion
+projections are part of the current shape without exposing raw Patris fields.
 
 `event_id` covers the validated `generated_at` value as well as the sorted
 record hashes and tombstones. Identical content generated at a later time is a
@@ -216,20 +218,16 @@ the same table, filtering, column, context-menu, accessibility, and RTL logic.
 ![Canonical landed-pricing row in the records viewer](screenshots/canonical-product-sync-viewer.png)
 
 Cross-project contract verification uses the entirely synthetic two-product
-fixture at `testdata/digitalogic-product-sync-v1.synthetic.json`; production
+fixture at `testdata/digitalogic-product-sync.synthetic.json`; production
 exports and catalog values must never be committed as golden fixtures.
 
 ```json
 {
   "schema": "digitalogic.product-sync",
-  "schema_version": "1.1",
-  "event": "digitalogic.product-sync",
   "event_type": "snapshot",
   "event_id": "sha256:...",
   "local_currency": "IRT",
-  "formula_id": "landed_price_v1",
-  "formula_revision": "1.0.0",
-  "formula_version": "landed_price_v1",
+  "formula_id": "landed_price",
   "source": {
     "id": "patris-office",
     "dataset": "kala.db",
@@ -243,12 +241,11 @@ exports and catalog values must never be committed as golden fixtures.
       "foreign_currency": "CNY",
       "foreign_price": 24.5,
       "weight_grams": 240,
-      "import_freight_method_id": "air_express",
-      "freight_cny_per_kg": 120,
+      "shipping_method_id": "air_express",
+      "shipping_price_per_kg_cny": 120,
       "markup_percent": 30,
       "irt_per_cny": 29000,
       "final_price": 2009410,
-      "formula_version": "landed_price_v1",
       "record_hash": "sha256:...",
       "warnings": []
     }
@@ -271,7 +268,9 @@ exports and catalog values must never be committed as golden fixtures.
       "record_hash": "sha256:..."
     }
   ],
-  "excluded_codes": ["999010"]
+  "excluded_codes": ["999010"],
+  "quarantined_codes": [],
+  "warnings": []
 }
 ```
 
@@ -295,7 +294,7 @@ reconciliation preserve the last known good downstream value until ambiguity
 is resolved.
 
 WebSocket messages retain their existing `added`/`modified`/`deleted` fields
-and include the same versioned contract under `contract`. CSV and XLSX preserve
+and include the same living contract under `contract`. CSV and XLSX preserve
 exact decimal lexemes. XLSX writes decimals that round-trip through Excel's
 numeric representation as numeric cells and keeps longer precision as text
 rather than silently changing it. Code is always text. Its frozen, filtered

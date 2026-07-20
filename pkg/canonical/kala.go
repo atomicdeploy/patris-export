@@ -1,6 +1,7 @@
 package canonical
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -57,34 +58,46 @@ type Product struct {
 	ForeignPrice           *pricingcatalog.Decimal `json:"foreign_price"`
 	WeightGrams            *pricingcatalog.Decimal `json:"weight_grams"`
 	Location               string                  `json:"location"`
-	ImportFreightMethodID  string                  `json:"import_freight_method_id"`
-	FreightCNYPerKg        *pricingcatalog.Decimal `json:"freight_cny_per_kg"`
+	ShippingMethodID       string                  `json:"shipping_method_id,omitempty"`
+	ShippingPricePerKgCNY  *pricingcatalog.Decimal `json:"shipping_price_per_kg_cny,omitempty"`
 	MarkupPercent          *pricingcatalog.Decimal `json:"markup_percent"`
 	IRTPerCNY              *pricingcatalog.Decimal `json:"irt_per_cny"`
 	PricingCatalogRevision string                  `json:"pricing_catalog_revision"`
 	PricingCatalogStatus   string                  `json:"pricing_catalog_status"`
 	CurrencyEffectiveDate  string                  `json:"currency_effective_date"`
 	FinalPrice             *int64                  `json:"final_price"`
-	FormulaVersion         string                  `json:"formula_version"`
 	SourceUpdatedAt        string                  `json:"source_updated_at"`
 	Warnings               []string                `json:"warnings"`
 	RecordHash             string                  `json:"record_hash,omitempty"`
+	fieldPresence          map[string]fieldPresence
+	warehouseNulls         map[string]bool
+	integrationActive      bool
 }
+
+type fieldPresence uint8
+
+const (
+	fieldAbsent fieldPresence = iota
+	fieldValue
+	fieldNull
+)
 
 // Category is the transformed catalog hierarchy carried beside products.
 // Patris category/header rows are structural records, not sellable products;
 // keeping a separate typed shape prevents zero-stock headers from crossing the
 // product boundary while preserving their names and hierarchy for consumers.
 type Category struct {
-	CategoryCode string   `json:"category_code"`
-	Name         string   `json:"name"`
-	ParentCode   string   `json:"parent_code"`
-	Depth        int      `json:"depth"`
-	Warnings     []string `json:"warnings"`
-	RecordHash   string   `json:"record_hash,omitempty"`
+	CategoryCode  string   `json:"category_code"`
+	Name          string   `json:"name"`
+	ParentCode    string   `json:"parent_code"`
+	Depth         int      `json:"depth"`
+	Warnings      []string `json:"warnings"`
+	RecordHash    string   `json:"record_hash,omitempty"`
+	fieldPresence map[string]fieldPresence
 }
 
 func Transform(ctx context.Context, rows []map[string]interface{}, source string, cfg Config, provider pricingcatalog.Provider, generatedAt time.Time) ([]map[string]interface{}, *Envelope) {
+	integrationActive := pricingcatalog.Configured(cfg.Pricing)
 	if provider == nil {
 		provider = pricingcatalog.NewProvider(cfg.Pricing)
 	}
@@ -136,7 +149,7 @@ func Transform(ctx context.Context, rows []map[string]interface{}, source string
 	}
 	if workers <= 1 {
 		for _, index := range eligible {
-			parsedProducts[index] = parseKalaProduct(ctx, rows[index], provider)
+			parsedProducts[index] = parseKalaProduct(ctx, rows[index], provider, integrationActive)
 		}
 	} else {
 		jobs := make(chan int)
@@ -146,7 +159,7 @@ func Transform(ctx context.Context, rows []map[string]interface{}, source string
 			go func() {
 				defer wait.Done()
 				for index := range jobs {
-					parsedProducts[index] = parseKalaProduct(ctx, rows[index], provider)
+					parsedProducts[index] = parseKalaProduct(ctx, rows[index], provider, integrationActive)
 				}
 			}()
 		}
@@ -171,6 +184,10 @@ func Transform(ctx context.Context, rows []map[string]interface{}, source string
 		return products[i].ProductCode < products[j].ProductCode
 	})
 	envelope := NewCatalogEnvelope(products, categories, excludedCodes, source, cfg.SourceID, generatedAt, quarantined...)
+	if !integrationActive {
+		envelope.LocalCurrency = ""
+		envelope.FormulaID = ""
+	}
 	envelope.Warnings = nil
 	for _, code := range duplicateCodes {
 		envelope.Warnings = append(envelope.Warnings, "duplicate_product_code:"+code)
@@ -179,6 +196,7 @@ func Transform(ctx context.Context, rows []map[string]interface{}, source string
 		envelope.Warnings = append(envelope.Warnings, "ambiguous_catalog_record:"+code)
 	}
 	envelope.Warnings = normalizedWarnings(envelope.Warnings)
+	envelope.EventID = eventID(envelope)
 	return ProductsToRows(products), envelope
 }
 
@@ -305,10 +323,13 @@ func parseKalaCategories(rows []map[string]interface{}, codeCounts map[string]in
 		if code == "" || codeCounts[code] != 1 || !categoryCodes[code] {
 			continue
 		}
+		presence := map[string]fieldPresence{}
+		markPresence(presence, "name", row, "name", "Name", "part_number")
 		byCode[code] = Category{
-			CategoryCode: code,
-			Name:         normalizeText(firstValue(row, "name", "Name", "part_number")),
-			Warnings:     []string{},
+			CategoryCode:  code,
+			Name:          normalizeText(firstValue(row, "name", "Name", "part_number")),
+			Warnings:      []string{},
+			fieldPresence: presence,
 		}
 	}
 
@@ -363,7 +384,8 @@ func longestCategoryPrefix(code string, categories map[string]Category) string {
 }
 
 func categoryHasStrongProductSignals(row map[string]interface{}) bool {
-	for _, stock := range warehouseStock(row) {
+	stocks, _ := warehouseStock(row)
+	for _, stock := range stocks {
 		if stock != 0 {
 			return true
 		}
@@ -411,27 +433,56 @@ func emptyCategoryHeader(code string, row map[string]interface{}) bool {
 	return name != "" && serial == code
 }
 
-func parseKalaProduct(ctx context.Context, row map[string]interface{}, provider pricingcatalog.Provider) Product {
+func parseKalaProduct(ctx context.Context, row map[string]interface{}, provider pricingcatalog.Provider, integrationActive bool) Product {
 	warnings := []string{}
 	code := codeString(firstValue(row, "product_code", "code", "Code"))
 	foreignPrice := extractForeignPrice(row, &warnings)
 	weight, location := extractWeightAndLocation(row, &warnings)
-	resolution := provider.Resolve(ctx, code)
-	warnings = append(warnings, resolution.Warnings...)
-	warehouseStock := warehouseStock(row)
+	resolution := pricingcatalog.Resolution{}
+	if integrationActive {
+		resolution = provider.Resolve(ctx, code)
+		warnings = append(warnings, resolution.Warnings...)
+	}
+	warehouseStock, warehouseNulls := warehouseStock(row)
 	totalStock := totalStock(row, warehouseStock, resolution.SelectedWarehouses, &warnings)
 
 	var finalPrice *int64
-	if foreignPrice != nil && weight != nil && resolution.FreightCNYPerKg != nil && resolution.MarkupPercent != nil && resolution.IRTPerCNY != nil {
-		value, err := LandedPriceV1(weight.String(), resolution.FreightCNYPerKg.String(), foreignPrice.String(), resolution.MarkupPercent.String(), resolution.IRTPerCNY.String())
+	if foreignPrice != nil && weight != nil && resolution.ShippingPricePerKgCNY != nil && resolution.MarkupPercent != nil && resolution.IRTPerCNY != nil {
+		value, err := LandedPrice(weight.String(), resolution.ShippingPricePerKgCNY.String(), foreignPrice.String(), resolution.MarkupPercent.String(), resolution.IRTPerCNY.String())
 		if err != nil {
 			warnings = append(warnings, "landed_price_calculation_failed")
 		} else {
 			finalPrice = &value
 		}
 	}
-	if finalPrice == nil {
+	if integrationActive && finalPrice == nil {
 		warnings = append(warnings, "final_price_unavailable")
+	}
+	presence := map[string]fieldPresence{}
+	markPresence(presence, "name", row, "name", "Name", "part_number")
+	markPresence(presence, "serial", row, "serial", "Serial")
+	markPresence(presence, "unit", row, "unit", "Vahed")
+	markPresence(presence, "sale_price_source", row, "sale_price_source", "FOROSH", "fee_kol")
+	markPresence(presence, "purchase_price_source", row, "purchase_price_source", "KHARYD", "purchase_price")
+	markPresence(presence, "minimum_stock", row, "minimum_stock", "Sefaresh", "minimum")
+	markPresence(presence, "foreign_price", row, "foreign_price", "yuan_price", "Sharh1", "priceinfo", "Sharh")
+	markPresence(presence, "weight_grams", row, "weight_grams", "Weight", "Sharh2")
+	markPresence(presence, "location", row, "location", "Location")
+	markPresence(presence, "source_updated_at", row, "source_updated_at", "updated_at", "Dates")
+	markPresence(presence, "total_stock", row, "total_stock", "stock", "ALLANBAR")
+	if warehouseFieldPresent(row) {
+		presence["warehouse_stock"] = fieldValue
+	}
+	if rowNull(row, "warehouse_stock", "ANBAR") && len(warehouseStock) == 0 && len(warehouseNulls) == 0 {
+		presence["warehouse_stock"] = fieldNull
+	}
+	if finalPrice != nil {
+		presence["final_price"] = fieldValue
+	}
+	for field, isNull := range resolution.ExplicitNulls {
+		if isNull {
+			presence[field] = fieldNull
+		}
 	}
 
 	return Product{
@@ -448,51 +499,178 @@ func parseKalaProduct(ctx context.Context, row map[string]interface{}, provider 
 		ForeignPrice:           foreignPrice,
 		WeightGrams:            weight,
 		Location:               location,
-		ImportFreightMethodID:  resolution.MethodID,
-		FreightCNYPerKg:        resolution.FreightCNYPerKg,
+		ShippingMethodID:       resolution.MethodID,
+		ShippingPricePerKgCNY:  resolution.ShippingPricePerKgCNY,
 		MarkupPercent:          resolution.MarkupPercent,
 		IRTPerCNY:              resolution.IRTPerCNY,
 		PricingCatalogRevision: resolution.CatalogRevision,
 		PricingCatalogStatus:   resolution.CatalogStatus,
 		CurrencyEffectiveDate:  resolution.CurrencyEffectiveDate,
 		FinalPrice:             finalPrice,
-		FormulaVersion:         FormulaVersion,
 		SourceUpdatedAt:        normalizeText(firstValue(row, "source_updated_at", "updated_at", "Dates")),
 		Warnings:               normalizedWarnings(warnings),
+		fieldPresence:          presence,
+		warehouseNulls:         warehouseNulls,
+		integrationActive:      integrationActive,
 	}
 }
 
 // Map converts the typed wire contract into the generic row representation
 // required by the existing spreadsheet and SQL sink boundary.
 func (product Product) Map() map[string]interface{} {
-	return map[string]interface{}{
-		"product_code":             product.ProductCode,
-		"category_code":            product.CategoryCode,
-		"name":                     product.Name,
-		"serial":                   product.Serial,
-		"unit":                     product.Unit,
-		"sale_price_source":        pointerFloatValue(product.SalePriceSource),
-		"purchase_price_source":    pointerFloatValue(product.PurchasePriceSource),
-		"warehouse_stock":          product.WarehouseStock,
-		"total_stock":              pointerFloatValue(product.TotalStock),
-		"minimum_stock":            pointerFloatValue(product.MinimumStock),
-		"foreign_currency":         product.ForeignCurrency,
-		"foreign_price":            pointerDecimalValue(product.ForeignPrice),
-		"weight_grams":             pointerDecimalValue(product.WeightGrams),
-		"location":                 product.Location,
-		"import_freight_method_id": product.ImportFreightMethodID,
-		"freight_cny_per_kg":       pointerDecimalValue(product.FreightCNYPerKg),
-		"markup_percent":           pointerDecimalValue(product.MarkupPercent),
-		"irt_per_cny":              pointerDecimalValue(product.IRTPerCNY),
-		"pricing_catalog_revision": product.PricingCatalogRevision,
-		"pricing_catalog_status":   product.PricingCatalogStatus,
-		"currency_effective_date":  product.CurrencyEffectiveDate,
-		"final_price":              pointerIntValue(product.FinalPrice),
-		"formula_version":          product.FormulaVersion,
-		"source_updated_at":        product.SourceUpdatedAt,
-		"warnings":                 append(make([]string, 0, len(product.Warnings)), product.Warnings...),
-		"record_hash":              product.RecordHash,
+	row := map[string]interface{}{"product_code": product.ProductCode}
+	putString(row, "category_code", product.CategoryCode, fieldAbsent)
+	putString(row, "name", product.Name, product.presence("name"))
+	putString(row, "serial", product.Serial, product.presence("serial"))
+	putString(row, "unit", product.Unit, product.presence("unit"))
+	putPointer(row, "sale_price_source", pointerFloatValue(product.SalePriceSource), product.presence("sale_price_source"))
+	putPointer(row, "purchase_price_source", pointerFloatValue(product.PurchasePriceSource), product.presence("purchase_price_source"))
+	putWarehouses(row, product)
+	putPointer(row, "total_stock", pointerFloatValue(product.TotalStock), product.presence("total_stock"))
+	putPointer(row, "minimum_stock", pointerFloatValue(product.MinimumStock), product.presence("minimum_stock"))
+	if product.ForeignPrice != nil || product.presence("foreign_currency") != fieldAbsent {
+		putString(row, "foreign_currency", product.ForeignCurrency, product.presence("foreign_currency"))
 	}
+	putPointer(row, "foreign_price", pointerDecimalValue(product.ForeignPrice), product.presence("foreign_price"))
+	putPointer(row, "weight_grams", pointerDecimalValue(product.WeightGrams), product.presence("weight_grams"))
+	putString(row, "location", product.Location, product.presence("location"))
+	if product.integrationActive {
+		putString(row, "shipping_method_id", product.ShippingMethodID, product.presence("shipping_method_id"))
+		putPointer(row, "shipping_price_per_kg_cny", pointerDecimalValue(product.ShippingPricePerKgCNY), product.presence("shipping_price_per_kg_cny"))
+		putPointer(row, "markup_percent", pointerDecimalValue(product.MarkupPercent), product.presence("markup_percent"))
+		putPointer(row, "irt_per_cny", pointerDecimalValue(product.IRTPerCNY), product.presence("irt_per_cny"))
+		putString(row, "pricing_catalog_revision", product.PricingCatalogRevision, product.presence("pricing_catalog_revision"))
+		putString(row, "pricing_catalog_status", product.PricingCatalogStatus, product.presence("pricing_catalog_status"))
+		putString(row, "currency_effective_date", product.CurrencyEffectiveDate, product.presence("currency_effective_date"))
+		putPointer(row, "final_price", pointerIntValue(product.FinalPrice), product.presence("final_price"))
+	}
+	putString(row, "source_updated_at", product.SourceUpdatedAt, product.presence("source_updated_at"))
+	row["warnings"] = append(make([]string, 0, len(product.Warnings)), product.Warnings...)
+	putString(row, "record_hash", product.RecordHash, fieldAbsent)
+	return row
+}
+
+// MarshalJSON keeps JSON and row-based sinks on one sparse boundary. Fields
+// absent from the source are omitted, while explicitly received nulls remain
+// JSON null instead of being confused with missing data.
+func (product Product) MarshalJSON() ([]byte, error) {
+	return json.Marshal(product.Map())
+}
+
+func (product *Product) UnmarshalJSON(data []byte) error {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	if err := rejectUnknownJSONFields(raw, "product", []string{
+		"product_code", "category_code", "name", "serial", "unit", "sale_price_source",
+		"purchase_price_source", "warehouse_stock", "total_stock", "minimum_stock",
+		"foreign_currency", "foreign_price", "weight_grams", "location", "shipping_method_id",
+		"shipping_price_per_kg_cny", "markup_percent", "irt_per_cny", "pricing_catalog_revision",
+		"pricing_catalog_status", "currency_effective_date", "final_price", "source_updated_at",
+		"warnings", "record_hash",
+	}); err != nil {
+		return err
+	}
+	type productAlias Product
+	var decoded productAlias
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	*product = Product(decoded)
+
+	product.fieldPresence = map[string]fieldPresence{}
+	for _, field := range []string{
+		"name", "serial", "unit", "sale_price_source", "purchase_price_source",
+		"warehouse_stock", "total_stock", "minimum_stock", "foreign_currency", "foreign_price",
+		"weight_grams", "location", "source_updated_at", "shipping_method_id",
+		"shipping_price_per_kg_cny", "markup_percent", "irt_per_cny",
+		"pricing_catalog_revision", "pricing_catalog_status", "currency_effective_date",
+		"final_price",
+	} {
+		if value, exists := raw[field]; exists {
+			if bytes.Equal(bytes.TrimSpace(value), []byte("null")) {
+				product.fieldPresence[field] = fieldNull
+			} else {
+				product.fieldPresence[field] = fieldValue
+			}
+		}
+	}
+	product.warehouseNulls = map[string]bool{}
+	if value, exists := raw["warehouse_stock"]; exists && !bytes.Equal(bytes.TrimSpace(value), []byte("null")) {
+		var warehouses map[string]json.RawMessage
+		if err := json.Unmarshal(value, &warehouses); err == nil {
+			for warehouse, stock := range warehouses {
+				if bytes.Equal(bytes.TrimSpace(stock), []byte("null")) {
+					product.warehouseNulls[warehouse] = true
+					delete(product.WarehouseStock, warehouse)
+				}
+			}
+		}
+	}
+
+	for _, field := range []string{
+		"shipping_method_id", "shipping_price_per_kg_cny", "markup_percent", "irt_per_cny",
+		"pricing_catalog_revision", "pricing_catalog_status", "currency_effective_date", "final_price",
+	} {
+		if _, exists := raw[field]; exists {
+			product.integrationActive = true
+			break
+		}
+	}
+	return nil
+}
+
+func (product Product) presence(field string) fieldPresence {
+	if state, ok := product.fieldPresence[field]; ok {
+		return state
+	}
+	return fieldAbsent
+}
+
+func putString(row map[string]interface{}, field, value string, state fieldPresence) {
+	if state == fieldNull {
+		row[field] = nil
+		return
+	}
+	if state == fieldValue {
+		row[field] = value
+		return
+	}
+	if strings.TrimSpace(value) != "" {
+		row[field] = value
+	}
+}
+
+func putPointer(row map[string]interface{}, field string, value interface{}, state fieldPresence) {
+	if value != nil {
+		row[field] = value
+		return
+	}
+	if state == fieldNull {
+		row[field] = nil
+	}
+}
+
+func putWarehouses(row map[string]interface{}, product Product) {
+	state := product.presence("warehouse_stock")
+	if state == fieldNull {
+		row["warehouse_stock"] = nil
+		return
+	}
+	if len(product.WarehouseStock) == 0 && len(product.warehouseNulls) == 0 && state == fieldAbsent {
+		return
+	}
+	stock := make(map[string]interface{}, len(product.WarehouseStock)+len(product.warehouseNulls))
+	for warehouse, value := range product.WarehouseStock {
+		stock[warehouse] = value
+	}
+	for warehouse := range product.warehouseNulls {
+		if _, exists := stock[warehouse]; !exists {
+			stock[warehouse] = nil
+		}
+	}
+	row["warehouse_stock"] = stock
 }
 
 func recordHash(product Product) string {
@@ -510,14 +688,46 @@ func ProductsToRows(products []Product) []map[string]interface{} {
 }
 
 func (category Category) Map() map[string]interface{} {
-	return map[string]interface{}{
+	row := map[string]interface{}{
 		"category_code": category.CategoryCode,
-		"name":          category.Name,
 		"parent_code":   category.ParentCode,
 		"depth":         category.Depth,
 		"warnings":      append(make([]string, 0, len(category.Warnings)), category.Warnings...),
-		"record_hash":   category.RecordHash,
 	}
+	putString(row, "name", category.Name, category.fieldPresence["name"])
+	putString(row, "record_hash", category.RecordHash, fieldAbsent)
+	return row
+}
+
+func (category Category) MarshalJSON() ([]byte, error) {
+	return json.Marshal(category.Map())
+}
+
+func (category *Category) UnmarshalJSON(data []byte) error {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	if err := rejectUnknownJSONFields(raw, "category", []string{
+		"category_code", "name", "parent_code", "depth", "warnings", "record_hash",
+	}); err != nil {
+		return err
+	}
+	type categoryAlias Category
+	var decoded categoryAlias
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	*category = Category(decoded)
+	category.fieldPresence = map[string]fieldPresence{}
+	if value, exists := raw["name"]; exists {
+		if bytes.Equal(bytes.TrimSpace(value), []byte("null")) {
+			category.fieldPresence["name"] = fieldNull
+		} else {
+			category.fieldPresence["name"] = fieldValue
+		}
+	}
+	return nil
 }
 
 func CategoriesToRows(categories []Category) []map[string]interface{} {
@@ -796,12 +1006,18 @@ func finiteDecimal(value *big.Rat) *pricingcatalog.Decimal {
 	return parsed
 }
 
-func warehouseStock(row map[string]interface{}) map[string]float64 {
+func warehouseStock(row map[string]interface{}) (map[string]float64, map[string]bool) {
 	result := map[string]float64{}
+	nulls := map[string]bool{}
 	if existing, ok := row["warehouse_stock"].(map[string]interface{}); ok {
 		for key, value := range existing {
+			key = strings.TrimSpace(key)
+			if value == nil {
+				nulls[key] = true
+				continue
+			}
 			if number := nullableNumber(value); number != nil {
-				result[strings.TrimSpace(key)] = *number
+				result[key] = *number
 			}
 		}
 	}
@@ -809,8 +1025,12 @@ func warehouseStock(row map[string]interface{}) map[string]float64 {
 		reflected := reflect.ValueOf(value)
 		if reflected.IsValid() && (reflected.Kind() == reflect.Slice || reflected.Kind() == reflect.Array) {
 			for index := 0; index < reflected.Len(); index++ {
-				if number := nullableNumber(reflected.Index(index).Interface()); number != nil {
-					result[strconv.Itoa(index+1)] = *number
+				value := reflected.Index(index).Interface()
+				key := strconv.Itoa(index + 1)
+				if value == nil {
+					nulls[key] = true
+				} else if number := nullableNumber(value); number != nil {
+					result[key] = *number
 				}
 			}
 		}
@@ -822,12 +1042,48 @@ func warehouseStock(row map[string]interface{}) map[string]float64 {
 		}
 		index := strings.TrimPrefix(upper, "ANBAR")
 		if _, err := strconv.Atoi(index); err == nil {
-			if number := nullableNumber(value); number != nil {
+			if value == nil {
+				nulls[index] = true
+			} else if number := nullableNumber(value); number != nil {
 				result[index] = *number
 			}
 		}
 	}
-	return result
+	return result, nulls
+}
+
+func markPresence(target map[string]fieldPresence, output string, row map[string]interface{}, fields ...string) {
+	for _, field := range fields {
+		value, exists := row[field]
+		if !exists {
+			continue
+		}
+		if value == nil {
+			target[output] = fieldNull
+		} else {
+			target[output] = fieldValue
+		}
+		return
+	}
+}
+
+func rowNull(row map[string]interface{}, fields ...string) bool {
+	for _, field := range fields {
+		if value, exists := row[field]; exists {
+			return value == nil
+		}
+	}
+	return false
+}
+
+func warehouseFieldPresent(row map[string]interface{}) bool {
+	for key := range row {
+		upper := strings.ToUpper(strings.TrimSpace(key))
+		if upper == "WAREHOUSE_STOCK" || upper == "ANBAR" || (strings.HasPrefix(upper, "ANBAR") && len(upper) > len("ANBAR")) {
+			return true
+		}
+	}
+	return false
 }
 
 func totalStock(row map[string]interface{}, warehouses map[string]float64, selected []string, warnings *[]string) *float64 {
