@@ -59,6 +59,17 @@ find "$BUILD_DIR" -maxdepth 3 -name '*.dll' -exec cp {} "$PREFIX/bin/" \; 2>/dev
 static_objects="$(find "$BUILD_DIR" -path '*/CMakeFiles/pxlib.dir/objects.a' -print -quit)"
 if [ -n "$static_objects" ]; then
     cp "$static_objects" "$PREFIX/lib/libpxlib_static.a"
+else
+    mapfile -d '' pxlib_objects < <(find "$BUILD_DIR/CMakeFiles/pxlib.dir" -type f \( -name '*.o' -o -name '*.obj' \) -print0)
+    if [ "${#pxlib_objects[@]}" -eq 0 ]; then
+        echo "pxlib build did not produce object files for the static backend" >&2
+        exit 1
+    fi
+    archive_tool="${AR:-ar}"
+    if [ "${PXLIB_MINGW_CROSS:-0}" = "1" ] && command -v x86_64-w64-mingw32-ar >/dev/null 2>&1; then
+        archive_tool=x86_64-w64-mingw32-ar
+    fi
+    "$archive_tool" rcs "$PREFIX/lib/libpxlib_static.a" "${pxlib_objects[@]}"
 fi
 
 if ls "$PREFIX/lib"/libpx.* >/dev/null 2>&1 && ! ls "$PREFIX/lib"/libpxlib.* >/dev/null 2>&1; then
@@ -68,5 +79,6 @@ if ls "$PREFIX/lib"/libpx.* >/dev/null 2>&1 && ! ls "$PREFIX/lib"/libpxlib.* >/d
 fi
 
 test -f "$PREFIX/include/paradox.h"
+test -f "$PREFIX/lib/libpxlib_static.a"
 ls "$PREFIX/lib"/libpxlib.* >/dev/null 2>&1
 echo "pxlib installed to $PREFIX"
