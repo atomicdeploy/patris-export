@@ -193,22 +193,18 @@ endif()
     Copy-Item (Join-Path $pxlibBuild "*.a") (Join-Path $pxlibInstall "lib") -ErrorAction SilentlyContinue
     Copy-Item (Join-Path $pxlibBuild "*.dll.a") (Join-Path $pxlibInstall "lib") -ErrorAction SilentlyContinue
     Copy-Item (Join-Path $pxlibBuild "*.dll") (Join-Path $pxlibInstall "bin") -ErrorAction SilentlyContinue
-    $pxlibObjects = Join-Path $pxlibBuild "CMakeFiles\pxlib.dir\objects.a"
-    if (Test-Path $pxlibObjects) {
-        Copy-Item $pxlibObjects (Join-Path $pxlibInstall "lib\libpxlib_static.a") -Force
-    } else {
-        $pxlibObjectFiles = @(
-            Get-ChildItem (Join-Path $pxlibBuild "CMakeFiles\pxlib.dir") -Recurse -File |
-                Where-Object { $_.Extension -in @(".o", ".obj") } |
-                Sort-Object FullName |
-                ForEach-Object { $_.FullName }
-        )
-        if ($pxlibObjectFiles.Count -eq 0) {
-            throw "pxlib build did not produce object files for the static backend."
-        }
-        $staticArchive = Join-Path $pxlibInstall "lib\libpxlib_static.a"
-        Invoke-Checked $ar (@("rcs", $staticArchive) + $pxlibObjectFiles)
+    $pxlibObjectFiles = @(
+        Get-ChildItem (Join-Path $pxlibBuild "CMakeFiles\pxlib.dir") -Recurse -File |
+            Where-Object { $_.Extension -in @(".o", ".obj") } |
+            Sort-Object FullName |
+            ForEach-Object { $_.FullName }
+    )
+    if ($pxlibObjectFiles.Count -eq 0) {
+        throw "pxlib build did not produce object files for the static backend."
     }
+    $staticArchive = Join-Path $pxlibInstall "lib\libpxlib_static.a"
+    Remove-Item $staticArchive -Force -ErrorAction SilentlyContinue
+    Invoke-Checked $ar (@("rcsD", $staticArchive) + $pxlibObjectFiles)
 }
 
 if (-not (Test-Path (Join-Path $pxlibInstall "include\paradox.h"))) {
