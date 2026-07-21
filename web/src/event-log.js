@@ -39,6 +39,68 @@ const EVENT_TOKEN_TRANSLATION_KEYS = Object.freeze({
     sound_test: 'eventTokenNotificationTest',
     xlsx_export: 'eventTokenExcelExport'
 });
+const LEGACY_EVENT_LOCALIZATION_RULES = Object.freeze([
+    Object.freeze({
+        identities: ['resource_update'],
+        titleKeys: ['updatingInterface'],
+        messageKeys: ['updatingInterfaceMessage']
+    }),
+    Object.freeze({
+        identities: ['source_switch', 'source_drop'],
+        titleKeys: ['unsupportedFile', 'sourceLoaded', 'sourceSwitchFailed'],
+        messageKeys: ['unsupportedFileHelp']
+    }),
+    Object.freeze({
+        identities: ['config_update'],
+        titleKeys: ['settingsSaveFailed', 'settingsReloaded'],
+        messageKeys: ['settingsReloadedMessage']
+    }),
+    Object.freeze({
+        identities: ['toast', 'native_toast'],
+        titleKeys: ['nativeToastUnavailable', 'toastRequestFailed'],
+        messageKeys: []
+    }),
+    Object.freeze({
+        identities: ['refresh', 'manual_refresh'],
+        titleKeys: ['refreshRequested', 'refreshed', 'refreshFailed'],
+        messageKeys: ['refreshRequestedMessage', 'refreshedMessage']
+    }),
+    Object.freeze({
+        identities: ['table_settings'],
+        titleKeys: ['widthsReset'],
+        messageKeys: []
+    }),
+    Object.freeze({
+        identities: ['row_action', 'grid_action', 'catalog_action', 'dialog_action'],
+        titleKeys: ['copied', 'copyFailed'],
+        messageKeys: ['codeCopied', 'jsonCopied']
+    }),
+    Object.freeze({
+        identities: ['copy_status', 'connection'],
+        titleKeys: ['copied'],
+        messageKeys: ['statusCopied']
+    }),
+    Object.freeze({
+        identities: ['copy_event_log', 'event_log'],
+        titleKeys: ['copied'],
+        messageKeys: ['eventLogCopied']
+    }),
+    Object.freeze({
+        identities: ['xlsx_export'],
+        titleKeys: ['excelExportStarted'],
+        messageKeys: ['excelExportStartedMessage']
+    }),
+    Object.freeze({
+        identities: ['source_info', 'file_info'],
+        titleKeys: ['currentSourceFile'],
+        messageKeys: []
+    }),
+    Object.freeze({
+        identities: ['notification_test', 'sound_test'],
+        titleKeys: ['soundTest'],
+        messageKeys: ['soundTestMessage']
+    })
+]);
 
 function isObject(value) {
     return !!value && typeof value === 'object' && !Array.isArray(value);
@@ -104,6 +166,24 @@ function rowChangeCounts(entry) {
     return null;
 }
 
+function legacyLocalizationRule(entry) {
+    const identities = new Set([
+        String(entry?.type || '').trim().toLowerCase(),
+        String(entry?.source || '').trim().toLowerCase()
+    ].filter(Boolean));
+    return LEGACY_EVENT_LOCALIZATION_RULES.find(rule =>
+        rule.identities.some(identity => identities.has(identity))
+    );
+}
+
+function exactLegacyTranslationKey(value, candidateKeys) {
+    const text = String(value || '');
+    if (!text) return '';
+    return candidateKeys.find(key =>
+        text === tableText('en', key) || text === tableText('fa', key)
+    ) || '';
+}
+
 export function upgradeEventLogEntryLocalization(entry = {}) {
     if (!isObject(entry)) return entry;
     const next = { ...entry };
@@ -113,6 +193,18 @@ export function upgradeEventLogEntryLocalization(entry = {}) {
         if (counts) {
             next.messageKey = 'eventLogChangeSummary';
             next.messageValues = counts;
+        }
+    }
+
+    const legacyRule = legacyLocalizationRule(next);
+    if (legacyRule) {
+        if (!next.titleKey) {
+            const titleKey = exactLegacyTranslationKey(next.title, legacyRule.titleKeys);
+            if (titleKey) next.titleKey = titleKey;
+        }
+        if (!next.messageKey) {
+            const messageKey = exactLegacyTranslationKey(next.message, legacyRule.messageKeys);
+            if (messageKey) next.messageKey = messageKey;
         }
     }
 
