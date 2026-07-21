@@ -50,6 +50,11 @@ jobs:
     - name: Audit Go pointer usage
       run: go vet ./...
 
+    - name: Verify Linux ILP32 native long decoding
+      env:
+        CGO_ENABLED: '0'
+      run: GOOS=linux GOARCH=386 go test ./pkg/paradox -run '^TestPxLongSignExtendsNativeNegativeValue$' -count=1
+
     - name: Run tests
       shell: bash
       run: |

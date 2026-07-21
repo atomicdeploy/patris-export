@@ -96,7 +96,8 @@ type pxlib struct {
 
 // pxField mirrors pxlib's pxfield_t. The explicit padding keeps px_flen at
 // offset 8 on 32-bit targets and offset 12 on 64-bit targets, matching the C
-// ABI on the supported ILP32, LP64, and LLP64 platforms.
+// layouts audited for ILP32, LP64, and LLP64. Runtime support remains limited
+// to the platform/backend combinations documented in docs/PXLIB-FFI.md.
 type pxField struct {
 	name         *byte
 	typ          int8

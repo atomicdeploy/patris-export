@@ -147,6 +147,19 @@ func TestGetFieldValueUsesAuditedUnionMember(t *testing.T) {
 	}
 }
 
+func TestPxLongSignExtendsNativeNegativeValue(t *testing.T) {
+	value := &pxVal{}
+	if runtime.GOOS == "windows" || unsafe.Sizeof(uintptr(0)) == 4 {
+		*(*int32)(unsafe.Pointer(&value.value[0])) = -1
+	} else {
+		*(*int64)(unsafe.Pointer(&value.value[0])) = -1
+	}
+
+	if got := pxLong(value); got != -1 {
+		t.Fatalf("pxLong(native -1) = %d, want -1", got)
+	}
+}
+
 func TestNativeCountsRejectMalformedValues(t *testing.T) {
 	if _, err := nonNegativeNativeCount("record", -1); err == nil {
 		t.Fatal("nonNegativeNativeCount accepted a negative record count")

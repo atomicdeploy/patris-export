@@ -23,15 +23,24 @@ struct px_val {
 The release targets are Windows amd64 (LLP64) and Linux amd64 (LP64). Both use
 8-byte pointers and 4-byte `int`; `px_field` has offsets 0/8/12/16 and size 24,
 while `px_val` has offsets 0/4/8 and size 24. Windows uses a 4-byte C `long`
-and Linux uses an 8-byte C `long`; the platform-specific `pxLong` readers
-preserve that distinction. The string union member is 16 bytes on both
+on both ILP32 and LLP64. Unix uses a 4-byte C `long` on ILP32 and an 8-byte C
+`long` on LP64. The platform-specific `pxLong` readers select that width before
+sign-extending to Go's `int64`. The string union member is 16 bytes on both
 64-bit targets.
 
-The Go mirrors also remain layout-correct for ILP32 source builds: 4-byte
-pointers produce a 16-byte `px_field`, a 16-byte `px_val`, and an 8-byte
-string member. Patris Export does not publish 32-bit artifacts. Unit tests
-derive and assert all offsets and sizes from the active pointer width, so a
-new architecture fails before it can silently use a different layout.
+The Go mirrors are layout-correct for ILP32 compilation: 4-byte pointers
+produce a 16-byte `px_field`, a 16-byte `px_val`, and an 8-byte string member.
+Patris Export does not publish any 32-bit artifact. Unit tests derive and
+assert all offsets and sizes from the active pointer width, so a new
+architecture fails before it can silently use a different layout.
+
+CI runs the negative-C-long regression as a Linux/386 executable; this would
+decode `-1` as `4294967295` if an ILP32 build read the full 8-byte union.
+Linux/386 is the only ILP32 runtime exercised by this audit. Windows/386
+runtime-dynamic remains unsupported and unverified: pxlib's WIN32 API uses
+`__cdecl`, and cross-compiling cannot prove that purego `RegisterFunc` invokes
+that 32-bit calling convention correctly. The Windows/386 checks in this work
+are layout/compilation evidence only, not a runtime support claim.
 
 ## Bounds, ownership, and lifetime
 
