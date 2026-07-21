@@ -46,7 +46,10 @@ jobs:
         cd web
         npm test
         npm run build
-        
+
+    - name: Audit Go pointer usage
+      run: go vet ./...
+
     - name: Run tests
       shell: bash
       run: |

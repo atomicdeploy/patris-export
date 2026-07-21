@@ -19,6 +19,7 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Fixed
 
+- The pxlib reader now keeps native data as typed pointers, bounds record and string reads, serializes close against active reads, and passes `go vet` without suppressions.
 - Standalone exports no longer contain Digitalogic pricing, formula, or shipping-method fields and warnings when no pricing integration is configured.
 - Windows file-lock monitoring now uses targeted Restart Manager queries instead of overlapping system-wide handle snapshots that could exhaust committed memory.
 

@@ -84,21 +84,35 @@ type pxlib struct {
 
 	pxBoot           func()
 	pxShutdown       func()
-	pxNew            func() uintptr
-	pxOpenFile       func(uintptr, string) int32
-	pxClose          func(uintptr)
-	pxDelete         func(uintptr)
-	pxGetNumFields   func(uintptr) int32
-	pxGetNumRecords  func(uintptr) int32
-	pxGetField       func(uintptr, int32) uintptr
-	pxRetrieveRecord func(uintptr, int32) uintptr
+	pxNew            func() unsafe.Pointer
+	pxOpenFile       func(unsafe.Pointer, string) int32
+	pxClose          func(unsafe.Pointer)
+	pxDelete         func(unsafe.Pointer)
+	pxGetNumFields   func(unsafe.Pointer) int32
+	pxGetNumRecords  func(unsafe.Pointer) int32
+	pxGetField       func(unsafe.Pointer, int32) *pxField
+	pxRetrieveRecord func(unsafe.Pointer, int32) **pxVal
 }
 
+// pxField mirrors pxlib's pxfield_t. The explicit padding keeps px_flen at
+// offset 8 on 32-bit targets and offset 12 on 64-bit targets, matching the C
+// ABI on the supported ILP32, LP64, and LLP64 platforms.
+type pxField struct {
+	name         *byte
+	typ          int8
+	_            [3]byte
+	length       int32
+	decimalCount int32
+}
+
+// pxVal mirrors pxlib's pxval_t. The union is two pointer-width words: 8 bytes
+// on 32-bit targets and 16 bytes on 64-bit targets. That is the size of the
+// largest C union member (the pointer/length string descriptor) on both ABIs.
 type pxVal struct {
 	isNull int8
 	_      [3]byte
 	typ    int32
-	value  [16]byte
+	value  [2]uintptr
 }
 
 type pxStringValue struct {
@@ -108,8 +122,9 @@ type pxStringValue struct {
 
 // Database represents a Paradox database file.
 type Database struct {
+	mu    sync.RWMutex
 	lib   *pxlib
-	pxdoc uintptr
+	pxdoc unsafe.Pointer
 	path  string
 }
 
@@ -123,7 +138,7 @@ func Open(path string) (*Database, error) {
 	lib.pxBoot()
 
 	pxdoc := lib.pxNew()
-	if pxdoc == 0 {
+	if pxdoc == nil {
 		return nil, fmt.Errorf("failed to create pxdoc structure")
 	}
 
@@ -141,32 +156,43 @@ func Open(path string) (*Database, error) {
 
 // Close closes the database.
 func (db *Database) Close() error {
-	if db.pxdoc != 0 {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+
+	if db.pxdoc != nil {
 		db.lib.pxClose(db.pxdoc)
 		db.lib.pxDelete(db.pxdoc)
-		db.pxdoc = 0
+		db.pxdoc = nil
 	}
 	return nil
 }
 
 // GetFields returns the list of fields in the database.
 func (db *Database) GetFields() ([]Field, error) {
-	if db.pxdoc == 0 {
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+	defer runtime.KeepAlive(db)
+
+	if db.pxdoc == nil {
 		return nil, fmt.Errorf("database is not open")
 	}
 
-	numFields := int(db.lib.pxGetNumFields(db.pxdoc))
+	numFields, err := nativeFieldCount(db.lib.pxGetNumFields(db.pxdoc))
+	if err != nil {
+		return nil, err
+	}
 	fields := make([]Field, numFields)
 
 	for i := 0; i < numFields; i++ {
-		fieldPtr := db.lib.pxGetField(db.pxdoc, int32(i))
-		if fieldPtr == 0 {
-			continue
+		field := db.lib.pxGetField(db.pxdoc, int32(i))
+		name, err := nativeFieldName(field)
+		if err != nil {
+			return nil, fmt.Errorf("decode field %d metadata: %w", i, err)
 		}
 		fields[i] = Field{
-			Name: cString(fieldName(fieldPtr)),
-			Type: fieldTypeName(fieldType(fieldPtr)),
-			Size: int(fieldLen(fieldPtr)),
+			Name: name,
+			Type: fieldTypeName(field.typ),
+			Size: int(field.length),
 		}
 	}
 
@@ -175,36 +201,55 @@ func (db *Database) GetFields() ([]Field, error) {
 
 // GetRecords returns all records from the database.
 func (db *Database) GetRecords() ([]Record, error) {
-	if db.pxdoc == 0 {
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+	defer runtime.KeepAlive(db)
+
+	if db.pxdoc == nil {
 		return nil, fmt.Errorf("database is not open")
 	}
 
-	numRecords := int(db.lib.pxGetNumRecords(db.pxdoc))
-	numFields := int(db.lib.pxGetNumFields(db.pxdoc))
+	numRecords, err := nonNegativeNativeCount("record", db.lib.pxGetNumRecords(db.pxdoc))
+	if err != nil {
+		return nil, err
+	}
+	numFields, err := nativeFieldCount(db.lib.pxGetNumFields(db.pxdoc))
+	if err != nil {
+		return nil, err
+	}
 	records := make([]Record, 0, numRecords)
 
 	for i := 0; i < numRecords; i++ {
 		valuesPtr := db.lib.pxRetrieveRecord(db.pxdoc, int32(i))
-		if valuesPtr == 0 {
+		if valuesPtr == nil {
 			continue
 		}
 
-		values := unsafe.Slice((*uintptr)(unsafe.Pointer(valuesPtr)), numFields)
+		values, err := nativeRecordValues(valuesPtr, numFields)
+		if err != nil {
+			return nil, fmt.Errorf("decode record %d values: %w", i, err)
+		}
 		record := make(Record)
 
 		for j := 0; j < numFields; j++ {
-			fieldPtr := db.lib.pxGetField(db.pxdoc, int32(j))
-			if fieldPtr == 0 || values[j] == 0 {
+			fieldMeta := db.lib.pxGetField(db.pxdoc, int32(j))
+			if values[j] == nil {
 				continue
 			}
 
-			field := cString(fieldName(fieldPtr))
-			nativeValue := (*pxVal)(unsafe.Pointer(values[j]))
+			field, err := nativeFieldName(fieldMeta)
+			if err != nil {
+				return nil, fmt.Errorf("decode record %d field %d metadata: %w", i, j, err)
+			}
+			nativeValue := values[j]
 			if nativeValue.isNull != 0 {
 				record[field] = nil
 				continue
 			}
-			value := getFieldValue(nativeValue, fieldType(fieldPtr))
+			value, err := getFieldValue(nativeValue, fieldMeta.typ)
+			if err != nil {
+				return nil, fmt.Errorf("decode record %d field %q: %w", i, field, err)
+			}
 			if value != nil {
 				record[field] = value
 			}
@@ -218,18 +263,34 @@ func (db *Database) GetRecords() ([]Record, error) {
 
 // GetNumRecords returns the number of records in the database.
 func (db *Database) GetNumRecords() int {
-	if db.pxdoc == 0 {
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+	defer runtime.KeepAlive(db)
+
+	if db.pxdoc == nil {
 		return 0
 	}
-	return int(db.lib.pxGetNumRecords(db.pxdoc))
+	count, err := nonNegativeNativeCount("record", db.lib.pxGetNumRecords(db.pxdoc))
+	if err != nil {
+		return 0
+	}
+	return count
 }
 
 // GetNumFields returns the number of fields in the database.
 func (db *Database) GetNumFields() int {
-	if db.pxdoc == 0 {
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+	defer runtime.KeepAlive(db)
+
+	if db.pxdoc == nil {
 		return 0
 	}
-	return int(db.lib.pxGetNumFields(db.pxdoc))
+	count, err := nativeFieldCount(db.lib.pxGetNumFields(db.pxdoc))
+	if err != nil {
+		return 0
+	}
+	return count
 }
 
 // Shutdown shuts down pxlib.
@@ -416,62 +477,109 @@ func fieldTypeName(fieldType int8) string {
 	}
 }
 
-func fieldName(fieldPtr uintptr) *byte {
-	return *(**byte)(unsafe.Pointer(fieldPtr))
-}
-
-func fieldType(fieldPtr uintptr) int8 {
-	return *(*int8)(unsafe.Pointer(fieldPtr + unsafe.Sizeof(uintptr(0))))
-}
-
-func fieldLen(fieldPtr uintptr) int32 {
-	return *(*int32)(unsafe.Pointer(fieldPtr + alignUp(unsafe.Sizeof(uintptr(0))+1, 4)))
-}
-
 func alignUp(value, alignment uintptr) uintptr {
 	return (value + alignment - 1) &^ (alignment - 1)
 }
 
-func getFieldValue(value *pxVal, fieldType int8) interface{} {
+const (
+	// pxlib's pinned parser reads field names into TMPBUFFSIZE and always adds
+	// a terminator. Scanning beyond this contract would turn malformed native
+	// output into an unbounded read.
+	maxNativeFieldNameBytes = 300
+	// Paradox stores the field count in an unsigned 16-bit header value. This
+	// cap also bounds the pxval_t** slice returned by PX_retrieve_record.
+	maxNativeFields = 1<<16 - 1
+	// Field length is stored in the file's one-byte TFldInfoRec.fSize member.
+	maxNativeFieldBytes = 1<<8 - 1
+)
+
+func nonNegativeNativeCount(kind string, count int32) (int, error) {
+	if count < 0 {
+		return 0, fmt.Errorf("pxlib returned negative %s count %d", kind, count)
+	}
+	return int(count), nil
+}
+
+func nativeFieldCount(count int32) (int, error) {
+	value, err := nonNegativeNativeCount("field", count)
+	if err != nil {
+		return 0, err
+	}
+	if value > maxNativeFields {
+		return 0, fmt.Errorf("pxlib returned field count %d above Paradox limit %d", value, maxNativeFields)
+	}
+	return value, nil
+}
+
+func nativeRecordValues(values **pxVal, count int) ([]*pxVal, error) {
+	if count < 0 || count > maxNativeFields {
+		return nil, fmt.Errorf("invalid record field count %d", count)
+	}
+	if count == 0 {
+		return nil, nil
+	}
+	if values == nil {
+		return nil, fmt.Errorf("pxlib returned a null record array for %d fields", count)
+	}
+	return unsafe.Slice(values, count), nil
+}
+
+func nativeFieldName(field *pxField) (string, error) {
+	if field == nil {
+		return "", fmt.Errorf("pxlib returned null field metadata")
+	}
+	if field.length < 0 || field.length > maxNativeFieldBytes {
+		return "", fmt.Errorf("pxlib returned invalid field length %d", field.length)
+	}
+	return cString(field.name)
+}
+
+func getFieldValue(value *pxVal, fieldType int8) (interface{}, error) {
 	if value == nil || value.isNull != 0 {
-		return nil
+		return nil, nil
 	}
 
 	switch fieldType {
-	case pxfAlpha:
+	case pxfAlpha, pxfMemoBLOb, pxfBLOb, pxfFmtMemoBLOb, pxfOLE, pxfGraphic, pxfBCD, pxfBytes:
 		return pxString(value)
-	case pxfShort, pxfLong, pxfAutoInc, pxfDate:
-		return int(pxLong(value))
-	case pxfNumber, pxfCurrency:
-		return *(*float64)(unsafe.Pointer(&value.value[0]))
+	case pxfShort, pxfLong, pxfAutoInc, pxfDate, pxfTime:
+		return int(pxLong(value)), nil
+	case pxfNumber, pxfCurrency, pxfTimestamp:
+		return *(*float64)(unsafe.Pointer(&value.value[0])), nil
 	case pxfLogical:
-		return pxLong(value) != 0
-	default:
-		if str := pxString(value); str != "" {
-			return str
-		}
+		return pxLong(value) != 0, nil
 	}
-	return nil
+	return nil, nil
 }
 
-func pxString(value *pxVal) string {
+func pxString(value *pxVal) (string, error) {
+	if value == nil {
+		return "", nil
+	}
 	str := (*pxStringValue)(unsafe.Pointer(&value.value[0]))
-	if str.ptr == nil || str.len <= 0 {
-		return ""
+	if str.len < 0 {
+		return "", fmt.Errorf("pxlib returned negative string length %d", str.len)
 	}
-	return string(unsafe.Slice(str.ptr, int(str.len)))
+	if str.ptr == nil {
+		if str.len != 0 {
+			return "", fmt.Errorf("pxlib returned null string data with length %d", str.len)
+		}
+		return "", nil
+	}
+	if str.len == 0 {
+		return "", nil
+	}
+	return string(unsafe.Slice(str.ptr, int(str.len))), nil
 }
 
-func cString(ptr *byte) string {
+func cString(ptr *byte) (string, error) {
 	if ptr == nil {
-		return ""
+		return "", nil
 	}
-	var n int
-	for p := uintptr(unsafe.Pointer(ptr)); ; p++ {
-		if *(*byte)(unsafe.Pointer(p)) == 0 {
-			break
+	for n := 0; n < maxNativeFieldNameBytes; n++ {
+		if *(*byte)(unsafe.Add(unsafe.Pointer(ptr), n)) == 0 {
+			return string(unsafe.Slice(ptr, n)), nil
 		}
-		n++
 	}
-	return string(unsafe.Slice(ptr, n))
+	return "", fmt.Errorf("pxlib field name is not NUL-terminated within %d bytes", maxNativeFieldNameBytes)
 }
