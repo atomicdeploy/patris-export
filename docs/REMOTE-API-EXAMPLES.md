@@ -289,7 +289,9 @@ include `status`, matching `event_id`, `retryable`, `pending_products`, and
 `deferred_products`. The adapter validates and propagates that state, including
 valid retry-pending work, and maps 408/425/429/5xx gateway failures to Patris
 retryable responses. Native gRPC without a gateway is not claimed or
-implemented by this example.
+implemented by this example. Default ProtoJSON camelCase response names
+(`eventId`, `pendingProducts`, and `deferredProducts`) are accepted and
+normalized to the canonical snake_case receiver response.
 
 ## Local receiver and smoke test
 

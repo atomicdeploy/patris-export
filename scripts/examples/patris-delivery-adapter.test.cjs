@@ -130,6 +130,24 @@ test('gRPC JSON gateway receives lossless canonical JSON without a parallel prod
   assert.deepEqual(JSON.parse(JSON.parse(request.body).envelope_json), envelope());
 });
 
+test('gRPC gateway default ProtoJSON camelCase response is normalized to canonical state', async () => {
+  const payload = envelope();
+  const state = await forwardEnvelope(config({
+    transport: 'grpc-gateway',
+    target: 'https://gateway.example.test/v1/patris:apply',
+  }), payload, async () => new Response(JSON.stringify({
+    status: 'accepted',
+    eventId: payload.event_id,
+    retryable: false,
+    pendingProducts: 0,
+    deferredProducts: 2,
+  }), { status: 200 }));
+  assert.deepEqual(state, {
+    status: 'accepted', event_id: payload.event_id, retryable: false,
+    pending_products: 0, deferred_products: 2,
+  });
+});
+
 test('all adapter modes preserve exact canonical numeric tokens', () => {
   const raw = '{"schema":"patris.product-sync","event_type":"update","event_id":"evt-exact","source":{"id":"patris-test"},"products":[{"product_code":"EXACT","final_price":100000000000000001,"foreign_price":0.1000000000000000006}]}';
   const payload = validateEnvelope(JSON.parse(raw));

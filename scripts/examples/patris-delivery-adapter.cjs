@@ -200,23 +200,37 @@ function buildOutboundRequest(config, envelope, rawEnvelopeJSON = JSON.stringify
 const TERMINAL_STATUSES = new Set(['accepted', 'already_current', 'replayed', 'recovered']);
 const RETRYABLE_STATUSES = new Set(['partially_applied', 'retry_pending']);
 
+function responseField(value, protoName, jsonName = protoName) {
+  const hasProtoName = Object.hasOwn(value, protoName);
+  const hasJSONName = jsonName !== protoName && Object.hasOwn(value, jsonName);
+  if (hasProtoName && hasJSONName && value[protoName] !== value[jsonName]) {
+    throw new AdapterError(`downstream response has conflicting ${protoName} fields`);
+  }
+  return hasProtoName ? value[protoName] : value[jsonName];
+}
+
 function validateDeliveryState(value, eventID) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     throw new AdapterError('downstream response is missing delivery state');
   }
-  const status = typeof value.status === 'string' ? value.status.trim() : '';
-  if (!status || typeof value.event_id !== 'string' || value.event_id !== eventID
-      || typeof value.retryable !== 'boolean'
-      || !Number.isSafeInteger(value.pending_products) || value.pending_products < 0
-      || !Number.isSafeInteger(value.deferred_products) || value.deferred_products < 0) {
+  const statusValue = responseField(value, 'status');
+  const responseEventID = responseField(value, 'event_id', 'eventId');
+  const retryable = responseField(value, 'retryable');
+  const pendingProducts = responseField(value, 'pending_products', 'pendingProducts');
+  const deferredProducts = responseField(value, 'deferred_products', 'deferredProducts');
+  const status = typeof statusValue === 'string' ? statusValue.trim() : '';
+  if (!status || typeof responseEventID !== 'string' || responseEventID !== eventID
+      || typeof retryable !== 'boolean'
+      || !Number.isSafeInteger(pendingProducts) || pendingProducts < 0
+      || !Number.isSafeInteger(deferredProducts) || deferredProducts < 0) {
     throw new AdapterError('downstream delivery state is invalid');
   }
   if (TERMINAL_STATUSES.has(status)) {
-    if (value.retryable || value.pending_products !== 0) {
+    if (retryable || pendingProducts !== 0) {
       throw new AdapterError('downstream terminal delivery state is inconsistent');
     }
   } else if (RETRYABLE_STATUSES.has(status)) {
-    if (!value.retryable || value.pending_products <= 0) {
+    if (!retryable || pendingProducts <= 0) {
       throw new AdapterError('downstream retryable delivery state is inconsistent');
     }
   } else {
@@ -224,10 +238,10 @@ function validateDeliveryState(value, eventID) {
   }
   return {
     status,
-    event_id: value.event_id,
-    retryable: value.retryable,
-    pending_products: value.pending_products,
-    deferred_products: value.deferred_products,
+    event_id: responseEventID,
+    retryable,
+    pending_products: pendingProducts,
+    deferred_products: deferredProducts,
   };
 }
 
