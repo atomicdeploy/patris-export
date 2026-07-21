@@ -7,10 +7,14 @@ import {
     escapeHtml,
     eventLogChangeDetailsMarkup,
     eventLogDisclosureText,
+    eventLogLocalizedText,
+    eventLogTokenLabel,
     isEventLogChangeDetails,
     modifiedRecordIdentityKey,
+    normalizeEventLogContent,
     recordIdentityKey,
-    retainRecentEventLogChanges
+    retainRecentEventLogChanges,
+    upgradeEventLogEntryLocalization
 } from './event-log.js';
 import {
     CANONICAL_ROW_FIELDS,
@@ -21,10 +25,15 @@ import {
     canonicalColumnKey,
     clampColumnWidth,
     defaultColumnWidth,
+    deriveGridFields,
     duplicateSafeRecordKeys,
     fitMenuPosition,
     iconMarkup,
     keyboardColumnWidth,
+    isWarehouseColumnField,
+    localizedColumnLabel,
+    normalizeColumnPreferenceList,
+    localizedRelativeTime,
     normalizeColumnWidths,
     normalizeRowIconFallback,
     normalizeRowIconRule,
@@ -32,6 +41,7 @@ import {
     nextRovingKey,
     pruneSelectedKeys,
     resizedColumnWidth,
+    resolvePersistedColumnPreferences,
     resolvedRovingKey,
     resolveRowIcon,
     rowCommandDefinitions,
@@ -39,7 +49,8 @@ import {
     stableRecordKey,
     structuredValueText,
     tableLanguage,
-    tableText
+    tableText,
+    warehouseColumnName
 } from './table-ux.js';
 
 // Application state
@@ -74,14 +85,25 @@ const state = {
     columnFilters: {},  // Store active filters per column: { fieldName: { type, value, ... } }
     hiddenColumns: new Set(),  // Track hidden columns
     columnOrder: [],
+    legacyColumnPreferences: {
+        hiddenColumns: null,
+        columnOrder: null
+    },
+    columnPreferenceMigrationAttempted: false,
+    columnPreferenceMigrationPending: {
+        hiddenColumns: false,
+        columnOrder: false
+    },
     selectedKeys: new Set(),
     recordSelectionKeys: new WeakMap(),
     rovingRowKey: '',
     rowMenu: {
         record: null,
         trigger: null,
-        focusTarget: null
+        focusTarget: null,
+        kind: ''
     },
+    inspectedRecord: null,
     openRangePanel: null,
     openRangeAnchor: null,
     scrollAnchor: null,
@@ -112,6 +134,7 @@ const state = {
         rowColorNoStock: '#6b7280',
         rowColorHasStock: '#10b981',
         enableRowIcons: true,
+        freezeFirstColumn: true,
         columnWidths: {},
         rowIconRules: [],
         rowIconFallback: { ...DEFAULT_ROW_ICON_FALLBACK }
@@ -131,6 +154,8 @@ const state = {
 
 const CONFIG_STORAGE_KEY = 'patris-config';
 const SETTINGS_STORAGE_KEY = 'patris-settings';
+const HIDDEN_COLUMNS_STORAGE_KEY = 'patris-hidden-columns';
+const COLUMN_ORDER_STORAGE_KEY = 'patris-column-order';
 const SCROLL_ANCHOR_STORAGE_KEY = 'patris-viewer-scroll-anchor';
 const EVENT_LOG_STORAGE_KEY = 'patris-event-log';
 const MAX_EVENT_LOG_ENTRIES = 200;
@@ -287,7 +312,19 @@ function logIntro() {
     console.info('%c🔌 WebSocket, REST, native toasts, generated audio fallback, and persistent config are active.', styles[2]);
 }
 
-// Load settings from localStorage
+function loadLegacyColumnPreference(storageKey) {
+    const raw = localStorage.getItem(storageKey);
+    if (raw === null) return null;
+    try {
+        const parsed = JSON.parse(raw);
+        return Array.isArray(parsed) ? normalizeColumnPreferenceList(parsed) : null;
+    } catch (error) {
+        console.warn(`Failed to read legacy column preference ${storageKey}:`, error);
+        return null;
+    }
+}
+
+// Load local settings and the legacy column cache used before UIConfig persistence.
 function loadSettings() {
     const saved = localStorage.getItem(SETTINGS_STORAGE_KEY);
     if (saved) {
@@ -306,19 +343,15 @@ function loadSettings() {
         state.sortDirection = direction || 'asc';
     }
     
-    // Load hidden columns
-    const hiddenCols = localStorage.getItem('patris-hidden-columns');
-    if (hiddenCols) {
-        state.hiddenColumns = new Set(JSON.parse(hiddenCols));
+    const legacyHiddenColumns = loadLegacyColumnPreference(HIDDEN_COLUMNS_STORAGE_KEY);
+    const legacyColumnOrder = loadLegacyColumnPreference(COLUMN_ORDER_STORAGE_KEY);
+    state.legacyColumnPreferences.hiddenColumns = legacyHiddenColumns;
+    state.legacyColumnPreferences.columnOrder = legacyColumnOrder;
+    if (legacyHiddenColumns !== null) {
+        state.hiddenColumns = new Set(legacyHiddenColumns);
     }
-
-    const savedOrder = localStorage.getItem('patris-column-order');
-    if (savedOrder) {
-        try {
-            state.columnOrder = JSON.parse(savedOrder).filter(Boolean);
-        } catch (e) {
-            state.columnOrder = [];
-        }
+    if (legacyColumnOrder !== null) {
+        state.columnOrder = legacyColumnOrder;
     }
     
     // Load column filters
@@ -345,7 +378,8 @@ function loadSettings() {
         try {
             state.eventLog = retainRecentEventLogChanges(
                 JSON.parse(savedEventLog)
-                    .filter(entry => entry && entry.title)
+                    .map(upgradeEventLogEntryLocalization)
+                    .filter(entry => entry && (entry.title || entry.titleKey))
                     .slice(0, MAX_EVENT_LOG_ENTRIES),
                 MAX_DETAILED_EVENT_LOG_ENTRIES
             );
@@ -364,12 +398,62 @@ function saveSettings(options = {}) {
     }
 }
 
+function applyConfigColumnPreferences(ui, source) {
+    const remoteConfig = source !== 'local';
+    const allowInitialLegacyFallback = !remoteConfig || !state.columnPreferenceMigrationAttempted;
+    const legacy = {
+        hiddenColumns: allowInitialLegacyFallback || state.columnPreferenceMigrationPending.hiddenColumns
+            ? state.legacyColumnPreferences.hiddenColumns : null,
+        columnOrder: allowInitialLegacyFallback || state.columnPreferenceMigrationPending.columnOrder
+            ? state.legacyColumnPreferences.columnOrder : null
+    };
+    const resolved = resolvePersistedColumnPreferences(ui, legacy);
+    state.hiddenColumns = new Set(resolved.hiddenColumns);
+    state.columnOrder = resolved.columnOrder;
+
+    if (remoteConfig || resolved.cacheHiddenColumns) {
+        const hiddenColumns = [...state.hiddenColumns];
+        localStorage.setItem(HIDDEN_COLUMNS_STORAGE_KEY, JSON.stringify(hiddenColumns));
+        state.legacyColumnPreferences.hiddenColumns = hiddenColumns;
+    }
+    if (remoteConfig || resolved.cacheColumnOrder) {
+        const columnOrder = state.columnOrder.slice();
+        localStorage.setItem(COLUMN_ORDER_STORAGE_KEY, JSON.stringify(columnOrder));
+        state.legacyColumnPreferences.columnOrder = columnOrder;
+    }
+
+    const shouldMigrate = remoteConfig
+        && !state.columnPreferenceMigrationAttempted
+        && (resolved.migrateHiddenColumns || resolved.migrateColumnOrder);
+    if (remoteConfig) {
+        state.columnPreferenceMigrationAttempted = true;
+        if (Array.isArray(ui.hidden_columns)) {
+            state.columnPreferenceMigrationPending.hiddenColumns = false;
+        }
+        if (Array.isArray(ui.column_order)) {
+            state.columnPreferenceMigrationPending.columnOrder = false;
+        }
+    }
+    if (shouldMigrate) {
+        if (resolved.migrateHiddenColumns) {
+            ui.hidden_columns = [...state.hiddenColumns];
+            state.columnPreferenceMigrationPending.hiddenColumns = true;
+        }
+        if (resolved.migrateColumnOrder) {
+            ui.column_order = state.columnOrder.slice();
+            state.columnPreferenceMigrationPending.columnOrder = true;
+        }
+    }
+    return shouldMigrate;
+}
+
 function applyConfig(config, source = 'server') {
     if (!config) return null;
     const diff = buildConfigDiff(state.config, config);
     state.config = config;
     localStorage.setItem(CONFIG_STORAGE_KEY, JSON.stringify(config));
     if (config.ui) {
+        const migrateColumnPreferences = applyConfigColumnPreferences(config.ui, source);
         if (config.ui.theme) {
             localStorage.setItem('theme', config.ui.theme);
         }
@@ -391,6 +475,7 @@ function applyConfig(config, source = 'server') {
             rowColorNoStock: config.ui.row_color_no_stock || state.settings.rowColorNoStock,
             rowColorHasStock: config.ui.row_color_has_stock || state.settings.rowColorHasStock,
             enableRowIcons: config.ui.enable_row_icons !== false,
+            freezeFirstColumn: config.ui.freeze_first_column !== false,
             columnWidths: normalizeColumnWidths(config.ui.column_widths),
             rowIconRules: normalizeRowIconRules(config.ui.row_icon_rules),
             rowIconFallback: normalizeRowIconFallback(config.ui.row_icon_fallback)
@@ -399,8 +484,13 @@ function applyConfig(config, source = 'server') {
         applySettings();
         initTheme();
         if (state.fields.length > 0) {
+            applyColumnOrder();
+            removeHiddenColumnFilters({ broadcast: false });
             renderTableHeader();
-            renderTable();
+            applyFilters();
+        }
+        if (migrateColumnPreferences) {
+            saveConfigToServer(state.config);
         }
     }
     if (source !== 'local') {
@@ -430,11 +520,13 @@ function buildConfigDiff(previousConfig, nextConfig) {
     }
 
     const signature = stableStringify(changed);
+    const message = configDiffMessageDescriptor(changed);
     return {
         changed,
         signature,
         dedupeKey: hashString(signature),
-        message: formatConfigDiffMessage(changed),
+        messageKey: message.key,
+        messageValues: message.values,
         details: formatConfigDiffDetails(changed)
     };
 }
@@ -487,14 +579,24 @@ function hashString(value) {
     return (hash >>> 0).toString(16);
 }
 
-function formatConfigDiffMessage(changed) {
+function configDiffMessageDescriptor(changed) {
     if (changed.length === 1) {
         const change = changed[0];
-        return `${change.path}: ${formatConfigDiffValue(change.before)} -> ${formatConfigDiffValue(change.after)}`;
+        return {
+            key: 'settingsChangeSingle',
+            values: {
+                path: change.path,
+                before: formatConfigDiffValue(change.before),
+                after: formatConfigDiffValue(change.after)
+            }
+        };
     }
     const names = changed.slice(0, 4).map(change => change.path).join(', ');
     const suffix = changed.length > 4 ? ', ...' : '';
-    return `${changed.length} settings changed: ${names}${suffix}`;
+    return {
+        key: 'settingsChangeMultiple',
+        values: { count: changed.length, names, suffix }
+    };
 }
 
 function formatConfigDiffDetails(changed) {
@@ -612,6 +714,7 @@ function syncSettingsToConfig() {
         row_color_no_stock: state.settings.rowColorNoStock,
         row_color_has_stock: state.settings.rowColorHasStock,
         enable_row_icons: state.settings.enableRowIcons,
+        freeze_first_column: state.settings.freezeFirstColumn,
         column_widths: normalizeColumnWidths(state.settings.columnWidths),
         row_icon_rules: normalizeRowIconRules(state.settings.rowIconRules),
         row_icon_fallback: normalizeRowIconFallback(state.settings.rowIconFallback)
@@ -633,7 +736,7 @@ async function saveConfigToServer(config) {
         console.info('💾 Settings synced to config file.');
     } catch (error) {
         console.error('❌ Failed to sync settings to config file:', error);
-        showInAppToast('Settings save failed', error.message, { error: true, broadcastToTabs: true, source: 'config_update', eventType: 'config_update' });
+        showInAppToast(t('settingsSaveFailed'), error.message, { titleKey: 'settingsSaveFailed', error: true, broadcastToTabs: true, source: 'config_update', eventType: 'config_update' });
     }
 }
 
@@ -651,9 +754,33 @@ function saveSortPreferences(options = {}) {
     }
 }
 
-// Save hidden columns to localStorage
+function cacheColumnPreferences() {
+    const hiddenColumns = normalizeColumnPreferenceList([...state.hiddenColumns]);
+    const columnOrder = normalizeColumnPreferenceList(state.columnOrder);
+    state.hiddenColumns = new Set(hiddenColumns);
+    state.columnOrder = columnOrder;
+    state.legacyColumnPreferences.hiddenColumns = hiddenColumns;
+    state.legacyColumnPreferences.columnOrder = columnOrder;
+    localStorage.setItem(HIDDEN_COLUMNS_STORAGE_KEY, JSON.stringify(hiddenColumns));
+    localStorage.setItem(COLUMN_ORDER_STORAGE_KEY, JSON.stringify(columnOrder));
+}
+
+function syncColumnPreferencesToConfig() {
+    if (!state.config) return;
+    state.config.ui = {
+        ...(state.config.ui || {}),
+        hidden_columns: [...state.hiddenColumns],
+        column_order: state.columnOrder.slice()
+    };
+    saveConfigToServer(state.config);
+}
+
+// Keep localStorage as a cache/fallback while UIConfig remains authoritative.
 function saveHiddenColumns(options = {}) {
-    localStorage.setItem('patris-hidden-columns', JSON.stringify([...state.hiddenColumns]));
+    cacheColumnPreferences();
+    if (options.persist !== false) {
+        syncColumnPreferencesToConfig();
+    }
     if (options.broadcast !== false) {
         publishFrontendBroadcast('columns:update', {
             hiddenColumns: [...state.hiddenColumns],
@@ -664,7 +791,10 @@ function saveHiddenColumns(options = {}) {
 
 function saveColumnOrder(options = {}) {
     state.columnOrder = state.fields.slice();
-    localStorage.setItem('patris-column-order', JSON.stringify(state.columnOrder));
+    cacheColumnPreferences();
+    if (options.persist !== false) {
+        syncColumnPreferencesToConfig();
+    }
     if (options.broadcast !== false) {
         publishFrontendBroadcast('columns:update', {
             hiddenColumns: [...state.hiddenColumns],
@@ -724,7 +854,7 @@ function applyRemoteColumns(payload = {}) {
         state.columnOrder = payload.columnOrder.filter(Boolean);
         applyColumnOrder();
     }
-    saveHiddenColumns({ broadcast: false });
+    saveHiddenColumns({ broadcast: false, persist: false });
     removeHiddenColumnFilters({ broadcast: false });
     renderColumnManager();
     renderTableHeader();
@@ -992,14 +1122,19 @@ function formatNumberWithSeparator(value) {
 
 function displayFieldName(field) {
     const labels = state.config?.column_labels || {};
-    return labels[field] || labels[field.replace(/[0-9]+$/, '')] || field;
+    const warehouseName = warehouseColumnName(field);
+    const configured = labels[field]
+        || (warehouseName ? labels[`warehouse_stock.${warehouseName}`] : '')
+        || labels[field.replace(/[0-9]+$/, '')]
+        || '';
+    return localizedColumnLabel(field, state.settings.language, configured);
 }
 
 function displayStockGroupName() {
     const labels = state.config?.column_labels || {};
-    if (labels.Stock || labels.stock) return labels.Stock || labels.stock;
-    if (labels.ANBAR && !/^warehouse$/i.test(String(labels.ANBAR).trim())) return labels.ANBAR;
-    return Object.keys(labels).length ? 'Stock' : 'ANBAR';
+    const configured = String(labels.warehouse_stock || labels.Stock || labels.stock || labels.ANBAR || '').trim();
+    if (configured && !/^(anbar|stock|warehouse|warehouse stock)$/i.test(configured)) return configured;
+    return t('warehouseStock');
 }
 
 function parsePatrisCode(code) {
@@ -1011,8 +1146,12 @@ function parsePatrisCode(code) {
 }
 
 function anbarTotal(record) {
-    if (!Array.isArray(record.ANBAR)) return 0;
-    return record.ANBAR.reduce((sum, value) => {
+    const declared = Number(record?.total_stock);
+    if (Number.isFinite(declared)) return declared;
+    const stock = record?.warehouse_stock && typeof record.warehouse_stock === 'object' && !Array.isArray(record.warehouse_stock)
+        ? Object.values(record.warehouse_stock)
+        : Array.isArray(record?.ANBAR) ? record.ANBAR : [];
+    return stock.reduce((sum, value) => {
         const n = typeof value === 'string' ? parseFloat(value) : value;
         return sum + (Number.isFinite(n) ? n : 0);
     }, 0);
@@ -1040,6 +1179,7 @@ function applySettings() {
     setValue('rowColorNoStock', state.settings.rowColorNoStock || '#6b7280');
     setValue('rowColorHasStock', state.settings.rowColorHasStock || '#10b981');
     setChecked('enableRowIcons', state.settings.enableRowIcons);
+    setChecked('freezeFirstColumn', state.settings.freezeFirstColumn);
     setValue('rowIconFallbackIcon', state.settings.rowIconFallback.icon);
     setValue('rowIconFallbackColor', state.settings.rowIconFallback.color);
     setValue(
@@ -1051,6 +1191,7 @@ function applySettings() {
     applyConfigToSettingsForm();
     document.body.classList.toggle('rtl-text-mode', !!state.settings.rtlTextDirection);
     document.body.classList.toggle('table-rtl', isTableRTL());
+    document.body.classList.toggle('freeze-first-column', !!state.settings.freezeFirstColumn);
     document.documentElement.lang = state.settings.language;
     document.getElementById('dataTable')?.setAttribute('dir', isTableRTL() ? 'rtl' : 'ltr');
     applyFooterVisibility();
@@ -1133,6 +1274,20 @@ function applyTableTranslations() {
     });
     document.querySelectorAll('[data-table-i18n-placeholder]').forEach(element => {
         element.placeholder = t(element.dataset.tableI18nPlaceholder);
+    });
+    document.querySelectorAll('[data-table-i18n-title]').forEach(element => {
+        element.title = t(element.dataset.tableI18nTitle);
+    });
+    document.querySelectorAll('[data-table-i18n-aria-label]').forEach(element => {
+        element.setAttribute('aria-label', t(element.dataset.tableI18nAriaLabel));
+    });
+    document.querySelectorAll('[data-dialog-menu]').forEach(button => {
+        button.title = t('moreActions');
+        button.setAttribute('aria-label', t('moreActions'));
+    });
+    document.querySelectorAll('.dialog-close-btn').forEach(button => {
+        button.title = t('close');
+        button.setAttribute('aria-label', t('close'));
     });
     const rowMenu = document.getElementById('rowContextMenu');
     if (rowMenu) {
@@ -1397,19 +1552,7 @@ function handleFooterToggleClick(event) {
 }
 
 function formatRelativeTime(date) {
-    if (!date) return 'never';
-    const diffMs = Date.now() - date.getTime();
-    const future = diffMs < 0;
-    const abs = Math.abs(diffMs);
-    const units = [
-        ['day', 86400000],
-        ['hour', 3600000],
-        ['minute', 60000],
-        ['second', 1000]
-    ];
-    const [unit, size] = units.find(([, ms]) => abs >= ms) || units[units.length - 1];
-    const count = Math.max(1, Math.round(abs / size));
-    return future ? `in ${count} ${unit}${count === 1 ? '' : 's'}` : `${count} ${unit}${count === 1 ? '' : 's'} ago`;
+    return localizedRelativeTime(date, state.settings.language);
 }
 
 function updateLastUpdateDisplay() {
@@ -1585,23 +1728,17 @@ function cssEscape(value) {
 }
 
 function initDialogActionButtons() {
-    [
-        ['settingsPanel', 'closeSettings'],
-        ['inspectorPanel', 'closeInspector']
-    ].forEach(([panelId, closeId]) => {
-        const closeButton = document.getElementById(closeId);
-        if (!closeButton || closeButton.dataset.normalizedDialogActions) return;
-        closeButton.classList.add('dialog-close-btn');
-        closeButton.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12" /><path d="M18 6L6 18" /></svg>';
-        const menuButton = document.createElement('button');
-        menuButton.type = 'button';
-        menuButton.className = 'btn btn-icon dialog-menu-btn';
-        menuButton.title = 'More actions';
-        menuButton.setAttribute('aria-label', 'More actions');
-        menuButton.dataset.dialogMenu = panelId;
-        menuButton.innerHTML = iconMarkup('more');
-        closeButton.parentElement?.insertBefore(menuButton, closeButton);
-        closeButton.dataset.normalizedDialogActions = '1';
+    document.querySelectorAll('[data-dialog-menu]').forEach(menuButton => {
+        if (menuButton.dataset.dialogMenuBound) return;
+        menuButton.title = t('moreActions');
+        menuButton.setAttribute('aria-label', t('moreActions'));
+        menuButton.setAttribute('aria-haspopup', 'menu');
+        menuButton.setAttribute('aria-expanded', 'false');
+        menuButton.addEventListener('click', event => {
+            event.stopPropagation();
+            openDialogCommandMenu(menuButton.dataset.dialogMenu, menuButton);
+        });
+        menuButton.dataset.dialogMenuBound = '1';
     });
 }
 
@@ -1728,7 +1865,7 @@ async function showPartialRoute(route) {
         resetPartialRouteScroll();
     } catch (error) {
         if (error.name === 'AbortError') return;
-        state.router.outlet.innerHTML = `<div class="route-error"><strong>Could not load page.</strong><span>${escapeHtml(error.message)}</span></div>`;
+        state.router.outlet.innerHTML = `<div class="route-error"><strong>${escapeHtml(t('couldNotLoadPage'))}</strong><span>${escapeHtml(error.message)}</span></div>`;
         resetPartialRouteScroll();
     }
 }
@@ -2092,10 +2229,20 @@ function setFavicon(href) {
 }
 
 function showInAppToast(title, message, options = {}) {
+    const displayTitle = options.titleKey
+        ? t(options.titleKey, options.titleValues || {})
+        : (title || 'Patris Export');
+    const displayMessage = options.messageKey
+        ? t(options.messageKey, options.messageValues || {})
+        : (message || '');
     if (options.log !== false) {
         recordEventLog({
-            title: title || 'Patris Export',
-            message: message || '',
+            title: displayTitle,
+            titleKey: options.titleKey,
+            titleValues: options.titleValues,
+            message: displayMessage,
+            messageKey: options.messageKey,
+            messageValues: options.messageValues,
             level: options.error || options.nativeError ? 'warning' : (options.level || 'info'),
             type: options.eventType || options.source || 'toast',
             source: options.source || 'web-ui',
@@ -2120,11 +2267,11 @@ function showInAppToast(title, message, options = {}) {
 
     const titleEl = document.createElement('div');
     titleEl.className = 'app-toast-title';
-    titleEl.textContent = title || 'Patris Export';
+    titleEl.textContent = displayTitle;
 
     const messageEl = document.createElement('div');
     messageEl.className = 'app-toast-message';
-    messageEl.textContent = message || '';
+    messageEl.textContent = displayMessage;
 
     toast.appendChild(titleEl);
     toast.appendChild(messageEl);
@@ -2146,15 +2293,14 @@ function showInAppToast(title, message, options = {}) {
 
 function recordEventLog(entry = {}) {
     const changes = isEventLogChangeDetails(entry.changes) ? entry.changes : null;
+    const content = normalizeEventLogContent(entry, { title: 'Patris Export event' });
     const logEntry = {
         id: entry.id || createTabId(),
         time: entry.timestamp || new Date().toISOString(),
         level: normalizeEventLevel(entry.level),
         type: String(entry.type || 'event'),
         source: String(entry.source || entry.type || 'web-ui'),
-        title: String(entry.title || 'Patris Export event'),
-        titleKey: entry.titleKey ? String(entry.titleKey) : '',
-        message: String(entry.message || ''),
+        ...content,
         details: entry.details ? String(entry.details) : '',
         ...(changes ? { changes } : {})
     };
@@ -2233,16 +2379,19 @@ function eventLogChangeLabels() {
 function eventLogEntrySummaryMarkup(entry, disclosure = '') {
     const parsedTime = new Date(entry.time);
     const displayTime = Number.isNaN(parsedTime.getTime()) ? entry.time : formatDateTime(parsedTime);
-    const title = entry.titleKey ? t(entry.titleKey) : entry.title;
+    const title = eventLogLocalizedText(entry, 'title', state.settings.language);
+    const message = eventLogLocalizedText(entry, 'message', state.settings.language);
+    const type = eventLogTokenLabel(entry.type, state.settings.language, 'type');
+    const source = eventLogTokenLabel(entry.source, state.settings.language, 'source');
     return `
         <span class="event-log-entry-meta">
             <time datetime="${escapeHtml(entry.time)}">${escapeHtml(displayTime)}</time>
-            <span>${escapeHtml(entry.type)}</span>
-            <span>${escapeHtml(entry.source)}</span>
+            <span>${escapeHtml(type)}</span>
+            <span>${escapeHtml(source)}</span>
         </span>
         <span class="event-log-entry-body">
             <strong>${escapeHtml(title)}</strong>
-            ${entry.message ? `<span class="event-log-entry-message">${escapeHtml(entry.message)}</span>` : ''}
+            ${message ? `<span class="event-log-entry-message">${escapeHtml(message)}</span>` : ''}
             ${!disclosure && entry.details ? `<code>${escapeHtml(entry.details)}</code>` : ''}
             ${!disclosure && entry.changeDetailsExpired ? `<span class="event-log-detail-expired">${escapeHtml(t('eventLogDetailsExpired'))}</span>` : ''}
         </span>
@@ -2346,14 +2495,14 @@ function setDropOverlayVisible(visible, mode = 'ready') {
     const message = overlay.querySelector('[data-drop-message]');
     if (title && message) {
         if (mode === 'uploading') {
-            title.textContent = 'Loading source...';
-            message.textContent = 'Uploading the file and switching connected viewers.';
+            title.textContent = t('loadingSource');
+            message.textContent = t('uploadingSource');
         } else if (mode === 'invalid') {
-            title.textContent = 'Unsupported file';
-            message.textContent = 'Drop a .db or .json file to switch the active source.';
+            title.textContent = t('unsupportedFile');
+            message.textContent = t('unsupportedFileHelp');
         } else {
-            title.textContent = 'Drop database file';
-            message.textContent = 'Release a .db or .json file to load it in this viewer.';
+            title.textContent = t('dropDatabase');
+            message.textContent = t('dropDatabaseDescription');
         }
     }
 }
@@ -2364,7 +2513,13 @@ async function uploadDroppedSource(file) {
     }
     if (!isSupportedSourceFile(file)) {
         setDropOverlayVisible(true, 'invalid');
-        showInAppToast('Unsupported file', 'Drop a .db or .json file to switch the active source.', { error: true, source: 'source_drop', eventType: 'source_switch' });
+        showInAppToast(t('unsupportedFile'), t('unsupportedFileHelp'), {
+            titleKey: 'unsupportedFile',
+            messageKey: 'unsupportedFileHelp',
+            error: true,
+            source: 'source_drop',
+            eventType: 'source_switch'
+        });
         setTimeout(() => setDropOverlayVisible(false), 1500);
         return;
     }
@@ -2401,7 +2556,19 @@ async function uploadDroppedSource(file) {
 
         state.fileName = payload.path || payload.file || file.name;
         updateFooterFileName();
-        showInAppToast('Source loaded', `${payload.file || file.name} is now active (${payload.records ?? 'unknown'} records).`, { broadcastToTabs: true, source: 'source_drop', eventType: 'source_switch', level: 'success' });
+        const sourceLoadedValues = {
+            file: payload.file || file.name,
+            count: payload.records ?? t('unknown')
+        };
+        showInAppToast(t('sourceLoaded'), t('sourceLoadedMessage', sourceLoadedValues), {
+            titleKey: 'sourceLoaded',
+            messageKey: 'sourceLoadedMessage',
+            messageValues: sourceLoadedValues,
+            broadcastToTabs: true,
+            source: 'source_drop',
+            eventType: 'source_switch',
+            level: 'success'
+        });
 
         if (!state.ws || state.ws.readyState !== WebSocket.OPEN) {
             await fetchInitialData();
@@ -2409,7 +2576,7 @@ async function uploadDroppedSource(file) {
         }
     } catch (error) {
         console.error('Failed to switch dropped source:', error);
-        showInAppToast('Source switch failed', error.message, { error: true, source: 'source_drop', eventType: 'source_switch' });
+        showInAppToast(t('sourceSwitchFailed'), error.message, { titleKey: 'sourceSwitchFailed', error: true, source: 'source_drop', eventType: 'source_switch' });
         setLoadingState(false);
     } finally {
         state.isUploadingSource = false;
@@ -2627,8 +2794,14 @@ function reloadForResourceUpdate(nextResourceVersion, source) {
     state.isReloadingForUpdate = true;
 
     console.info('🔄 Embedded web resources changed from %s to %s via %s. Reloading viewer...', state.resourceVersion, nextResourceVersion, source);
-    updateStatus('connected', 'Updating UI...');
-    showInAppToast('Updating interface', 'A newer embedded web UI is available. Reloading now.', { source: 'resource_update', eventType: 'resource_update', level: 'update' });
+    updateStatus('connected', t('updatingUI'));
+    showInAppToast(t('updatingInterface'), t('updatingInterfaceMessage'), {
+        titleKey: 'updatingInterface',
+        messageKey: 'updatingInterfaceMessage',
+        source: 'resource_update',
+        eventType: 'resource_update',
+        level: 'update'
+    });
 
     sessionStorage.setItem('patris-resource-reload', JSON.stringify({
         from: state.resourceVersion,
@@ -2670,8 +2843,8 @@ function applyProcessStatus(status) {
     const fileAccess = state.processStatus.file_access || {};
     const el = document.getElementById('processStatus');
     if (el) {
-        const patrisText = patris.running ? `Patris81 running (${patris.count})` : 'Patris81 not running';
-        const lockText = fileAccess.in_use ? `DB locked (${fileAccess.count})` : 'DB unlocked';
+        const patrisText = patris.running ? t('patrisRunning', { count: patris.count }) : t('patrisNotRunning');
+        const lockText = fileAccess.in_use ? t('databaseLockedCount', { count: fileAccess.count }) : t('databaseUnlocked');
         el.textContent = `${patrisText} · ${lockText}`;
         el.classList.toggle('warning', !!patris.running || !!fileAccess.in_use);
     }
@@ -2686,10 +2859,10 @@ async function sendNativeToast(title, message) {
         });
         const result = await response.json();
         if (result.native_error) {
-            showInAppToast('Native toast unavailable', result.native_error, { error: true, source: 'native_toast', eventType: 'toast', nativeError: result.native_error });
+            showInAppToast(t('nativeToastUnavailable'), result.native_error, { titleKey: 'nativeToastUnavailable', error: true, source: 'native_toast', eventType: 'toast', nativeError: result.native_error });
         }
     } catch (error) {
-        showInAppToast('Toast request failed', error.message, { error: true, source: 'native_toast', eventType: 'toast' });
+        showInAppToast(t('toastRequestFailed'), error.message, { titleKey: 'toastRequestFailed', error: true, source: 'native_toast', eventType: 'toast' });
     }
 }
 
@@ -2697,19 +2870,19 @@ async function requestSourceRefresh() {
     const button = document.getElementById('refreshNowBtn');
     if (button) {
         button.disabled = true;
-        button.textContent = 'Refreshing...';
+        button.textContent = t('refreshing');
     }
     try {
         if (state.ws && state.ws.readyState === WebSocket.OPEN) {
             state.ws.send(JSON.stringify({ type: 'refresh' }));
-            showInAppToast('Refresh requested', 'The backend is reloading the data source.', { broadcastToTabs: true, source: 'manual_refresh', eventType: 'refresh', level: 'update' });
+            showInAppToast(t('refreshRequested'), t('refreshRequestedMessage'), { titleKey: 'refreshRequested', messageKey: 'refreshRequestedMessage', broadcastToTabs: true, source: 'manual_refresh', eventType: 'refresh', level: 'update' });
         } else {
             await fetchInitialData();
-            showInAppToast('Refreshed', 'Data was reloaded over HTTP.', { broadcastToTabs: true, source: 'manual_refresh', eventType: 'refresh', level: 'success' });
+            showInAppToast(t('refreshed'), t('refreshedMessage'), { titleKey: 'refreshed', messageKey: 'refreshedMessage', broadcastToTabs: true, source: 'manual_refresh', eventType: 'refresh', level: 'success' });
         }
     } catch (error) {
         console.error('Failed to refresh data source:', error);
-        showInAppToast('Refresh failed', error.message, { error: true, source: 'manual_refresh', eventType: 'refresh' });
+        showInAppToast(t('refreshFailed'), error.message, { titleKey: 'refreshFailed', error: true, source: 'manual_refresh', eventType: 'refresh' });
     } finally {
         if (button) {
             setTimeout(() => {
@@ -2729,7 +2902,7 @@ function initWebSocket() {
     
     state.ws.onopen = () => {
         console.log('WebSocket connected');
-        updateStatus('connected', 'Connected');
+        updateStatus('connected', t('connected'));
     };
     
     state.ws.onmessage = (event) => {
@@ -2743,12 +2916,12 @@ function initWebSocket() {
     
     state.ws.onerror = (error) => {
         console.error('WebSocket error:', error);
-        updateStatus('disconnected', 'Error');
+        updateStatus('disconnected', t('error'));
     };
     
     state.ws.onclose = () => {
         console.log('WebSocket disconnected');
-        updateStatus('disconnected', 'Disconnected');
+        updateStatus('disconnected', t('disconnected'));
         // Attempt to reconnect after 3 seconds
         setTimeout(initWebSocket, 3000);
     };
@@ -2888,9 +3061,9 @@ function handleWebSocketMessage(data) {
             flashFavicon();
 
             recordEventLog({
-                title: 'Rows changed',
                 titleKey: 'eventLogRowsChanged',
-                message: titleMessage,
+                messageKey: 'eventLogChangeSummary',
+                messageValues: changeCounts,
                 level: 'update',
                 type: 'row_updated',
                 source: 'websocket',
@@ -2913,7 +3086,12 @@ function handleWebSocketMessage(data) {
     } else if (data.type === 'config_update') {
         const diff = applyConfig(data.config, 'file watcher');
         if (shouldNotifyConfigReload(diff)) {
-            showInAppToast('Settings reloaded', diff.message || 'Configuration file changes were applied.', {
+            const messageKey = diff.messageKey || 'settingsReloadedMessage';
+            const messageValues = diff.messageValues || {};
+            showInAppToast(t('settingsReloaded'), t(messageKey, messageValues), {
+                titleKey: 'settingsReloaded',
+                messageKey,
+                messageValues,
                 source: 'config_update',
                 eventType: 'config_update',
                 level: 'update',
@@ -2986,14 +3164,14 @@ function updateFooterFileName() {
         if (headerFileChip) headerFileChip.title = state.fileName;
     } else {
         if (footerFile) {
-            footerFile.textContent = 'Unknown';
+            footerFile.textContent = t('unknown');
             footerFile.removeAttribute('title');
         }
         if (headerFile) {
-            headerFile.textContent = 'Unknown';
+            headerFile.textContent = t('unknown');
             headerFile.removeAttribute('title');
         }
-        if (headerFileChip) headerFileChip.title = 'Current source file';
+        if (headerFileChip) headerFileChip.title = t('currentSourceFile');
     }
 }
 
@@ -3038,16 +3216,16 @@ function renderConnectionPanel() {
     const details = document.getElementById('connectionDetails');
     const log = document.getElementById('connectionLog');
     if (!details || !log) return;
-    const wsState = state.ws ? ['Connecting', 'Open', 'Closing', 'Closed'][state.ws.readyState] || 'Unknown' : 'Not started';
-    const file = state.fileName || 'Unknown';
+    const wsState = state.ws ? [t('connecting'), t('open'), t('closing'), t('closed')][state.ws.readyState] || t('unknown') : t('notStarted');
+    const file = state.fileName || t('unknown');
     const patris = state.processStatus?.patris81 || {};
     const fileAccess = state.processStatus?.file_access || {};
     details.innerHTML = `
-        <div><span>Status</span><strong>${escapeHtml(state.connectionStatus.text)}</strong></div>
-        <div><span>WebSocket</span><strong>${escapeHtml(wsState)}</strong></div>
-        <div><span>Source</span><strong title="${escapeHtml(file)}">${escapeHtml(file.split('/').pop().split('\\').pop() || file)}</strong></div>
-        <div><span>Patris81</span><strong>${patris.running ? `Running (${patris.count || 1})` : 'Not running'}</strong></div>
-        <div><span>Database lock</span><strong>${fileAccess.in_use ? `Locked (${fileAccess.count || 1})` : 'Unlocked'}</strong></div>
+        <div><span>${escapeHtml(t('status'))}</span><strong>${escapeHtml(state.connectionStatus.text)}</strong></div>
+        <div><span>${escapeHtml(t('webSocket'))}</span><strong>${escapeHtml(wsState)}</strong></div>
+        <div><span>${escapeHtml(t('source'))}</span><strong title="${escapeHtml(file)}">${escapeHtml(file.split('/').pop().split('\\').pop() || file)}</strong></div>
+        <div><span>Patris81</span><strong>${patris.running ? `${escapeHtml(t('running'))} (${patris.count || 1})` : escapeHtml(t('notRunning'))}</strong></div>
+        <div><span>${escapeHtml(t('databaseLock'))}</span><strong>${fileAccess.in_use ? `${escapeHtml(t('locked'))} (${fileAccess.count || 1})` : escapeHtml(t('unlocked'))}</strong></div>
     `;
     log.innerHTML = state.connectionLog.map(entry => `
         <div class="connection-log-entry ${escapeHtml(entry.level)}">
@@ -3065,41 +3243,7 @@ function openConnectionPanel() {
 
 // Extract and organize fields from records
 function extractFields() {
-    if (state.records.length === 0) return;
-    
-    const firstRecord = state.records[0];
-    const allFields = Object.keys(firstRecord);
-    
-    // Separate ANBAR array from other fields
-    // Code is the stable viewer identity alias for canonical product_code.
-    // Keep the canonical key on the record for rules/integrations without
-    // rendering a duplicate identity column.
-    const nonAnbarFields = allFields.filter(f => f !== 'ANBAR' && f !== 'product_code');
-    
-    // If ANBAR is an array, create separate ANBAR1, ANBAR2, etc. columns
-    if (firstRecord.ANBAR && Array.isArray(firstRecord.ANBAR)) {
-        const anbarLength = firstRecord.ANBAR.length;
-        const anbarFields = [];
-        for (let i = 0; i < anbarLength; i++) {
-            anbarFields.push(`ANBAR${i + 1}`);
-        }
-        
-        // Ensure Code is first, Name is second (if it exists), then other fields, then ANBAR columns
-        const otherFields = nonAnbarFields.filter(f => f !== 'Code' && f !== 'Name');
-        if (nonAnbarFields.includes('Name')) {
-            state.fields = ['Code', 'Name', ...otherFields, ...anbarFields];
-        } else {
-            state.fields = ['Code', ...otherFields, ...anbarFields];
-        }
-    } else {
-        // Ensure Code is first, Name is second (if it exists)
-        const otherFields = nonAnbarFields.filter(f => f !== 'Code' && f !== 'Name');
-        if (nonAnbarFields.includes('Name')) {
-            state.fields = ['Code', 'Name', ...otherFields];
-        } else {
-            state.fields = ['Code', ...otherFields];
-        }
-    }
+    state.fields = deriveGridFields(state.records);
     applyColumnOrder();
 }
 
@@ -3114,12 +3258,10 @@ function applyColumnOrder() {
 
 // Ensure Code column is always first
 function ensureCodeFirst() {
-    const codeIndex = state.fields.indexOf('Code');
+    const codeIndex = state.fields.findIndex(field => ['code', 'product_code'].includes(String(field).toLowerCase()));
     if (codeIndex > 0) {
-        // Remove Code from its current position
-        state.fields.splice(codeIndex, 1);
-        // Add Code to the beginning
-        state.fields.unshift('Code');
+        const [identityField] = state.fields.splice(codeIndex, 1);
+        state.fields.unshift(identityField);
     }
 }
 
@@ -3185,65 +3327,77 @@ function renderTableHeader() {
 
     const visibleFields = state.fields.filter(field => !state.hiddenColumns.has(field));
     renderColumnLayout(visibleFields);
-    const visibleAnbarFields = visibleFields.filter(field => isAnbarField(field));
-    const hasAnbarFields = visibleAnbarFields.length > 0;
+    const visibleWarehouseFields = visibleFields.filter(field => isWarehouseColumnField(field));
+    const hasWarehouseFields = visibleWarehouseFields.length > 0;
+    const frozenField = state.settings.freezeFirstColumn ? visibleFields[0] : '';
 
     const groupRow = document.createElement('tr');
-    groupRow.className = 'anbar-group-row';
+    groupRow.className = 'warehouse-group-row';
     const columnRow = document.createElement('tr');
-    columnRow.className = hasAnbarFields ? 'column-header-row has-anbar-group' : 'column-header-row';
+    columnRow.className = hasWarehouseFields ? 'column-header-row has-warehouse-group' : 'column-header-row';
     const filterRow = document.createElement('tr');
     filterRow.className = 'filter-row';
 
-    groupRow.appendChild(createSelectionHeaderCell(hasAnbarFields ? 2 : 1));
+    groupRow.appendChild(createSelectionHeaderCell(hasWarehouseFields ? 2 : 1));
     const selectionFilter = document.createElement('th');
     selectionFilter.className = 'selection-column selection-filter-cell';
     selectionFilter.setAttribute('aria-hidden', 'true');
     filterRow.appendChild(selectionFilter);
 
-    let processedAnbar = false;
+    let processedWarehouses = false;
 
     visibleFields.forEach(field => {
-        // Handle ANBAR grouped columns
-        if (isAnbarField(field) && !processedAnbar) {
-            if (visibleAnbarFields.length > 0 && hasAnbarFields) {
+        if (isWarehouseColumnField(field) && !processedWarehouses) {
+            if (visibleWarehouseFields.length > 0 && hasWarehouseFields) {
                 const groupTh = document.createElement('th');
                 groupTh.textContent = displayStockGroupName();
-                groupTh.setAttribute('colspan', visibleAnbarFields.length);
-                groupTh.className = 'anbar-group-header';
+                groupTh.setAttribute('colspan', visibleWarehouseFields.length);
+                groupTh.className = 'warehouse-group-header';
+                groupTh.tabIndex = 0;
+                groupTh.setAttribute('aria-haspopup', 'menu');
+                groupTh.addEventListener('contextmenu', event => {
+                    event.preventDefault();
+                    openWarehouseGroupContextMenu({ point: { x: event.clientX, y: event.clientY }, trigger: groupTh, focusMenu: true });
+                });
+                groupTh.addEventListener('keydown', event => {
+                    if (event.key === 'ContextMenu' || (event.shiftKey && event.key === 'F10')) {
+                        event.preventDefault();
+                        openWarehouseGroupContextMenu({ trigger: groupTh, focusMenu: true });
+                    }
+                });
                 groupRow.appendChild(groupTh);
 
-                // Create individual ANBAR column headers and filters
-                visibleAnbarFields.forEach(anbarField => {
-                    const anbarNum = anbarField.substring(5); // Extract number
-                    const label = anbarNum;
-                    const th = createHeaderCell(anbarField, { label, className: 'anbar-column' });
+                visibleWarehouseFields.forEach(warehouseField => {
+                    const th = createHeaderCell(warehouseField, {
+                        label: displayFieldName(warehouseField),
+                        className: 'warehouse-column'
+                    });
                     columnRow.appendChild(th);
-                    
-                    // Create filter cell for this ANBAR field
+
                     const filterTh = document.createElement('th');
-                    filterTh.dataset.filterField = anbarField;
-                    filterTh.appendChild(createFilterControl(anbarField));
+                    filterTh.className = 'warehouse-column';
+                    filterTh.dataset.filterField = warehouseField;
+                    filterTh.appendChild(createFilterControl(warehouseField));
                     filterRow.appendChild(filterTh);
                 });
             }
-            
-            processedAnbar = true;
-        } else if (!isAnbarField(field)) {
-            // Regular field header
+
+            processedWarehouses = true;
+        } else if (!isWarehouseColumnField(field)) {
             const th = createHeaderCell(field, {
                 label: displayFieldName(field),
-                rowSpan: hasAnbarFields ? 2 : 1,
-                className: field === 'Code' ? 'sticky-column' : ''
+                rowSpan: hasWarehouseFields ? 2 : 1,
+                className: [field === frozenField ? 'sticky-column' : '', String(field).toLowerCase() === 'warnings' ? 'warning-column' : ''].filter(Boolean).join(' ')
             });
             groupRow.appendChild(th);
             
             // Create filter cell for this field
             const filterTh = document.createElement('th');
             filterTh.dataset.filterField = field;
-            if (field === 'Code') {
+            if (field === frozenField) {
                 filterTh.classList.add('sticky-column');
             }
+            if (String(field).toLowerCase() === 'warnings') filterTh.classList.add('warning-column');
             filterTh.appendChild(createFilterControl(field));
             filterRow.appendChild(filterTh);
         }
@@ -3253,7 +3407,7 @@ function renderTableHeader() {
     const actionsHeader = document.createElement('th');
     actionsHeader.textContent = t('actions');
     actionsHeader.className = 'actions-column';
-    if (hasAnbarFields) {
+    if (hasWarehouseFields) {
         actionsHeader.setAttribute('rowspan', '2');
     }
     groupRow.appendChild(actionsHeader);
@@ -3281,7 +3435,7 @@ function renderTableHeader() {
     filterRow.appendChild(actionsFilter);
 
     thead.appendChild(groupRow);
-    if (hasAnbarFields) {
+    if (hasWarehouseFields) {
         thead.appendChild(columnRow);
     }
     thead.appendChild(filterRow);
@@ -3369,10 +3523,6 @@ function updateSelectionCount() {
     element.textContent = count ? t('selectedCount', { count }) : '';
 }
 
-function isAnbarField(field) {
-    return field.startsWith('ANBAR') && field.length > 5;
-}
-
 function createHeaderCell(field, { label, rowSpan = 1, className = '' } = {}) {
     const th = document.createElement('th');
     th.className = ['sortable', className].filter(Boolean).join(' ');
@@ -3397,15 +3547,28 @@ function createHeaderCell(field, { label, rowSpan = 1, className = '' } = {}) {
     th.appendChild(sortContainer);
     th.dataset.field = field;
     th.tabIndex = 0;
+    th.setAttribute('aria-haspopup', 'menu');
     th.setAttribute('aria-sort', state.sortField === field ? (state.sortDirection === 'asc' ? 'ascending' : 'descending') : 'none');
     th.addEventListener('click', event => {
         if (!event.target.closest('.column-resizer')) sortByField(field);
     });
     th.addEventListener('keydown', event => {
-        if ((event.key === 'Enter' || event.key === ' ') && event.target === th) {
+        if ((event.key === 'ContextMenu' || (event.shiftKey && event.key === 'F10')) && event.target === th) {
+            event.preventDefault();
+            openHeaderCommandMenu(field, { trigger: th, focusMenu: true });
+        } else if ((event.key === 'Enter' || event.key === ' ') && event.target === th) {
             event.preventDefault();
             sortByField(field);
         }
+    });
+    th.addEventListener('contextmenu', event => {
+        if (event.target.closest('.column-resizer')) return;
+        event.preventDefault();
+        openHeaderCommandMenu(field, {
+            point: { x: event.clientX, y: event.clientY },
+            trigger: th,
+            focusMenu: true
+        });
     });
     th.appendChild(createColumnResizer(field));
     return th;
@@ -3449,14 +3612,17 @@ function createColumnResizer(field) {
         const startWidth = columnWidth(field);
         handle.classList.add('resizing');
         handle.setPointerCapture?.(event.pointerId);
+        setColumnResizeGuide(event.clientX, true);
 
         const move = moveEvent => {
             const width = resizedColumnWidth(startWidth, moveEvent.clientX - startX, isTableRTL());
             setColumnWidth(field, width, { persist: false });
             handle.setAttribute('aria-valuenow', String(width));
+            setColumnResizeGuide(moveEvent.clientX, true);
         };
         const end = endEvent => {
             handle.classList.remove('resizing');
+            setColumnResizeGuide(0, false);
             handle.releasePointerCapture?.(endEvent.pointerId);
             handle.removeEventListener('pointermove', move);
             handle.removeEventListener('pointerup', end);
@@ -3468,6 +3634,20 @@ function createColumnResizer(field) {
         handle.addEventListener('pointercancel', end);
     });
     return handle;
+}
+
+function setColumnResizeGuide(clientX, visible) {
+    const guide = document.getElementById('columnResizeGuide');
+    const container = document.querySelector('.table-container');
+    if (!guide || !container || !visible) {
+        if (guide) guide.hidden = true;
+        return;
+    }
+    const rect = container.getBoundingClientRect();
+    guide.style.left = `${Math.min(rect.right, Math.max(rect.left, clientX))}px`;
+    guide.style.top = `${rect.top}px`;
+    guide.style.height = `${rect.height}px`;
+    guide.hidden = false;
 }
 
 function setColumnWidth(field, width, { persist = false } = {}) {
@@ -3493,7 +3673,7 @@ function resetAllColumnWidths() {
     state.settings.columnWidths = {};
     renderTableHeader();
     saveSettings();
-    showInAppToast(t('widthsReset'), '', { source: 'table_settings', eventType: 'table_settings' });
+    showInAppToast(t('widthsReset'), '', { titleKey: 'widthsReset', source: 'table_settings', eventType: 'table_settings' });
 }
 
 // Create filter control based on field type
@@ -3513,7 +3693,7 @@ function createFilterControl(field) {
         // Dropdown for categorical fields
         const select = document.createElement('select');
         select.className = 'filter-select';
-        select.setAttribute('aria-label', `Filter ${displayFieldName(field)}`);
+        select.setAttribute('aria-label', t('filterColumn', { column: displayFieldName(field) }));
         
         const defaultOption = document.createElement('option');
         defaultOption.value = '';
@@ -3560,7 +3740,7 @@ function createFilterControl(field) {
         input.className = 'filter-input';
         input.placeholder = t('filterPlaceholder');
         input.value = currentFilter?.value ?? '';
-        input.setAttribute('aria-label', `Filter ${displayFieldName(field)} text`);
+        input.setAttribute('aria-label', t('filterColumnText', { column: displayFieldName(field) }));
         
         const updateTextFilter = debounce((e) => {
             const value = e.target.value.trim();
@@ -3648,15 +3828,15 @@ function createRangePopover2(field, currentFilter, mode) {
     exactInput.className = 'filter-input range-direct-input';
     exactInput.placeholder = hasUsableRange ? `${formatRangeValue(minLimit)}-${formatRangeValue(maxLimit)}` : formatRangeValue(minLimit);
     exactInput.title = hasUsableRange
-        ? `Type an exact value, a range like ${formatRangeValue(minLimit)}-${formatRangeValue(maxLimit)}, >=value, or <=value`
-        : `All sampled values are ${formatRangeValue(minLimit)}`;
-    exactInput.setAttribute('aria-label', `${displayFieldName(field)} exact or range filter`);
+        ? t('exactRangeHelp', { minimum: formatRangeValue(minLimit), maximum: formatRangeValue(maxLimit) })
+        : t('sampledValue', { value: formatRangeValue(minLimit) });
+    exactInput.setAttribute('aria-label', t('exactOrRangeFilter', { column: displayFieldName(field) }));
 
     const button = document.createElement('button');
     button.type = 'button';
     button.className = 'range-trigger range-trigger-ellipsis';
     button.innerHTML = iconMarkup('more');
-    button.setAttribute('aria-label', `Open ${displayFieldName(field)} range options`);
+    button.setAttribute('aria-label', t('openRangeOptions', { column: displayFieldName(field) }));
 
     const panel = document.createElement('div');
     panel.className = 'range-panel';
@@ -3665,24 +3845,24 @@ function createRangePopover2(field, currentFilter, mode) {
     const meta = document.createElement('div');
     meta.className = 'range-meta';
     meta.innerHTML = hasUsableRange
-        ? `<span>Min <strong>${escapeHtml(formatRangeValue(minLimit))}</strong></span><span>Max <strong>${escapeHtml(formatRangeValue(maxLimit))}</strong></span>`
-        : `<span class="range-meta-note">All sampled values are <strong>${escapeHtml(formatRangeValue(minLimit))}</strong></span>`;
+        ? `<span>${escapeHtml(t('minimum'))} <strong>${escapeHtml(formatRangeValue(minLimit))}</strong></span><span>${escapeHtml(t('maximum'))} <strong>${escapeHtml(formatRangeValue(maxLimit))}</strong></span>`
+        : `<span class="range-meta-note">${escapeHtml(t('sampledValue', { value: formatRangeValue(minLimit) }))}</span>`;
 
     const minInput = document.createElement('input');
     minInput.type = 'text';
     minInput.inputMode = mode === 'numeric' ? 'decimal' : 'text';
     minInput.className = 'filter-input-small';
-    minInput.placeholder = 'Min';
+    minInput.placeholder = t('minimum');
     minInput.value = currentFilter?.min ?? '';
-    minInput.setAttribute('aria-label', `Minimum ${displayFieldName(field)}`);
+    minInput.setAttribute('aria-label', t('minimumColumn', { column: displayFieldName(field) }));
 
     const maxInput = document.createElement('input');
     maxInput.type = 'text';
     maxInput.inputMode = mode === 'numeric' ? 'decimal' : 'text';
     maxInput.className = 'filter-input-small';
-    maxInput.placeholder = 'Max';
+    maxInput.placeholder = t('maximum');
     maxInput.value = currentFilter?.max ?? '';
-    maxInput.setAttribute('aria-label', `Maximum ${displayFieldName(field)}`);
+    maxInput.setAttribute('aria-label', t('maximumColumn', { column: displayFieldName(field) }));
 
     const minSlider = document.createElement('input');
     minSlider.type = 'range';
@@ -3705,7 +3885,7 @@ function createRangePopover2(field, currentFilter, mode) {
     const clearBtn = document.createElement('button');
     clearBtn.type = 'button';
     clearBtn.className = 'range-clear';
-    clearBtn.textContent = 'Clear';
+    clearBtn.textContent = t('clearFilters');
 
     const updateDirectInput = () => {
         const latest = state.columnFilters[field];
@@ -3848,7 +4028,7 @@ function parseNumericFilterText(text) {
         const exact = parseFloat(compact);
         return { min: exact, max: exact };
     }
-    return { error: 'Use a number, min-max, >=min, or <=max' };
+    return { error: t('invalidNumberRange') };
 }
 
 function formatRangeValue(value) {
@@ -3868,25 +4048,25 @@ function createJalaliDateFilterControl(field, currentFilter) {
     fromInput.type = 'text';
     fromInput.inputMode = 'numeric';
     fromInput.className = 'filter-input jalali-date-input';
-    fromInput.placeholder = minDate ? JalaliUtils.format(minDate) : 'From';
+    fromInput.placeholder = minDate ? JalaliUtils.format(minDate) : t('from');
     fromInput.value = currentFilter?.min ?? '';
-    fromInput.title = 'Jalali date, YY.MM.DD';
-    fromInput.setAttribute('aria-label', `From ${displayFieldName(field)} Jalali date`);
+    fromInput.title = t('jalaliDateFormat');
+    fromInput.setAttribute('aria-label', t('jalaliDateFrom', { column: displayFieldName(field) }));
 
     const toInput = document.createElement('input');
     toInput.type = 'text';
     toInput.inputMode = 'numeric';
     toInput.className = 'filter-input jalali-date-input';
-    toInput.placeholder = maxDate ? JalaliUtils.format(maxDate) : 'To';
+    toInput.placeholder = maxDate ? JalaliUtils.format(maxDate) : t('to');
     toInput.value = currentFilter?.max ?? '';
-    toInput.title = 'Jalali date, YY.MM.DD';
-    toInput.setAttribute('aria-label', `To ${displayFieldName(field)} Jalali date`);
+    toInput.title = t('jalaliDateFormat');
+    toInput.setAttribute('aria-label', t('jalaliDateTo', { column: displayFieldName(field) }));
 
     const button = document.createElement('button');
     button.type = 'button';
     button.className = 'range-trigger range-trigger-ellipsis date-picker-trigger';
     button.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M7 3v3M17 3v3M4 9h16M6 5h12a2 2 0 0 1 2 2v11a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2Z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>';
-    button.setAttribute('aria-label', `Open ${displayFieldName(field)} Jalali date picker`);
+    button.setAttribute('aria-label', t('jalaliDatePicker', { column: displayFieldName(field) }));
 
     const panel = document.createElement('div');
     panel.className = 'range-panel jalali-picker-panel';
@@ -3895,8 +4075,8 @@ function createJalaliDateFilterControl(field, currentFilter) {
     const meta = document.createElement('div');
     meta.className = 'range-meta';
     meta.innerHTML = minDate && maxDate
-        ? `<span>Min <strong>${escapeHtml(JalaliUtils.format(minDate))}</strong></span><span>Max <strong>${escapeHtml(JalaliUtils.format(maxDate))}</strong></span>`
-        : '<span class="range-meta-note">No valid Jalali dates detected</span>';
+        ? `<span>${escapeHtml(t('minimum'))} <strong>${escapeHtml(JalaliUtils.format(minDate))}</strong></span><span>${escapeHtml(t('maximum'))} <strong>${escapeHtml(JalaliUtils.format(maxDate))}</strong></span>`
+        : `<span class="range-meta-note">${escapeHtml(t('noJalaliDates'))}</span>`;
 
     const pickerState = {
         cursor: JalaliUtils.parse(fromInput.value) || minDate || maxDate || { year: 0, month: 1, day: 1 },
@@ -3908,8 +4088,8 @@ function createJalaliDateFilterControl(field, currentFilter) {
         const maxText = toInput.value.trim();
         const parsedMin = minText ? JalaliUtils.parse(minText) : null;
         const parsedMax = maxText ? JalaliUtils.parse(maxText) : null;
-        fromInput.setCustomValidity(minText && !parsedMin ? 'Use YY.MM.DD' : '');
-        toInput.setCustomValidity(maxText && !parsedMax ? 'Use YY.MM.DD' : '');
+        fromInput.setCustomValidity(minText && !parsedMin ? t('invalidJalaliDate') : '');
+        toInput.setCustomValidity(maxText && !parsedMax ? t('invalidJalaliDate') : '');
         if ((minText && !parsedMin) || (maxText && !parsedMax)) return;
 
         let nextMin = minText;
@@ -3961,7 +4141,7 @@ function createJalaliDateFilterControl(field, currentFilter) {
             const targetButton = document.createElement('button');
             targetButton.type = 'button';
             targetButton.className = pickerState.target === target ? 'active' : '';
-            targetButton.textContent = target === 'min' ? 'From' : 'To';
+            targetButton.textContent = target === 'min' ? t('from') : t('to');
             targetButton.addEventListener('click', () => {
                 pickerState.target = target;
                 renderPicker();
@@ -3995,7 +4175,7 @@ function createJalaliDateFilterControl(field, currentFilter) {
         const clearBtn = document.createElement('button');
         clearBtn.type = 'button';
         clearBtn.className = 'range-clear';
-        clearBtn.textContent = 'Clear';
+        clearBtn.textContent = t('clearFilters');
         clearBtn.addEventListener('click', () => {
             fromInput.value = '';
             toInput.value = '';
@@ -4038,7 +4218,7 @@ function createCodeFilterControl(currentFilter) {
 
     const typeSelect = document.createElement('select');
     typeSelect.className = 'filter-select code-filter-type';
-    typeSelect.setAttribute('aria-label', 'Filter Code type');
+    typeSelect.setAttribute('aria-label', t('filterCodeType'));
     [
         ['', t('all')],
         ['group', t('group')],
@@ -4058,7 +4238,7 @@ function createCodeFilterControl(currentFilter) {
     segmentInput.className = 'filter-input code-segment-input';
     segmentInput.placeholder = '100/200';
     segmentInput.value = currentFilter?.segment || '';
-    segmentInput.setAttribute('aria-label', 'Filter Code group segments');
+    segmentInput.setAttribute('aria-label', t('filterCodeSegments'));
 
     const badge = document.createElement('span');
     badge.className = 'filter-badge';
@@ -4133,28 +4313,6 @@ function rowAccessibleLabel(record, selectionKey) {
 }
 
 function renderTableCellValue(cell, field, value) {
-    if (field === 'warehouse_stock' && value && typeof value === 'object' && !Array.isArray(value)) {
-        const list = document.createElement('div');
-        list.className = 'warehouse-stock-list';
-        Object.entries(value)
-            .sort(([left], [right]) => left.localeCompare(right, undefined, { numeric: true, sensitivity: 'base' }))
-            .forEach(([warehouse, amount]) => {
-                const chip = document.createElement('span');
-                chip.className = 'warehouse-stock-chip';
-                const name = document.createElement('span');
-                name.className = 'warehouse-stock-name';
-                name.textContent = warehouse;
-                const stock = document.createElement('strong');
-                stock.className = 'warehouse-stock-value';
-                stock.textContent = structuredValueText(amount) || '0';
-                chip.append(name, stock);
-                list.appendChild(chip);
-            });
-        if (!list.childElementCount) list.textContent = '—';
-        cell.appendChild(list);
-        return;
-    }
-
     if (field !== 'Code' && field !== 'Serial' && typeof value !== 'object'
         && value !== null && value !== undefined && value !== '' && !isNaN(value)) {
         cell.textContent = formatNumberWithSeparator(value);
@@ -4198,6 +4356,8 @@ function renderTable(changedIndices = new Set()) {
     }
 
     const visibleSelectionKeys = recordsToShow.map(recordSelectionKey);
+    const visibleFields = state.fields.filter(field => !state.hiddenColumns.has(field));
+    const frozenField = state.settings.freezeFirstColumn ? visibleFields[0] : '';
     state.rovingRowKey = resolvedRovingKey(focusedRowKey || state.rovingRowKey, visibleSelectionKeys);
 
     tbody.innerHTML = '';
@@ -4244,25 +4404,15 @@ function renderTable(changedIndices = new Set()) {
 
             const td = document.createElement('td');
 
-            // Handle ANBAR fields (ANBAR1, ANBAR2, etc.)
-            if (field.startsWith('ANBAR') && field.length > 5) {
-                const anbarIndex = parseInt(field.substring(5), 10) - 1;
-                if (record.ANBAR && Array.isArray(record.ANBAR) && anbarIndex < record.ANBAR.length) {
-                    const value = record.ANBAR[anbarIndex];
-                    // Apply thousand separator to ANBAR values
-                    td.textContent = value !== null && value !== undefined ? formatNumberWithSeparator(value) : '';
-                } else {
-                    td.textContent = '';
-                }
-                td.classList.add('anbar-column');
-                // Right-align numeric ANBAR values
-                td.style.textAlign = 'right';
-            } else {
-                renderTableCellValue(td, field, record[field]);
+            const value = getFieldValue(record, field);
+            renderTableCellValue(td, field, value);
+            if (isWarehouseColumnField(field)) td.classList.add('warehouse-column');
+            if (String(field).toLowerCase() === 'warnings') {
+                td.classList.add('warning-column');
+                td.title = structuredValueText(value);
             }
 
-            // Make Code column sticky
-            if (field === 'Code') {
+            if (field === frozenField) {
                 td.classList.add('sticky-column');
             }
             row.appendChild(td);
@@ -4399,16 +4549,92 @@ function commandsForRow(record) {
 }
 
 function openRowCommandMenu(record, { point = null, trigger = null, focusMenu = false } = {}) {
+    state.rowMenu.record = record;
+    openGridCommandMenu(commandsForRow(record), {
+        point,
+        trigger,
+        focusMenu,
+        kind: 'row',
+        ariaLabel: t('rowActions', { code: stableRecordKey(record) || '—' })
+    });
+}
+
+function headerCommands(field) {
+    const identity = canonicalColumnKey(field) === 'product_code';
+    return [
+        { id: 'sort_ascending', icon: 'arrowUp', label: t('sortAscending'), execute: () => applySort(field, 'asc') },
+        { id: 'sort_descending', icon: 'arrowDown', label: t('sortDescending'), execute: () => applySort(field, 'desc') },
+        { id: 'reset_width', icon: 'refresh', label: t('resetColumnWidth'), execute: () => resetColumnWidth(field) },
+        ...(!identity ? [{ id: 'hide_column', icon: 'close', label: t('hideColumn'), execute: () => hideColumn(field) }] : []),
+        { id: 'manage_columns', icon: 'columns', label: t('manageColumns'), execute: () => openModalRoute('columns') }
+    ];
+}
+
+function openHeaderCommandMenu(field, options = {}) {
+    openGridCommandMenu(headerCommands(field), {
+        ...options,
+        kind: 'header',
+        ariaLabel: t('headerActions', { column: displayFieldName(field) })
+    });
+}
+
+function openWarehouseGroupContextMenu(options = {}) {
+    openGridCommandMenu([
+        { id: 'show_warehouses', icon: 'check-square', label: t('showAll'), execute: () => setWarehouseVisibility(true) },
+        { id: 'hide_warehouses', icon: 'close', label: t('hideAll'), execute: () => setWarehouseVisibility(false) },
+        { id: 'manage_columns', icon: 'columns', label: t('manageColumns'), execute: () => openModalRoute('columns') }
+    ], { ...options, kind: 'header', ariaLabel: t('warehouseStock') });
+}
+
+function dialogCommands(panelID) {
+    const definitions = {
+        settingsPanel: [
+            { id: 'open_columns', icon: 'columns', label: t('openColumns'), execute: () => openModalRoute('columns') },
+            { id: 'open_connection', icon: 'info', label: t('openConnection'), execute: () => openModalRoute('connection') },
+            { id: 'open_logs', icon: 'list', label: t('openEventLog'), execute: () => openModalRoute('logs') }
+        ],
+        columnsPanel: [
+            { id: 'show_all', icon: 'check-square', label: t('showAll'), execute: showAllColumns },
+            { id: 'hide_all', icon: 'close', label: t('hideAll'), execute: hideAllOptionalColumns },
+            { id: 'reset_widths', icon: 'refresh', label: t('resetColumnWidths'), execute: resetAllColumnWidths }
+        ],
+        connectionPanel: [
+            { id: 'refresh_source', icon: 'refresh', label: t('refreshSource'), execute: requestSourceRefresh },
+            { id: 'copy_status', icon: 'copy', label: t('copyStatus'), execute: copyConnectionStatus }
+        ],
+        eventLogPanel: [
+            { id: 'copy_event_log', icon: 'copy', label: t('copyEventLog'), execute: copyEventLog },
+            { id: 'clear_event_log', icon: 'trash', label: t('eventLogClear'), execute: () => clearEventLog() }
+        ],
+        inspectorPanel: [
+            { id: 'copy_inspected_json', icon: 'braces', label: t('copyJSON'), execute: () => copyTextToClipboard(JSON.stringify(state.inspectedRecord || {}, null, 2)) },
+            { id: 'open_columns', icon: 'columns', label: t('openColumns'), execute: () => openModalRoute('columns') }
+        ]
+    };
+    return definitions[panelID] || [];
+}
+
+function openDialogCommandMenu(panelID, trigger) {
+    openGridCommandMenu(dialogCommands(panelID), {
+        trigger,
+        focusMenu: true,
+        kind: 'dialog',
+        ariaLabel: t('moreActions')
+    });
+}
+
+function openGridCommandMenu(commands, { point = null, trigger = null, focusMenu = false, kind = '', ariaLabel = '' } = {}) {
     const menu = document.getElementById('rowContextMenu');
     if (!menu) return;
     closeRowCommandMenu({ restoreFocus: false });
-    state.rowMenu.record = record;
     state.rowMenu.trigger = trigger;
     state.rowMenu.focusTarget = trigger?.closest?.('tr[data-row-key]') || trigger;
-    if (trigger?.matches('.row-action-button')) trigger.setAttribute('aria-expanded', 'true');
+    state.rowMenu.kind = kind;
+    trigger?.setAttribute?.('aria-expanded', 'true');
+    menu.setAttribute('aria-label', ariaLabel || t('actions'));
 
     menu.innerHTML = '';
-    commandsForRow(record).forEach(command => {
+    commands.forEach(command => {
         const item = document.createElement('button');
         item.type = 'button';
         item.className = 'row-context-menu-item';
@@ -4421,7 +4647,7 @@ function openRowCommandMenu(record, { point = null, trigger = null, focusMenu = 
             event.stopPropagation();
             closeRowCommandMenu({ restoreFocus: true });
             Promise.resolve(command.execute()).catch(error => {
-                showInAppToast(t('copyFailed'), error.message, { error: true, source: 'row_action', eventType: 'row_action' });
+                showInAppToast(t('copyFailed'), error.message, { titleKey: 'copyFailed', error: true, source: `${kind || 'grid'}_action`, eventType: `${kind || 'grid'}_action` });
             });
         });
         menu.appendChild(item);
@@ -4462,13 +4688,14 @@ function closeRowCommandMenu({ restoreFocus = false } = {}) {
     if (!menu || menu.hidden) return;
     const trigger = state.rowMenu.trigger;
     const focusTarget = state.rowMenu.focusTarget;
-    if (trigger?.matches('.row-action-button')) trigger.setAttribute('aria-expanded', 'false');
+    trigger?.setAttribute?.('aria-expanded', 'false');
     menu.hidden = true;
     menu.classList.remove('open');
     menu.innerHTML = '';
     state.rowMenu.record = null;
     state.rowMenu.trigger = null;
     state.rowMenu.focusTarget = null;
+    state.rowMenu.kind = '';
     if (restoreFocus && focusTarget?.isConnected) focusTarget.focus({ preventScroll: true });
 }
 
@@ -4514,11 +4741,11 @@ async function executeRowCommand(commandID, record) {
             return;
         case 'copy_code':
             await copyTextToClipboard(recordCode);
-            showInAppToast(t('copied'), t('codeCopied'), { source: 'row_action', eventType: 'row_action' });
+            showInAppToast(t('copied'), t('codeCopied'), { titleKey: 'copied', messageKey: 'codeCopied', source: 'row_action', eventType: 'row_action' });
             return;
         case 'copy_json':
             await copyTextToClipboard(JSON.stringify(record, null, 2));
-            showInAppToast(t('copied'), t('jsonCopied'), { source: 'row_action', eventType: 'row_action' });
+            showInAppToast(t('copied'), t('jsonCopied'), { titleKey: 'copied', messageKey: 'jsonCopied', source: 'row_action', eventType: 'row_action' });
             return;
         case 'toggle_selection':
             if (state.selectedKeys.has(selectionKey)) state.selectedKeys.delete(selectionKey);
@@ -4548,41 +4775,44 @@ async function copyTextToClipboard(text) {
     if (!copied) throw new Error(t('copyFailed'));
 }
 
+async function copyConnectionStatus() {
+    await copyTextToClipboard(JSON.stringify({
+        connection: state.connectionStatus,
+        websocket: state.ws?.readyState ?? null,
+        source: state.fileName || '',
+        process: state.processStatus || null
+    }, null, 2));
+    showInAppToast(t('copied'), t('statusCopied'), { titleKey: 'copied', messageKey: 'statusCopied', source: 'connection', eventType: 'copy_status' });
+}
+
+async function copyEventLog() {
+    await copyTextToClipboard(JSON.stringify(state.eventLog, null, 2));
+    showInAppToast(t('copied'), t('eventLogCopied'), { titleKey: 'copied', messageKey: 'eventLogCopied', source: 'event_log', eventType: 'copy_event_log' });
+}
+
 // Sort by field
 function sortByField(field) {
-    // Toggle direction if same field, otherwise reset to ascending
-    if (state.sortField === field) {
-        state.sortDirection = state.sortDirection === 'asc' ? 'desc' : 'asc';
-    } else {
-        state.sortField = field;
-        state.sortDirection = 'asc';
-    }
-    
-    // Save sort preferences
+    const direction = state.sortField === field && state.sortDirection === 'asc' ? 'desc' : 'asc';
+    applySort(field, direction);
+}
+
+function applySort(field, direction) {
+    state.sortField = field;
+    state.sortDirection = direction === 'desc' ? 'desc' : 'asc';
     saveSortPreferences();
-    
     sortRecords();
-    renderTableHeader();  // Re-render header to update sort indicators
+    renderTableHeader();
     renderTable();
 }
 
 // Sort records based on current sort field and direction
 function sortRecords() {
     state.filteredRecords.sort((a, b) => {
-        let aVal, bVal;
-        
-        // Handle ANBAR fields (ANBAR1, ANBAR2, etc.)
-        if (state.sortField.startsWith('ANBAR') && state.sortField.length > 5) {
-            const anbarIndex = parseInt(state.sortField.substring(5), 10) - 1;
-            aVal = a.ANBAR && Array.isArray(a.ANBAR) && anbarIndex < a.ANBAR.length ? a.ANBAR[anbarIndex] : '';
-            bVal = b.ANBAR && Array.isArray(b.ANBAR) && anbarIndex < b.ANBAR.length ? b.ANBAR[anbarIndex] : '';
-        } else {
-            aVal = a[state.sortField];
-            bVal = b[state.sortField];
-        }
+        let aVal = getFieldValue(a, state.sortField);
+        let bVal = getFieldValue(b, state.sortField);
         
         // Special handling for Code field - right-pad to 9 characters for sorting
-        if (state.sortField === 'Code') {
+        if (canonicalColumnKey(state.sortField) === 'product_code') {
             aVal = String(aVal || '').padEnd(9, ' ');
             bVal = String(bVal || '').padEnd(9, ' ');
             // Use pure string comparison for Code to respect padding
@@ -4610,7 +4840,9 @@ function downloadCanonicalWorkbook() {
     document.body.appendChild(link);
     link.click();
     link.remove();
-    showInAppToast('Excel export started', 'The canonical workbook includes records and non-secret provenance metadata.', {
+    showInAppToast(t('excelExportStarted'), t('excelExportStartedMessage'), {
+        titleKey: 'excelExportStarted',
+        messageKey: 'excelExportStartedMessage',
         source: 'xlsx_export',
         eventType: 'xlsx_export'
     });
@@ -4647,15 +4879,50 @@ function renderColumnManager() {
     });
 }
 
+function refreshColumnVisibilityUI() {
+    removeHiddenColumnFilters();
+    saveHiddenColumns();
+    saveColumnFilters();
+    renderColumnManager();
+    renderTableHeader();
+    applyFilters();
+}
+
+function showAllColumns() {
+    state.hiddenColumns.clear();
+    refreshColumnVisibilityUI();
+}
+
+function hideAllOptionalColumns() {
+    state.fields.forEach(field => {
+        if (canonicalColumnKey(field) !== 'product_code') state.hiddenColumns.add(field);
+    });
+    refreshColumnVisibilityUI();
+}
+
+function hideColumn(field) {
+    if (canonicalColumnKey(field) === 'product_code') return;
+    state.hiddenColumns.add(field);
+    refreshColumnVisibilityUI();
+}
+
+function setWarehouseVisibility(visible) {
+    state.fields.filter(isWarehouseColumnField).forEach(field => {
+        if (visible) state.hiddenColumns.delete(field);
+        else state.hiddenColumns.add(field);
+    });
+    refreshColumnVisibilityUI();
+}
+
 function getColumnManagerEntries() {
     const entries = [];
-    const anbarFields = state.fields.filter(isAnbarField);
-    let anbarAdded = false;
+    const warehouseFields = state.fields.filter(isWarehouseColumnField);
+    let warehousesAdded = false;
     state.fields.forEach(field => {
-        if (isAnbarField(field)) {
-            if (!anbarAdded) {
-                entries.push({ key: 'ANBAR_GROUP', fields: anbarFields, type: 'stock', draggable: true });
-                anbarAdded = true;
+        if (isWarehouseColumnField(field)) {
+            if (!warehousesAdded) {
+                entries.push({ key: 'WAREHOUSE_GROUP', fields: warehouseFields, type: 'stock', draggable: true });
+                warehousesAdded = true;
             }
             return;
         }
@@ -4674,8 +4941,10 @@ function createColumnManagerRow(entry) {
     visibleCell.className = 'checkbox-label column-visible-toggle';
     const checkbox = document.createElement('input');
     checkbox.type = 'checkbox';
-    checkbox.checked = entry.fields.some(field => !state.hiddenColumns.has(field));
-    checkbox.disabled = entry.key === 'Code';
+    const visibleFields = entry.fields.filter(field => !state.hiddenColumns.has(field));
+    checkbox.checked = visibleFields.length === entry.fields.length;
+    checkbox.indeterminate = visibleFields.length > 0 && visibleFields.length < entry.fields.length;
+    checkbox.disabled = canonicalColumnKey(entry.key) === 'product_code';
     checkbox.addEventListener('change', event => {
         entry.fields.forEach(field => {
             if (event.target.checked) {
@@ -4695,10 +4964,10 @@ function createColumnManagerRow(entry) {
 
     const sourceCell = document.createElement('div');
     sourceCell.className = 'column-source-cell';
-    if (entry.key === 'ANBAR_GROUP') {
-        sourceCell.innerHTML = `<strong>ANBAR</strong><div class="warehouse-chip-grid">${entry.fields.map(field => `<span>${escapeHtml(field.replace('ANBAR', ''))}</span>`).join('')}</div>`;
+    if (entry.key === 'WAREHOUSE_GROUP') {
+        sourceCell.innerHTML = `<strong>warehouse_stock</strong><small>${escapeHtml(displayStockGroupName())}</small>`;
     } else {
-        sourceCell.innerHTML = `<strong>${escapeHtml(entry.key)}</strong>${entry.key === 'Code' ? '<small>Always visible</small>' : ''}`;
+        sourceCell.innerHTML = `<strong>${escapeHtml(entry.key)}</strong>${canonicalColumnKey(entry.key) === 'product_code' ? `<small>${escapeHtml(t('alwaysVisible'))}</small>` : ''}`;
     }
 
     const labelCell = document.createElement('div');
@@ -4706,13 +4975,13 @@ function createColumnManagerRow(entry) {
     const labelInput = document.createElement('input');
     labelInput.className = 'text-input';
     labelInput.type = 'text';
-    labelInput.value = entry.key === 'ANBAR_GROUP' ? displayStockGroupName() : displayFieldName(entry.key);
-    labelInput.placeholder = entry.key === 'ANBAR_GROUP' ? 'Stock' : entry.key;
+    labelInput.value = entry.key === 'WAREHOUSE_GROUP' ? displayStockGroupName() : displayFieldName(entry.key);
+    labelInput.placeholder = entry.key === 'WAREHOUSE_GROUP' ? t('warehouseStock') : entry.key;
     labelInput.addEventListener('input', debounce(() => {
         state.config = state.config || {};
         state.config.column_labels = state.config.column_labels || {};
-        if (entry.key === 'ANBAR_GROUP') {
-            state.config.column_labels.ANBAR = labelInput.value.trim() || 'Stock';
+        if (entry.key === 'WAREHOUSE_GROUP') {
+            state.config.column_labels.warehouse_stock = labelInput.value.trim() || t('warehouseStock');
         } else {
             state.config.column_labels[entry.key] = labelInput.value.trim() || entry.key;
         }
@@ -4729,8 +4998,44 @@ function createColumnManagerRow(entry) {
     row.appendChild(sourceCell);
     row.appendChild(labelCell);
     row.appendChild(typeCell);
+    if (entry.key === 'WAREHOUSE_GROUP') {
+        row.classList.add('warehouse-manager-row');
+        row.appendChild(createWarehouseVisibilityGrid(entry));
+    }
     attachColumnDragHandlers(row);
     return row;
+}
+
+function createWarehouseVisibilityGrid(entry) {
+    const fieldset = document.createElement('fieldset');
+    fieldset.className = 'warehouse-visibility-grid';
+    const legend = document.createElement('legend');
+    legend.textContent = t('warehouseVisibility');
+    fieldset.appendChild(legend);
+    entry.fields.forEach(field => {
+        const label = document.createElement('label');
+        label.className = 'warehouse-visibility-toggle';
+        const checkbox = document.createElement('input');
+        checkbox.type = 'checkbox';
+        checkbox.checked = !state.hiddenColumns.has(field);
+        checkbox.addEventListener('change', () => {
+            if (checkbox.checked) state.hiddenColumns.delete(field);
+            else {
+                state.hiddenColumns.add(field);
+                delete state.columnFilters[field];
+            }
+            saveHiddenColumns();
+            saveColumnFilters();
+            renderColumnManager();
+            renderTableHeader();
+            applyFilters();
+        });
+        const text = document.createElement('span');
+        text.textContent = displayFieldName(field);
+        label.append(checkbox, text);
+        fieldset.appendChild(label);
+    });
+    return fieldset;
 }
 
 function attachColumnDragHandlers(row) {
@@ -4807,36 +5112,21 @@ function convertToCSV(data) {
     if (data.length === 0) return '';
     
     // Create header row
-    const headers = state.fields.join(',');
+    const headers = state.fields.map(field => csvCell(displayFieldName(field))).join(',');
     
     // Create data rows
     const rows = data.map(record => {
         return state.fields.map(field => {
-            let value;
-            
-            // Handle ANBAR fields (ANBAR1, ANBAR2, etc.)
-            if (field.startsWith('ANBAR') && field.length > 5) {
-                const anbarIndex = parseInt(field.substring(5), 10) - 1;
-                if (record.ANBAR && Array.isArray(record.ANBAR) && anbarIndex < record.ANBAR.length) {
-                    value = record.ANBAR[anbarIndex];
-                } else {
-                    value = '';
-                }
-            } else {
-                value = record[field];
-            }
-            
-            // Escape value for CSV
-            const str = value !== null && value !== undefined ? String(value) : '';
-            // Quote if contains comma, newline, or quote
-            if (str.includes(',') || str.includes('\n') || str.includes('"')) {
-                return `"${str.replace(/"/g, '""')}"`;
-            }
-            return str;
+            return csvCell(structuredValueText(getFieldValue(record, field)));
         }).join(',');
     });
     
     return [headers, ...rows].join('\n');
+}
+
+function csvCell(value) {
+    const text = value === null || value === undefined ? '' : String(value);
+    return /[,\n"]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
 }
 
 // Download file helper
@@ -4895,10 +5185,16 @@ function filterRecords() {
     state.filteredRecords = filtered;
 }
 
-// Get field value from record (handles ANBAR fields)
+// Get field values through the shared virtual warehouse-column schema.
 function getFieldValue(record, field) {
-    if (field.startsWith('ANBAR') && field.length > 5) {
-        const anbarIndex = parseInt(field.substring(5), 10) - 1;
+    const warehouseName = warehouseColumnName(field);
+    if (isWarehouseColumnField(field) && !/^ANBAR\d+$/i.test(String(field))) {
+        return record?.warehouse_stock && typeof record.warehouse_stock === 'object'
+            ? record.warehouse_stock[warehouseName] ?? null
+            : null;
+    }
+    if (/^ANBAR\d+$/i.test(String(field))) {
+        const anbarIndex = parseInt(warehouseName, 10) - 1;
         if (record.ANBAR && Array.isArray(record.ANBAR) && anbarIndex < record.ANBAR.length) {
             return record.ANBAR[anbarIndex];
         }
@@ -5053,6 +5349,7 @@ function inspectRecord(record) {
     const body = document.getElementById('inspectorBody');
     
     body.innerHTML = '';
+    state.inspectedRecord = record;
     
     state.fields.forEach(field => {
         const fieldDiv = document.createElement('div');
@@ -5060,23 +5357,12 @@ function inspectRecord(record) {
         
         const nameDiv = document.createElement('div');
         nameDiv.className = 'inspector-field-name';
-        nameDiv.textContent = field;
+        nameDiv.textContent = displayFieldName(field);
         
         const valueDiv = document.createElement('div');
         valueDiv.className = 'inspector-field-value';
         
-        // Handle ANBAR fields (ANBAR1, ANBAR2, etc.)
-        let value;
-        if (field.startsWith('ANBAR') && field.length > 5) {
-            const anbarIndex = parseInt(field.substring(5), 10) - 1;
-            if (record.ANBAR && Array.isArray(record.ANBAR) && anbarIndex < record.ANBAR.length) {
-                value = record.ANBAR[anbarIndex];
-            } else {
-                value = null;
-            }
-        } else {
-            value = record[field];
-        }
+        const value = getFieldValue(record, field);
         
         valueDiv.textContent = value !== null && value !== undefined ? String(value) : '(null)';
         
@@ -5225,7 +5511,7 @@ function init() {
     document.getElementById('closeEventLog')?.addEventListener('click', closeRouteDialog);
     document.getElementById('clearEventLog')?.addEventListener('click', () => clearEventLog());
     document.getElementById('headerFileChip')?.addEventListener('click', () => {
-        if (state.fileName) showInAppToast('Current source file', state.fileName, { broadcastToTabs: true, source: 'file_info', eventType: 'source_info' });
+        if (state.fileName) showInAppToast(t('currentSourceFile'), state.fileName, { titleKey: 'currentSourceFile', broadcastToTabs: true, source: 'file_info', eventType: 'source_info' });
     });
     
     // Export button and dropdown
@@ -5279,25 +5565,11 @@ function init() {
     document.getElementById('refreshNowBtn').addEventListener('click', requestSourceRefresh);
     
     document.getElementById('showAllColumns').addEventListener('click', () => {
-        state.hiddenColumns.clear();
-        saveHiddenColumns();
-        renderColumnManager();
-        renderTableHeader();
-        applyFilters();
+        showAllColumns();
     });
     
     document.getElementById('hideAllColumns').addEventListener('click', () => {
-        // Don't allow hiding Code column
-        state.fields.forEach(field => {
-            if (field !== 'Code') {
-                state.hiddenColumns.add(field);
-            }
-        });
-        removeHiddenColumnFilters();
-        saveHiddenColumns();
-        renderColumnManager();
-        renderTableHeader();
-        applyFilters();
+        hideAllOptionalColumns();
     });
     
     // Settings checkboxes
@@ -5317,6 +5589,14 @@ function init() {
         saveSettings();
         renderTableHeader();
         updateFieldFilter();
+        renderTable();
+    });
+
+    document.getElementById('freezeFirstColumn')?.addEventListener('change', event => {
+        state.settings.freezeFirstColumn = event.target.checked;
+        applySettings();
+        saveSettings();
+        renderTableHeader();
         renderTable();
     });
 
@@ -5385,7 +5665,7 @@ function init() {
 
     document.getElementById('testNotificationSound').addEventListener('click', () => {
         playNotificationSound(true);
-        showInAppToast('Sound test', 'Notification audio was triggered.', { broadcastToTabs: true, source: 'sound_test', eventType: 'notification_test' });
+        showInAppToast(t('soundTest'), t('soundTestMessage'), { titleKey: 'soundTest', messageKey: 'soundTestMessage', broadcastToTabs: true, source: 'sound_test', eventType: 'notification_test' });
     });
 
     document.getElementById('testNativeToast').addEventListener('click', () => {

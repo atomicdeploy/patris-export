@@ -3,6 +3,7 @@ import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 
 const source = await readFile(new URL('../src/table-ux.js', import.meta.url), 'utf8');
+const viewerSource = await readFile(new URL('../src/viewer.html', import.meta.url), 'utf8');
 const {
     DEFAULT_ROW_ICON_FALLBACK,
     assignStableRecordKeys,
@@ -10,15 +11,21 @@ const {
     canonicalRowValue,
     canonicalRuleField,
     clampColumnWidth,
+    deriveGridFields,
     duplicateSafeRecordKeys,
     fitMenuPosition,
     iconMarkup,
     keyboardColumnWidth,
+    isWarehouseColumnField,
+    localizedColumnLabel,
+    normalizeColumnPreferenceList,
+    localizedRelativeTime,
     normalizeColumnWidths,
     normalizeRowIconRules,
     nextRovingKey,
     pruneSelectedKeys,
     resizedColumnWidth,
+    resolvePersistedColumnPreferences,
     resolvedRovingKey,
     resolveRowIcon,
     rowCommandDefinitions,
@@ -27,7 +34,10 @@ const {
     selectionSummary,
     stableRecordKey,
     structuredValueText,
-    tableText
+    tableTranslationCoverage,
+    tableText,
+    warehouseColumnField,
+    warehouseColumnName
 } = await import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}`);
 
 test('selection is Code-keyed, filter-aware, and pruned only when rows disappear', () => {
@@ -98,6 +108,43 @@ test('column widths clamp and keyboard/pointer resizing reverse in RTL', () => {
     assert.deepEqual(normalizeColumnWidths({ product_code: 211, Code: 900, 'product_code ': 444 }), { product_code: 211 });
 });
 
+test('UIConfig column preferences override and migrate the legacy browser cache', () => {
+    const warehouse = warehouseColumnField('North hub');
+    const legacy = {
+        hiddenColumns: [` ${warehouse} `, warehouse, 'warnings'],
+        columnOrder: ['product_code', 'name', 'shipping_price_per_kg', 'shipping_price_per_kg_currency', warehouse]
+    };
+    assert.deepEqual(normalizeColumnPreferenceList(legacy.hiddenColumns), [warehouse, 'warnings']);
+
+    const migration = resolvePersistedColumnPreferences({}, legacy);
+    assert.deepEqual(migration.hiddenColumns, [warehouse, 'warnings']);
+    assert.deepEqual(migration.columnOrder, legacy.columnOrder);
+    assert.equal(migration.migrateHiddenColumns, true);
+    assert.equal(migration.migrateColumnOrder, true);
+
+    const configured = resolvePersistedColumnPreferences({
+        hidden_columns: [],
+        column_order: ['product_code', warehouse, 'shipping_price_per_kg', 'shipping_price_per_kg_currency']
+    }, legacy);
+    assert.deepEqual(configured.hiddenColumns, []);
+    assert.deepEqual(configured.columnOrder, [
+        'product_code', warehouse, 'shipping_price_per_kg', 'shipping_price_per_kg_currency'
+    ]);
+    assert.equal(configured.migrateHiddenColumns, false);
+    assert.equal(configured.migrateColumnOrder, false);
+
+    const clearedAfterRestart = resolvePersistedColumnPreferences({
+        hidden_columns: [],
+        column_order: []
+    }, legacy);
+    assert.deepEqual(clearedAfterRestart.hiddenColumns, []);
+    assert.deepEqual(clearedAfterRestart.columnOrder, []);
+    assert.equal(clearedAfterRestart.cacheHiddenColumns, true);
+    assert.equal(clearedAfterRestart.cacheColumnOrder, true);
+    assert.equal(clearedAfterRestart.migrateHiddenColumns, false);
+    assert.equal(clearedAfterRestart.migrateColumnOrder, false);
+});
+
 test('ordered icon rules match transformed canonical values and keep a fallback', () => {
     const rules = normalizeRowIconRules([
         { id: 'warning', field: 'warnings', operator: 'not_empty', icon: 'warning', color: '#d97706', label: 'Warnings' },
@@ -140,6 +187,51 @@ test('structured warehouse stock has readable deterministic text', () => {
     assert.equal(structuredValueText(['north', 2]), 'north, 2');
 });
 
+test('shared grid schema expands canonical and legacy warehouse stock into independent columns', () => {
+    const north = warehouseColumnField('North hub');
+    const south = warehouseColumnField('South/hub');
+    assert.deepEqual(deriveGridFields([
+        { product_code: '1', name: 'First', warehouse_stock: { 'South/hub': 2 } },
+        { product_code: '2', name: 'Second', warehouse_stock: { 'North hub': 3 }, warnings: [] }
+    ]), ['product_code', 'name', 'warnings', north, south]);
+    assert.equal(isWarehouseColumnField(north), true);
+    assert.equal(warehouseColumnName(north), 'North hub');
+    assert.deepEqual(deriveGridFields([{ Code: '1', Name: 'Legacy', ANBAR: [2, 4, 6] }]), [
+        'Code', 'Name', 'ANBAR1', 'ANBAR2', 'ANBAR3'
+    ]);
+});
+
+test('known column keys use human localized labels and custom labels remain authoritative', () => {
+    assert.equal(localizedColumnLabel('part_number', 'en'), 'Part Number');
+    assert.equal(localizedColumnLabel('part_number', 'fa'), 'پارت نامبر');
+    assert.equal(localizedColumnLabel('final_price', 'fa'), 'قیمت نهایی (تومان)');
+    assert.equal(localizedColumnLabel('some_machine_key', 'en'), 'Some Machine Key');
+    assert.equal(localizedColumnLabel('name', 'fa', 'Marketing title'), 'Marketing title');
+    assert.equal(localizedColumnLabel('Code', 'fa', 'Code'), 'کد');
+    assert.equal(localizedColumnLabel('FOROSH', 'en', 'FOROSH'), 'Sale Price');
+    assert.equal(localizedColumnLabel('FOROSH', 'fa', 'FOROSH'), 'قیمت فروش');
+    assert.equal(localizedColumnLabel('Sefaresh', 'fa', 'Sefaresh'), 'حد سفارش');
+    assert.equal(localizedColumnLabel('Vahed', 'fa', 'Vahed'), 'واحد');
+    assert.equal(localizedColumnLabel('shipping_price_per_kg', 'en'), 'Shipping Rate per kg');
+    assert.equal(localizedColumnLabel('shipping_price_per_kg', 'fa'), 'نرخ حمل هر کیلوگرم');
+    assert.equal(localizedColumnLabel('shipping_price_per_kg_currency', 'en'), 'Shipping Rate Currency (CNY/IRR)');
+    assert.equal(localizedColumnLabel('shipping_price_per_kg_currency', 'fa'), 'ارز نرخ حمل (یوان/ریال)');
+    assert.doesNotMatch(source, /shipping_price_per_kg_cny|freight_cny_per_kg/);
+
+    const machineFields = [
+        'product_code', 'category_code', 'part_number', 'sale_price_source',
+        'purchase_price_source', 'total_stock', 'minimum_stock', 'foreign_currency',
+        'foreign_price', 'weight_grams', 'shipping_method_id', 'shipping_price_per_kg',
+        'shipping_price_per_kg_currency',
+        'markup_percent', 'irt_per_cny', 'final_price', 'source_updated_at', 'record_hash',
+        'Dates', 'FOROSH', 'Invahed', 'KHARYD', 'Kharyd_E', 'Sefaresh', 'Tedad_k', 'Vahed'
+    ];
+    machineFields.forEach(field => {
+        assert.doesNotMatch(localizedColumnLabel(field, 'en', field), /_/, `machine key leaked in English: ${field}`);
+        assert.match(localizedColumnLabel(field, 'fa', field), /[\u0600-\u06ff]/, `Persian label missing: ${field}`);
+    });
+});
+
 test('row command metadata is shared and selection label is state-aware', () => {
     assert.deepEqual(rowCommandDefinitions({ selected: false, hasCode: true }).map(item => item.id), [
         'inspect', 'copy_code', 'copy_json', 'toggle_selection'
@@ -165,6 +257,43 @@ test('English and Persian table strings interpolate and SVG names are allowliste
     assert.equal(tableText('fa', 'fallbackProduct'), 'محصول');
     assert.match(iconMarkup('warning'), /^<svg/);
     assert.doesNotMatch(iconMarkup('<script>'), /script/);
+});
+
+test('relative last-update text follows the active interface language', () => {
+    const now = new Date('2026-07-21T12:00:00.000Z');
+    const twoMinutesAgo = new Date('2026-07-21T11:58:00.000Z');
+    const oneHourAhead = new Date('2026-07-21T13:00:00.000Z');
+
+    assert.equal(localizedRelativeTime(twoMinutesAgo, 'en', now), '2 minutes ago');
+    assert.equal(localizedRelativeTime(oneHourAhead, 'en', now), 'in 1 hour');
+    assert.equal(localizedRelativeTime(twoMinutesAgo, 'fa', now), '۲ دقیقه پیش');
+    assert.equal(localizedRelativeTime(oneHourAhead, 'fa', now), '۱ ساعت دیگر');
+    assert.doesNotMatch(localizedRelativeTime(twoMinutesAgo, 'fa', now), /ago|minute/i);
+});
+
+test('every declared viewer translation key has English and Persian text', () => {
+    const keys = [...viewerSource.matchAll(/data-table-i18n(?:-(?:placeholder|title|aria-label))?="([^"]+)"/g)].map(match => match[1]);
+    assert.ok(keys.length > 50);
+    [...new Set(keys)].forEach(key => {
+        assert.notEqual(tableText('en', key), key, `missing English translation: ${key}`);
+        assert.notEqual(tableText('fa', key), key, `missing Persian translation: ${key}`);
+    });
+
+    const coverage = tableTranslationCoverage();
+    assert.ok(coverage.english >= 200);
+    assert.equal(coverage.english, coverage.persian);
+    assert.deepEqual(coverage.missingEnglish, []);
+    assert.deepEqual(coverage.missingPersian, []);
+});
+
+test('viewer English titles and accessible labels are wired to translation keys', () => {
+    const tags = viewerSource.match(/<[^>]+(?:title|aria-label)="[A-Za-z][^"]*"[^>]*>/g) || [];
+    const untranslated = tags.filter(tag => {
+        const titleNeedsKey = /title="[A-Za-z]/.test(tag) && !/data-table-i18n-title=/.test(tag);
+        const labelNeedsKey = /aria-label="[A-Za-z]/.test(tag) && !/data-table-i18n-aria-label=/.test(tag);
+        return titleNeedsKey || labelNeedsKey;
+    });
+    assert.deepEqual(untranslated, []);
 });
 
 test('icon evaluation remains a single small ordered pass for 1,000 rows', () => {

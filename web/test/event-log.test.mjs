@@ -14,11 +14,15 @@ const {
     eventLogChangeDetailsMarkup,
     eventLogChangeTotal,
     eventLogDisclosureText,
+    eventLogLocalizedText,
+    eventLogTokenLabel,
     eventLogValueText,
     isEventLogChangeDetails,
     modifiedRecordIdentityKey,
+    normalizeEventLogContent,
     recordIdentityKey,
-    retainRecentEventLogChanges
+    retainRecentEventLogChanges,
+    upgradeEventLogEntryLocalization
 } = await import(`data:text/javascript;base64,${Buffer.from(eventLogSource).toString('base64')}`);
 
 test('captures added, modified, and deleted values before the live table mutates', () => {
@@ -154,4 +158,131 @@ test('formats empty, missing, and nested values without object placeholders', ()
         tableText('fa', 'eventLogChangeSummary', { added: 1, modified: 2, deleted: 3 }),
         '1 افزوده، 2 تغییریافته، 3 حذف‌شده'
     );
+});
+
+test('persists semantic event text and retranslates it after a language switch', () => {
+    const semantic = normalizeEventLogContent({
+        title: 'Rows changed',
+        titleKey: 'eventLogRowsChanged',
+        message: '1 added, 2 modified, 3 deleted',
+        messageKey: 'eventLogChangeSummary',
+        messageValues: { added: 1, modified: 2, deleted: 3 }
+    });
+    const persisted = JSON.parse(JSON.stringify(semantic));
+
+    assert.equal(Object.hasOwn(persisted, 'title'), false);
+    assert.equal(Object.hasOwn(persisted, 'message'), false);
+    assert.doesNotMatch(JSON.stringify(persisted), /Rows changed|1 added, 2 modified, 3 deleted/);
+    assert.equal(eventLogLocalizedText(persisted, 'title', 'en'), 'Rows changed');
+    assert.equal(eventLogLocalizedText(persisted, 'message', 'en'), '1 added, 2 modified, 3 deleted');
+    assert.equal(eventLogLocalizedText(persisted, 'title', 'fa'), 'ردیف‌ها تغییر کردند');
+    assert.equal(
+        eventLogLocalizedText(persisted, 'message', 'fa'),
+        '1 افزوده، 2 تغییریافته، 3 حذف‌شده'
+    );
+});
+
+test('upgrades existing row-update log entries without losing their technical data', () => {
+    const legacy = {
+        id: 'legacy-row-update',
+        type: 'row_updated',
+        source: 'websocket',
+        title: 'Rows changed',
+        message: '1 added, 2 modified, 3 deleted',
+        details: 'added=1 modified=2 deleted=3'
+    };
+    const upgraded = upgradeEventLogEntryLocalization(legacy);
+
+    assert.equal(upgraded.id, legacy.id);
+    assert.equal(upgraded.type, legacy.type);
+    assert.equal(upgraded.source, legacy.source);
+    assert.equal(upgraded.details, legacy.details);
+    assert.equal(Object.hasOwn(upgraded, 'title'), false);
+    assert.equal(Object.hasOwn(upgraded, 'message'), false);
+    assert.equal(eventLogLocalizedText(upgraded, 'message', 'en'), legacy.message);
+    assert.equal(
+        eventLogLocalizedText(upgraded, 'message', 'fa'),
+        '1 افزوده، 2 تغییریافته، 3 حذف‌شده'
+    );
+});
+
+test('upgrades known app-owned legacy toast text and retranslates existing history', () => {
+    const legacyResourceUpdate = {
+        id: 'legacy-resource-update',
+        type: 'resource_update',
+        source: 'resource_update',
+        title: 'Updating interface',
+        message: 'A newer embedded web UI is available. Reloading now.',
+        details: 'resource=v2'
+    };
+    const upgraded = upgradeEventLogEntryLocalization(legacyResourceUpdate);
+
+    assert.equal(upgraded.id, legacyResourceUpdate.id);
+    assert.equal(upgraded.details, legacyResourceUpdate.details);
+    assert.equal(Object.hasOwn(upgraded, 'title'), false);
+    assert.equal(Object.hasOwn(upgraded, 'message'), false);
+    assert.equal(eventLogLocalizedText(upgraded, 'title', 'en'), legacyResourceUpdate.title);
+    assert.equal(eventLogLocalizedText(upgraded, 'message', 'en'), legacyResourceUpdate.message);
+    assert.equal(eventLogLocalizedText(upgraded, 'title', 'fa'), tableText('fa', 'updatingInterface'));
+    assert.equal(eventLogLocalizedText(upgraded, 'message', 'fa'), tableText('fa', 'updatingInterfaceMessage'));
+    assert.doesNotMatch(eventLogLocalizedText(upgraded, 'message', 'fa'), /embedded web UI|Reloading/i);
+
+    const safeAppHistory = [
+        {
+            entry: { type: 'refresh', source: 'manual_refresh', title: 'Refresh requested', message: 'The backend is reloading the data source.' },
+            titleKey: 'refreshRequested',
+            messageKey: 'refreshRequestedMessage'
+        },
+        {
+            entry: { type: 'copy_status', source: 'connection', title: 'Copied', message: 'Connection status copied to the clipboard.' },
+            titleKey: 'copied',
+            messageKey: 'statusCopied'
+        },
+        {
+            entry: { type: 'notification_test', source: 'sound_test', title: 'Sound test', message: 'Notification audio was triggered.' },
+            titleKey: 'soundTest',
+            messageKey: 'soundTestMessage'
+        }
+    ];
+    safeAppHistory.forEach(({ entry, titleKey, messageKey }) => {
+        const localized = upgradeEventLogEntryLocalization(entry);
+        assert.equal(localized.titleKey, titleKey);
+        assert.equal(localized.messageKey, messageKey);
+        assert.equal(eventLogLocalizedText(localized, 'title', 'fa'), tableText('fa', titleKey));
+        assert.equal(eventLogLocalizedText(localized, 'message', 'fa'), tableText('fa', messageKey));
+    });
+});
+
+test('legacy upgrade leaves arbitrary external event text unchanged', () => {
+    const external = {
+        type: 'toast',
+        source: 'server',
+        title: 'Updating interface',
+        message: 'A newer embedded web UI is available. Reloading now.'
+    };
+    assert.deepEqual(upgradeEventLogEntryLocalization(external), external);
+
+    const appEventWithExternalDetail = {
+        type: 'resource_update',
+        source: 'resource_update',
+        title: 'Updating interface',
+        message: 'Operator-provided diagnostic text'
+    };
+    const partiallyUpgraded = upgradeEventLogEntryLocalization(appEventWithExternalDetail);
+    assert.equal(partiallyUpgraded.titleKey, 'updatingInterface');
+    assert.equal(partiallyUpgraded.message, appEventWithExternalDetail.message);
+    assert.equal(Object.hasOwn(partiallyUpgraded, 'messageKey'), false);
+});
+
+test('renders stored protocol type and source tokens as localized human labels', () => {
+    assert.equal(eventLogTokenLabel('row_updated', 'en', 'type'), 'Row update');
+    assert.equal(eventLogTokenLabel('config_update', 'en', 'type'), 'Configuration update');
+    assert.equal(eventLogTokenLabel('web-ui', 'en', 'source'), 'Web interface');
+    assert.equal(eventLogTokenLabel('websocket', 'en', 'source'), 'Live connection');
+    assert.equal(eventLogTokenLabel('row_updated', 'fa', 'type'), 'به‌روزرسانی ردیف‌ها');
+    assert.equal(eventLogTokenLabel('config_update', 'fa', 'type'), 'به‌روزرسانی تنظیمات');
+    assert.equal(eventLogTokenLabel('web-ui', 'fa', 'source'), 'رابط وب');
+    assert.equal(eventLogTokenLabel('websocket', 'fa', 'source'), 'اتصال زنده');
+    assert.equal(eventLogTokenLabel('future_machine_event', 'en', 'type'), 'Future Machine Event event');
+    assert.equal(eventLogTokenLabel('future_machine_event', 'fa', 'type'), 'رویداد Future Machine Event');
 });

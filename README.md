@@ -568,11 +568,16 @@ source revision, generated time, and warnings. Add `rtl=1` or enable the UI RTL
 text-direction setting to open worksheets in right-to-left mode.
 
 The viewer data grid keeps selection keyed by `Code` across sorting and
-filtering, exposes the same accessible command menu from row right-click and the
-ellipsis action, and supports pointer or keyboard column resizing. Language,
-canonical-key conditional row-icon rules, fallback icon metadata, column
-widths, and the independent row-coloring toggle are persisted under `ui` in the
-normal Patris Export config file rather than in a separate table-settings file.
+filtering, exposes accessible row and header command menus through right-click,
+keyboard, and ellipsis actions, and supports pointer or keyboard column resizing
+with a full-height guide. Warehouse stock remains a two-row group with one
+independently selectable column per warehouse. Sticky headers and the optional
+sticky first data column keep identifiers visible while scrolling. Language,
+canonical-key conditional row-icon rules, fallback icon metadata, column widths,
+column order, per-warehouse visibility, and the independent row-coloring toggle
+are persisted under `ui` through the normal Patris Export config API rather
+than in a separate table-settings file. Existing browser-only column choices
+are migrated once; `localStorage` remains only a cache and offline fallback.
 
 For a configured canonical dataset, `GET /api/product-sync` returns the full
 current `patris.product-sync` envelope. Missing source/reference values are

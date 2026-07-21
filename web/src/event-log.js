@@ -1,4 +1,4 @@
-import { structuredValueText } from './table-ux.js';
+import { structuredValueText, tableLanguage, tableText } from './table-ux.js';
 
 export const EVENT_LOG_CHANGE_LIMITS = Object.freeze({
     maxRows: 30,
@@ -11,9 +11,230 @@ export const MAX_DETAILED_EVENT_LOG_ENTRIES = 20;
 
 const CHANGE_TYPES = ['added', 'modified', 'deleted'];
 const IDENTITY_FIELDS = ['Code', 'product_code', 'code', 'id'];
+const EVENT_TOKEN_TRANSLATION_KEYS = Object.freeze({
+    row_updated: 'eventTokenRowUpdated',
+    config_update: 'eventTokenConfigUpdate',
+    'web-ui': 'eventTokenWebUI',
+    websocket: 'eventTokenWebSocket',
+    server: 'eventTokenServer',
+    toast: 'eventTokenNotification',
+    native_toast: 'eventTokenNotification',
+    notification: 'eventTokenNotification',
+    manual_refresh: 'eventTokenManualRefresh',
+    refresh: 'eventTokenManualRefresh',
+    resource_update: 'eventTokenResourceUpdate',
+    source_drop: 'eventTokenDataSource',
+    source_switch: 'eventTokenDataSource',
+    source_info: 'eventTokenDataSource',
+    file_info: 'eventTokenDataSource',
+    table_settings: 'eventTokenTableSettings',
+    row_action: 'eventTokenRowAction',
+    grid_action: 'eventTokenRowAction',
+    catalog_action: 'eventTokenRowAction',
+    event_log: 'eventTokenEventLog',
+    copy_event_log: 'eventTokenEventLog',
+    connection: 'eventTokenConnection',
+    copy_status: 'eventTokenConnection',
+    notification_test: 'eventTokenNotificationTest',
+    sound_test: 'eventTokenNotificationTest',
+    xlsx_export: 'eventTokenExcelExport'
+});
+const LEGACY_EVENT_LOCALIZATION_RULES = Object.freeze([
+    Object.freeze({
+        identities: ['resource_update'],
+        titleKeys: ['updatingInterface'],
+        messageKeys: ['updatingInterfaceMessage']
+    }),
+    Object.freeze({
+        identities: ['source_switch', 'source_drop'],
+        titleKeys: ['unsupportedFile', 'sourceLoaded', 'sourceSwitchFailed'],
+        messageKeys: ['unsupportedFileHelp']
+    }),
+    Object.freeze({
+        identities: ['config_update'],
+        titleKeys: ['settingsSaveFailed', 'settingsReloaded'],
+        messageKeys: ['settingsReloadedMessage']
+    }),
+    Object.freeze({
+        identities: ['toast', 'native_toast'],
+        titleKeys: ['nativeToastUnavailable', 'toastRequestFailed'],
+        messageKeys: []
+    }),
+    Object.freeze({
+        identities: ['refresh', 'manual_refresh'],
+        titleKeys: ['refreshRequested', 'refreshed', 'refreshFailed'],
+        messageKeys: ['refreshRequestedMessage', 'refreshedMessage']
+    }),
+    Object.freeze({
+        identities: ['table_settings'],
+        titleKeys: ['widthsReset'],
+        messageKeys: []
+    }),
+    Object.freeze({
+        identities: ['row_action', 'grid_action', 'catalog_action', 'dialog_action'],
+        titleKeys: ['copied', 'copyFailed'],
+        messageKeys: ['codeCopied', 'jsonCopied']
+    }),
+    Object.freeze({
+        identities: ['copy_status', 'connection'],
+        titleKeys: ['copied'],
+        messageKeys: ['statusCopied']
+    }),
+    Object.freeze({
+        identities: ['copy_event_log', 'event_log'],
+        titleKeys: ['copied'],
+        messageKeys: ['eventLogCopied']
+    }),
+    Object.freeze({
+        identities: ['xlsx_export'],
+        titleKeys: ['excelExportStarted'],
+        messageKeys: ['excelExportStartedMessage']
+    }),
+    Object.freeze({
+        identities: ['source_info', 'file_info'],
+        titleKeys: ['currentSourceFile'],
+        messageKeys: []
+    }),
+    Object.freeze({
+        identities: ['notification_test', 'sound_test'],
+        titleKeys: ['soundTest'],
+        messageKeys: ['soundTestMessage']
+    })
+]);
 
 function isObject(value) {
     return !!value && typeof value === 'object' && !Array.isArray(value);
+}
+
+function semanticTemplateValues(value) {
+    if (!isObject(value)) return {};
+    try {
+        const cloned = JSON.parse(JSON.stringify(value));
+        return isObject(cloned) ? cloned : {};
+    } catch (_error) {
+        return {};
+    }
+}
+
+function semanticTextField(entry, field, defaultText = '') {
+    const keyField = `${field}Key`;
+    const valuesField = `${field}Values`;
+    const key = String(entry?.[keyField] || '').trim();
+    if (!key) {
+        return { [field]: String(entry?.[field] || defaultText) };
+    }
+
+    const values = semanticTemplateValues(entry?.[valuesField]);
+    return {
+        [keyField]: key,
+        ...(Object.keys(values).length > 0 ? { [valuesField]: values } : {})
+    };
+}
+
+export function normalizeEventLogContent(entry = {}, defaults = {}) {
+    return {
+        ...semanticTextField(entry, 'title', defaults.title || 'Patris Export event'),
+        ...semanticTextField(entry, 'message', defaults.message || '')
+    };
+}
+
+export function eventLogLocalizedText(entry, field, language = 'en') {
+    if (!['title', 'message'].includes(field)) return '';
+    const key = String(entry?.[`${field}Key`] || '').trim();
+    if (key) {
+        const translated = tableText(language, key, semanticTemplateValues(entry?.[`${field}Values`]));
+        if (translated !== key) return translated;
+    }
+    return String(entry?.[field] || key || '');
+}
+
+function rowChangeCounts(entry) {
+    if (isObject(entry?.changes?.counts)) {
+        const counts = entry.changes.counts;
+        if (CHANGE_TYPES.every(type => Number.isFinite(Number(counts[type])))) {
+            return Object.fromEntries(CHANGE_TYPES.map(type => [type, Math.max(0, Number(counts[type]))]));
+        }
+    }
+
+    const details = String(entry?.details || '');
+    const matches = Object.fromEntries(
+        CHANGE_TYPES.map(type => [type, details.match(new RegExp(`(?:^|\\s)${type}=(\\d+)`))])
+    );
+    if (CHANGE_TYPES.every(type => matches[type])) {
+        return Object.fromEntries(CHANGE_TYPES.map(type => [type, Number(matches[type][1])]));
+    }
+    return null;
+}
+
+function legacyLocalizationRule(entry) {
+    const identities = new Set([
+        String(entry?.type || '').trim().toLowerCase(),
+        String(entry?.source || '').trim().toLowerCase()
+    ].filter(Boolean));
+    return LEGACY_EVENT_LOCALIZATION_RULES.find(rule =>
+        rule.identities.some(identity => identities.has(identity))
+    );
+}
+
+function exactLegacyTranslationKey(value, candidateKeys) {
+    const text = String(value || '');
+    if (!text) return '';
+    return candidateKeys.find(key =>
+        text === tableText('en', key) || text === tableText('fa', key)
+    ) || '';
+}
+
+export function upgradeEventLogEntryLocalization(entry = {}) {
+    if (!isObject(entry)) return entry;
+    const next = { ...entry };
+    if (String(next.type || '').toLowerCase() === 'row_updated') {
+        next.titleKey = 'eventLogRowsChanged';
+        const counts = rowChangeCounts(next);
+        if (counts) {
+            next.messageKey = 'eventLogChangeSummary';
+            next.messageValues = counts;
+        }
+    }
+
+    const legacyRule = legacyLocalizationRule(next);
+    if (legacyRule) {
+        if (!next.titleKey) {
+            const titleKey = exactLegacyTranslationKey(next.title, legacyRule.titleKeys);
+            if (titleKey) next.titleKey = titleKey;
+        }
+        if (!next.messageKey) {
+            const messageKey = exactLegacyTranslationKey(next.message, legacyRule.messageKeys);
+            if (messageKey) next.messageKey = messageKey;
+        }
+    }
+
+    if (!next.titleKey && !next.messageKey) return next;
+    const content = normalizeEventLogContent(next);
+    delete next.title;
+    delete next.titleKey;
+    delete next.titleValues;
+    delete next.message;
+    delete next.messageKey;
+    delete next.messageValues;
+    return { ...next, ...content };
+}
+
+function humanEventToken(value) {
+    return String(value || '')
+        .trim()
+        .replaceAll('_', ' ')
+        .replaceAll('-', ' ')
+        .replace(/\s+/g, ' ')
+        .replace(/\b\w/g, letter => letter.toUpperCase());
+}
+
+export function eventLogTokenLabel(value, language = 'en', kind = 'type') {
+    const token = String(value || '').trim().toLowerCase();
+    const translationKey = EVENT_TOKEN_TRANSLATION_KEYS[token];
+    if (translationKey) return tableText(language, translationKey);
+
+    const label = humanEventToken(token) || (tableLanguage(language) === 'fa' ? 'نامشخص' : 'Unknown');
+    return tableText(language, kind === 'source' ? 'eventLogSourceOther' : 'eventLogTypeOther', { label });
 }
 
 function hasOwn(object, key) {

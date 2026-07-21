@@ -4,6 +4,12 @@ const fs = require('fs');
 const path = require('path');
 
 const watch = process.argv.includes('--watch');
+const vazirmatnPath = path.join(__dirname, 'node_modules', 'vazirmatn', 'fonts', 'webfonts', 'Vazirmatn[wght].woff2');
+
+function embeddedFontCSS() {
+  const data = fs.readFileSync(vazirmatnPath).toString('base64');
+  return `@font-face{font-family:'Vazirmatn';src:url(data:font/woff2;base64,${data}) format('woff2');font-style:normal;font-weight:100 900;font-display:swap;}`;
+}
 
 // Compile SCSS to CSS
 function compileSass() {
@@ -47,7 +53,7 @@ async function build() {
   
   // Inline everything into viewer.html
   const finalViewerHtml = viewerHtml
-    .replace('<!-- STYLES -->', `<style>${css}</style>`)
+    .replace('<!-- STYLES -->', `<style>${embeddedFontCSS()}${css}</style>`)
     .replace('<!-- SCRIPTS -->', `<script>${js}</script>`);
   
   // Ensure dist directory exists
