@@ -25,46 +25,59 @@ function compileSass() {
   }
 }
 
-// Build function
-async function build() {
-  console.log('Building frontend...');
-  
-  // Compile SCSS
-  const css = compileSass();
-  
-  // Build JS with esbuild
-  await esbuild.build({
-    entryPoints: ['src/app.js'],
+async function bundle(entryPoint) {
+  const result = await esbuild.build({
+    entryPoints: [entryPoint],
     bundle: true,
     minify: true,
     target: 'es2020',
     format: 'iife',
-    outfile: 'dist/app.js',
+    write: false,
     sourcemap: false,
   });
-  
-  // Read the built JS
-  const js = fs.readFileSync('dist/app.js', 'utf8');
-  
+  return result.outputFiles[0].text;
+}
+
+// Build function
+async function build() {
+  console.log('Building frontend...');
+
+  // Compile SCSS
+  const css = compileSass();
+
+  // Bundle each embedded route independently while sharing the same source
+  // translation and allowlisted icon runtime.
+  const [js, welcomeJs, charmapJs] = await Promise.all([
+    bundle('src/app.js'),
+    bundle('src/welcome.js'),
+    bundle('src/charmap.js'),
+  ]);
+
   // Read the HTML templates
   const viewerHtml = fs.readFileSync('src/viewer.html', 'utf8');
   const welcomeHtml = fs.readFileSync('src/welcome.html', 'utf8');
   const charmapHtml = fs.readFileSync('src/charmap.html', 'utf8');
-  
+
   // Inline everything into viewer.html
   const finalViewerHtml = viewerHtml
-    .replace('<!-- STYLES -->', `<style>${embeddedFontCSS()}${css}</style>`)
-    .replace('<!-- SCRIPTS -->', `<script>${js}</script>`);
-  
+    .replace('<!-- STYLES -->', () => `<style>${embeddedFontCSS()}${css}</style>`)
+    .replace('<!-- SCRIPTS -->', () => `<script>${js}</script>`);
+  const finalWelcomeHtml = welcomeHtml
+    .replace('<!-- EMBEDDED_FONT -->', () => embeddedFontCSS())
+    .replace('<!-- PAGE_SCRIPTS -->', () => welcomeJs);
+  const finalCharmapHtml = charmapHtml
+    .replace('<!-- EMBEDDED_FONT -->', () => embeddedFontCSS())
+    .replace('<!-- PAGE_SCRIPTS -->', () => charmapJs);
+
   // Ensure dist directory exists
   if (!fs.existsSync('dist')) {
     fs.mkdirSync('dist');
   }
-  
+
   // Write the final files
   fs.writeFileSync('dist/viewer.html', finalViewerHtml);
-  fs.writeFileSync('dist/welcome.html', welcomeHtml);
-  fs.writeFileSync('dist/charmap.html', charmapHtml);
+  fs.writeFileSync('dist/welcome.html', finalWelcomeHtml);
+  fs.writeFileSync('dist/charmap.html', finalCharmapHtml);
   
   console.log('Build complete: dist/viewer.html, dist/welcome.html, dist/charmap.html');
 }
@@ -78,7 +91,7 @@ build().catch(err => {
 if (watch) {
   console.log('Watching for changes...');
   // Simple file watcher
-  const watchFiles = ['src/viewer.html', 'src/welcome.html', 'src/charmap.html', 'src/styles.scss', 'src/app.js', 'src/records.js', 'src/export-menu.js', 'src/event-log.js', 'src/table-ux.js'];
+  const watchFiles = ['src/viewer.html', 'src/welcome.html', 'src/welcome.js', 'src/charmap.html', 'src/charmap.js', 'src/standalone-runtime.js', 'src/styles.scss', 'src/app.js', 'src/records.js', 'src/export-menu.js', 'src/event-log.js', 'src/table-ux.js'];
   watchFiles.forEach(file => {
     fs.watch(file, (eventType) => {
       if (eventType === 'change') {

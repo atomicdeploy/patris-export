@@ -211,6 +211,33 @@ func TestServerJSON(t *testing.T) {
 		if ct := w.Header().Get("Content-Type"); ct != "text/html; charset=utf-8" {
 			t.Errorf("Expected Content-Type text/html; charset=utf-8, got %s", ct)
 		}
+		body := w.Body.String()
+		for _, marker := range []string{`data-page-i18n="homeHeroTitle"`, `id="languageSelect"`, `data-page-icon="moon"`, `font-family:'Vazirmatn'`} {
+			if !strings.Contains(body, marker) {
+				t.Errorf("welcome page is missing localized embedded marker %q", marker)
+			}
+		}
+		for _, emoji := range []string{"🌙", "☀️", "🚀", "🌗", "⚡", "🔍", "📱", "🔄"} {
+			if strings.Contains(body, emoji) {
+				t.Errorf("welcome page still contains raw emoji glyph %q", emoji)
+			}
+		}
+	})
+
+	t.Run("GET /debug/charmap", func(t *testing.T) {
+		req := httptest.NewRequest("GET", "/debug/charmap", nil)
+		w := httptest.NewRecorder()
+		srv.router.ServeHTTP(w, req)
+
+		if w.Code != http.StatusOK {
+			t.Errorf("Expected status 200, got %d", w.Code)
+		}
+		body := w.Body.String()
+		for _, marker := range []string{`data-page-i18n="charmapPageTitle"`, `data-page-i18n-placeholder="filterCharmap"`, `id="languageSelect"`, `font-family:'Vazirmatn'`} {
+			if !strings.Contains(body, marker) {
+				t.Errorf("character-map page is missing localized embedded marker %q", marker)
+			}
+		}
 	})
 
 	// Test GET /viewer
@@ -253,8 +280,10 @@ func TestServerJSON(t *testing.T) {
 		if strings.Contains(strings.ToLower(body), "<html") || strings.Contains(strings.ToLower(body), "<body") {
 			t.Fatalf("Expected partial HTML without document wrapper, got %q", body[:min(80, len(body))])
 		}
-		if !strings.Contains(body, "Launch Visualizer") {
-			t.Fatalf("Expected welcome partial content")
+		for _, marker := range []string{"Launch Visualizer", `data-page-i18n="homeHeroTitle"`, `id="languageSelect"`} {
+			if !strings.Contains(body, marker) {
+				t.Fatalf("Expected welcome partial marker %q", marker)
+			}
 		}
 	})
 
@@ -270,8 +299,10 @@ func TestServerJSON(t *testing.T) {
 		if strings.Contains(strings.ToLower(body), "<html") || strings.Contains(strings.ToLower(body), "<body") {
 			t.Fatalf("Expected partial HTML without document wrapper, got %q", body[:min(80, len(body))])
 		}
-		if !strings.Contains(body, "Character Map Viewer") {
-			t.Fatalf("Expected charmap partial content")
+		for _, marker := range []string{"Character Map Viewer", `data-page-i18n="charmapPageTitle"`, `id="languageSelect"`} {
+			if !strings.Contains(body, marker) {
+				t.Fatalf("Expected charmap partial marker %q", marker)
+			}
 		}
 	})
 
