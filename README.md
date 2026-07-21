@@ -95,6 +95,9 @@ shared-object path for troubleshooting. On Windows foreground `.db` read
 failures show a TaskDialog-style message by default; set
 `PATRIS_EXPORT_NO_TASKDIALOG=1` for scripts and services.
 
+The native boundary's audited layouts, pointer-lifetime rules, read bounds,
+and backend requirements are documented in [docs/PXLIB-FFI.md](docs/PXLIB-FFI.md).
+
 ## 📖 Usage
 
 ### Convert Database to JSON
