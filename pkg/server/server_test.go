@@ -544,7 +544,7 @@ func TestServerJSON(t *testing.T) {
 	})
 }
 
-func TestBrowserConfigRedactsAndPreservesMySQLDSN(t *testing.T) {
+func TestBrowserConfigRedactsAndPreservesProtectedMySQLConnectionConfig(t *testing.T) {
 	tmpDir := t.TempDir()
 	configPath := filepath.Join(tmpDir, "patris-export.json")
 	manager, err := appconfig.Load(configPath)
@@ -552,10 +552,14 @@ func TestBrowserConfigRedactsAndPreservesMySQLDSN(t *testing.T) {
 		t.Fatalf("load config manager: %v", err)
 	}
 	const protectedDSN = "protected-dsn-test-value"
+	const protectedCAPath = "C:/protected/mysql/private-ca-path.pem"
+	const protectedServerName = "private-db.internal.example"
 	if err := manager.Update(func(cfg *appconfig.Config) {
 		cfg.Export.MySQLDSN = protectedDSN
+		cfg.Export.MySQLTLSCAFile = protectedCAPath
+		cfg.Export.MySQLTLSServerName = protectedServerName
 	}); err != nil {
-		t.Fatalf("store protected DSN: %v", err)
+		t.Fatalf("store protected MySQL config: %v", err)
 	}
 
 	jsonPath := filepath.Join(tmpDir, "records.json")
@@ -575,8 +579,17 @@ func TestBrowserConfigRedactsAndPreservesMySQLDSN(t *testing.T) {
 			t.Fatalf("marshal browser payload: %v", err)
 		}
 		body := string(data)
-		if strings.Contains(body, protectedDSN) || strings.Contains(body, `"mysql_dsn"`) {
-			t.Fatalf("browser payload exposed protected SQL configuration: %s", body)
+		for _, forbidden := range []string{
+			protectedDSN,
+			protectedCAPath,
+			protectedServerName,
+			`"mysql_dsn"`,
+			`"mysql_tls_ca_file"`,
+			`"mysql_tls_server_name"`,
+		} {
+			if strings.Contains(body, forbidden) {
+				t.Fatalf("browser payload exposed protected SQL configuration %q: %s", forbidden, body)
+			}
 		}
 	}
 
@@ -603,6 +616,8 @@ func TestBrowserConfigRedactsAndPreservesMySQLDSN(t *testing.T) {
 	clientConfig := browserConfig(manager.Get())
 	clientConfig.UI.Theme = "dark"
 	clientConfig.Export.MySQLDSN = "browser-supplied-dsn-must-be-ignored"
+	clientConfig.Export.MySQLTLSCAFile = "browser-supplied-ca-must-be-ignored.pem"
+	clientConfig.Export.MySQLTLSServerName = "browser-supplied-name.invalid"
 	body, err := json.Marshal(clientConfig)
 	if err != nil {
 		t.Fatalf("marshal browser update: %v", err)
@@ -613,8 +628,14 @@ func TestBrowserConfigRedactsAndPreservesMySQLDSN(t *testing.T) {
 		t.Fatalf("PUT /api/config status = %d: %s", put.Code, put.Body.String())
 	}
 	assertRedacted(t, json.RawMessage(put.Body.Bytes()))
-	if got := manager.Get(); got.Export.MySQLDSN != protectedDSN || got.UI.Theme != "dark" {
-		t.Fatalf("browser update did not preserve protected DSN and apply UI setting: DSN preserved=%t theme=%q", got.Export.MySQLDSN == protectedDSN, got.UI.Theme)
+	if got := manager.Get(); got.Export.MySQLDSN != protectedDSN || got.Export.MySQLTLSCAFile != protectedCAPath ||
+		got.Export.MySQLTLSServerName != protectedServerName || got.UI.Theme != "dark" {
+		t.Fatalf("browser update did not preserve protected MySQL config and apply UI setting: DSN=%t CA=%t name=%t theme=%q",
+			got.Export.MySQLDSN == protectedDSN,
+			got.Export.MySQLTLSCAFile == protectedCAPath,
+			got.Export.MySQLTLSServerName == protectedServerName,
+			got.UI.Theme,
+		)
 	}
 }
 

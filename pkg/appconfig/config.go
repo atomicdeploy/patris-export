@@ -87,16 +87,19 @@ type ConvertConfig struct {
 }
 
 type ExportConfig struct {
-	SQLitePath     string `json:"sqlite_path,omitempty" yaml:"sqlite_path,omitempty" toml:"sqlite_path,omitempty"`
-	SQLiteTable    string `json:"sqlite_table,omitempty" yaml:"sqlite_table,omitempty" toml:"sqlite_table,omitempty"`
-	MySQLDSN       string `json:"mysql_dsn,omitempty" yaml:"mysql_dsn,omitempty" toml:"mysql_dsn,omitempty"`
-	MySQLTable     string `json:"mysql_table,omitempty" yaml:"mysql_table,omitempty" toml:"mysql_table,omitempty"`
-	BatchSize      int    `json:"batch_size,omitempty" yaml:"batch_size,omitempty" toml:"batch_size,omitempty"`
-	Reconciliation string `json:"reconciliation,omitempty" yaml:"reconciliation,omitempty" toml:"reconciliation,omitempty"`
-	DryRun         bool   `json:"dry_run,omitempty" yaml:"dry_run,omitempty" toml:"dry_run,omitempty"`
-	XLSXLanguage   string `json:"xlsx_language,omitempty" yaml:"xlsx_language,omitempty" toml:"xlsx_language,omitempty"`
-	XLSXMode       string `json:"xlsx_mode,omitempty" yaml:"xlsx_mode,omitempty" toml:"xlsx_mode,omitempty"`
-	XLSXZebraRows  bool   `json:"xlsx_zebra_rows" yaml:"xlsx_zebra_rows" toml:"xlsx_zebra_rows"`
+	SQLitePath          string `json:"sqlite_path,omitempty" yaml:"sqlite_path,omitempty" toml:"sqlite_path,omitempty"`
+	SQLiteTable         string `json:"sqlite_table,omitempty" yaml:"sqlite_table,omitempty" toml:"sqlite_table,omitempty"`
+	MySQLDSN            string `json:"mysql_dsn,omitempty" yaml:"mysql_dsn,omitempty" toml:"mysql_dsn,omitempty"`
+	MySQLTable          string `json:"mysql_table,omitempty" yaml:"mysql_table,omitempty" toml:"mysql_table,omitempty"`
+	MySQLTLSCAFile      string `json:"mysql_tls_ca_file,omitempty" yaml:"mysql_tls_ca_file,omitempty" toml:"mysql_tls_ca_file,omitempty"`
+	MySQLTLSServerName  string `json:"mysql_tls_server_name,omitempty" yaml:"mysql_tls_server_name,omitempty" toml:"mysql_tls_server_name,omitempty"`
+	MySQLConnectTimeout string `json:"mysql_connect_timeout,omitempty" yaml:"mysql_connect_timeout,omitempty" toml:"mysql_connect_timeout,omitempty"`
+	BatchSize           int    `json:"batch_size,omitempty" yaml:"batch_size,omitempty" toml:"batch_size,omitempty"`
+	Reconciliation      string `json:"reconciliation,omitempty" yaml:"reconciliation,omitempty" toml:"reconciliation,omitempty"`
+	DryRun              bool   `json:"dry_run,omitempty" yaml:"dry_run,omitempty" toml:"dry_run,omitempty"`
+	XLSXLanguage        string `json:"xlsx_language,omitempty" yaml:"xlsx_language,omitempty" toml:"xlsx_language,omitempty"`
+	XLSXMode            string `json:"xlsx_mode,omitempty" yaml:"xlsx_mode,omitempty" toml:"xlsx_mode,omitempty"`
+	XLSXZebraRows       bool   `json:"xlsx_zebra_rows" yaml:"xlsx_zebra_rows" toml:"xlsx_zebra_rows"`
 }
 
 type EdgeConfig struct {
@@ -197,11 +200,12 @@ func Default() Config {
 			Debounce: "1s",
 		},
 		Export: ExportConfig{
-			BatchSize:      500,
-			Reconciliation: "upsert_only",
-			XLSXLanguage:   "auto",
-			XLSXMode:       "precalculated",
-			XLSXZebraRows:  true,
+			MySQLConnectTimeout: "10s",
+			BatchSize:           500,
+			Reconciliation:      "upsert_only",
+			XLSXLanguage:        "auto",
+			XLSXMode:            "precalculated",
+			XLSXZebraRows:       true,
 		},
 		Canonical: canonical.DefaultConfig(),
 		SendUpdates: updateout.Config{
@@ -817,6 +821,15 @@ func ApplyEnv(cfg *Config) {
 	if value := os.Getenv("PATRIS_EXPORT_MYSQL_TABLE"); strings.TrimSpace(value) != "" {
 		cfg.Export.MySQLTable = strings.TrimSpace(value)
 	}
+	if value := os.Getenv("PATRIS_EXPORT_MYSQL_TLS_CA_FILE"); strings.TrimSpace(value) != "" {
+		cfg.Export.MySQLTLSCAFile = strings.TrimSpace(value)
+	}
+	if value := os.Getenv("PATRIS_EXPORT_MYSQL_TLS_SERVER_NAME"); strings.TrimSpace(value) != "" {
+		cfg.Export.MySQLTLSServerName = strings.TrimSpace(value)
+	}
+	if value := os.Getenv("PATRIS_EXPORT_MYSQL_CONNECT_TIMEOUT"); strings.TrimSpace(value) != "" {
+		cfg.Export.MySQLConnectTimeout = strings.TrimSpace(value)
+	}
 	if value := os.Getenv("PATRIS_EXPORT_BATCH_SIZE"); strings.TrimSpace(value) != "" {
 		if batch, err := strconv.Atoi(strings.TrimSpace(value)); err == nil {
 			cfg.Export.BatchSize = batch
@@ -989,6 +1002,9 @@ func normalize(cfg *Config) {
 	if cfg.Export.BatchSize <= 0 {
 		cfg.Export.BatchSize = 500
 	}
+	cfg.Export.MySQLTLSCAFile = strings.TrimSpace(cfg.Export.MySQLTLSCAFile)
+	cfg.Export.MySQLTLSServerName = strings.TrimSpace(cfg.Export.MySQLTLSServerName)
+	cfg.Export.MySQLConnectTimeout = normalizeDuration(cfg.Export.MySQLConnectTimeout, 10*time.Second, 100*time.Millisecond, 2*time.Minute)
 	cfg.Export.XLSXLanguage = strings.ToLower(strings.TrimSpace(cfg.Export.XLSXLanguage))
 	if cfg.Export.XLSXLanguage != "fa" && cfg.Export.XLSXLanguage != "en" {
 		cfg.Export.XLSXLanguage = "auto"
@@ -1189,6 +1205,20 @@ func setAddr(cfg *Config, addr string) {
 		cfg.Server.Host = host
 		cfg.Server.Port = port
 	}
+}
+
+func normalizeDuration(value string, fallback, minimum, maximum time.Duration) string {
+	duration, err := time.ParseDuration(strings.TrimSpace(value))
+	if err != nil || duration <= 0 {
+		duration = fallback
+	}
+	if minimum > 0 && duration < minimum {
+		duration = minimum
+	}
+	if maximum > 0 && duration > maximum {
+		duration = maximum
+	}
+	return duration.String()
 }
 
 func parseBool(value string, fallback bool) bool {

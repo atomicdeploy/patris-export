@@ -9,6 +9,9 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Added
 
+- MySQL/MariaDB targets now have a shared bounded read-only connection probe,
+  protected custom-CA/server-name configuration, verified TLS 1.2+ connector,
+  and typed secret-safe retry diagnostics for future authenticated UI controls.
 - Product names and descriptions are checked for leading/trailing spaces,
   repeated spaces, and unseparated Persian/English/digit transitions. Stable
   warning codes are exported, summarized on the CLI, and highlighted in the
@@ -40,8 +43,9 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 ### Fixed
 
 - Browser configuration responses, initial WebSocket snapshots, and config
-  update events no longer expose the MySQL DSN; browser saves preserve the
-  protected server-side value and ignore client-supplied replacements.
+  update events no longer expose the MySQL DSN or protected TLS paths/names;
+  browser saves preserve the server-side values and ignore client-supplied
+  replacements.
 - Excel dashboard refresh now validates Code identity before mutating reviewed
   rows, rejects empty/non-JSON Digitalogic responses, uses deterministic
   canonical-over-legacy label precedence, and strips private Office path/author

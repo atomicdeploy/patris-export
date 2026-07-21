@@ -921,6 +921,11 @@ func writeConvertOutput(dbFile string, result recordpipe.Result, useStdout bool,
 			Reconciliation: recordsink.ReconciliationMode(cfg.Export.Reconciliation),
 			DryRun:         cfg.Export.DryRun,
 			ProtectedKeys:  quarantinedCodes(result),
+			ConnectTimeout: recordsink.ParseSQLConnectTimeout(cfg.Export.MySQLConnectTimeout),
+			MySQLTLS: recordsink.MySQLTLSOptions{
+				CAFile:     cfg.Export.MySQLTLSCAFile,
+				ServerName: cfg.Export.MySQLTLSServerName,
+			},
 		}, result.Rows)
 		if err != nil {
 			return err

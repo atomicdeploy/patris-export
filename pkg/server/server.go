@@ -324,6 +324,8 @@ func (s *Server) Config() appconfig.Config {
 // protected config files, environment variables, or command-line options.
 func browserConfig(cfg appconfig.Config) appconfig.Config {
 	cfg.Export.MySQLDSN = ""
+	cfg.Export.MySQLTLSCAFile = ""
+	cfg.Export.MySQLTLSServerName = ""
 	return cfg
 }
 
@@ -873,10 +875,13 @@ func (s *Server) handlePutConfig(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf("Failed to decode config: %v", err), http.StatusBadRequest)
 		return
 	}
-	// The browser is not a credential-management surface. Preserve the
-	// protected server-side DSN even if an old cached config or a crafted
-	// request includes a mysql_dsn value.
-	cfg.Export.MySQLDSN = s.config.Get().Export.MySQLDSN
+	// The browser is not a connection-management surface. Preserve protected
+	// server-side connection material even if an old cache or crafted request
+	// includes replacement values.
+	protectedExport := s.config.Get().Export
+	cfg.Export.MySQLDSN = protectedExport.MySQLDSN
+	cfg.Export.MySQLTLSCAFile = protectedExport.MySQLTLSCAFile
+	cfg.Export.MySQLTLSServerName = protectedExport.MySQLTLSServerName
 	cfg, err := s.ReplaceConfig(cfg)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("Failed to save config: %v", err), http.StatusInternalServerError)

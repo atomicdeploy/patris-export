@@ -17,7 +17,6 @@ import (
 	"strings"
 	"time"
 
-	_ "github.com/go-sql-driver/mysql"
 	_ "github.com/mattn/go-sqlite3"
 
 	"github.com/atomicdeploy/patris-export/pkg/recordmap"
@@ -25,13 +24,15 @@ import (
 
 type SQLOptions struct {
 	Driver         string
-	DSN            string
+	DSN            string `json:"-"`
 	Table          string
 	KeyField       string
 	Batch          int
 	Reconciliation ReconciliationMode
 	DryRun         bool
 	ProtectedKeys  []string
+	ConnectTimeout time.Duration
+	MySQLTLS       MySQLTLSOptions `json:"-"`
 }
 
 // ReconciliationMode controls what happens to destination rows that are not
@@ -156,23 +157,28 @@ func SyncSQL(ctx context.Context, options SQLOptions, rows []map[string]interfac
 // SyncSQLWithResult opens a configured SQL destination and reports the shared
 // sink result. The returned value deliberately has no connection fields.
 func SyncSQLWithResult(ctx context.Context, options SQLOptions, rows []map[string]interface{}) (SQLResult, error) {
-	driver := strings.ToLower(strings.TrimSpace(options.Driver))
-	if driver == "" {
-		driver = "mysql"
+	driver := normalizedSQLDriver(options.Driver)
+	if ctx == nil {
+		ctx = context.Background()
 	}
-	if options.DSN == "" {
-		return SQLResult{}, fmt.Errorf("%s DSN is required", driver)
-	}
-	db, err := sql.Open(driver, options.DSN)
+	connectCtx, cancel := sqlConnectContext(ctx, options.ConnectTimeout)
+	db, err := openSQLTarget(options)
 	if err != nil {
+		cancel()
 		return SQLResult{}, err
 	}
 	defer db.Close()
-	if err := db.PingContext(ctx); err != nil {
-		return SQLResult{}, fmt.Errorf("connect to %s destination: %w", driver, err)
+	if err := db.PingContext(connectCtx); err != nil {
+		cancel()
+		return SQLResult{}, ClassifySQLError(SQLStageConnect, err)
 	}
+	cancel()
 	options.Driver = driver
-	return SyncSQLDB(ctx, db, options, rows)
+	result, err := SyncSQLDB(ctx, db, options, rows)
+	if err != nil {
+		return result, ClassifySQLError(SQLStageSync, err)
+	}
+	return result, nil
 }
 
 // UpsertSQL writes a partial set of rows without deleting records that are not
