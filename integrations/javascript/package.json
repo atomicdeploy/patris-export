@@ -1,0 +1,24 @@
+{
+  "name": "@atomicdeploy/patris-export-hosts",
+  "version": "1.2.0",
+  "private": true,
+  "description": "Privileged JavaScript host contracts for Patris Export",
+  "type": "commonjs",
+  "main": "src/index.cjs",
+  "types": "src/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./src/index.d.ts",
+      "require": "./src/index.cjs",
+      "default": "./src/index.cjs"
+    }
+  },
+  "scripts": {
+    "test": "node --test test/*.test.cjs",
+    "check": "node --check src/index.cjs && node --check src/contract.cjs && node --check src/authorization.cjs && node --check src/privileged-host.cjs && node --check src/transports.cjs && node --check src/native-worker.cjs && node --check src/electron.cjs && node --check src/tauri.cjs && node --check src/webview2.cjs && node --check examples/electron-main.cjs && node --check examples/electron-preload.cjs && node --check examples/tauri-renderer.cjs && node --check examples/webview2-renderer.cjs"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "license": "MIT"
+}

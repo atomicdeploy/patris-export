@@ -58,6 +58,11 @@ jobs:
     - name: Test remote delivery examples
       run: node --test scripts/examples/patris-delivery-adapter.test.cjs
 
+    - name: Test JavaScript host adapters
+      run: |
+        npm --prefix integrations/javascript run check
+        npm --prefix integrations/javascript test
+
     - name: Run tests
       shell: bash
       run: |
