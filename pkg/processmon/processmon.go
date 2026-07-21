@@ -1,12 +1,12 @@
 package processmon
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
-	"time"
 
 	"github.com/shirou/gopsutil/v4/process"
 )
@@ -28,32 +28,49 @@ type FileAccessInfo struct {
 	Processes []ProcessInfo `json:"processes"`
 }
 
-const (
-	openFilesTimeoutWindows = 50 * time.Millisecond
-	openFilesTimeoutDefault = 250 * time.Millisecond
-	fileScanDeadlineWindows = 3 * time.Second
-	fileScanDeadlineDefault = 10 * time.Second
-)
+type fileProcessMatch struct {
+	PID        int32
+	Name       string
+	OpenFiles  []string
+	CreateTime int64
+}
 
 // FindProcessByName finds all running processes with the given name.
 // Windows uses exact matching. Unix-like systems use substring matching and
 // ignore a trailing ".exe" so callers can search for Windows process names.
 func FindProcessByName(name string) ([]ProcessInfo, error) {
-	processes, err := process.Processes()
+	return FindProcessByNameContext(context.Background(), name)
+}
+
+// FindProcessByNameContext finds all running processes with the given name
+// and stops between process inspections when ctx is cancelled.
+func FindProcessByNameContext(ctx context.Context, name string) ([]ProcessInfo, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	processes, err := process.ProcessesWithContext(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get process list: %w", err)
 	}
 
 	found := make([]ProcessInfo, 0)
 	for _, p := range processes {
-		pName, err := p.Name()
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+
+		pName, err := p.NameWithContext(ctx)
 		if err != nil {
 			continue // Skip processes we can't access
 		}
 
 		if processNameMatches(pName, name) {
-			found = append(found, collectProcessInfo(p, pName, nil, false))
+			found = append(found, collectProcessInfo(ctx, p, pName, nil, false))
 		}
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 
 	return found, nil
@@ -61,20 +78,41 @@ func FindProcessByName(name string) ([]ProcessInfo, error) {
 
 // FindProcessesWithFile finds all processes that have the specified file open
 func FindProcessesWithFile(filePath string) (*FileAccessInfo, error) {
+	return FindProcessesWithFileContext(context.Background(), filePath)
+}
+
+// FindProcessesWithFileContext finds processes using filePath without
+// abandoning background scans when ctx expires.
+func FindProcessesWithFileContext(ctx context.Context, filePath string) (*FileAccessInfo, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
 	// Normalize the file path
 	absPath, err := filepath.Abs(filePath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get absolute path: %w", err)
 	}
 
-	// Ensure file exists
-	if _, err := os.Stat(absPath); err != nil {
+	// Ensure file exists and is a file. Restart Manager accepts files, not
+	// directories, and otherwise reports a fairly opaque registration error.
+	fileInfo, err := os.Stat(absPath)
+	if err != nil {
 		return nil, fmt.Errorf("file does not exist: %w", err)
 	}
+	if fileInfo.IsDir() {
+		return nil, fmt.Errorf("path is a directory, not a file: %s", absPath)
+	}
 
-	processes, err := process.Processes()
+	matches, err := findFileProcesses(ctx, absPath)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get process list: %w", err)
+		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 
 	info := &FileAccessInfo{
@@ -82,35 +120,59 @@ func FindProcessesWithFile(filePath string) (*FileAccessInfo, error) {
 		Processes: make([]ProcessInfo, 0),
 	}
 
-	deadline := time.Now().Add(fileScanDeadline())
-	for _, p := range processes {
-		if time.Now().After(deadline) {
-			break
+	for _, match := range matches {
+		if err := ctx.Err(); err != nil {
+			return nil, err
 		}
 
-		openFiles, err := openFilesWithTimeout(p)
+		fallback := ProcessInfo{
+			PID:        match.PID,
+			Name:       match.Name,
+			OpenFiles:  append([]string(nil), match.OpenFiles...),
+			CreateTime: match.CreateTime,
+		}
+
+		p, err := process.NewProcessWithContext(ctx, match.PID)
 		if err != nil {
-			continue // Skip processes we can't access
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return nil, ctxErr
+			}
+			// Restart Manager already identified the lock owner. Preserve that
+			// useful result even if the process is protected or exits before we
+			// can enrich it with optional details.
+			info.Processes = append(info.Processes, fallback)
+			continue
 		}
 
-		// Check if this process has our file open
-		hasFile := false
-		for _, f := range openFiles {
-			// Normalize and compare paths
-			openPath, err := filepath.Abs(f.Path)
-			if err != nil {
+		knownName := match.Name
+		if processName, nameErr := p.NameWithContext(ctx); nameErr == nil && processName != "" {
+			knownName = processName
+		} else if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, ctxErr
+		}
+
+		if match.CreateTime != 0 {
+			createTime, createErr := p.CreateTimeWithContext(ctx)
+			if createErr != nil {
+				if ctxErr := ctx.Err(); ctxErr != nil {
+					return nil, ctxErr
+				}
+				info.Processes = append(info.Processes, fallback)
 				continue
 			}
-
-			if openPath == absPath {
-				hasFile = true
-				break
+			if createTime != match.CreateTime {
+				// The PID was reused after Restart Manager took its snapshot.
+				// Preserve the point-in-time lock owner without enriching it
+				// with details from the unrelated replacement process.
+				info.Processes = append(info.Processes, fallback)
+				continue
 			}
 		}
 
-		if hasFile {
-			info.Processes = append(info.Processes, collectProcessInfo(p, "", openFiles, true))
-		}
+		info.Processes = append(info.Processes, collectProcessInfo(ctx, p, knownName, match.OpenFiles, true))
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 
 	return info, nil
@@ -118,7 +180,13 @@ func FindProcessesWithFile(filePath string) (*FileAccessInfo, error) {
 
 // IsFileInUse checks if a file is currently opened by any process
 func IsFileInUse(filePath string) (bool, error) {
-	info, err := FindProcessesWithFile(filePath)
+	return IsFileInUseContext(context.Background(), filePath)
+}
+
+// IsFileInUseContext checks whether filePath is currently opened by any
+// process while honoring ctx between OS queries.
+func IsFileInUseContext(ctx context.Context, filePath string) (bool, error) {
+	info, err := FindProcessesWithFileContext(ctx, filePath)
 	if err != nil {
 		return false, err
 	}
@@ -127,12 +195,24 @@ func IsFileInUse(filePath string) (bool, error) {
 
 // GetProcessInfo retrieves detailed information about a specific process by PID
 func GetProcessInfo(pid int32) (*ProcessInfo, error) {
-	p, err := process.NewProcess(pid)
+	return GetProcessInfoContext(context.Background(), pid)
+}
+
+// GetProcessInfoContext retrieves detailed information about a process.
+func GetProcessInfoContext(ctx context.Context, pid int32) (*ProcessInfo, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	p, err := process.NewProcessWithContext(ctx, pid)
 	if err != nil {
 		return nil, fmt.Errorf("failed to find process: %w", err)
 	}
 
-	info := collectProcessInfo(p, "", nil, true)
+	info := collectProcessInfo(ctx, p, "", nil, true)
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	return &info, nil
 }
 
@@ -146,71 +226,35 @@ func processNameMatches(processName, target string) bool {
 	return strings.Contains(normalizedProcess, normalizedTarget)
 }
 
-func collectProcessInfo(p *process.Process, knownName string, knownOpenFiles []process.OpenFilesStat, includeOpenFiles bool) ProcessInfo {
+func collectProcessInfo(ctx context.Context, p *process.Process, knownName string, knownOpenFiles []string, includeOpenFiles bool) ProcessInfo {
 	info := ProcessInfo{PID: p.Pid, Name: knownName}
 
 	if info.Name == "" {
-		if pName, err := p.Name(); err == nil {
+		if pName, err := p.NameWithContext(ctx); err == nil {
 			info.Name = pName
 		}
 	}
-	if exe, err := p.Exe(); err == nil {
+	if exe, err := p.ExeWithContext(ctx); err == nil {
 		info.Exe = exe
 	}
-	if cmdline, err := p.Cmdline(); err == nil {
+	if cmdline, err := p.CmdlineWithContext(ctx); err == nil {
 		info.Cmdline = cmdline
 	}
-	if createTime, err := p.CreateTime(); err == nil {
+	if createTime, err := p.CreateTimeWithContext(ctx); err == nil {
 		info.CreateTime = createTime
 	}
-	if memInfo, err := p.MemoryInfo(); err == nil {
+	if memInfo, err := p.MemoryInfoWithContext(ctx); err == nil {
 		info.MemoryUsage = memInfo.RSS
 	}
 	if includeOpenFiles {
 		openFiles := knownOpenFiles
 		if openFiles == nil {
-			if files, err := openFilesWithTimeout(p); err == nil {
+			if files, err := openFilesForProcess(ctx, p); err == nil {
 				openFiles = files
 			}
 		}
-		for _, f := range openFiles {
-			info.OpenFiles = append(info.OpenFiles, f.Path)
-		}
+		info.OpenFiles = append(info.OpenFiles, openFiles...)
 	}
 
 	return info
-}
-
-func openFilesTimeout() time.Duration {
-	if runtime.GOOS == "windows" {
-		return openFilesTimeoutWindows
-	}
-	return openFilesTimeoutDefault
-}
-
-func fileScanDeadline() time.Duration {
-	if runtime.GOOS == "windows" {
-		return fileScanDeadlineWindows
-	}
-	return fileScanDeadlineDefault
-}
-
-func openFilesWithTimeout(p *process.Process) ([]process.OpenFilesStat, error) {
-	type result struct {
-		files []process.OpenFilesStat
-		err   error
-	}
-
-	ch := make(chan result, 1)
-	go func() {
-		files, err := p.OpenFiles()
-		ch <- result{files: files, err: err}
-	}()
-
-	select {
-	case res := <-ch:
-		return res.files, res.err
-	case <-time.After(openFilesTimeout()):
-		return nil, fmt.Errorf("timed out reading open files for pid %d", p.Pid)
-	}
 }

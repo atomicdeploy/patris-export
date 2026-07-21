@@ -1820,42 +1820,28 @@ func (s *Server) processStatus() map[string]interface{} {
 }
 
 func findPatrisProcessesWithTimeout(timeout time.Duration) ([]processmon.ProcessInfo, error) {
-	type result struct {
-		processes []processmon.ProcessInfo
-		err       error
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	processes, err := processmon.FindProcessByNameContext(ctx, "patris81.exe")
+	if err != nil && ctx.Err() != nil {
+		return nil, fmt.Errorf("timed out inspecting patris81.exe processes: %w", ctx.Err())
 	}
-	ch := make(chan result, 1)
-	go func() {
-		processes, err := processmon.FindProcessByName("patris81.exe")
-		ch <- result{processes: processes, err: err}
-	}()
-	select {
-	case res := <-ch:
-		return res.processes, res.err
-	case <-time.After(timeout):
-		return nil, fmt.Errorf("timed out inspecting patris81.exe processes")
-	}
+	return processes, err
 }
 
 func findFileProcessesWithTimeout(path string, timeout time.Duration) (*processmon.FileAccessInfo, error) {
-	type result struct {
-		info *processmon.FileAccessInfo
-		err  error
-	}
-	ch := make(chan result, 1)
-	go func() {
-		info, err := processmon.FindProcessesWithFile(path)
-		ch <- result{info: info, err: err}
-	}()
-	select {
-	case res := <-ch:
-		return res.info, res.err
-	case <-time.After(timeout):
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	info, err := processmon.FindProcessesWithFileContext(ctx, path)
+	if err != nil && ctx.Err() != nil {
 		return &processmon.FileAccessInfo{
 			FilePath:  path,
 			Processes: []processmon.ProcessInfo{},
-		}, fmt.Errorf("timed out inspecting file access")
+		}, fmt.Errorf("timed out inspecting file access: %w", ctx.Err())
 	}
+	return info, err
 }
 
 func (s *Server) broadcastConfig(cfg appconfig.Config) {

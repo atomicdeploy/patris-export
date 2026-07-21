@@ -3,6 +3,7 @@ package processmon
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -87,6 +88,13 @@ func TestFindProcessesWithFile_NotExists(t *testing.T) {
 	}
 }
 
+func TestFindProcessesWithFile_RejectsDirectory(t *testing.T) {
+	_, err := FindProcessesWithFile(t.TempDir())
+	if err == nil || !strings.Contains(err.Error(), "directory") {
+		t.Fatalf("error = %v, want directory error", err)
+	}
+}
+
 func TestIsFileInUse(t *testing.T) {
 	// Create a temporary file
 	tmpFile, err := os.CreateTemp("", "processmon_test_*.txt")
@@ -145,7 +153,7 @@ func TestIntegration(t *testing.T) {
 	// Create a test file
 	tmpDir := t.TempDir()
 	testFile := filepath.Join(tmpDir, "test.db")
-	
+
 	f, err := os.Create(testFile)
 	if err != nil {
 		t.Fatalf("Failed to create test file: %v", err)
