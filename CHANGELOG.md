@@ -20,6 +20,7 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 ### Fixed
 
 - Standalone exports no longer contain Digitalogic pricing, formula, or shipping-method fields and warnings when no pricing integration is configured.
+- Windows file-lock monitoring now uses targeted Restart Manager queries instead of overlapping system-wide handle snapshots that could exhaust committed memory.
 
 ## [1.2.0] - 2026-07-17
 

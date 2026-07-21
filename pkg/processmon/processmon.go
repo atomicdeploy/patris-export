@@ -13,10 +13,13 @@ import (
 
 // ProcessInfo contains information about a running process
 type ProcessInfo struct {
-	PID         int32    `json:"pid"`
-	Name        string   `json:"name"`
-	Exe         string   `json:"exe"`
-	Cmdline     string   `json:"cmdline"`
+	PID     int32  `json:"pid"`
+	Name    string `json:"name"`
+	Exe     string `json:"exe"`
+	Cmdline string `json:"cmdline"`
+	// OpenFiles contains files known to the operation that produced this
+	// ProcessInfo. On Windows, targeted file scans contain only the requested
+	// file, while generic process-info queries leave this field empty.
 	OpenFiles   []string `json:"open_files,omitempty"`
 	CreateTime  int64    `json:"create_time"`
 	MemoryUsage uint64   `json:"memory_usage,omitempty"`
@@ -193,12 +196,16 @@ func IsFileInUseContext(ctx context.Context, filePath string) (bool, error) {
 	return len(info.Processes) > 0, nil
 }
 
-// GetProcessInfo retrieves detailed information about a specific process by PID
+// GetProcessInfo retrieves detailed information about a specific process by PID.
+// On Windows, OpenFiles is intentionally empty because enumerating a process's
+// handles requires the system-wide snapshot that targeted Restart Manager
+// queries avoid. Use FindProcessesWithFile to query ownership of a known file.
 func GetProcessInfo(pid int32) (*ProcessInfo, error) {
 	return GetProcessInfoContext(context.Background(), pid)
 }
 
-// GetProcessInfoContext retrieves detailed information about a process.
+// GetProcessInfoContext retrieves detailed information about a process. Its
+// Windows OpenFiles behavior matches GetProcessInfo.
 func GetProcessInfoContext(ctx context.Context, pid int32) (*ProcessInfo, error) {
 	if ctx == nil {
 		ctx = context.Background()

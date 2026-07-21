@@ -176,6 +176,47 @@ func TestFindFileProcessesWithManagerJoinsCleanupError(t *testing.T) {
 	}
 }
 
+func TestFindFileProcessesWithManagerCancellationEndsSession(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	manager := &fakeRestartManager{
+		getListFunc: func(_ uint32, _ *uint32, _ *uint32, _ []restartManagerProcessInfo, _ *uint32) uintptr {
+			cancel()
+			return restartManagerSuccess
+		},
+	}
+
+	_, err := findFileProcessesWithManager(ctx, `C:\data\kala.db`, manager)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("error = %v, want context.Canceled", err)
+	}
+	if manager.endSessionCalls != 1 {
+		t.Fatalf("endSession calls = %d, want 1", manager.endSessionCalls)
+	}
+}
+
+func TestAcquireRestartManagerScanHonorsCancellation(t *testing.T) {
+	if err := acquireRestartManagerScan(context.Background()); err != nil {
+		t.Fatalf("occupy scan gate: %v", err)
+	}
+	defer releaseRestartManagerScan()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := acquireRestartManagerScan(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("error = %v, want context.Canceled", err)
+	}
+}
+
+func TestGetProcessInfoDoesNotEnumerateOpenFilesOnWindows(t *testing.T) {
+	info, err := GetProcessInfo(int32(os.Getpid()))
+	if err != nil {
+		t.Fatalf("GetProcessInfo: %v", err)
+	}
+	if len(info.OpenFiles) != 0 {
+		t.Fatalf("OpenFiles = %v, want empty targeted-only Windows contract", info.OpenFiles)
+	}
+}
+
 // This test measures operating-system process resources and is intentionally
 // opt-in because unrelated system activity can make the deltas noisy.
 func TestRestartManagerFileScanIsBoundedIntegration(t *testing.T) {
@@ -200,6 +241,9 @@ func TestRestartManagerFileScanIsBoundedIntegration(t *testing.T) {
 		}
 		for _, processInfo := range info.Processes {
 			if processInfo.PID == int32(os.Getpid()) {
+				if len(processInfo.OpenFiles) != 1 || processInfo.OpenFiles[0] != file.Name() {
+					t.Fatalf("scan %d open files = %v, want only %s", iteration, processInfo.OpenFiles, file.Name())
+				}
 				return
 			}
 		}

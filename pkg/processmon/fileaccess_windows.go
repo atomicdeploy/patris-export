@@ -69,6 +69,8 @@ func (nativeRestartManager) startSession() (uint32, error) {
 		0,
 		uintptr(unsafe.Pointer(&sessionKey[0])),
 	)
+	runtime.KeepAlive(&session)
+	runtime.KeepAlive(sessionKey)
 	if err := restartManagerError("start session", result); err != nil {
 		return 0, err
 	}
@@ -90,6 +92,7 @@ func (nativeRestartManager) registerFile(session uint32, filePath string) error 
 		0,
 		0,
 	)
+	runtime.KeepAlive(pathPtr)
 	runtime.KeepAlive(filePaths)
 	return restartManagerError("register file", result)
 }
@@ -112,6 +115,13 @@ func (nativeRestartManager) getList(
 		processBuffer,
 		uintptr(unsafe.Pointer(rebootReasons)),
 	)
+	// LazyProc.Call receives raw uintptr values. Keep every Go allocation that
+	// backs those pointers live until the native call has returned, including
+	// the slice backing array used for RM_PROCESS_INFO results.
+	runtime.KeepAlive(needed)
+	runtime.KeepAlive(count)
+	runtime.KeepAlive(processes)
+	runtime.KeepAlive(rebootReasons)
 	return result
 }
 
