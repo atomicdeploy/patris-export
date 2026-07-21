@@ -413,11 +413,14 @@ func (p *httpProvider) resolve(ctx context.Context, code string, run *prefetchRu
 	if !exists {
 		resolution.Warnings = append(resolution.Warnings, "shipping_method_unknown")
 	} else {
-		if catalog.methodPairPresent[resolution.MethodID] {
+		pricePresent, currencyPresent := method.shippingPairPresence()
+		if pricePresent {
 			resolution.ShippingPricePerKg = cloneDecimal(method.PricePerKg)
-			resolution.ShippingPricePerKgCurrency = method.Currency
-			resolution.ShippingPricePairPresent = true
 		}
+		if currencyPresent {
+			resolution.ShippingPricePerKgCurrency = method.Currency
+		}
+		resolution.ShippingPricePairPresent = catalog.methodPairPresent[resolution.MethodID]
 		if catalog.methodPairIncomplete[resolution.MethodID] {
 			resolution.Warnings = append(resolution.Warnings, "shipping_price_per_kg_pair_incomplete")
 		}

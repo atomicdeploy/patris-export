@@ -22,7 +22,6 @@ func LandedPrice(weightGrams, shippingPricePerKg, shippingCurrency, foreignCNY, 
 		values = append(values, value)
 	}
 
-	shippingCurrency = strings.TrimSpace(shippingCurrency)
 	if shippingCurrency != pricingcatalog.CurrencyCNY && shippingCurrency != pricingcatalog.CurrencyIRR {
 		return 0, fmt.Errorf("shipping currency must be CNY or IRR")
 	}

@@ -69,6 +69,11 @@ type Method struct {
 	Enabled    *bool    `json:"enabled,omitempty" yaml:"enabled,omitempty" toml:"enabled,omitempty"`
 	PricePerKg *Decimal `json:"price_per_kg,omitempty" yaml:"price_per_kg,omitempty" toml:"price_per_kg,omitempty"`
 	Currency   string   `json:"currency,omitempty" yaml:"currency,omitempty" toml:"currency,omitempty"`
+
+	pricePerKgPresent bool
+	pricePerKgNull    bool
+	currencyPresent   bool
+	currencyNull      bool
 }
 
 type Assignment struct {
@@ -257,9 +262,29 @@ func (p *staticProvider) Resolve(_ context.Context, code string) Resolution {
 		if !exists {
 			resolution.Warnings = append(resolution.Warnings, "shipping_method_unknown")
 		} else {
-			resolution.ShippingPricePerKg = cloneDecimal(method.PricePerKg)
-			resolution.ShippingPricePerKgCurrency = method.Currency
-			resolution.ShippingPricePairPresent = method.PricePerKg != nil || strings.TrimSpace(method.Currency) != ""
+			pricePresent, currencyPresent := method.shippingPairPresence()
+			if pricePresent {
+				resolution.ShippingPricePerKg = cloneDecimal(method.PricePerKg)
+			}
+			if currencyPresent {
+				resolution.ShippingPricePerKgCurrency = method.Currency
+			}
+			resolution.ShippingPricePairPresent = pricePresent && currencyPresent
+			if pricePresent != currencyPresent {
+				resolution.Warnings = append(resolution.Warnings, "shipping_price_per_kg_pair_incomplete")
+			}
+			if method.pricePerKgNull {
+				if resolution.ExplicitNulls == nil {
+					resolution.ExplicitNulls = make(map[string]bool)
+				}
+				resolution.ExplicitNulls["shipping_price_per_kg"] = true
+			}
+			if method.currencyNull {
+				if resolution.ExplicitNulls == nil {
+					resolution.ExplicitNulls = make(map[string]bool)
+				}
+				resolution.ExplicitNulls["shipping_price_per_kg_currency"] = true
+			}
 			if method.Enabled != nil && !*method.Enabled {
 				resolution.Warnings = append(resolution.Warnings, "shipping_method_disabled")
 			}
@@ -310,7 +335,7 @@ func finishResolution(value Resolution) Resolution {
 }
 
 func normalizeShippingCurrency(value string) string {
-	return strings.TrimSpace(value)
+	return value
 }
 
 func validShippingCurrency(value string) bool {

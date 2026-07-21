@@ -1,6 +1,7 @@
 package appconfig
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -495,7 +496,9 @@ func decodeConfig(path string, data []byte, cfg *Config) error {
 	case ".yaml", ".yml":
 		return yaml.Unmarshal(data, cfg)
 	case ".toml":
-		return toml.Unmarshal(data, cfg)
+		decoder := toml.NewDecoder(bytes.NewReader(data))
+		decoder.EnableUnmarshalerInterface()
+		return decoder.Decode(cfg)
 	default:
 		return json.Unmarshal(data, cfg)
 	}

@@ -1,11 +1,14 @@
 package appconfig
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/atomicdeploy/patris-export/pkg/pricingcatalog"
 )
 
 func TestLoadFilesLayersJSONYAMLTOML(t *testing.T) {
@@ -49,6 +52,18 @@ func TestLoadFilesLayersJSONYAMLTOML(t *testing.T) {
 	}
 	if mgr.Path() != tomlPath {
 		t.Fatalf("write path = %q, want %q", mgr.Path(), tomlPath)
+	}
+}
+
+func TestTOMLStaticShippingPairUsesPresenceAwareDecoder(t *testing.T) {
+	cfg := Default()
+	data := []byte("[canonical.pricing]\nmode = 'static'\n[canonical.pricing.static.assignments.A]\nshipping_method_id = 'air'\nprofit_percent = 30\n[[canonical.pricing.static.shipping_methods]]\nid = 'air'\nprice_per_kg = 120\ncurrency = 'IRR'\n")
+	if err := decodeConfig("patris-export.toml", data, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	resolution := pricingcatalog.NewProvider(cfg.Canonical.Pricing).Resolve(context.Background(), "A")
+	if !resolution.ShippingPricePairPresent || resolution.ShippingPricePerKg == nil || resolution.ShippingPricePerKg.String() != "120" || resolution.ShippingPricePerKgCurrency != pricingcatalog.CurrencyIRR {
+		t.Fatalf("TOML shipping pair presence was lost: %+v", resolution)
 	}
 }
 

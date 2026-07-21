@@ -11,6 +11,9 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/pelletier/go-toml/v2"
+	"gopkg.in/yaml.v3"
 )
 
 func floatPointer(value float64) *Decimal { return DecimalFromFloat(value) }
@@ -57,6 +60,22 @@ func TestNormalizeUsesCurrentShippingKeys(t *testing.T) {
 	}
 }
 
+func TestStaticMethodJSONRejectsUnknownAndRetiredFreightFields(t *testing.T) {
+	retiredField := "price_per_kg_" + strings.ToLower(CurrencyCNY)
+	for name, field := range map[string]string{
+		"unknown": "unexpected_method_field",
+		"retired": retiredField,
+	} {
+		t.Run(name, func(t *testing.T) {
+			payload := fmt.Sprintf(`{"mode":"static","static":{"shipping_methods":[{"id":"air","price_per_kg":120,"currency":"CNY",%q:120}]}}`, field)
+			var cfg Config
+			if err := json.Unmarshal([]byte(payload), &cfg); err == nil {
+				t.Fatalf("nested method field %q was accepted", field)
+			}
+		})
+	}
+}
+
 func TestStaticProviderRequiresPairedShippingPriceAndCurrency(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -67,6 +86,7 @@ func TestStaticProviderRequiresPairedShippingPriceAndCurrency(t *testing.T) {
 		{name: "currency only", method: Method{ID: "air", Currency: CurrencyIRR}, warnings: []string{"shipping_price_per_kg_missing", "shipping_price_per_kg_pair_incomplete"}},
 		{name: "unsupported currency", method: Method{ID: "air", PricePerKg: floatPointer(120), Currency: "USD"}, warnings: []string{"shipping_price_per_kg_currency_invalid", "shipping_price_per_kg_pair_incomplete"}},
 		{name: "lowercase currency", method: Method{ID: "air", PricePerKg: floatPointer(120), Currency: "cny"}, warnings: []string{"shipping_price_per_kg_currency_invalid", "shipping_price_per_kg_pair_incomplete"}},
+		{name: "whitespace currency", method: Method{ID: "air", PricePerKg: floatPointer(120), Currency: " CNY "}, warnings: []string{"shipping_price_per_kg_currency_invalid", "shipping_price_per_kg_pair_incomplete"}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -82,6 +102,73 @@ func TestStaticProviderRequiresPairedShippingPriceAndCurrency(t *testing.T) {
 				if !contains(resolution.Warnings, warning) {
 					t.Fatalf("missing %s in %v", warning, resolution.Warnings)
 				}
+			}
+			if test.name == "price only" && contains(resolution.Warnings, "shipping_price_per_kg_missing") {
+				t.Fatalf("a supplied price was incorrectly diagnosed as missing: %v", resolution.Warnings)
+			}
+			if test.name == "currency only" && contains(resolution.Warnings, "shipping_price_per_kg_currency_missing") {
+				t.Fatalf("a supplied currency was incorrectly diagnosed as missing: %v", resolution.Warnings)
+			}
+		})
+	}
+}
+
+func TestStaticMethodDecodersPreserveShippingNullPresence(t *testing.T) {
+	tests := []struct {
+		name             string
+		decode           func(*Config) error
+		wantPrice        string
+		wantCurrency     string
+		wantPriceNull    bool
+		wantCurrencyNull bool
+	}{
+		{
+			name: "JSON amount and null currency",
+			decode: func(cfg *Config) error {
+				return json.Unmarshal([]byte(`{"mode":"static","static":{"shipping_methods":[{"id":"air","price_per_kg":120,"currency":null}],"assignments":{"A":{"shipping_method_id":"air","profit_percent":30}}}}`), cfg)
+			},
+			wantPrice: "120", wantCurrencyNull: true,
+		},
+		{
+			name: "YAML null amount and currency",
+			decode: func(cfg *Config) error {
+				return yaml.Unmarshal([]byte("mode: static\nstatic:\n  shipping_methods:\n    - id: air\n      price_per_kg: null\n      currency: CNY\n  assignments:\n    A:\n      shipping_method_id: air\n      profit_percent: 30\n"), cfg)
+			},
+			wantCurrency: CurrencyCNY, wantPriceNull: true,
+		},
+		{
+			name: "YAML explicit null pair",
+			decode: func(cfg *Config) error {
+				return yaml.Unmarshal([]byte("mode: static\nstatic:\n  shipping_methods:\n    - id: air\n      price_per_kg: null\n      currency: null\n  assignments:\n    A:\n      shipping_method_id: air\n      profit_percent: 30\n"), cfg)
+			},
+			wantPriceNull: true, wantCurrencyNull: true,
+		},
+		{
+			name: "TOML supplied pair",
+			decode: func(cfg *Config) error {
+				decoder := toml.NewDecoder(strings.NewReader("mode = 'static'\n[static.assignments.A]\nshipping_method_id = 'air'\nprofit_percent = 30\n[[static.shipping_methods]]\nid = 'air'\nprice_per_kg = 120\ncurrency = 'IRR'\n"))
+				decoder.EnableUnmarshalerInterface()
+				return decoder.Decode(cfg)
+			},
+			wantPrice: "120", wantCurrency: CurrencyIRR,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var cfg Config
+			if err := test.decode(&cfg); err != nil {
+				t.Fatal(err)
+			}
+			resolution := NewProvider(cfg).Resolve(context.Background(), "A")
+			if !resolution.ShippingPricePairPresent {
+				t.Fatalf("source pair presence was lost: %+v", resolution)
+			}
+			if decimalText(resolution.ShippingPricePerKg) != test.wantPrice || resolution.ShippingPricePerKgCurrency != test.wantCurrency {
+				t.Fatalf("shipping pair = %s/%q, want %s/%q: %+v", decimalText(resolution.ShippingPricePerKg), resolution.ShippingPricePerKgCurrency, test.wantPrice, test.wantCurrency, resolution)
+			}
+			if resolution.ExplicitNulls["shipping_price_per_kg"] != test.wantPriceNull || resolution.ExplicitNulls["shipping_price_per_kg_currency"] != test.wantCurrencyNull {
+				t.Fatalf("explicit null presence was lost: %+v", resolution)
 			}
 		})
 	}
@@ -204,18 +291,22 @@ func TestHTTPProviderCachesCatalogAndAssignmentsWithinFreshnessLimit(t *testing.
 
 func TestHTTPProviderShippingPriceCurrencyPairSemantics(t *testing.T) {
 	tests := []struct {
-		name            string
-		methodFields    string
-		wantPrice       string
-		wantCurrency    string
-		wantExplicitNil bool
-		warnings        []string
+		name             string
+		methodFields     string
+		wantPrice        string
+		wantCurrency     string
+		wantPriceNull    bool
+		wantCurrencyNull bool
+		warnings         []string
 	}{
 		{name: "IRR", methodFields: `"price_per_kg":22000000,"currency":"IRR"`, wantPrice: "22000000", wantCurrency: CurrencyIRR},
-		{name: "explicit null pair", methodFields: `"price_per_kg":null,"currency":null`, wantExplicitNil: true, warnings: []string{"shipping_price_per_kg_missing", "shipping_price_per_kg_currency_missing"}},
+		{name: "explicit null pair", methodFields: `"price_per_kg":null,"currency":null`, wantPriceNull: true, wantCurrencyNull: true, warnings: []string{"shipping_price_per_kg_missing", "shipping_price_per_kg_currency_missing"}},
+		{name: "amount and null currency", methodFields: `"price_per_kg":120,"currency":null`, wantPrice: "120", wantCurrencyNull: true, warnings: []string{"shipping_price_per_kg_currency_missing"}},
+		{name: "null amount and currency", methodFields: `"price_per_kg":null,"currency":"CNY"`, wantCurrency: CurrencyCNY, wantPriceNull: true, warnings: []string{"shipping_price_per_kg_missing"}},
 		{name: "price without currency", methodFields: `"price_per_kg":120`, warnings: []string{"shipping_price_per_kg_currency_missing", "shipping_price_per_kg_pair_incomplete"}},
 		{name: "currency without price", methodFields: `"currency":"CNY"`, warnings: []string{"shipping_price_per_kg_missing", "shipping_price_per_kg_pair_incomplete"}},
 		{name: "unsupported currency", methodFields: `"price_per_kg":120,"currency":"USD"`, warnings: []string{"shipping_price_per_kg_currency_invalid", "shipping_price_per_kg_pair_incomplete"}},
+		{name: "whitespace currency", methodFields: `"price_per_kg":120,"currency":" CNY "`, warnings: []string{"shipping_price_per_kg_currency_invalid", "shipping_price_per_kg_pair_incomplete"}},
 	}
 
 	for _, test := range tests {
@@ -234,9 +325,9 @@ func TestHTTPProviderShippingPriceCurrencyPairSemantics(t *testing.T) {
 			if decimalText(resolution.ShippingPricePerKg) != test.wantPrice || resolution.ShippingPricePerKgCurrency != test.wantCurrency {
 				t.Fatalf("shipping pair = %s/%q, want %s/%q: %+v", decimalText(resolution.ShippingPricePerKg), resolution.ShippingPricePerKgCurrency, test.wantPrice, test.wantCurrency, resolution)
 			}
-			if test.wantExplicitNil {
-				if !resolution.ShippingPricePairPresent || !resolution.ExplicitNulls["shipping_price_per_kg"] || !resolution.ExplicitNulls["shipping_price_per_kg_currency"] {
-					t.Fatalf("explicit null pair was not preserved: %+v", resolution)
+			if test.wantPriceNull || test.wantCurrencyNull {
+				if !resolution.ShippingPricePairPresent || resolution.ExplicitNulls["shipping_price_per_kg"] != test.wantPriceNull || resolution.ExplicitNulls["shipping_price_per_kg_currency"] != test.wantCurrencyNull {
+					t.Fatalf("explicit null presence was not preserved: %+v", resolution)
 				}
 			} else if test.wantPrice == "" && resolution.ShippingPricePairPresent {
 				t.Fatalf("malformed pair remained present: %+v", resolution)
@@ -245,6 +336,12 @@ func TestHTTPProviderShippingPriceCurrencyPairSemantics(t *testing.T) {
 				if !contains(resolution.Warnings, warning) {
 					t.Fatalf("missing %s in %v", warning, resolution.Warnings)
 				}
+			}
+			if test.name == "price without currency" && contains(resolution.Warnings, "shipping_price_per_kg_missing") {
+				t.Fatalf("a supplied price was incorrectly diagnosed as missing: %v", resolution.Warnings)
+			}
+			if test.name == "currency without price" && contains(resolution.Warnings, "shipping_price_per_kg_currency_missing") {
+				t.Fatalf("a supplied currency was incorrectly diagnosed as missing: %v", resolution.Warnings)
 			}
 		})
 	}
@@ -693,6 +790,25 @@ func TestHTTPProviderMissingBatchEndpointFailsClosed(t *testing.T) {
 }
 
 func TestHTTPProviderRejectsUnknownContractFields(t *testing.T) {
+	retiredField := "price_per_kg_" + strings.ToLower(CurrencyCNY)
+	for name, field := range map[string]string{
+		"catalog method unknown field":         "unexpected_method_field",
+		"catalog method retired freight field": retiredField,
+	} {
+		t.Run(name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				fmt.Fprintf(w, `{"data":{"schema":"digitalogic.integration-catalog","revision":"r1","currency":{"local":"IRT","cny_to_local":1,"cny_to_irt":1},"pricing":{"formula_id":"landed_price"},"shipping_methods":[{"id":"air","price_per_kg":1,"currency":"CNY",%q:1}]}}`, field)
+			}))
+			defer server.Close()
+
+			resolved := newHTTPProvider(DigitalogicConfig{BaseURL: server.URL}, server.Client(), time.Now).Resolve(context.Background(), "A")
+			if !contains(resolved.Warnings, "pricing_catalog_fetch_failed") || resolved.IRTPerCNY != nil {
+				t.Fatalf("nested method field %q was accepted: %+v", field, resolved)
+			}
+		})
+	}
+
 	t.Run("catalog field", func(t *testing.T) {
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")

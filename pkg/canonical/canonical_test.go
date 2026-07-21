@@ -14,6 +14,7 @@ import (
 
 	"github.com/atomicdeploy/patris-export/pkg/pricingcatalog"
 	"github.com/atomicdeploy/patris-export/pkg/recorddiff"
+	"gopkg.in/yaml.v3"
 )
 
 type fixedResolutionProvider struct {
@@ -121,6 +122,94 @@ func TestLandedPriceRoundsOnceHalfUpAndRejectsInvalidInput(t *testing.T) {
 	}
 	if _, err := LandedPrice("1", "1", "USD", "1", "1", "1"); err == nil {
 		t.Fatal("unsupported shipping currency was accepted")
+	}
+	for _, currency := range []string{" CNY", "CNY ", "\tIRR"} {
+		if _, err := LandedPrice("1", "1", currency, "1", "1", "1"); err == nil {
+			t.Fatalf("non-lexical shipping currency %q was accepted", currency)
+		}
+	}
+}
+
+func TestWhitespaceShippingCurrencyNeverProducesFinalPrice(t *testing.T) {
+	staticConfig := pricingcatalog.Config{}
+	if err := json.Unmarshal([]byte(`{"mode":"static","static":{"cny_to_irt":30000,"shipping_methods":[{"id":"air","price_per_kg":120,"currency":" CNY "}],"assignments":{"A":{"shipping_method_id":"air","profit_percent":30}}}}`), &staticConfig); err != nil {
+		t.Fatal(err)
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/integration/catalog" {
+			fmt.Fprint(w, `{"data":{"schema":"digitalogic.integration-catalog","revision":"r1","currency":{"local":"IRT","cny_to_local":30000,"cny_to_irt":30000},"pricing":{"formula_id":"landed_price"},"shipping_methods":[{"id":"air","price_per_kg":120,"currency":"CNY "}]}}`)
+			return
+		}
+		fmt.Fprint(w, `{"data":{"shipping_method_id":"air","profit_percent":30,"profit_percent_source":"global_default","pricing_warnings":[]}}`)
+	}))
+	defer server.Close()
+	httpConfig := pricingcatalog.Config{Mode: pricingcatalog.ModeDigitalogic, Digitalogic: pricingcatalog.DigitalogicConfig{BaseURL: server.URL}}
+
+	for name, test := range map[string]struct {
+		provider pricingcatalog.Provider
+	}{
+		"static": {provider: pricingcatalog.NewProvider(staticConfig)},
+		"HTTP":   {provider: pricingcatalog.NewProvider(httpConfig)},
+	} {
+		t.Run(name, func(t *testing.T) {
+			row := parseKalaProduct(context.Background(), map[string]interface{}{
+				"Code": "A", "foreign_price": "10", "weight_grams": "1000", "ALLANBAR": 1,
+			}, test.provider, true).Map()
+			if _, exists := row["final_price"]; exists {
+				t.Fatalf("invalid currency produced final_price: %#v", row)
+			}
+			warnings := row["warnings"].([]string)
+			if !hasAny(warnings, "shipping_price_per_kg_currency_invalid") || !hasAny(warnings, "final_price_unavailable") {
+				t.Fatalf("invalid currency warnings missing: %v", warnings)
+			}
+		})
+	}
+}
+
+func TestStaticConfigMixedShippingNullsRemainExplicitInProducts(t *testing.T) {
+	tests := []struct {
+		name         string
+		decode       func(*pricingcatalog.Config) error
+		wantPrice    interface{}
+		wantCurrency interface{}
+	}{
+		{
+			name: "JSON amount and null currency",
+			decode: func(cfg *pricingcatalog.Config) error {
+				return json.Unmarshal([]byte(`{"mode":"static","static":{"cny_to_irt":30000,"shipping_methods":[{"id":"air","price_per_kg":120,"currency":null}],"assignments":{"A":{"shipping_method_id":"air","profit_percent":30}}}}`), cfg)
+			},
+			wantPrice: json.Number("120"), wantCurrency: nil,
+		},
+		{
+			name: "YAML null amount and currency",
+			decode: func(cfg *pricingcatalog.Config) error {
+				return yaml.Unmarshal([]byte("mode: static\nstatic:\n  cny_to_irt: 30000\n  shipping_methods:\n    - id: air\n      price_per_kg: null\n      currency: CNY\n  assignments:\n    A:\n      shipping_method_id: air\n      profit_percent: 30\n"), cfg)
+			},
+			wantPrice: nil, wantCurrency: pricingcatalog.CurrencyCNY,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var pricing pricingcatalog.Config
+			if err := test.decode(&pricing); err != nil {
+				t.Fatal(err)
+			}
+			row := parseKalaProduct(context.Background(), map[string]interface{}{
+				"Code": "A", "foreign_price": "10", "weight_grams": "1000", "ALLANBAR": 1,
+			}, pricingcatalog.NewProvider(pricing), true).Map()
+			if value, exists := row["shipping_price_per_kg"]; !exists || !reflect.DeepEqual(value, test.wantPrice) {
+				t.Fatalf("shipping price presence/value = %#v, present %t; want %#v", value, exists, test.wantPrice)
+			}
+			if value, exists := row["shipping_price_per_kg_currency"]; !exists || !reflect.DeepEqual(value, test.wantCurrency) {
+				t.Fatalf("shipping currency presence/value = %#v, present %t; want %#v", value, exists, test.wantCurrency)
+			}
+			if _, exists := row["final_price"]; exists {
+				t.Fatalf("mixed null shipping pair produced final_price: %#v", row)
+			}
+		})
 	}
 }
 
@@ -323,10 +412,11 @@ func TestProductSyncDecoderRejectsUnknownFields(t *testing.T) {
 
 func TestProductSyncDecoderRequiresCanonicalShippingPair(t *testing.T) {
 	for name, payload := range map[string]string{
-		"price only":         `{"product_code":"A","shipping_price_per_kg":120}`,
-		"currency only":      `{"product_code":"A","shipping_price_per_kg_currency":"CNY"}`,
-		"lowercase currency": `{"product_code":"A","shipping_price_per_kg":120,"shipping_price_per_kg_currency":"cny"}`,
-		"other currency":     `{"product_code":"A","shipping_price_per_kg":120,"shipping_price_per_kg_currency":"USD"}`,
+		"price only":          `{"product_code":"A","shipping_price_per_kg":120}`,
+		"currency only":       `{"product_code":"A","shipping_price_per_kg_currency":"CNY"}`,
+		"lowercase currency":  `{"product_code":"A","shipping_price_per_kg":120,"shipping_price_per_kg_currency":"cny"}`,
+		"other currency":      `{"product_code":"A","shipping_price_per_kg":120,"shipping_price_per_kg_currency":"USD"}`,
+		"whitespace currency": `{"product_code":"A","shipping_price_per_kg":120,"shipping_price_per_kg_currency":" CNY "}`,
 	} {
 		t.Run(name, func(t *testing.T) {
 			var product Product
