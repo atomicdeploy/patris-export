@@ -94,6 +94,9 @@ function validateTarget(target, hasSecret) {
   if (parsed.username || parsed.password) {
     throw new AdapterError('target credentials must be supplied through a secret environment variable, not the URL');
   }
+  if (parsed.search || parsed.hash) {
+    throw new AdapterError('target query parameters and fragments are not allowed; use secret environment variables');
+  }
   if (hasSecret && parsed.protocol !== 'https:' && !['127.0.0.1', 'localhost', '::1'].includes(parsed.hostname.toLowerCase())) {
     throw new AdapterError('a secret-bearing remote target requires HTTPS');
   }
@@ -110,8 +113,12 @@ function validateEnvelope(value, headers = {}) {
   if (typeof value.event_id !== 'string' || value.event_id.trim() === '') {
     throw new AdapterError('request is missing event_id');
   }
-  if (typeof value.schema_version !== 'string' || value.schema_version.trim() === '') {
-    throw new AdapterError('request is missing schema_version');
+  if (typeof value.event_type !== 'string' || value.event_type.trim() === '') {
+    throw new AdapterError('request is missing event_type');
+  }
+  if (!value.source || typeof value.source !== 'object' || Array.isArray(value.source)
+      || typeof value.source.id !== 'string' || value.source.id.trim() === '') {
+    throw new AdapterError('request is missing source.id');
   }
   if (!Array.isArray(value.products)) {
     throw new AdapterError('request products must be an array');
@@ -121,16 +128,20 @@ function validateEnvelope(value, headers = {}) {
     Object.entries(headers).map(([key, item]) => [key.toLowerCase(), String(item)]),
   );
   const headerContract = normalizedHeaders.get('x-patris-contract');
-  const headerVersion = normalizedHeaders.get('x-patris-contract-version');
   const headerEventID = normalizedHeaders.get('x-patris-event-id');
+  const headerEvent = normalizedHeaders.get('x-patris-event');
+  const headerSource = normalizedHeaders.get('x-patris-source');
   if (headerContract && headerContract !== value.schema) {
     throw new AdapterError('X-Patris-Contract does not match the body');
   }
-  if (headerVersion && headerVersion !== String(value.schema_version ?? '')) {
-    throw new AdapterError('X-Patris-Contract-Version does not match the body');
-  }
   if (headerEventID && headerEventID !== value.event_id) {
     throw new AdapterError('X-Patris-Event-ID does not match the body');
+  }
+  if (headerEvent && headerEvent !== value.event_type) {
+    throw new AdapterError('X-Patris-Event does not match the body');
+  }
+  if (headerSource && headerSource !== value.source.id) {
+    throw new AdapterError('X-Patris-Source does not match the body');
   }
   return value;
 }
@@ -140,15 +151,16 @@ function identityHeaders(envelope, secret, transport) {
     'Content-Type': 'application/json; charset=utf-8',
     'Idempotency-Key': envelope.event_id,
     'X-Patris-Contract': envelope.schema,
-    'X-Patris-Contract-Version': String(envelope.schema_version ?? ''),
     'X-Patris-Event-ID': envelope.event_id,
+    'X-Patris-Event': envelope.event_type,
+    'X-Patris-Source': envelope.source.id,
     'X-Patris-Adapter': transport,
   };
   if (secret) headers.Authorization = `Bearer ${secret}`;
   return headers;
 }
 
-function buildOutboundRequest(config, envelope) {
+function buildOutboundRequest(config, envelope, rawEnvelopeJSON = JSON.stringify(envelope)) {
   const target = validateTarget(config.target, config.targetSecret !== '');
   const headers = identityHeaders(envelope, config.targetSecret, config.transport);
 
@@ -158,18 +170,13 @@ function buildOutboundRequest(config, envelope) {
         url: target,
         method: 'POST',
         headers,
-        body: JSON.stringify({
-          jsonrpc: '2.0',
-          id: envelope.event_id,
-          method: config.method || 'patris.productSync',
-          params: envelope,
-        }),
+        body: `{"jsonrpc":"2.0","id":${JSON.stringify(envelope.event_id)},"method":${JSON.stringify(config.method || 'patris.productSync')},"params":${rawEnvelopeJSON}}`,
       };
     case 'wordpress-ajax': {
       const form = new URLSearchParams({
         action: config.action || 'patris_product_sync',
         event_id: envelope.event_id,
-        payload: JSON.stringify(envelope),
+        payload: rawEnvelopeJSON,
       });
       headers['Content-Type'] = 'application/x-www-form-urlencoded; charset=utf-8';
       if (config.targetSecret) {
@@ -183,11 +190,45 @@ function buildOutboundRequest(config, envelope) {
         url: target,
         method: 'POST',
         headers,
-        body: JSON.stringify(envelope),
+        body: JSON.stringify({ envelope_json: rawEnvelopeJSON }),
       };
     default:
       throw new AdapterError(`unsupported outbound transport: ${config.transport}`);
   }
+}
+
+const TERMINAL_STATUSES = new Set(['accepted', 'already_current', 'replayed', 'recovered']);
+const RETRYABLE_STATUSES = new Set(['partially_applied', 'retry_pending']);
+
+function validateDeliveryState(value, eventID) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new AdapterError('downstream response is missing delivery state');
+  }
+  const status = typeof value.status === 'string' ? value.status.trim() : '';
+  if (!status || typeof value.event_id !== 'string' || value.event_id !== eventID
+      || typeof value.retryable !== 'boolean'
+      || !Number.isSafeInteger(value.pending_products) || value.pending_products < 0
+      || !Number.isSafeInteger(value.deferred_products) || value.deferred_products < 0) {
+    throw new AdapterError('downstream delivery state is invalid');
+  }
+  if (TERMINAL_STATUSES.has(status)) {
+    if (value.retryable || value.pending_products !== 0) {
+      throw new AdapterError('downstream terminal delivery state is inconsistent');
+    }
+  } else if (RETRYABLE_STATUSES.has(status)) {
+    if (!value.retryable || value.pending_products <= 0) {
+      throw new AdapterError('downstream retryable delivery state is inconsistent');
+    }
+  } else {
+    throw new AdapterError('downstream delivery status is unsupported');
+  }
+  return {
+    status,
+    event_id: value.event_id,
+    retryable: value.retryable,
+    pending_products: value.pending_products,
+    deferred_products: value.deferred_products,
+  };
 }
 
 function retryableStatus(status) {
@@ -207,11 +248,11 @@ async function readResponseJSON(response) {
   }
 }
 
-async function forwardEnvelope(config, envelope, fetchImpl = globalThis.fetch) {
+async function forwardEnvelope(config, envelope, fetchImpl = globalThis.fetch, rawEnvelopeJSON = JSON.stringify(envelope)) {
   if (typeof fetchImpl !== 'function') {
     throw new AdapterError('this adapter requires Node.js 18 or newer');
   }
-  const outbound = buildOutboundRequest(config, envelope);
+  const outbound = buildOutboundRequest(config, envelope, rawEnvelopeJSON);
   let response;
   try {
     response = await fetchImpl(outbound.url, {
@@ -241,13 +282,17 @@ async function forwardEnvelope(config, envelope, fetchImpl = globalThis.fetch) {
         retryable: responseBody.error?.data?.retryable === true,
       });
     }
+    return validateDeliveryState(responseBody.result, envelope.event_id);
   }
-  if (config.transport === 'wordpress-ajax' && responseBody?.success !== true) {
-    throw new AdapterError('WordPress AJAX action rejected the update', {
-      retryable: responseBody?.data?.retryable === true,
-    });
+  if (config.transport === 'wordpress-ajax') {
+    if (responseBody?.success !== true) {
+      throw new AdapterError('WordPress AJAX action rejected the update', {
+        retryable: responseBody?.data?.retryable === true || responseBody?.details?.retryable === true,
+      });
+    }
+    return validateDeliveryState(responseBody.data, envelope.event_id);
   }
-  return responseBody;
+  return validateDeliveryState(responseBody, envelope.event_id);
 }
 
 function readBody(request, maxBytes) {
@@ -291,6 +336,10 @@ function acceptedResponse(eventID) {
   };
 }
 
+function successfulResponse(state) {
+  return { success: true, data: state };
+}
+
 function rejectedResponse(error) {
   return {
     success: false,
@@ -317,19 +366,22 @@ function createAdapterServer(config, dependencies = {}) {
         }
       }
       const body = await readBody(request, config.maxBodyBytes);
-      envelope = validateEnvelope(JSON.parse(body.toString('utf8')), request.headers);
+      const rawEnvelopeJSON = body.toString('utf8');
+      envelope = validateEnvelope(JSON.parse(rawEnvelopeJSON), request.headers);
       received += 1;
 
+      let state;
       if (config.transport === 'mock') {
         if (received <= config.failFirst) {
           throw new AdapterError('mock receiver requested a retry', { retryable: true, httpStatus: 503 });
         }
+        state = acceptedResponse(envelope.event_id).data;
       } else {
-        await forwardEnvelope(config, envelope, fetchImpl);
+        state = await forwardEnvelope(config, envelope, fetchImpl, rawEnvelopeJSON);
       }
 
-      console.log(`[adapter] accepted event_id=${envelope.event_id} products=${envelope.products.length}`);
-      sendJSON(response, 200, acceptedResponse(envelope.event_id));
+      console.log(`[adapter] status=${state.status} event_id=${envelope.event_id} products=${envelope.products.length}`);
+      sendJSON(response, 200, successfulResponse(state));
     } catch (caught) {
       const error = caught instanceof AdapterError
         ? caught
@@ -427,5 +479,6 @@ module.exports = {
   forwardEnvelope,
   parseArgs,
   retryableStatus,
+  validateDeliveryState,
   validateEnvelope,
 };

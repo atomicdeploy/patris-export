@@ -2,6 +2,8 @@
 
 const assert = require('node:assert/strict');
 const { once } = require('node:events');
+const fs = require('node:fs');
+const path = require('node:path');
 const test = require('node:test');
 
 const {
@@ -16,9 +18,9 @@ const {
 function envelope() {
   return {
     schema: 'patris.product-sync',
-    schema_version: '1.1',
     event_type: 'update',
     event_id: 'evt-sparse-001',
+    source: { id: 'patris-test' },
     products: [
       {
         product_code: '113007045',
@@ -55,14 +57,27 @@ test('validates canonical body identity against Patris headers', () => {
   assert.equal(SECRET_HEADER, 'X-Patris-Product-Sync-Secret');
   assert.equal(validateEnvelope(payload, {
     'X-Patris-Contract': payload.schema,
-    'X-Patris-Contract-Version': payload.schema_version,
     'X-Patris-Event-ID': payload.event_id,
+    'X-Patris-Event': payload.event_type,
+    'X-Patris-Source': payload.source.id,
   }), payload);
 
   assert.throws(
     () => validateEnvelope(payload, { 'X-Patris-Event-ID': 'different' }),
     /does not match/,
   );
+});
+
+test('accepts the repository canonical golden envelope without an invented schema version', () => {
+  const fixturePath = path.join(__dirname, '..', '..', 'testdata', 'patris-product-sync.synthetic.json');
+  const payload = JSON.parse(fs.readFileSync(fixturePath, 'utf8'));
+  assert.equal(Object.hasOwn(payload, 'schema_version'), false);
+  assert.equal(validateEnvelope(payload, {
+    'X-Patris-Contract': payload.schema,
+    'X-Patris-Event-ID': payload.event_id,
+    'X-Patris-Event': payload.event_type,
+    'X-Patris-Source': payload.source.id,
+  }), payload);
 });
 
 test('JSON-RPC wrapper preserves explicit null and does not invent unseen keys', () => {
@@ -84,6 +99,9 @@ test('JSON-RPC wrapper preserves explicit null and does not invent unseen keys',
   assert.equal(body.params.products[1].shipping_price_per_kg, null);
   assert.equal(body.params.products[1].shipping_price_per_kg_currency, null);
   assert.equal(request.headers['Idempotency-Key'], 'evt-sparse-001');
+  assert.equal(request.headers['X-Patris-Event'], 'update');
+  assert.equal(request.headers['X-Patris-Source'], 'patris-test');
+  assert.equal(Object.hasOwn(request.headers, 'X-Patris-Contract-Version'), false);
   assert.equal(request.headers.Authorization, 'Bearer test-only');
 });
 
@@ -104,12 +122,27 @@ test('WordPress AJAX wrapper preserves the original sparse envelope', () => {
   assert.equal(Object.hasOwn(request.headers, 'Authorization'), false);
 });
 
-test('gRPC JSON gateway receives the direct envelope without a parallel schema', () => {
+test('gRPC JSON gateway receives lossless canonical JSON without a parallel product schema', () => {
   const request = buildOutboundRequest(config({
     transport: 'grpc-gateway',
     target: 'https://gateway.example.test/v1/patris:apply',
   }), envelope());
-  assert.deepEqual(JSON.parse(request.body), envelope());
+  assert.deepEqual(JSON.parse(JSON.parse(request.body).envelope_json), envelope());
+});
+
+test('all adapter modes preserve exact canonical numeric tokens', () => {
+  const raw = '{"schema":"patris.product-sync","event_type":"update","event_id":"evt-exact","source":{"id":"patris-test"},"products":[{"product_code":"EXACT","final_price":100000000000000001,"foreign_price":0.1000000000000000006}]}';
+  const payload = validateEnvelope(JSON.parse(raw));
+
+  const rpc = buildOutboundRequest(config({ transport: 'json-rpc', target: 'https://api.example.test/rpc' }), payload, raw);
+  assert.match(rpc.body, /"final_price":100000000000000001/);
+  assert.match(rpc.body, /"foreign_price":0\.1000000000000000006/);
+
+  const ajax = buildOutboundRequest(config({ transport: 'wordpress-ajax', target: 'https://api.example.test/ajax' }), payload, raw);
+  assert.equal(new URLSearchParams(ajax.body).get('payload'), raw);
+
+  const grpc = buildOutboundRequest(config({ transport: 'grpc-gateway', target: 'https://api.example.test/grpc' }), payload, raw);
+  assert.equal(JSON.parse(grpc.body).envelope_json, raw);
 });
 
 test('secret-bearing remote adapter targets require HTTPS', () => {
@@ -124,6 +157,11 @@ test('secret-bearing remote adapter targets require HTTPS', () => {
     target: 'http://127.0.0.1:18082/rpc',
     targetSecret: 'loopback-test',
   }), envelope()));
+
+  assert.throws(() => buildOutboundRequest(config({
+    transport: 'json-rpc',
+    target: 'https://api.example.test/rpc?token=not-allowed',
+  }), envelope()), /query parameters/);
 });
 
 test('CLI configuration resolves secret names without storing them in options', (t) => {
@@ -156,7 +194,14 @@ test('JSON-RPC response identity and method errors are enforced', async () => {
   let captured;
   const fetchOK = async (url, options) => {
     captured = { url, options };
-    return new Response(JSON.stringify({ jsonrpc: '2.0', id: payload.event_id, result: { accepted: true } }), {
+    return new Response(JSON.stringify({
+      jsonrpc: '2.0',
+      id: payload.event_id,
+      result: {
+        status: 'accepted', event_id: payload.event_id, retryable: false,
+        pending_products: 0, deferred_products: 0,
+      },
+    }), {
       status: 200,
       headers: { 'Content-Type': 'application/json' },
     });
@@ -180,6 +225,18 @@ test('JSON-RPC response identity and method errors are enforced', async () => {
     }), { status: 200 })),
     (error) => error.retryable === true && /rejected/.test(error.message),
   );
+
+  await assert.rejects(
+    forwardEnvelope(config({
+      transport: 'json-rpc',
+      target: 'https://api.example.test/rpc',
+    }), payload, async () => new Response(JSON.stringify({
+      jsonrpc: '2.0',
+      id: payload.event_id,
+      result: { accepted: false, retryable: true },
+    }), { status: 200 })),
+    /delivery state/,
+  );
 });
 
 test('mock receiver exposes a retryable failure and then accepts identical event identity', async (t) => {
@@ -197,8 +254,9 @@ test('mock receiver exposes a retryable failure and then accepts identical event
   const headers = {
     'Content-Type': 'application/json',
     'X-Patris-Contract': 'patris.product-sync',
-    'X-Patris-Contract-Version': '1.1',
     'X-Patris-Event-ID': 'evt-sparse-001',
+    'X-Patris-Event': 'update',
+    'X-Patris-Source': 'patris-test',
     [SECRET_HEADER]: 'local-ingress-test',
   };
 
@@ -213,4 +271,43 @@ test('mock receiver exposes a retryable failure and then accepts identical event
   assert.equal(accepted.data.retryable, false);
   assert.equal(accepted.data.pending_products, 0);
   assert.equal(accepted.data.deferred_products, 0);
+});
+
+test('WordPress retry-pending state is validated and propagated to Patris', async (t) => {
+  const payload = envelope();
+  const server = createAdapterServer(config({
+    transport: 'wordpress-ajax',
+    target: 'https://wordpress.example.test/wp-admin/admin-ajax.php',
+    ingressSecret: 'local-ingress-test',
+  }), {
+    fetchImpl: async () => new Response(JSON.stringify({
+      success: true,
+      data: {
+        status: 'retry_pending', event_id: payload.event_id, retryable: true,
+        pending_products: 10, deferred_products: 3,
+      },
+    }), { status: 200 }),
+  });
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  t.after(() => server.close());
+
+  const address = server.address();
+  const response = await fetch(`http://127.0.0.1:${address.port}/ingest`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Patris-Contract': payload.schema,
+      'X-Patris-Event-ID': payload.event_id,
+      'X-Patris-Event': payload.event_type,
+      'X-Patris-Source': payload.source.id,
+      [SECRET_HEADER]: 'local-ingress-test',
+    },
+    body: JSON.stringify(payload),
+  });
+  assert.equal(response.status, 200);
+  assert.deepEqual((await response.json()).data, {
+    status: 'retry_pending', event_id: payload.event_id, retryable: true,
+    pending_products: 10, deferred_products: 3,
+  });
 });

@@ -14,7 +14,7 @@ Patris or transform product data again.
 | WordPress REST | Native and recommended | `send_updates.url` | Direct canonical envelope |
 | JSON-RPC 2.0 | Loopback adapter | Patris sends to adapter | JSON-RPC wrapper whose `params` is the unchanged envelope |
 | WordPress `admin-ajax.php` | Loopback adapter, legacy only | Patris sends to adapter | Form fields containing the unchanged envelope |
-| gRPC | HTTP/JSON transcoding gateway | Patris sends to adapter, adapter sends to gateway | Direct envelope mapped to `google.protobuf.Struct` |
+| gRPC | HTTP/JSON transcoding gateway | Patris sends to adapter, adapter sends to gateway | Exact canonical JSON carried in an `envelope_json` string |
 | RPC-style local command | Native command sink | `send_updates.command` | Direct envelope on stdin |
 
 Patris does **not** natively speak JSON-RPC framing, WordPress form AJAX, or
@@ -40,9 +40,10 @@ Sparse payloads have two distinct states:
 - A key that was never supplied, or whose source value is empty, is absent.
 - A key explicitly supplied as JSON `null` is present with a `null` value.
 
-The adapters parse and wrap the existing envelope without normalizing product
-objects. Automated adapter tests assert that explicit null survives and unseen
-shipping/weight keys remain absent. Upgrade older binaries that still emit the
+The adapters validate identity fields, but forward the original JSON text
+instead of serializing parsed JavaScript numbers. This preserves exact int64
+and decimal tokens, explicit nulls, and absent fields. Automated adapter tests
+cover all three wrappers. Upgrade older binaries that still emit the
 legacy always-present pricing fields to a build containing the sparse export
 work tracked by [issue #171](https://github.com/atomicdeploy/patris-export/issues/171)
 before using these recipes in production.
@@ -56,7 +57,6 @@ at request time and sends it as `X-Patris-Product-Sync-Secret`.
 For every canonical HTTP request Patris sets:
 
 - `X-Patris-Contract`
-- `X-Patris-Contract-Version`
 - `X-Patris-Event-ID`
 - `X-Patris-Event`
 - `X-Patris-Source`
@@ -217,8 +217,9 @@ The adapter sends:
   "method": "patris.productSync",
   "params": {
     "schema": "patris.product-sync",
-    "schema_version": "1.1",
+    "event_type": "update",
     "event_id": "sha256:replace-with-event-id",
+    "source": {"id": "patris-office"},
     "products": []
   }
 }
@@ -227,7 +228,7 @@ The adapter sends:
 The RPC server must return the same `id`:
 
 ```json
-{"jsonrpc":"2.0","id":"sha256:replace-with-event-id","result":{"accepted":true}}
+{"jsonrpc":"2.0","id":"sha256:replace-with-event-id","result":{"status":"accepted","event_id":"sha256:replace-with-event-id","retryable":false,"pending_products":0,"deferred_products":0}}
 ```
 
 For a temporary method error, set `error.data.retryable` to `true`. The adapter
@@ -265,8 +266,10 @@ browser nonce is not an appropriate machine-to-machine credential.
 Patris does not contain a second protobuf product model or a native gRPC
 client. Deploy an HTTP/JSON transcoding gateway in front of the gRPC service,
 using [patris-product-sync.proto](examples/patris-product-sync.proto) as the
-minimal boundary. Its `body: "envelope"` mapping accepts the direct canonical
-envelope and places it in `ApplyRequest.envelope`.
+minimal boundary. The adapter places the original canonical JSON text in
+`ApplyRequest.envelope_json`; the gRPC service must parse that string with a
+lossless JSON decoder. This avoids `google.protobuf.Struct`, whose double-based
+number representation cannot preserve every supported Patris int64 or decimal.
 
 Point the adapter at the gateway route:
 
@@ -281,9 +284,12 @@ node .\scripts\examples\patris-delivery-adapter.cjs `
 ```
 
 The gateway must forward `Idempotency-Key` and the `X-Patris-*` identity headers
-as gRPC metadata. The adapter treats an HTTP 2xx gateway response as accepted
-and maps 408/425/429/5xx gateway failures to Patris retryable responses. Native
-gRPC without a gateway is not claimed or implemented by this example.
+as gRPC metadata. Every successful JSON-RPC, AJAX, or gateway response must
+include `status`, matching `event_id`, `retryable`, `pending_products`, and
+`deferred_products`. The adapter validates and propagates that state, including
+valid retry-pending work, and maps 408/425/429/5xx gateway failures to Patris
+retryable responses. Native gRPC without a gateway is not claimed or
+implemented by this example.
 
 ## Local receiver and smoke test
 
@@ -304,7 +310,7 @@ adapter transcript looks like:
 ```text
 [adapter] listening=http://127.0.0.1:18081/ingest transport=mock
 [adapter] retryable event_id=sha256:... reason=mock receiver requested a retry
-[adapter] accepted event_id=sha256:... products=292
+[adapter] status=accepted event_id=sha256:... products=292
 ```
 
 For a visible terminal failure, start the mock with `--fail-first 10` while the
