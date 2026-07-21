@@ -364,8 +364,16 @@ copy_windows_dlls() {
     mkdir -p "$BUILD_DIR"
     if [ -n "$prefix" ] && [ -d "$prefix/bin" ]; then
         for dll in "$prefix"/bin/*.dll; do
-            [ -f "$dll" ] && cp "$dll" "$BUILD_DIR/" || true
+            [ -f "$dll" ] || continue
+            local dll_name="${dll##*/}"
+            if [ "$PXLIB_BACKEND" = "cgo-static" ] && { [ "$dll_name" = "libpxlib.dll" ] || [ "$dll_name" = "pxlib.dll" ]; }; then
+                continue
+            fi
+            cp "$dll" "$BUILD_DIR/"
         done
+    fi
+    if [ "$PXLIB_BACKEND" = "cgo-static" ]; then
+        rm -f "$BUILD_DIR/libpxlib.dll" "$BUILD_DIR/pxlib.dll"
     fi
     local gcc_path
     gcc_path="$(command -v "${CC:-gcc}" 2>/dev/null || true)"

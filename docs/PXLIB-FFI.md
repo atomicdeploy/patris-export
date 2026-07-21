@@ -82,10 +82,16 @@ The portable regression gate is:
 go vet ./...
 go test ./...
 go test -race ./pkg/paradox
+go vet -tags pxlib_cgo ./...
+go test -tags pxlib_cgo ./...
+go vet -tags pxlib_cgo,pxlib_cgo_static ./...
+go test -tags pxlib_cgo,pxlib_cgo_static ./...
 ```
 
 Release workflows additionally build and read `testdata/kala.db` with the
 source-built pxlib runtime on Linux amd64, native Windows amd64, and the MinGW
-Windows cross-build under Wine. Optional CGO link-mode verification remains
-part of the backend-specific work and must use the same real-database smoke
-test before such an artifact is published.
+Windows cross-build under Wine. The optional CGO link modes run the same typed
+ABI tests, vet analysis, and real-database suite on Linux and Windows. CI also
+proves that `pxlib_cgo` cannot build with CGO disabled and that the secondary
+`pxlib_cgo_static` tag cannot silently select the runtime-dynamic backend by
+itself.

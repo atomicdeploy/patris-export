@@ -3,6 +3,7 @@ package paradox
 import (
 	"errors"
 	"fmt"
+	"runtime"
 	"strings"
 	"sync"
 	"unsafe"

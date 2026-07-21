@@ -118,6 +118,7 @@ $bash = Resolve-Tool "bash.exe" @("C:\Program Files\Git\usr\bin\bash.exe")
 $go = Resolve-Tool "go.exe" @("$goBin\go.exe")
 $cmake = Resolve-Tool "cmake.exe" @("$winLibsBin\cmake.exe")
 $gcc = Resolve-Tool "gcc.exe" @("$winLibsBin\gcc.exe")
+$ar = Resolve-Tool "ar.exe" @("$winLibsBin\ar.exe")
 $windres = Resolve-Tool "windres.exe" @("$winLibsBin\windres.exe")
 
 Write-Host "Using Go: $(& $go version)"
@@ -195,6 +196,18 @@ endif()
     $pxlibObjects = Join-Path $pxlibBuild "CMakeFiles\pxlib.dir\objects.a"
     if (Test-Path $pxlibObjects) {
         Copy-Item $pxlibObjects (Join-Path $pxlibInstall "lib\libpxlib_static.a") -Force
+    } else {
+        $pxlibObjectFiles = @(
+            Get-ChildItem (Join-Path $pxlibBuild "CMakeFiles\pxlib.dir") -Recurse -File |
+                Where-Object { $_.Extension -in @(".o", ".obj") } |
+                Sort-Object FullName |
+                ForEach-Object { $_.FullName }
+        )
+        if ($pxlibObjectFiles.Count -eq 0) {
+            throw "pxlib build did not produce object files for the static backend."
+        }
+        $staticArchive = Join-Path $pxlibInstall "lib\libpxlib_static.a"
+        Invoke-Checked $ar (@("rcs", $staticArchive) + $pxlibObjectFiles)
     }
 }
 

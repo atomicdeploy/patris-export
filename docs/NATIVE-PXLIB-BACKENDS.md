@@ -78,10 +78,19 @@ for tests and builds:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File `
+  .\scripts\windows\Invoke-CGO.ps1 -PxlibBackend dynamic go vet ./...
+
+powershell -NoProfile -ExecutionPolicy Bypass -File `
   .\scripts\windows\Invoke-CGO.ps1 -PxlibBackend dynamic go test ./...
 
 powershell -NoProfile -ExecutionPolicy Bypass -File `
+  .\scripts\windows\Invoke-CGO.ps1 -PxlibBackend cgo go vet ./...
+
+powershell -NoProfile -ExecutionPolicy Bypass -File `
   .\scripts\windows\Invoke-CGO.ps1 -PxlibBackend cgo go test ./...
+
+powershell -NoProfile -ExecutionPolicy Bypass -File `
+  .\scripts\windows\Invoke-CGO.ps1 -PxlibBackend cgo-static go vet ./...
 
 powershell -NoProfile -ExecutionPolicy Bypass -File `
   .\scripts\windows\Invoke-CGO.ps1 -PxlibBackend cgo-static go test ./...
@@ -94,4 +103,6 @@ powershell -NoProfile -ExecutionPolicy Bypass -File `
 The `pkg/paradox` test suite opens the checked-in real `testdata/kala.db`
 fixture. A tagged build with `CGO_ENABLED=0` fails immediately with an explicit
 `pxlib_cgo_requires_CGO_ENABLED_1` compiler diagnostic instead of silently
-falling back to another backend.
+falling back to another backend. The secondary `pxlib_cgo_static` tag likewise
+fails unless `pxlib_cgo` is present, so a misspelled direct build cannot produce
+a runtime-dynamic artifact mislabeled as static.

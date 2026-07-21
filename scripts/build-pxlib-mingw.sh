@@ -60,7 +60,7 @@ static_objects="$(find "$BUILD_DIR" -path '*/CMakeFiles/pxlib.dir/objects.a' -pr
 if [ -n "$static_objects" ]; then
     cp "$static_objects" "$PREFIX/lib/libpxlib_static.a"
 else
-    mapfile -d '' pxlib_objects < <(find "$BUILD_DIR/CMakeFiles/pxlib.dir" -type f \( -name '*.o' -o -name '*.obj' \) -print0)
+    mapfile -d '' pxlib_objects < <(find "$BUILD_DIR/CMakeFiles/pxlib.dir" -type f \( -name '*.o' -o -name '*.obj' \) -print0 | LC_ALL=C sort -z)
     if [ "${#pxlib_objects[@]}" -eq 0 ]; then
         echo "pxlib build did not produce object files for the static backend" >&2
         exit 1
