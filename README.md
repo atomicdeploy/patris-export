@@ -574,9 +574,10 @@ with a full-height guide. Warehouse stock remains a two-row group with one
 independently selectable column per warehouse. Sticky headers and the optional
 sticky first data column keep identifiers visible while scrolling. Language,
 canonical-key conditional row-icon rules, fallback icon metadata, column widths,
-warehouse visibility, and the independent row-coloring toggle are persisted
-under `ui` in the normal Patris Export config file rather than in a separate
-table-settings file.
+column order, per-warehouse visibility, and the independent row-coloring toggle
+are persisted under `ui` through the normal Patris Export config API rather
+than in a separate table-settings file. Existing browser-only column choices
+are migrated once; `localStorage` remains only a cache and offline fallback.
 
 For a configured canonical dataset, `GET /api/product-sync` returns the full
 current `patris.product-sync` envelope. Missing source/reference values are

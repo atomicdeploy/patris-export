@@ -18,11 +18,13 @@ const {
     keyboardColumnWidth,
     isWarehouseColumnField,
     localizedColumnLabel,
+    normalizeColumnPreferenceList,
     normalizeColumnWidths,
     normalizeRowIconRules,
     nextRovingKey,
     pruneSelectedKeys,
     resizedColumnWidth,
+    resolvePersistedColumnPreferences,
     resolvedRovingKey,
     resolveRowIcon,
     rowCommandDefinitions,
@@ -103,6 +105,32 @@ test('column widths clamp and keyboard/pointer resizing reverse in RTL', () => {
         { product_code: 211, name: 120 }
     );
     assert.deepEqual(normalizeColumnWidths({ product_code: 211, Code: 900, 'product_code ': 444 }), { product_code: 211 });
+});
+
+test('UIConfig column preferences override and migrate the legacy browser cache', () => {
+    const warehouse = warehouseColumnField('North hub');
+    const legacy = {
+        hiddenColumns: [` ${warehouse} `, warehouse, 'warnings'],
+        columnOrder: ['product_code', 'name', 'shipping_price_per_kg', 'shipping_price_per_kg_currency', warehouse]
+    };
+    assert.deepEqual(normalizeColumnPreferenceList(legacy.hiddenColumns), [warehouse, 'warnings']);
+
+    const migration = resolvePersistedColumnPreferences({}, legacy);
+    assert.deepEqual(migration.hiddenColumns, [warehouse, 'warnings']);
+    assert.deepEqual(migration.columnOrder, legacy.columnOrder);
+    assert.equal(migration.migrateHiddenColumns, true);
+    assert.equal(migration.migrateColumnOrder, true);
+
+    const configured = resolvePersistedColumnPreferences({
+        hidden_columns: [],
+        column_order: ['product_code', warehouse, 'shipping_price_per_kg', 'shipping_price_per_kg_currency']
+    }, legacy);
+    assert.deepEqual(configured.hiddenColumns, []);
+    assert.deepEqual(configured.columnOrder, [
+        'product_code', warehouse, 'shipping_price_per_kg', 'shipping_price_per_kg_currency'
+    ]);
+    assert.equal(configured.migrateHiddenColumns, false);
+    assert.equal(configured.migrateColumnOrder, false);
 });
 
 test('ordered icon rules match transformed canonical values and keep a fallback', () => {

@@ -138,6 +138,8 @@ type UIConfig struct {
 	EnableRowIcons          bool              `json:"enable_row_icons" yaml:"enable_row_icons" toml:"enable_row_icons"`
 	FreezeFirstColumn       bool              `json:"freeze_first_column" yaml:"freeze_first_column" toml:"freeze_first_column"`
 	ColumnWidths            map[string]int    `json:"column_widths" yaml:"column_widths" toml:"column_widths"`
+	HiddenColumns           []string          `json:"hidden_columns" yaml:"hidden_columns" toml:"hidden_columns"`
+	ColumnOrder             []string          `json:"column_order" yaml:"column_order" toml:"column_order"`
 	RowIconRules            []RowIconRule     `json:"row_icon_rules" yaml:"row_icon_rules" toml:"row_icon_rules"`
 	RowIconFallback         RowIconAppearance `json:"row_icon_fallback" yaml:"row_icon_fallback" toml:"row_icon_fallback"`
 }
@@ -1033,6 +1035,8 @@ func normalize(cfg *Config) {
 		normalizedColumnWidths[cleanField] = clampUIColumnWidth(width)
 	}
 	cfg.UI.ColumnWidths = normalizedColumnWidths
+	cfg.UI.HiddenColumns = normalizeUIColumnList(cfg.UI.HiddenColumns)
+	cfg.UI.ColumnOrder = normalizeUIColumnList(cfg.UI.ColumnOrder)
 	if cfg.UI.RowIconRules == nil {
 		cfg.UI.RowIconRules = defaultRowIconRules()
 	}
@@ -1083,6 +1087,26 @@ func canonicalUIColumnKey(field string) string {
 	default:
 		return strings.TrimSpace(field)
 	}
+}
+
+func normalizeUIColumnList(fields []string) []string {
+	if fields == nil {
+		return nil
+	}
+	normalized := make([]string, 0, len(fields))
+	seen := make(map[string]struct{}, len(fields))
+	for _, field := range fields {
+		field = strings.TrimSpace(field)
+		if field == "" {
+			continue
+		}
+		if _, exists := seen[field]; exists {
+			continue
+		}
+		seen[field] = struct{}{}
+		normalized = append(normalized, field)
+	}
+	return normalized
 }
 
 func clampUIColumnWidth(width int) int {

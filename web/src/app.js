@@ -28,6 +28,7 @@ import {
     keyboardColumnWidth,
     isWarehouseColumnField,
     localizedColumnLabel,
+    normalizeColumnPreferenceList,
     normalizeColumnWidths,
     normalizeRowIconFallback,
     normalizeRowIconRule,
@@ -35,6 +36,7 @@ import {
     nextRovingKey,
     pruneSelectedKeys,
     resizedColumnWidth,
+    resolvePersistedColumnPreferences,
     resolvedRovingKey,
     resolveRowIcon,
     rowCommandDefinitions,
@@ -78,6 +80,15 @@ const state = {
     columnFilters: {},  // Store active filters per column: { fieldName: { type, value, ... } }
     hiddenColumns: new Set(),  // Track hidden columns
     columnOrder: [],
+    legacyColumnPreferences: {
+        hiddenColumns: null,
+        columnOrder: null
+    },
+    columnPreferenceMigrationAttempted: false,
+    columnPreferenceMigrationPending: {
+        hiddenColumns: false,
+        columnOrder: false
+    },
     selectedKeys: new Set(),
     recordSelectionKeys: new WeakMap(),
     rovingRowKey: '',
@@ -138,6 +149,8 @@ const state = {
 
 const CONFIG_STORAGE_KEY = 'patris-config';
 const SETTINGS_STORAGE_KEY = 'patris-settings';
+const HIDDEN_COLUMNS_STORAGE_KEY = 'patris-hidden-columns';
+const COLUMN_ORDER_STORAGE_KEY = 'patris-column-order';
 const SCROLL_ANCHOR_STORAGE_KEY = 'patris-viewer-scroll-anchor';
 const EVENT_LOG_STORAGE_KEY = 'patris-event-log';
 const MAX_EVENT_LOG_ENTRIES = 200;
@@ -294,7 +307,19 @@ function logIntro() {
     console.info('%c🔌 WebSocket, REST, native toasts, generated audio fallback, and persistent config are active.', styles[2]);
 }
 
-// Load settings from localStorage
+function loadLegacyColumnPreference(storageKey) {
+    const raw = localStorage.getItem(storageKey);
+    if (raw === null) return null;
+    try {
+        const parsed = JSON.parse(raw);
+        return Array.isArray(parsed) ? normalizeColumnPreferenceList(parsed) : null;
+    } catch (error) {
+        console.warn(`Failed to read legacy column preference ${storageKey}:`, error);
+        return null;
+    }
+}
+
+// Load local settings and the legacy column cache used before UIConfig persistence.
 function loadSettings() {
     const saved = localStorage.getItem(SETTINGS_STORAGE_KEY);
     if (saved) {
@@ -313,19 +338,15 @@ function loadSettings() {
         state.sortDirection = direction || 'asc';
     }
     
-    // Load hidden columns
-    const hiddenCols = localStorage.getItem('patris-hidden-columns');
-    if (hiddenCols) {
-        state.hiddenColumns = new Set(JSON.parse(hiddenCols));
+    const legacyHiddenColumns = loadLegacyColumnPreference(HIDDEN_COLUMNS_STORAGE_KEY);
+    const legacyColumnOrder = loadLegacyColumnPreference(COLUMN_ORDER_STORAGE_KEY);
+    state.legacyColumnPreferences.hiddenColumns = legacyHiddenColumns;
+    state.legacyColumnPreferences.columnOrder = legacyColumnOrder;
+    if (legacyHiddenColumns !== null) {
+        state.hiddenColumns = new Set(legacyHiddenColumns);
     }
-
-    const savedOrder = localStorage.getItem('patris-column-order');
-    if (savedOrder) {
-        try {
-            state.columnOrder = JSON.parse(savedOrder).filter(Boolean);
-        } catch (e) {
-            state.columnOrder = [];
-        }
+    if (legacyColumnOrder !== null) {
+        state.columnOrder = legacyColumnOrder;
     }
     
     // Load column filters
@@ -371,12 +392,62 @@ function saveSettings(options = {}) {
     }
 }
 
+function applyConfigColumnPreferences(ui, source) {
+    const remoteConfig = source !== 'local';
+    const allowInitialLegacyFallback = !remoteConfig || !state.columnPreferenceMigrationAttempted;
+    const legacy = {
+        hiddenColumns: allowInitialLegacyFallback || state.columnPreferenceMigrationPending.hiddenColumns
+            ? state.legacyColumnPreferences.hiddenColumns : null,
+        columnOrder: allowInitialLegacyFallback || state.columnPreferenceMigrationPending.columnOrder
+            ? state.legacyColumnPreferences.columnOrder : null
+    };
+    const resolved = resolvePersistedColumnPreferences(ui, legacy);
+    state.hiddenColumns = new Set(resolved.hiddenColumns);
+    state.columnOrder = resolved.columnOrder;
+
+    if (remoteConfig || resolved.cacheHiddenColumns) {
+        const hiddenColumns = [...state.hiddenColumns];
+        localStorage.setItem(HIDDEN_COLUMNS_STORAGE_KEY, JSON.stringify(hiddenColumns));
+        state.legacyColumnPreferences.hiddenColumns = hiddenColumns;
+    }
+    if (remoteConfig || resolved.cacheColumnOrder) {
+        const columnOrder = state.columnOrder.slice();
+        localStorage.setItem(COLUMN_ORDER_STORAGE_KEY, JSON.stringify(columnOrder));
+        state.legacyColumnPreferences.columnOrder = columnOrder;
+    }
+
+    const shouldMigrate = remoteConfig
+        && !state.columnPreferenceMigrationAttempted
+        && (resolved.migrateHiddenColumns || resolved.migrateColumnOrder);
+    if (remoteConfig) {
+        state.columnPreferenceMigrationAttempted = true;
+        if (Array.isArray(ui.hidden_columns)) {
+            state.columnPreferenceMigrationPending.hiddenColumns = false;
+        }
+        if (Array.isArray(ui.column_order)) {
+            state.columnPreferenceMigrationPending.columnOrder = false;
+        }
+    }
+    if (shouldMigrate) {
+        if (resolved.migrateHiddenColumns) {
+            ui.hidden_columns = [...state.hiddenColumns];
+            state.columnPreferenceMigrationPending.hiddenColumns = true;
+        }
+        if (resolved.migrateColumnOrder) {
+            ui.column_order = state.columnOrder.slice();
+            state.columnPreferenceMigrationPending.columnOrder = true;
+        }
+    }
+    return shouldMigrate;
+}
+
 function applyConfig(config, source = 'server') {
     if (!config) return null;
     const diff = buildConfigDiff(state.config, config);
     state.config = config;
     localStorage.setItem(CONFIG_STORAGE_KEY, JSON.stringify(config));
     if (config.ui) {
+        const migrateColumnPreferences = applyConfigColumnPreferences(config.ui, source);
         if (config.ui.theme) {
             localStorage.setItem('theme', config.ui.theme);
         }
@@ -407,8 +478,13 @@ function applyConfig(config, source = 'server') {
         applySettings();
         initTheme();
         if (state.fields.length > 0) {
+            applyColumnOrder();
+            removeHiddenColumnFilters({ broadcast: false });
             renderTableHeader();
-            renderTable();
+            applyFilters();
+        }
+        if (migrateColumnPreferences) {
+            saveConfigToServer(state.config);
         }
     }
     if (source !== 'local') {
@@ -660,9 +736,33 @@ function saveSortPreferences(options = {}) {
     }
 }
 
-// Save hidden columns to localStorage
+function cacheColumnPreferences() {
+    const hiddenColumns = normalizeColumnPreferenceList([...state.hiddenColumns]);
+    const columnOrder = normalizeColumnPreferenceList(state.columnOrder);
+    state.hiddenColumns = new Set(hiddenColumns);
+    state.columnOrder = columnOrder;
+    state.legacyColumnPreferences.hiddenColumns = hiddenColumns;
+    state.legacyColumnPreferences.columnOrder = columnOrder;
+    localStorage.setItem(HIDDEN_COLUMNS_STORAGE_KEY, JSON.stringify(hiddenColumns));
+    localStorage.setItem(COLUMN_ORDER_STORAGE_KEY, JSON.stringify(columnOrder));
+}
+
+function syncColumnPreferencesToConfig() {
+    if (!state.config) return;
+    state.config.ui = {
+        ...(state.config.ui || {}),
+        hidden_columns: [...state.hiddenColumns],
+        column_order: state.columnOrder.slice()
+    };
+    saveConfigToServer(state.config);
+}
+
+// Keep localStorage as a cache/fallback while UIConfig remains authoritative.
 function saveHiddenColumns(options = {}) {
-    localStorage.setItem('patris-hidden-columns', JSON.stringify([...state.hiddenColumns]));
+    cacheColumnPreferences();
+    if (options.persist !== false) {
+        syncColumnPreferencesToConfig();
+    }
     if (options.broadcast !== false) {
         publishFrontendBroadcast('columns:update', {
             hiddenColumns: [...state.hiddenColumns],
@@ -673,7 +773,10 @@ function saveHiddenColumns(options = {}) {
 
 function saveColumnOrder(options = {}) {
     state.columnOrder = state.fields.slice();
-    localStorage.setItem('patris-column-order', JSON.stringify(state.columnOrder));
+    cacheColumnPreferences();
+    if (options.persist !== false) {
+        syncColumnPreferencesToConfig();
+    }
     if (options.broadcast !== false) {
         publishFrontendBroadcast('columns:update', {
             hiddenColumns: [...state.hiddenColumns],
@@ -733,7 +836,7 @@ function applyRemoteColumns(payload = {}) {
         state.columnOrder = payload.columnOrder.filter(Boolean);
         applyColumnOrder();
     }
-    saveHiddenColumns({ broadcast: false });
+    saveHiddenColumns({ broadcast: false, persist: false });
     removeHiddenColumnFilters({ broadcast: false });
     renderColumnManager();
     renderTableHeader();

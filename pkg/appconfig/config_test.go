@@ -137,6 +137,11 @@ func TestUITableUXPersistsThroughConfigPath(t *testing.T) {
 		cfg.UI.EnableRowColoring = false
 		cfg.UI.FreezeFirstColumn = false
 		cfg.UI.ColumnWidths = map[string]int{"Code": 333, "product_code ": 444, "product_code": 211, "Name": 180, "name": 999}
+		cfg.UI.HiddenColumns = []string{" warehouse_stock::North%20hub ", "warnings", "warnings", ""}
+		cfg.UI.ColumnOrder = []string{
+			"product_code", "name", "shipping_price_per_kg", "shipping_price_per_kg_currency",
+			"warehouse_stock::North%20hub", "warehouse_stock::North%20hub",
+		}
 		cfg.UI.RowIconRules = []RowIconRule{{
 			ID: "missing-price", Field: "final_price", Operator: "empty",
 			Icon: "price", Color: "#dc2626", Label: "Price unavailable",
@@ -159,6 +164,12 @@ func TestUITableUXPersistsThroughConfigPath(t *testing.T) {
 	}
 	if _, exists := ui.ColumnWidths["Code"]; exists {
 		t.Fatalf("legacy Code width was not migrated: %+v", ui.ColumnWidths)
+	}
+	if got, want := strings.Join(ui.HiddenColumns, "|"), "warehouse_stock::North%20hub|warnings"; got != want {
+		t.Fatalf("hidden columns were not persisted and normalized: got %q want %q", got, want)
+	}
+	if got, want := strings.Join(ui.ColumnOrder, "|"), "product_code|name|shipping_price_per_kg|shipping_price_per_kg_currency|warehouse_stock::North%20hub"; got != want {
+		t.Fatalf("column order was not persisted and normalized: got %q want %q", got, want)
 	}
 	if len(ui.RowIconRules) != 1 || ui.RowIconRules[0].Field != "final_price" || ui.RowIconRules[0].Icon != "price" {
 		t.Fatalf("ordered row icon rules were not preserved: %+v", ui.RowIconRules)

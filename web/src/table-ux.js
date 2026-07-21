@@ -977,6 +977,40 @@ export function normalizeColumnWidths(widths) {
     }, {});
 }
 
+export function normalizeColumnPreferenceList(fields) {
+    if (!Array.isArray(fields)) return [];
+    const seen = new Set();
+    return fields.reduce((result, field) => {
+        const key = String(field ?? '').trim();
+        if (key && !seen.has(key)) {
+            seen.add(key);
+            result.push(key);
+        }
+        return result;
+    }, []);
+}
+
+export function resolvePersistedColumnPreferences(ui = {}, legacy = {}) {
+    const configuredHiddenColumns = Array.isArray(ui?.hidden_columns);
+    const configuredColumnOrder = Array.isArray(ui?.column_order);
+    const legacyHiddenColumns = Array.isArray(legacy?.hiddenColumns)
+        ? normalizeColumnPreferenceList(legacy.hiddenColumns) : null;
+    const legacyColumnOrder = Array.isArray(legacy?.columnOrder)
+        ? normalizeColumnPreferenceList(legacy.columnOrder) : null;
+    return {
+        hiddenColumns: configuredHiddenColumns
+            ? normalizeColumnPreferenceList(ui.hidden_columns)
+            : legacyHiddenColumns || [],
+        columnOrder: configuredColumnOrder
+            ? normalizeColumnPreferenceList(ui.column_order)
+            : legacyColumnOrder || [],
+        cacheHiddenColumns: configuredHiddenColumns || legacyHiddenColumns !== null,
+        cacheColumnOrder: configuredColumnOrder || legacyColumnOrder !== null,
+        migrateHiddenColumns: !configuredHiddenColumns && legacyHiddenColumns !== null,
+        migrateColumnOrder: !configuredColumnOrder && legacyColumnOrder !== null
+    };
+}
+
 export function canonicalColumnKey(field) {
     const source = String(field || '').trim();
     const lowered = source.toLowerCase();
