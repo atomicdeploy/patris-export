@@ -12,7 +12,7 @@ import (
 // XLSXOptions maps the already-built pipeline result to non-secret workbook
 // provenance. Keeping this adapter on Result ensures the CLI and HTTP route
 // cannot invent a second canonical transformation.
-func (result Result) XLSXOptions(dataset string, rightToLeft bool) recordsink.XLSXOptions {
+func (result Result) XLSXOptions(dataset string, rightToLeft bool, values ...recordsink.XLSXPreferences) recordsink.XLSXOptions {
 	metadata := recordsink.XLSXMetadata{
 		Schema:        "patris-export.records",
 		SourceDataset: filepath.Base(strings.TrimSpace(dataset)),
@@ -31,7 +31,19 @@ func (result Result) XLSXOptions(dataset string, rightToLeft bool) recordsink.XL
 			Warnings:       workbookWarnings(result),
 		}
 	}
-	return recordsink.XLSXOptions{RightToLeft: rightToLeft, Metadata: metadata}
+	preferences := recordsink.XLSXPreferences{Language: "en", Mode: "precalculated", ZebraRows: true}
+	if len(values) > 0 {
+		preferences = values[len(values)-1]
+	}
+	zebraRows := preferences.ZebraRows
+	return recordsink.XLSXOptions{
+		RightToLeft:  rightToLeft,
+		Language:     preferences.Language,
+		Mode:         preferences.Mode,
+		ZebraRows:    &zebraRows,
+		ColumnLabels: preferences.ColumnLabels,
+		Metadata:     metadata,
+	}
 }
 
 func workbookWarnings(result Result) []string {

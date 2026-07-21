@@ -4,6 +4,7 @@ import (
 	"archive/zip"
 	"encoding/json"
 	"io"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -29,6 +30,7 @@ func TestCanonicalXLSXRoundTripPreservesTypesLayoutAndMetadata(t *testing.T) {
 	}
 	options := XLSXOptions{
 		RightToLeft: true,
+		Language:    "en",
 		Metadata: XLSXMetadata{
 			Schema:         "patris.product-sync",
 			FormulaID:      "landed_price",
@@ -56,25 +58,25 @@ func TestCanonicalXLSXRoundTripPreservesTypesLayoutAndMetadata(t *testing.T) {
 	if err != nil || len(recordRows) != 2 {
 		t.Fatalf("records rows = %#v, err=%v", recordRows, err)
 	}
-	wantHeaders := []string{"product_code", "name", "foreign_price", "weight_grams", "shipping_price_per_kg", "shipping_price_per_kg_currency", "markup_percent", "irt_per_cny", "final_price", "warnings"}
+	wantHeaders := []string{"Code", "Name", "Foreign Price", "Weight (g)", "Shipping Price/kg", "Shipping Currency", "Profit Margin (%)", "IRT per CNY", "Final Price (IRT)", "Warnings"}
 	if strings.Join(recordRows[0], "|") != strings.Join(wantHeaders, "|") {
 		t.Fatalf("canonical column order = %v, want %v", recordRows[0], wantHeaders)
 	}
 	columns := headerColumns(recordRows[0])
-	assertXLSXCell(t, book, "Records", cellAt(columns, "product_code", 2), "00113007045", excelize.CellTypeSharedString)
-	assertXLSXCell(t, book, "Records", cellAt(columns, "name", 2), "ماژول آزمون", excelize.CellTypeSharedString)
-	assertXLSXCell(t, book, "Records", cellAt(columns, "foreign_price", 2), "24.5", excelize.CellTypeNumber)
-	assertXLSXCell(t, book, "Records", cellAt(columns, "final_price", 2), "2009410", excelize.CellTypeNumber)
+	assertXLSXCell(t, book, "Records", cellAt(columns, "Code", 2), "00113007045", excelize.CellTypeSharedString)
+	assertXLSXCell(t, book, "Records", cellAt(columns, "Name", 2), "ماژول آزمون", excelize.CellTypeSharedString)
+	assertXLSXCell(t, book, "Records", cellAt(columns, "Foreign Price", 2), "24.5", excelize.CellTypeNumber)
+	assertXLSXCell(t, book, "Records", cellAt(columns, "Final Price (IRT)", 2), "2009410", excelize.CellTypeNumber)
 
-	codeStyle := styleForCell(t, book, "Records", cellAt(columns, "product_code", 2))
+	codeStyle := styleForCell(t, book, "Records", cellAt(columns, "Code", 2))
 	if codeStyle.CustomNumFmt == nil || *codeStyle.CustomNumFmt != "@" {
 		t.Fatalf("Code style = %+v, want text format", codeStyle)
 	}
-	priceStyle := styleForCell(t, book, "Records", cellAt(columns, "final_price", 2))
+	priceStyle := styleForCell(t, book, "Records", cellAt(columns, "Final Price (IRT)", 2))
 	if priceStyle.CustomNumFmt == nil || *priceStyle.CustomNumFmt != "#,##0" {
 		t.Fatalf("final_price style = %+v", priceStyle)
 	}
-	decimalStyle := styleForCell(t, book, "Records", cellAt(columns, "foreign_price", 2))
+	decimalStyle := styleForCell(t, book, "Records", cellAt(columns, "Foreign Price", 2))
 	if decimalStyle.CustomNumFmt == nil || !strings.Contains(*decimalStyle.CustomNumFmt, "#") {
 		t.Fatalf("foreign_price style = %+v", decimalStyle)
 	}
@@ -103,6 +105,9 @@ func TestCanonicalXLSXRoundTripPreservesTypesLayoutAndMetadata(t *testing.T) {
 		"source_dataset":  "kala.db",
 		"source_revision": "sha256:fixture-revision",
 		"generated_at":    "2026-07-16T12:00:00Z",
+		"xlsx_language":   "en",
+		"xlsx_mode":       "precalculated",
+		"zebra_rows":      "true",
 	} {
 		if metadata[key] != want {
 			t.Errorf("metadata[%s] = %q, want %q", key, metadata[key], want)
@@ -122,6 +127,311 @@ func TestCanonicalXLSXRoundTripPreservesTypesLayoutAndMetadata(t *testing.T) {
 	if !strings.Contains(worksheetXML, `<autoFilter ref="$A$1:$J$2"`) {
 		t.Fatalf("autofilter missing from Records sheet: %s", worksheetXML)
 	}
+}
+
+func TestFormulaXLSXLocalizesHeadersSplitsWarehousesAndCalculates(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "formula-fa.xlsx")
+	zebra := true
+	rows := []map[string]interface{}{
+		{
+			"product_code":                   "001",
+			"name":                           "ماژول آزمون",
+			"warehouse_stock":                map[string]interface{}{"10": json.Number("3"), "2": json.Number("1")},
+			"foreign_price":                  json.Number("24.5"),
+			"weight_grams":                   json.Number("240"),
+			"shipping_price_per_kg":          json.Number("120"),
+			"shipping_price_per_kg_currency": "CNY",
+			"markup_percent":                 json.Number("30"),
+			"irt_per_cny":                    json.Number("29000"),
+			"final_price":                    json.Number("2009410"),
+		},
+		{
+			"product_code":                   "002",
+			"name":                           "محصول بدون قیمت",
+			"warehouse_stock":                map[string]interface{}{"2": nil},
+			"weight_grams":                   json.Number("100"),
+			"shipping_price_per_kg":          json.Number("120"),
+			"shipping_price_per_kg_currency": "CNY",
+			"markup_percent":                 json.Number("30"),
+			"irt_per_cny":                    json.Number("29000"),
+			"final_price":                    nil,
+		},
+	}
+	if err := WriteXLSX(path, rows, "product_code", XLSXOptions{
+		Language:  "fa",
+		Mode:      "formula",
+		ZebraRows: &zebra,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	book, err := excelize.OpenFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer book.Close()
+	recordRows, err := book.GetRows("Records", excelize.Options{RawCellValue: true})
+	if err != nil || len(recordRows) != 3 {
+		t.Fatalf("records rows = %#v, err=%v", recordRows, err)
+	}
+	wantHeaders := []string{
+		"کد", "نام", "موجودی انبار ۲", "موجودی انبار ۱۰", "قیمت ارزی", "وزن (گرم)",
+		"هزینه حمل/کیلوگرم", "ارز هزینه حمل", "حاشیه سود (%)", "نرخ ریال به یوان", "قیمت نهایی (ریال)",
+	}
+	if strings.Join(recordRows[0], "|") != strings.Join(wantHeaders, "|") {
+		t.Fatalf("localized columns = %v, want %v", recordRows[0], wantHeaders)
+	}
+	columns := headerColumns(recordRows[0])
+	assertXLSXCell(t, book, "Records", cellAt(columns, "کد", 2), "001", excelize.CellTypeSharedString)
+	assertXLSXCell(t, book, "Records", cellAt(columns, "موجودی انبار ۲", 2), "1", excelize.CellTypeNumber)
+	assertXLSXCell(t, book, "Records", cellAt(columns, "موجودی انبار ۱۰", 2), "3", excelize.CellTypeNumber)
+
+	finalCell := cellAt(columns, "قیمت نهایی (ریال)", 2)
+	wantFormula := `=IF(AND(COUNT(E2,F2,G2,I2,J2)=5,OR(H2="CNY",H2="IRR")),ROUND((E2*J2+F2/1000*IF(H2="CNY",G2*J2,G2/10))*(1+I2/100),0),"")`
+	if formula, err := book.GetCellFormula("Records", finalCell); err != nil || formula != wantFormula {
+		t.Fatalf("formula = %q, want %q, err=%v", formula, wantFormula, err)
+	}
+	if calculated, err := book.CalcCellValue("Records", finalCell, excelize.Options{RawCellValue: true}); err != nil || calculated != "2009410" {
+		t.Fatalf("calculated final price = %q, want 2009410, err=%v", calculated, err)
+	}
+	missingCell := cellAt(columns, "قیمت نهایی (ریال)", 3)
+	if calculated, err := book.CalcCellValue("Records", missingCell, excelize.Options{RawCellValue: true}); err != nil || calculated != "" {
+		t.Fatalf("missing-input formula result = %q, want blank, err=%v", calculated, err)
+	}
+	if value, err := book.GetCellValue("Records", cellAt(columns, "موجودی انبار ۲", 3)); err != nil || value != "" {
+		t.Fatalf("explicit-null warehouse cell = %q, want blank, err=%v", value, err)
+	}
+	view, err := book.GetSheetView("Records", 0)
+	if err != nil || view.RightToLeft == nil || !*view.RightToLeft {
+		t.Fatalf("Persian workbook RTL view = %+v, err=%v", view.RightToLeft, err)
+	}
+	zebraStyle := styleForCell(t, book, "Records", "A3")
+	if zebraStyle.Fill.Type != "pattern" || len(zebraStyle.Fill.Color) == 0 || zebraStyle.Fill.Color[0] != "EAF2F8" {
+		t.Fatalf("second data row zebra style = %+v", zebraStyle.Fill)
+	}
+	metadata := metadataValues(mustXLSXRows(t, book, "Metadata"))
+	if metadata["xlsx_language"] != "fa" || metadata["xlsx_mode"] != "formula" || metadata["zebra_rows"] != "true" {
+		t.Fatalf("formula workbook metadata = %+v", metadata)
+	}
+}
+
+func TestFormulaXLSXSupportsCNYAndIRRFreightAndRejectsInvalidCurrency(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "formula-currencies.xlsx")
+	rows := []map[string]interface{}{
+		{
+			"product_code":                   "CNY-1",
+			"foreign_price":                  json.Number("10"),
+			"weight_grams":                   json.Number("1000"),
+			"shipping_price_per_kg":          json.Number("100"),
+			"shipping_price_per_kg_currency": "CNY",
+			"markup_percent":                 json.Number("30"),
+			"irt_per_cny":                    json.Number("30000"),
+			"final_price":                    json.Number("4290000"),
+		},
+		{
+			"product_code":                   "IRR-1",
+			"foreign_price":                  json.Number("10"),
+			"weight_grams":                   json.Number("1000"),
+			"shipping_price_per_kg":          json.Number("30000000"),
+			"shipping_price_per_kg_currency": "IRR",
+			"markup_percent":                 json.Number("30"),
+			"irt_per_cny":                    json.Number("30000"),
+			"final_price":                    json.Number("4290000"),
+		},
+		{
+			"product_code":                   "INVALID-1",
+			"foreign_price":                  json.Number("10"),
+			"weight_grams":                   json.Number("1000"),
+			"shipping_price_per_kg":          json.Number("100"),
+			"shipping_price_per_kg_currency": "USD",
+			"markup_percent":                 json.Number("30"),
+			"irt_per_cny":                    json.Number("30000"),
+			"final_price":                    nil,
+		},
+	}
+	if err := WriteXLSX(path, rows, "product_code", XLSXOptions{Language: "en", Mode: "formula"}); err != nil {
+		t.Fatal(err)
+	}
+	book, err := excelize.OpenFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer book.Close()
+	columns := headerColumns(mustXLSXRows(t, book, "Records")[0])
+	finalColumn := columns["Final Price (IRT)"]
+	for row, want := range map[int]string{2: "4290000", 3: "4290000", 4: ""} {
+		cell, _ := excelize.CoordinatesToCellName(finalColumn, row)
+		got, calcErr := book.CalcCellValue("Records", cell, excelize.Options{RawCellValue: true})
+		if calcErr != nil || got != want {
+			t.Fatalf("formula result at %s = %q, want %q, err=%v", cell, got, want, calcErr)
+		}
+	}
+	formulaCell, _ := excelize.CoordinatesToCellName(finalColumn, 2)
+	formula, err := book.GetCellFormula("Records", formulaCell)
+	if err != nil || !strings.Contains(formula, `="CNY"`) || !strings.Contains(formula, `="IRR"`) || !strings.Contains(formula, "/10") {
+		t.Fatalf("currency-aware formula = %q, err=%v", formula, err)
+	}
+}
+
+func TestXLSXPreferencesSupportCustomLabelsLTRAndNoZebra(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "custom.xlsx")
+	zebra := false
+	rows := []map[string]interface{}{
+		{"product_code": "0001", "warehouse_stock": map[string]float64{"A": 2}},
+		{"product_code": "0002", "warehouse_stock": map[string]float64{"A": 4}},
+	}
+	if err := WriteXLSX(path, rows, "product_code", XLSXOptions{
+		Language:     "en",
+		ZebraRows:    &zebra,
+		ColumnLabels: map[string]string{"Code": "Item Code", "ANBAR": "Depot Stock"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	book, err := excelize.OpenFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer book.Close()
+	rowsOut := mustXLSXRows(t, book, "Records")
+	if got := strings.Join(rowsOut[0], "|"); got != "Item Code|Depot Stock A" {
+		t.Fatalf("custom headers = %q", got)
+	}
+	view, err := book.GetSheetView("Records", 0)
+	if err != nil || view.RightToLeft == nil || *view.RightToLeft {
+		t.Fatalf("English workbook should be LTR: %+v, err=%v", view.RightToLeft, err)
+	}
+	style := styleForCell(t, book, "Records", "A3")
+	if style.Fill.Type == "pattern" && len(style.Fill.Color) > 0 && style.Fill.Color[0] == "EAF2F8" {
+		t.Fatalf("zebra fill remained enabled: %+v", style.Fill)
+	}
+}
+
+func TestConfiguredXLSXLabelUsesDeterministicCanonicalAliasPrecedence(t *testing.T) {
+	configured := map[string]string{
+		"product_code":    "Canonical Code",
+		"Code":            "Legacy Code",
+		"warehouse_stock": "Canonical Stock",
+		"ANBAR":           "Legacy Depot",
+		"Warehouse":       "Old Warehouse",
+	}
+	for iteration := 0; iteration < 100; iteration++ {
+		if got := configuredXLSXLabel("product_code", "en", configured); got != "Canonical Code" {
+			t.Fatalf("product_code label = %q, want canonical label", got)
+		}
+		if got := configuredXLSXLabel("warehouse_stock", "en", configured); got != "Canonical Stock" {
+			t.Fatalf("warehouse_stock label = %q, want canonical label", got)
+		}
+	}
+
+	// A canonical default English label intentionally defers to the built-in
+	// Persian vocabulary; a stale legacy alias must not override it.
+	configured["warehouse_stock"] = "Warehouse Stock"
+	if got := configuredXLSXLabel("warehouse_stock", "fa", configured); got != "" {
+		t.Fatalf("Persian warehouse override = %q, want built-in localization", got)
+	}
+
+	delete(configured, "product_code")
+	configured[" product_code "] = "Trimmed Canonical Code"
+	if got := configuredXLSXLabel("product_code", "en", configured); got != "Trimmed Canonical Code" {
+		t.Fatalf("trimmed canonical label = %q", got)
+	}
+}
+
+func TestResolveXLSXLanguage(t *testing.T) {
+	for _, test := range []struct {
+		value, fallback, want string
+	}{
+		{value: "fa", fallback: "en", want: "fa"},
+		{value: "EN", fallback: "fa", want: "en"},
+		{value: "auto", fallback: "fa", want: "fa"},
+		{value: "", fallback: "en", want: "en"},
+	} {
+		if got := ResolveXLSXLanguage(test.value, test.fallback); got != test.want {
+			t.Errorf("ResolveXLSXLanguage(%q, %q) = %q, want %q", test.value, test.fallback, got, test.want)
+		}
+	}
+}
+
+func TestDashboardExamplePackageHasNeutralMetadataAndNoExternalConnections(t *testing.T) {
+	path := filepath.Join("..", "..", "docs", "examples", "Patris-Digitalogic-Dashboard.xlsm")
+	archive, err := zip.OpenReader(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer archive.Close()
+
+	var coreProperties string
+	for _, entry := range archive.File {
+		if strings.HasPrefix(entry.Name, "xl/externalLinks/") || entry.Name == "xl/connections.xml" {
+			t.Fatalf("dashboard contains external Office connection %q", entry.Name)
+		}
+		reader, openErr := entry.Open()
+		if openErr != nil {
+			t.Fatal(openErr)
+		}
+		content, readErr := io.ReadAll(reader)
+		reader.Close()
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		lower := strings.ToLower(string(content))
+		for _, forbidden := range []string{"x15ac:abspath", `c:\users\`, "/users/", "mahdi shokri", "mahdielector@"} {
+			if strings.Contains(lower, forbidden) {
+				t.Fatalf("dashboard package entry %q leaked %q", entry.Name, forbidden)
+			}
+		}
+		if entry.Name == "docProps/core.xml" {
+			coreProperties = string(content)
+		}
+	}
+	if !strings.Contains(coreProperties, "<dc:creator>AtomicDeploy</dc:creator>") ||
+		!strings.Contains(coreProperties, "<cp:lastModifiedBy>AtomicDeploy</cp:lastModifiedBy>") {
+		t.Fatalf("dashboard core properties are not project-owned: %s", coreProperties)
+	}
+	if strings.Contains(coreProperties, "dcterms:created") || strings.Contains(coreProperties, "dcterms:modified") {
+		t.Fatalf("dashboard core properties contain volatile build timestamps: %s", coreProperties)
+	}
+}
+
+func TestDashboardVBASourceValidatesCodesAndDigitalogicJSONBeforeMutation(t *testing.T) {
+	path := filepath.Join("..", "..", "docs", "examples", "vba", "PatrisDashboard.bas")
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := string(content)
+	deletePosition := strings.Index(source, "table.DataBodyRange.Delete")
+	for _, requiredBeforeDelete := range []string{
+		"If Not HasAnyHeader(headers, \"product_code\", \"Code\", \"code\")",
+		"If Len(codeValue) = 0 Then",
+		"If seenCodes.Exists(codeValue) Then",
+	} {
+		position := strings.Index(source, requiredBeforeDelete)
+		if position < 0 || deletePosition < 0 || position > deletePosition {
+			t.Fatalf("VBA safeguard %q is missing or runs after table deletion", requiredBeforeDelete)
+		}
+	}
+	for _, required := range []string{
+		"The Digitalogic endpoint returned an empty response.",
+		"The Digitalogic endpoint did not return a JSON object or array.",
+		"If Not IsValidJsonResponse(responseText) Or _",
+		`Left$(responseText, 1) <> "{"`,
+		"Private Function ParseJsonObject",
+		"Private Function ParseJsonArray",
+	} {
+		if !strings.Contains(source, required) {
+			t.Fatalf("VBA source is missing validation: %s", required)
+		}
+	}
+}
+
+func mustXLSXRows(t *testing.T, book *excelize.File, sheet string) [][]string {
+	t.Helper()
+	rows, err := book.GetRows(sheet, excelize.Options{RawCellValue: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return rows
 }
 
 func headerColumns(headers []string) map[string]int {

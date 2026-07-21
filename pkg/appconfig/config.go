@@ -94,6 +94,9 @@ type ExportConfig struct {
 	BatchSize      int    `json:"batch_size,omitempty" yaml:"batch_size,omitempty" toml:"batch_size,omitempty"`
 	Reconciliation string `json:"reconciliation,omitempty" yaml:"reconciliation,omitempty" toml:"reconciliation,omitempty"`
 	DryRun         bool   `json:"dry_run,omitempty" yaml:"dry_run,omitempty" toml:"dry_run,omitempty"`
+	XLSXLanguage   string `json:"xlsx_language,omitempty" yaml:"xlsx_language,omitempty" toml:"xlsx_language,omitempty"`
+	XLSXMode       string `json:"xlsx_mode,omitempty" yaml:"xlsx_mode,omitempty" toml:"xlsx_mode,omitempty"`
+	XLSXZebraRows  bool   `json:"xlsx_zebra_rows" yaml:"xlsx_zebra_rows" toml:"xlsx_zebra_rows"`
 }
 
 type EdgeConfig struct {
@@ -196,6 +199,9 @@ func Default() Config {
 		Export: ExportConfig{
 			BatchSize:      500,
 			Reconciliation: "upsert_only",
+			XLSXLanguage:   "auto",
+			XLSXMode:       "precalculated",
+			XLSXZebraRows:  true,
 		},
 		Canonical: canonical.DefaultConfig(),
 		SendUpdates: updateout.Config{
@@ -822,6 +828,15 @@ func ApplyEnv(cfg *Config) {
 	if value := os.Getenv("PATRIS_EXPORT_SQL_DRY_RUN"); strings.TrimSpace(value) != "" {
 		cfg.Export.DryRun = parseBool(value, cfg.Export.DryRun)
 	}
+	if value := os.Getenv("PATRIS_EXPORT_XLSX_LANGUAGE"); strings.TrimSpace(value) != "" {
+		cfg.Export.XLSXLanguage = strings.TrimSpace(value)
+	}
+	if value := os.Getenv("PATRIS_EXPORT_XLSX_MODE"); strings.TrimSpace(value) != "" {
+		cfg.Export.XLSXMode = strings.TrimSpace(value)
+	}
+	if value := os.Getenv("PATRIS_EXPORT_XLSX_ZEBRA_ROWS"); strings.TrimSpace(value) != "" {
+		cfg.Export.XLSXZebraRows = parseBool(value, cfg.Export.XLSXZebraRows)
+	}
 	if value := os.Getenv("PATRIS_EXPORT_CONVERT_WATCH"); strings.TrimSpace(value) != "" {
 		cfg.Convert.Watch = parseBool(value, cfg.Convert.Watch)
 	}
@@ -973,6 +988,17 @@ func normalize(cfg *Config) {
 	}
 	if cfg.Export.BatchSize <= 0 {
 		cfg.Export.BatchSize = 500
+	}
+	cfg.Export.XLSXLanguage = strings.ToLower(strings.TrimSpace(cfg.Export.XLSXLanguage))
+	if cfg.Export.XLSXLanguage != "fa" && cfg.Export.XLSXLanguage != "en" {
+		cfg.Export.XLSXLanguage = "auto"
+	}
+	cfg.Export.XLSXMode = strings.ToLower(strings.TrimSpace(cfg.Export.XLSXMode))
+	switch cfg.Export.XLSXMode {
+	case "formula", "formulas":
+		cfg.Export.XLSXMode = "formula"
+	default:
+		cfg.Export.XLSXMode = "precalculated"
 	}
 	cfg.Export.Reconciliation = strings.ToLower(strings.TrimSpace(cfg.Export.Reconciliation))
 	switch cfg.Export.Reconciliation {

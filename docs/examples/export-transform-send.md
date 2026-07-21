@@ -64,7 +64,10 @@ $env:PATRIS_EXPORT_RAW = "0"
 ## Excel, SQLite, and MySQL
 
 ```powershell
-patris-export convert C:\Patris\data4\kala.db -f xlsx -o exports
+patris-export convert C:\Patris\data4\kala.db -f xlsx -o exports `
+  --xlsx-language fa `
+  --xlsx-mode formula `
+  --xlsx-zebra=true
 
 patris-export --mapping .\mapping.kala.json convert C:\Patris\data4\kala.db `
   -f sqlite `
@@ -81,6 +84,12 @@ patris-export --mapping .\mapping.kala.json convert C:\Patris\data4\kala.db `
   --mysql-table products `
   --batch-size 250
 ```
+
+`--xlsx-language auto` follows `ui.language`; `--xlsx-mode precalculated`
+writes the transformed final values, while `formula` emits auditable Excel
+formulas that remain blank until every required input is numeric. Warehouse
+stock is exported as one column per available warehouse. See
+[Excel export](../EXCEL-EXPORT.md) for config, environment, and HTTP examples.
 
 SQLite and MySQL exports create the destination table when needed, add new
 columns on later exports, preserve canonical numeric types, and upsert by the

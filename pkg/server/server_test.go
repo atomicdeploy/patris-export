@@ -616,7 +616,7 @@ func TestCanonicalKalaParityAcrossRESTCSVXLSXAndWebSocket(t *testing.T) {
 		_ = book.Close()
 		t.Fatalf("read canonical XLSX: %v", err)
 	}
-	assertTabularCanonicalFixture(t, "XLSX", xlsxRows)
+	assertHumanXLSXCanonicalFixture(t, xlsxRows)
 	metadataRows, err := book.GetRows("Metadata")
 	if err != nil {
 		_ = book.Close()
@@ -656,6 +656,64 @@ func TestCanonicalKalaParityAcrossRESTCSVXLSXAndWebSocket(t *testing.T) {
 		}
 	}
 	_ = book.Close()
+
+	formulaRequest := httptest.NewRequest(http.MethodGet, "/api/records.xlsx?language=fa&mode=formula&zebra=0", nil)
+	formulaRecorder := httptest.NewRecorder()
+	srv.router.ServeHTTP(formulaRecorder, formulaRequest)
+	if formulaRecorder.Code != http.StatusOK {
+		t.Fatalf("formula XLSX status = %d: %s", formulaRecorder.Code, formulaRecorder.Body.String())
+	}
+	formulaBook, err := excelize.OpenReader(bytes.NewReader(formulaRecorder.Body.Bytes()))
+	if err != nil {
+		t.Fatalf("open formula XLSX: %v", err)
+	}
+	defer formulaBook.Close()
+	formulaRows, err := formulaBook.GetRows("Records", excelize.Options{RawCellValue: true})
+	if err != nil || len(formulaRows) < 2 {
+		t.Fatalf("formula XLSX rows = %d, err=%v", len(formulaRows), err)
+	}
+	formulaColumns := map[string]int{}
+	for index, header := range formulaRows[0] {
+		formulaColumns[header] = index + 1
+	}
+	for _, required := range []string{"کد", "قیمت ارزی", "وزن (گرم)", "هزینه حمل/کیلوگرم", "ارز هزینه حمل", "حاشیه سود (%)", "نرخ ریال به یوان", "قیمت نهایی (ریال)"} {
+		if formulaColumns[required] == 0 {
+			t.Fatalf("formula XLSX missing Persian header %q: %v", required, formulaRows[0])
+		}
+	}
+	formulaRow := 0
+	for index, row := range formulaRows[1:] {
+		codeColumn := formulaColumns["کد"] - 1
+		if len(row) > codeColumn && row[codeColumn] == "102001011" {
+			formulaRow = index + 2
+			break
+		}
+	}
+	if formulaRow == 0 {
+		t.Fatal("formula XLSX fixture Code was not found")
+	}
+	formulaCell, _ := excelize.CoordinatesToCellName(formulaColumns["قیمت نهایی (ریال)"], formulaRow)
+	formula, err := formulaBook.GetCellFormula("Records", formulaCell)
+	if err != nil || !strings.Contains(formula, "ROUND((") || !strings.Contains(formula, `="CNY"`) || !strings.Contains(formula, `="IRR"`) || !strings.Contains(formula, `/10`) || !strings.Contains(formula, `,0),"")`) {
+		t.Fatalf("formula XLSX final price formula = %q, err=%v", formula, err)
+	}
+	formulaView, err := formulaBook.GetSheetView("Records", 0)
+	if err != nil || formulaView.RightToLeft == nil || !*formulaView.RightToLeft {
+		t.Fatalf("formula Persian XLSX view = %+v, err=%v", formulaView.RightToLeft, err)
+	}
+	formulaMetadataRows, err := formulaBook.GetRows("Metadata")
+	if err != nil {
+		t.Fatal(err)
+	}
+	formulaMetadata := map[string]string{}
+	for _, row := range formulaMetadataRows[1:] {
+		if len(row) >= 2 {
+			formulaMetadata[row[0]] = row[1]
+		}
+	}
+	if formulaMetadata["xlsx_language"] != "fa" || formulaMetadata["xlsx_mode"] != "formula" || formulaMetadata["zebra_rows"] != "false" {
+		t.Fatalf("formula XLSX query options = %+v", formulaMetadata)
+	}
 
 	httpServer := httptest.NewServer(srv.router)
 	defer httpServer.Close()
@@ -758,6 +816,34 @@ func assertTabularCanonicalFixture(t *testing.T, source string, rows [][]string)
 		return
 	}
 	t.Fatalf("%s did not contain fixture Code", source)
+}
+
+func assertHumanXLSXCanonicalFixture(t *testing.T, rows [][]string) {
+	t.Helper()
+	if len(rows) < 2 {
+		t.Fatal("XLSX has no data rows")
+	}
+	columns := map[string]int{}
+	for index, field := range rows[0] {
+		columns[field] = index
+	}
+	for _, required := range []string{"Code", "Foreign Price", "Weight (g)", "Total Stock", "Final Price (IRT)", "Record Hash"} {
+		if _, exists := columns[required]; !exists {
+			t.Fatalf("XLSX missing human-readable column %s: %v", required, rows[0])
+		}
+	}
+	for _, row := range rows[1:] {
+		if len(row) <= columns["Code"] || row[columns["Code"]] != "102001011" {
+			continue
+		}
+		for field, expected := range map[string]string{"Foreign Price": "2.75", "Weight (g)": "1.84", "Total Stock": "20", "Final Price (IRT)": "111999"} {
+			if len(row) <= columns[field] || row[columns[field]] != expected {
+				t.Fatalf("XLSX %s = %q, want %q", field, row[columns[field]], expected)
+			}
+		}
+		return
+	}
+	t.Fatal("XLSX did not contain fixture Code")
 }
 
 // TestWebSocketUpdates tests WebSocket broadcasting of changes

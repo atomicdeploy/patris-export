@@ -1,5 +1,6 @@
 import { normalizeCategoriesPayload, normalizeRecordsPayload } from './records.js';
 import { createExportMenuController } from './export-menu.js';
+import { canonicalWorkbookPath } from './xlsx-export.mjs';
 import {
     MAX_DETAILED_EVENT_LOG_ENTRIES,
     createEventLogChangeSnapshot,
@@ -4830,11 +4831,15 @@ function sortRecords() {
 }
 
 function downloadCanonicalWorkbook() {
-    const url = new URL('/api/records.xlsx', window.location.origin);
-    url.searchParams.set('download', '1');
-    url.searchParams.set('rtl', state.settings.rtlTextDirection ? '1' : '0');
-    const link = document.createElement('a');
-    link.href = `${url.pathname}${url.search}`;
+	const exportConfig = state.config?.export || {};
+	const workbookPath = canonicalWorkbookPath({
+		language: state.settings.language,
+		rtl: state.settings.rtlTextDirection,
+		mode: exportConfig.xlsx_mode,
+		zebra: exportConfig.xlsx_zebra_rows !== false
+	});
+	const link = document.createElement('a');
+	link.href = workbookPath;
     link.download = 'patris-export.xlsx';
     link.hidden = true;
     document.body.appendChild(link);

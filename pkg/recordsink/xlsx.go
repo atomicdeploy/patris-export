@@ -8,6 +8,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strconv"
 	"strings"
@@ -22,11 +23,14 @@ import (
 const (
 	xlsxRecordsSheet  = "Records"
 	xlsxMetadataSheet = "Metadata"
+	XLSXModeValues    = "precalculated"
+	XLSXModeFormula   = "formula"
 )
 
 var canonicalXLSXFields = []string{
 	"product_code",
 	"name",
+	"category_code",
 	"serial",
 	"unit",
 	"sale_price_source",
@@ -66,9 +70,37 @@ type XLSXMetadata struct {
 	Warnings       []string
 }
 
+// XLSXPreferences contains caller-selectable presentation behavior. It does
+// not carry transformed values: every workbook still consumes the shared
+// record-pipeline rows.
+type XLSXPreferences struct {
+	Language     string
+	Mode         string
+	ZebraRows    bool
+	ColumnLabels map[string]string
+}
+
 type XLSXOptions struct {
-	RightToLeft bool
-	Metadata    XLSXMetadata
+	RightToLeft  bool
+	Language     string
+	Mode         string
+	ZebraRows    *bool
+	ColumnLabels map[string]string
+	Metadata     XLSXMetadata
+}
+
+// ResolveXLSXLanguage normalizes a requested workbook language and lets
+// "auto" follow the active UI/TUI language.
+func ResolveXLSXLanguage(value, fallback string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	if value == "fa" || value == "en" {
+		return value
+	}
+	fallback = strings.ToLower(strings.TrimSpace(fallback))
+	if fallback == "fa" {
+		return "fa"
+	}
+	return "en"
 }
 
 // WriteXLSX writes the same transformed rows consumed by the other record
@@ -91,6 +123,18 @@ func WriteXLSX(path string, rows []map[string]interface{}, keyField string, valu
 	if err := writeMetadataWorksheet(book, options); err != nil {
 		return err
 	}
+	if options.Mode == XLSXModeFormula {
+		mode := "auto"
+		enabled := true
+		if err := book.SetCalcProps(&excelize.CalcPropsOptions{
+			CalcMode:       &mode,
+			FullCalcOnLoad: &enabled,
+			CalcOnSave:     &enabled,
+			ForceFullCalc:  &enabled,
+		}); err != nil {
+			return err
+		}
+	}
 	book.SetActiveSheet(0)
 	return book.SaveAs(path)
 }
@@ -106,8 +150,24 @@ func normalizeXLSXOptions(values []XLSXOptions) XLSXOptions {
 	if strings.TrimSpace(options.Metadata.GeneratedAt) == "" {
 		options.Metadata.GeneratedAt = time.Now().UTC().Format(time.RFC3339Nano)
 	}
+	options.Language = ResolveXLSXLanguage(options.Language, "en")
+	options.Mode = normalizeXLSXMode(options.Mode)
+	if options.ZebraRows == nil {
+		enabled := true
+		options.ZebraRows = &enabled
+	}
+	options.RightToLeft = options.RightToLeft || options.Language == "fa"
 	options.Metadata.Warnings = normalizedXLSXWarnings(options.Metadata.Warnings)
 	return options
+}
+
+func normalizeXLSXMode(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "formula", "formulas":
+		return XLSXModeFormula
+	default:
+		return XLSXModeValues
+	}
 }
 
 func normalizedXLSXWarnings(values []string) []string {
@@ -127,11 +187,15 @@ func normalizedXLSXWarnings(values []string) []string {
 }
 
 type xlsxStyles struct {
-	header  int
-	text    int
-	integer int
-	decimal int
-	wrapped int
+	header       int
+	text         int
+	integer      int
+	decimal      int
+	wrapped      int
+	textZebra    int
+	integerZebra int
+	decimalZebra int
+	wrappedZebra int
 }
 
 func newXLSXStyles(book *excelize.File) (xlsxStyles, error) {
@@ -143,26 +207,77 @@ func newXLSXStyles(book *excelize.File) (xlsxStyles, error) {
 	if err != nil {
 		return xlsxStyles{}, err
 	}
-	textFormat := "@"
-	text, err := book.NewStyle(&excelize.Style{CustomNumFmt: &textFormat})
+	text, err := newXLSXDataStyle(book, "@", false, false)
 	if err != nil {
 		return xlsxStyles{}, err
 	}
-	integerFormat := "#,##0"
-	integer, err := book.NewStyle(&excelize.Style{CustomNumFmt: &integerFormat})
+	integer, err := newXLSXDataStyle(book, "#,##0", false, false)
 	if err != nil {
 		return xlsxStyles{}, err
 	}
-	decimalFormat := "#,##0.##############################"
-	decimal, err := book.NewStyle(&excelize.Style{CustomNumFmt: &decimalFormat})
+	decimal, err := newXLSXDataStyle(book, "#,##0.##############################", false, false)
 	if err != nil {
 		return xlsxStyles{}, err
 	}
-	wrapped, err := book.NewStyle(&excelize.Style{CustomNumFmt: &textFormat, Alignment: &excelize.Alignment{WrapText: true, Vertical: "top"}})
+	wrapped, err := newXLSXDataStyle(book, "@", true, false)
 	if err != nil {
 		return xlsxStyles{}, err
 	}
-	return xlsxStyles{header: header, text: text, integer: integer, decimal: decimal, wrapped: wrapped}, nil
+	textZebra, err := newXLSXDataStyle(book, "@", false, true)
+	if err != nil {
+		return xlsxStyles{}, err
+	}
+	integerZebra, err := newXLSXDataStyle(book, "#,##0", false, true)
+	if err != nil {
+		return xlsxStyles{}, err
+	}
+	decimalZebra, err := newXLSXDataStyle(book, "#,##0.##############################", false, true)
+	if err != nil {
+		return xlsxStyles{}, err
+	}
+	wrappedZebra, err := newXLSXDataStyle(book, "@", true, true)
+	if err != nil {
+		return xlsxStyles{}, err
+	}
+	return xlsxStyles{
+		header: header, text: text, integer: integer, decimal: decimal, wrapped: wrapped,
+		textZebra: textZebra, integerZebra: integerZebra, decimalZebra: decimalZebra, wrappedZebra: wrappedZebra,
+	}, nil
+}
+
+func newXLSXDataStyle(book *excelize.File, numberFormat string, wrapped, zebra bool) (int, error) {
+	style := &excelize.Style{CustomNumFmt: &numberFormat}
+	if wrapped {
+		style.Alignment = &excelize.Alignment{WrapText: true, Vertical: "top"}
+	}
+	if zebra {
+		style.Fill = excelize.Fill{Type: "pattern", Color: []string{"EAF2F8"}, Pattern: 1}
+	}
+	return book.NewStyle(style)
+}
+
+func (styles xlsxStyles) withZebra(style int, enabled bool) int {
+	if !enabled {
+		return style
+	}
+	switch style {
+	case styles.text:
+		return styles.textZebra
+	case styles.integer:
+		return styles.integerZebra
+	case styles.decimal:
+		return styles.decimalZebra
+	case styles.wrapped:
+		return styles.wrappedZebra
+	default:
+		return style
+	}
+}
+
+type xlsxColumn struct {
+	Field       string
+	WarehouseID string
+	Header      string
 }
 
 func writeRecordsWorksheet(book *excelize.File, rows []map[string]interface{}, keyField string, options XLSXOptions) error {
@@ -170,30 +285,44 @@ func writeRecordsWorksheet(book *excelize.File, rows []map[string]interface{}, k
 	if err != nil {
 		return err
 	}
-	fields := xlsxFields(rows, keyField)
-	widths := make([]float64, len(fields))
-	for index, field := range fields {
+	columns := xlsxColumns(rows, keyField, options)
+	widths := make([]float64, len(columns))
+	fieldColumns := make(map[string]int, len(columns))
+	for index, column := range columns {
 		cellName, err := excelize.CoordinatesToCellName(index+1, 1)
 		if err != nil {
 			return err
 		}
-		if err := book.SetCellStr(xlsxRecordsSheet, cellName, field); err != nil {
+		if err := book.SetCellStr(xlsxRecordsSheet, cellName, column.Header); err != nil {
 			return err
 		}
-		widths[index] = readableCellWidth(field)
+		if column.WarehouseID == "" {
+			fieldColumns[column.Field] = index + 1
+		}
+		widths[index] = readableCellWidth(column.Header)
 	}
 	for rowIndex, row := range rows {
-		for columnIndex, field := range fields {
+		for columnIndex, column := range columns {
 			cellName, err := excelize.CoordinatesToCellName(columnIndex+1, rowIndex+2)
 			if err != nil {
 				return err
 			}
-			value := row[field]
-			style, err := writeXLSXCell(book, xlsxRecordsSheet, cellName, field, keyField, value, styles)
+			value := xlsxColumnValue(row, column)
+			style := 0
+			if options.Mode == XLSXModeFormula && column.Field == "final_price" {
+				if formula, ok := xlsxPriceFormula(rowIndex+2, fieldColumns); ok {
+					err = book.SetCellFormula(xlsxRecordsSheet, cellName, formula)
+					style = styles.integer
+				}
+			} else {
+				style, err = writeXLSXCell(book, xlsxRecordsSheet, cellName, column.Field, keyField, value, styles)
+			}
 			if err != nil {
-				return fmt.Errorf("write %s row %d: %w", field, rowIndex+2, err)
+				return fmt.Errorf("write %s row %d: %w", column.Field, rowIndex+2, err)
 			}
 			if style != 0 {
+				zebra := options.ZebraRows != nil && *options.ZebraRows && rowIndex%2 == 1
+				style = styles.withZebra(style, zebra)
 				if err := book.SetCellStyle(xlsxRecordsSheet, cellName, cellName, style); err != nil {
 					return err
 				}
@@ -203,10 +332,10 @@ func writeRecordsWorksheet(book *excelize.File, rows []map[string]interface{}, k
 			}
 		}
 	}
-	if len(fields) == 0 {
+	if len(columns) == 0 {
 		return nil
 	}
-	lastColumn, err := excelize.ColumnNumberToName(len(fields))
+	lastColumn, err := excelize.ColumnNumberToName(len(columns))
 	if err != nil {
 		return err
 	}
@@ -221,7 +350,7 @@ func writeRecordsWorksheet(book *excelize.File, rows []map[string]interface{}, k
 		if err != nil {
 			return err
 		}
-		if isCodeColumn(fields[index], keyField) && width < 18 {
+		if isCodeColumn(columns[index].Field, keyField) && width < 18 {
 			width = 18
 		}
 		if err := book.SetColWidth(xlsxRecordsSheet, column, column, width); err != nil {
@@ -243,6 +372,116 @@ func writeRecordsWorksheet(book *excelize.File, rows []map[string]interface{}, k
 	}
 	rtl := options.RightToLeft
 	return book.SetSheetView(xlsxRecordsSheet, 0, &excelize.ViewOptions{RightToLeft: &rtl})
+}
+
+func xlsxColumns(rows []map[string]interface{}, keyField string, options XLSXOptions) []xlsxColumn {
+	fields := xlsxFields(rows, keyField)
+	columns := make([]xlsxColumn, 0, len(fields))
+	warehouses := xlsxWarehouseIDs(rows)
+	for _, field := range fields {
+		if field == "warehouse_stock" && len(warehouses) > 0 {
+			for _, warehouseID := range warehouses {
+				columns = append(columns, xlsxColumn{
+					Field:       field,
+					WarehouseID: warehouseID,
+					Header:      xlsxHeaderLabel(field, warehouseID, options.Language, options.ColumnLabels),
+				})
+			}
+			continue
+		}
+		columns = append(columns, xlsxColumn{
+			Field:  field,
+			Header: xlsxHeaderLabel(field, "", options.Language, options.ColumnLabels),
+		})
+	}
+	return columns
+}
+
+func xlsxWarehouseIDs(rows []map[string]interface{}) []string {
+	seen := map[string]struct{}{}
+	for _, row := range rows {
+		value, exists := row["warehouse_stock"]
+		if !exists || value == nil {
+			continue
+		}
+		reflected := reflect.ValueOf(value)
+		if reflected.Kind() != reflect.Map || reflected.Type().Key().Kind() != reflect.String {
+			continue
+		}
+		iterator := reflected.MapRange()
+		for iterator.Next() {
+			warehouseID := strings.TrimSpace(iterator.Key().String())
+			if warehouseID != "" {
+				seen[warehouseID] = struct{}{}
+			}
+		}
+	}
+	ids := make([]string, 0, len(seen))
+	for warehouseID := range seen {
+		ids = append(ids, warehouseID)
+	}
+	sort.Slice(ids, func(left, right int) bool {
+		leftNumber, leftErr := strconv.ParseUint(ids[left], 10, 64)
+		rightNumber, rightErr := strconv.ParseUint(ids[right], 10, 64)
+		if leftErr == nil && rightErr == nil && leftNumber != rightNumber {
+			return leftNumber < rightNumber
+		}
+		return strings.ToLower(ids[left]) < strings.ToLower(ids[right])
+	})
+	return ids
+}
+
+func xlsxColumnValue(row map[string]interface{}, column xlsxColumn) interface{} {
+	value := row[column.Field]
+	if column.WarehouseID == "" || value == nil {
+		return value
+	}
+	reflected := reflect.ValueOf(value)
+	if reflected.Kind() != reflect.Map || reflected.Type().Key().Kind() != reflect.String {
+		return nil
+	}
+	entry := reflected.MapIndex(reflect.ValueOf(column.WarehouseID).Convert(reflected.Type().Key()))
+	if !entry.IsValid() {
+		return nil
+	}
+	return entry.Interface()
+}
+
+func xlsxPriceFormula(row int, fieldColumns map[string]int) (string, bool) {
+	required := []string{"foreign_price", "weight_grams", "shipping_price_per_kg", "shipping_price_per_kg_currency", "markup_percent", "irt_per_cny"}
+	references := make(map[string]string, len(required))
+	for _, field := range required {
+		column, exists := fieldColumns[field]
+		if !exists {
+			return "", false
+		}
+		cellName, err := excelize.CoordinatesToCellName(column, row)
+		if err != nil {
+			return "", false
+		}
+		references[field] = cellName
+	}
+	numericReferences := []string{
+		references["foreign_price"],
+		references["weight_grams"],
+		references["shipping_price_per_kg"],
+		references["markup_percent"],
+		references["irt_per_cny"],
+	}
+	return fmt.Sprintf(
+		`=IF(AND(COUNT(%s)=5,OR(%s="CNY",%s="IRR")),ROUND((%s*%s+%s/1000*IF(%s="CNY",%s*%s,%s/10))*(1+%s/100),0),"")`,
+		strings.Join(numericReferences, ","),
+		references["shipping_price_per_kg_currency"],
+		references["shipping_price_per_kg_currency"],
+		references["foreign_price"],
+		references["irt_per_cny"],
+		references["weight_grams"],
+		references["shipping_price_per_kg_currency"],
+		references["shipping_price_per_kg"],
+		references["irt_per_cny"],
+		references["shipping_price_per_kg"],
+		references["markup_percent"],
+	), true
 }
 
 func xlsxFields(rows []map[string]interface{}, keyField string) []string {
@@ -401,6 +640,9 @@ func writeMetadataWorksheet(book *excelize.File, options XLSXOptions) error {
 		{"source_dataset", safeDatasetName(options.Metadata.SourceDataset)},
 		{"source_revision", options.Metadata.SourceRevision},
 		{"generated_at", options.Metadata.GeneratedAt},
+		{"xlsx_language", options.Language},
+		{"xlsx_mode", options.Mode},
+		{"zebra_rows", strconv.FormatBool(options.ZebraRows != nil && *options.ZebraRows)},
 		{"warnings", strings.Join(options.Metadata.Warnings, "\n")},
 	}
 	for rowIndex, row := range rows {

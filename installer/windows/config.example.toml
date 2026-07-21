@@ -12,5 +12,10 @@ port = 18080
 language = "fa"
 rtl_text_direction = false
 
+[export]
+xlsx_language = "auto"
+xlsx_mode = "precalculated"
+xlsx_zebra_rows = true
+
 [runtime]
 debug = false

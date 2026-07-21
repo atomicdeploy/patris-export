@@ -128,8 +128,11 @@ patris-export convert kala.db -f csv -o output/
 # Raw pxlib rows for debugging; no conversion, ANBAR compaction, RTL, or mapping.
 patris-export --raw convert kala.db -f json -o raw-output/
 
-# Excel workbook using the transformed row shape.
-patris-export convert kala.db -f xlsx -o output/
+# Persian Excel workbook using live pricing formulas and zebra rows.
+patris-export convert kala.db -f xlsx -o output/ \
+  --xlsx-language fa \
+  --xlsx-mode formula \
+  --xlsx-zebra=true
 
 # SQLite export using the built-in canonical kala profile.
 patris-export convert kala.db \
@@ -562,10 +565,13 @@ curl 'http://localhost:8080/api/records.xlsx?download=1' -o kala.xlsx
 Add `download=1` to ask the API for an attachment filename, for example
 `/api/records.csv?download=1`. The viewer's Excel action calls this same Go
 endpoint rather than rebuilding the workbook in JavaScript. XLSX workbooks keep
-Code as text, preserve safe numeric values as numeric cells, freeze and filter
-the header, and include an allowlisted Metadata sheet with schema, formula,
-source revision, generated time, and warnings. Add `rtl=1` or enable the UI RTL
-text-direction setting to open worksheets in right-to-left mode.
+Code as text, preserve safe numeric values as numeric cells, split
+`warehouse_stock` into one column per warehouse, freeze and filter the header,
+and include an allowlisted Metadata sheet with schema, formula, export mode,
+source revision, generated time, and warnings. Headers follow the active UI
+language by default. Use `language=en|fa`, `mode=precalculated|formula`,
+`zebra=0|1`, and `rtl=0|1` on the HTTP route, or the equivalent CLI/config
+settings described in [Excel export](docs/EXCEL-EXPORT.md).
 
 The viewer data grid keeps selection keyed by `Code` across sorting and
 filtering, exposes accessible row and header command menus through right-click,
