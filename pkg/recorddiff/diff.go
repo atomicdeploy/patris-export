@@ -6,6 +6,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/atomicdeploy/patris-export/pkg/converter"
 )
 
 // RecordChange describes one modified record while preserving the legacy
@@ -140,12 +142,12 @@ func indexRows(rows []map[string]interface{}, keyField string) (map[string]map[s
 func changedValues(oldRecord, newRecord map[string]interface{}, keyField string) ([]string, map[string]interface{}, map[string]interface{}) {
 	fields := make(map[string]struct{}, len(oldRecord)+len(newRecord))
 	for field := range oldRecord {
-		if field != keyField {
+		if field != keyField && !converter.IsSortField(field) {
 			fields[field] = struct{}{}
 		}
 	}
 	for field := range newRecord {
-		if field != keyField {
+		if field != keyField && !converter.IsSortField(field) {
 			fields[field] = struct{}{}
 		}
 	}
@@ -191,7 +193,9 @@ func copyRows(rows []map[string]interface{}) []map[string]interface{} {
 func copyRecord(record map[string]interface{}) map[string]interface{} {
 	result := make(map[string]interface{}, len(record))
 	for key, value := range record {
-		result[key] = value
+		if !converter.IsSortField(key) {
+			result[key] = value
+		}
 	}
 	return result
 }

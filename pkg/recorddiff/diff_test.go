@@ -87,3 +87,44 @@ func TestBetweenIsStableAndDoesNotMutateInputs(t *testing.T) {
 		t.Fatalf("unexpected counts: %d %d %d", added, modified, deleted)
 	}
 }
+
+func TestBetweenIgnoresSortFieldsAndOmitsThemFromPayloads(t *testing.T) {
+	at := time.Unix(1, 0)
+	previous := []map[string]interface{}{{"Code": "100", "Name": "Old", "Sort": "a", "SortCode": "1"}}
+	current := []map[string]interface{}{{"Code": "100", "Name": "New", "Sort": "b", "SortCode": "2"}}
+
+	changes := Between(previous, current, "Code", at)
+	if len(changes.Modified) != 1 {
+		t.Fatalf("modified changes = %#v, want one non-Sort change", changes.Modified)
+	}
+	modified := changes.Modified[0]
+	if !reflect.DeepEqual(modified.ChangedFields, []string{"Name"}) {
+		t.Fatalf("changed fields = %#v, want only Name", modified.ChangedFields)
+	}
+	for _, field := range []string{"Sort", "SortCode"} {
+		if _, exists := modified.Record[field]; exists {
+			t.Fatalf("ignored field %s leaked into modified record: %#v", field, modified.Record)
+		}
+		if _, exists := modified.OldValues[field]; exists {
+			t.Fatalf("ignored field %s leaked into old values: %#v", field, modified.OldValues)
+		}
+		if _, exists := modified.NewValues[field]; exists {
+			t.Fatalf("ignored field %s leaked into new values: %#v", field, modified.NewValues)
+		}
+	}
+
+	onlySortChanged := Between(previous, []map[string]interface{}{{"Code": "100", "Name": "Old", "Sort": "changed"}}, "Code", at)
+	if !onlySortChanged.Empty() {
+		t.Fatalf("Sort-only mutation produced a change: %#v", onlySortChanged)
+	}
+
+	initial := Between(nil, current, "Code", at)
+	if len(initial.Added) != 1 {
+		t.Fatalf("initial added rows = %#v", initial.Added)
+	}
+	for _, field := range []string{"Sort", "SortCode"} {
+		if _, exists := initial.Added[0][field]; exists {
+			t.Fatalf("ignored field %s leaked into initial payload: %#v", field, initial.Added[0])
+		}
+	}
+}

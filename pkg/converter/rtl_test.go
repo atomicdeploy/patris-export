@@ -37,6 +37,14 @@ func TestConvertLTRVisualToRTL(t *testing.T) {
 	}
 }
 
+func TestConvertLTRVisualToRTLPreservesLineAndWhitespaceStructure(t *testing.T) {
+	input := "LAN  \t\u0645\u062a\u0646\nNEXT\t\u0641\u0627\u0631\u0633\u06cc"
+	want := "\u0645\u062a\u0646  \tLAN\n\u0641\u0627\u0631\u0633\u06cc\tNEXT"
+	if got := ConvertLTRVisualToRTL(input); got != want {
+		t.Fatalf("ConvertLTRVisualToRTL(%q) = %q, want %q", input, got, want)
+	}
+}
+
 func TestRTLConversionOptIn(t *testing.T) {
 	originalMapping := DefaultCharMapping()
 	defer SetDefaultMapping(originalMapping)

@@ -33,6 +33,7 @@ var (
 	defaultMapping       CharMapping
 	dashFixEnabled       = true
 	rtlConversionEnabled = false
+	zwnjSpacingPattern   = regexp.MustCompile(`\[zwnj\][ \t\f\v]*`)
 )
 
 // LoadCharMapping loads the character mapping from a file
@@ -163,6 +164,10 @@ func Patris2FaWithMapping(value string, mapping CharMapping) string {
 		mapping = defaultMapping
 	}
 
+	// Patris uses both CR and LF as item separators. Normalize their encoding
+	// while retaining every logical line boundary for structured output.
+	value = strings.ReplaceAll(value, "\r\n", "\n")
+	value = strings.ReplaceAll(value, "\r", "\n")
 	valueBytes := []byte(value)
 
 	// Step 1: Replace dash marker if enabled
@@ -177,7 +182,7 @@ func Patris2FaWithMapping(value string, mapping CharMapping) string {
 	// Step 2: Reverse Patris-encoded segments
 	// Persian characters (0x9F-0xE0) and whitespace/punctuation are stored reversed
 	// English letters are NOT reversed, allowing mixed Persian/English text
-	valueBytes = reversePatrisSegments(valueBytes)
+	valueBytes = reversePatrisLines(valueBytes)
 
 	// Step 3: Map Patris bytes to UTF-8
 	var output strings.Builder
@@ -197,9 +202,9 @@ func Patris2FaWithMapping(value string, mapping CharMapping) string {
 
 	// Step 5: Clean up formatting
 	// Replace [zwnj] markers with spaces for proper Persian word spacing
-	result = regexp.MustCompile(`\[zwnj\]\s*`).ReplaceAllString(result, " ")
-	// Normalize whitespace
-	result = regexp.MustCompile(`\s+`).ReplaceAllString(result, " ")
+	result = zwnjSpacingPattern.ReplaceAllString(result, " ")
+	// Preserve internal spaces, tabs, blank lines, and line separators. Only
+	// outer padding is transport noise and remains safe to trim.
 	result = strings.TrimSpace(result)
 
 	if rtlConversionEnabled {
@@ -207,6 +212,22 @@ func Patris2FaWithMapping(value string, mapping CharMapping) string {
 	}
 
 	return result
+}
+
+// reversePatrisLines converts each Patris line independently so Persian
+// segments cannot move across CR/LF item boundaries.
+func reversePatrisLines(data []byte) []byte {
+	result := make([]byte, 0, len(data))
+	lineStart := 0
+	for index, b := range data {
+		if b != '\n' {
+			continue
+		}
+		result = append(result, reversePatrisSegments(data[lineStart:index])...)
+		result = append(result, '\n')
+		lineStart = index + 1
+	}
+	return append(result, reversePatrisSegments(data[lineStart:])...)
 }
 
 // reversePatrisSegments reverses byte segments containing Patris-encoded characters
@@ -322,7 +343,14 @@ func ConvertLTRVisualToRTL(text string) string {
 	if text == "" {
 		return text
 	}
+	lines := strings.Split(text, "\n")
+	for index, line := range lines {
+		lines[index] = convertLTRVisualLineToRTL(line)
+	}
+	return strings.Join(lines, "\n")
+}
 
+func convertLTRVisualLineToRTL(text string) string {
 	words := splitWords(text)
 	hasPersian := false
 	hasLatin := false
@@ -372,11 +400,24 @@ func reverseScriptGroups(words [][]rune) string {
 	var groups []wordGroup
 	var current wordGroup
 	inGroup := false
+	var leadingWhitespace []rune
+	var trailingWhitespace []rune
+	var separators [][]rune
+	var pendingWhitespace []rune
+	wordCount := 0
 
 	for _, word := range words {
 		if isSpaceWord(word) {
+			pendingWhitespace = append(pendingWhitespace, word...)
 			continue
 		}
+		if wordCount == 0 {
+			leadingWhitespace = append(leadingWhitespace, pendingWhitespace...)
+		} else {
+			separators = append(separators, append([]rune(nil), pendingWhitespace...))
+		}
+		pendingWhitespace = nil
+		wordCount++
 
 		wordIsRTL := isPersianOrArabic(word[0])
 		wordIsNumeric := isNumericWord(word)
@@ -395,22 +436,24 @@ func reverseScriptGroups(words [][]rune) string {
 	if inGroup {
 		groups = append(groups, current)
 	}
+	trailingWhitespace = append(trailingWhitespace, pendingWhitespace...)
 
 	var result [][]rune
 	for i := len(groups) - 1; i >= 0; i-- {
 		result = append(result, groups[i].words...)
 	}
-	return joinWords(result)
+	return joinWords(result, leadingWhitespace, separators, trailingWhitespace)
 }
 
-func joinWords(words [][]rune) string {
-	var output []rune
+func joinWords(words [][]rune, leading []rune, separators [][]rune, trailing []rune) string {
+	output := append([]rune(nil), leading...)
 	for i, word := range words {
 		if i > 0 {
-			output = append(output, ' ')
+			output = append(output, separators[i-1]...)
 		}
 		output = append(output, word...)
 	}
+	output = append(output, trailing...)
 	return string(output)
 }
 

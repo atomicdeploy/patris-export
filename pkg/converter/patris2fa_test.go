@@ -100,6 +100,21 @@ func TestPatris2Fa(t *testing.T) {
 	}
 }
 
+func TestPatris2FaPreservesLineBoundariesAndHorizontalWhitespace(t *testing.T) {
+	mapping := CharMapping{
+		0xa1: "A",
+		0xa2: "B",
+		0xa3: "C",
+		0xa4: "D",
+	}
+
+	input := "\xa1\xa2\r\n\xa3\xa4  \tvalue\rplain\n\nlast"
+	want := "BA\nDC  \tvalue\nplain\n\nlast"
+	if got := Patris2FaWithMapping(input, mapping); got != want {
+		t.Fatalf("Patris2FaWithMapping(%#v) = %q, want %q", []byte(input), got, want)
+	}
+}
+
 func TestLoadCharMapping(t *testing.T) {
 	mapping, err := LoadCharMapping("farsi_chars.txt")
 	if err != nil {
