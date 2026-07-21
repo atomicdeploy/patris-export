@@ -75,7 +75,7 @@ test('accepts the repository canonical golden envelope without an invented schem
   assert.equal(validateEnvelope(payload, {
     'X-Patris-Contract': payload.schema,
     'X-Patris-Event-ID': payload.event_id,
-    'X-Patris-Event': payload.event_type,
+    'X-Patris-Event': 'initial',
     'X-Patris-Source': payload.source.id,
   }), payload);
 });
@@ -103,6 +103,19 @@ test('JSON-RPC wrapper preserves explicit null and does not invent unseen keys',
   assert.equal(request.headers['X-Patris-Source'], 'patris-test');
   assert.equal(Object.hasOwn(request.headers, 'X-Patris-Contract-Version'), false);
   assert.equal(request.headers.Authorization, 'Bearer test-only');
+});
+
+test('snapshot envelopes retain the sender initial-event header convention', () => {
+  const payload = {
+    ...envelope(),
+    event_type: 'snapshot',
+  };
+  assert.equal(validateEnvelope(payload, { 'X-Patris-Event': 'initial' }), payload);
+  assert.throws(() => validateEnvelope(payload, { 'X-Patris-Event': 'snapshot' }), /does not match/);
+  const request = buildOutboundRequest(config({
+    transport: 'json-rpc', target: 'https://api.example.test/rpc',
+  }), payload);
+  assert.equal(request.headers['X-Patris-Event'], 'initial');
 });
 
 test('WordPress AJAX wrapper preserves the original sparse envelope', () => {

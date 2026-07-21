@@ -64,7 +64,9 @@ For every canonical HTTP request Patris sets:
 `event_id` is deterministic for a given source revision and event. Receivers
 must use it as their idempotency key. Patris encodes the envelope once and
 reuses the same bytes and identity headers for all attempts. The adapter also
-sets `Idempotency-Key` on downstream HTTP requests.
+sets `Idempotency-Key` on downstream HTTP requests. The transport header uses
+`X-Patris-Event: initial` for a body `event_type` of `snapshot`; update events
+use `update` in both places.
 
 Remote secret-bearing destinations require HTTPS. Plain HTTP is accepted only
 for a loopback adapter or mock receiver. Redirects are not followed when the

@@ -103,6 +103,11 @@ function validateTarget(target, hasSecret) {
   return parsed.toString();
 }
 
+function transportEventType(contractEventType) {
+  if (contractEventType === 'snapshot') return 'initial';
+  return contractEventType;
+}
+
 function validateEnvelope(value, headers = {}) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     throw new AdapterError('request body must be a JSON object');
@@ -137,7 +142,7 @@ function validateEnvelope(value, headers = {}) {
   if (headerEventID && headerEventID !== value.event_id) {
     throw new AdapterError('X-Patris-Event-ID does not match the body');
   }
-  if (headerEvent && headerEvent !== value.event_type) {
+  if (headerEvent && headerEvent !== transportEventType(value.event_type)) {
     throw new AdapterError('X-Patris-Event does not match the body');
   }
   if (headerSource && headerSource !== value.source.id) {
@@ -152,7 +157,7 @@ function identityHeaders(envelope, secret, transport) {
     'Idempotency-Key': envelope.event_id,
     'X-Patris-Contract': envelope.schema,
     'X-Patris-Event-ID': envelope.event_id,
-    'X-Patris-Event': envelope.event_type,
+    'X-Patris-Event': transportEventType(envelope.event_type),
     'X-Patris-Source': envelope.source.id,
     'X-Patris-Adapter': transport,
   };
