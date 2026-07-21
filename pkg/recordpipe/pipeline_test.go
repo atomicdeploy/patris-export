@@ -1,9 +1,11 @@
 package recordpipe
 
 import (
+	"encoding/json"
 	"fmt"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -41,6 +43,61 @@ func TestBuildRawSkipsTransformAndMapping(t *testing.T) {
 		if _, exists := result.Rows[0][field]; exists {
 			t.Fatalf("raw mode leaked ignored field %s: %#v", field, result.Rows[0])
 		}
+	}
+	if _, exists := result.Rows[0]["warnings"]; exists {
+		t.Fatal("raw mode must not add derived naming warnings")
+	}
+}
+
+func TestBuildAddsNamingWarningsAfterFieldMapping(t *testing.T) {
+	result := Build([]map[string]interface{}{{"Code": "100", "Name": "Bad  name"}}, "name.db", Options{
+		Mapping: recordmap.Config{
+			Enabled:  true,
+			KeyField: "sku",
+			Fields:   map[string]string{"Code": "sku", "Name": "title"},
+			Include:  []string{"Code", "Name"},
+		},
+	})
+	if got := result.Rows[0]["warnings"]; !reflect.DeepEqual(got, []string{"naming_multiple_spaces:name"}) {
+		t.Fatalf("mapped row warnings = %#v", got)
+	}
+	payload := result.Payload.(map[string]interface{})["100"].(map[string]interface{})
+	if got := payload["warnings"]; !reflect.DeepEqual(got, []string{"naming_multiple_spaces:name"}) {
+		t.Fatalf("mapped payload warnings = %#v", got)
+	}
+}
+
+func TestBuildCanonicalNamingWarningsRemainIdentityValid(t *testing.T) {
+	result := Build([]map[string]interface{}{{
+		"Code": "123456789", "Name": " Widget2 ", "Serial": "SKU",
+	}}, "kala.db", Options{
+		Canonical:       canonical.DefaultConfig(),
+		CatalogProvider: pricingcatalog.NewProvider(pricingcatalog.Config{Mode: pricingcatalog.ModeNone}),
+		GeneratedAt:     time.Date(2026, 7, 21, 0, 0, 0, 0, time.UTC),
+	})
+	if result.Contract == nil || len(result.Contract.Products) != 1 {
+		t.Fatalf("canonical naming fixture did not produce one product: %+v", result.Contract)
+	}
+	want := []string{
+		"naming_leading_space:name",
+		"naming_mixed_kind_without_space:name",
+		"naming_trailing_space:name",
+	}
+	gotNaming := make([]string, 0)
+	for _, warning := range result.Contract.Products[0].Warnings {
+		if strings.HasPrefix(warning, "naming_") {
+			gotNaming = append(gotNaming, warning)
+		}
+	}
+	if !reflect.DeepEqual(gotNaming, want) {
+		t.Fatalf("canonical naming warnings = %#v, want %#v", gotNaming, want)
+	}
+	payload, err := json.Marshal(result.Contract)
+	if err != nil {
+		t.Fatalf("marshal canonical result: %v", err)
+	}
+	if _, _, err := canonical.VerifySnapshotJSON(payload); err != nil {
+		t.Fatalf("naming warnings invalidated canonical identities: %v", err)
 	}
 }
 
@@ -82,8 +139,8 @@ func TestBuildKalaProfileAgainstRealLegacyDatabaseFixture(t *testing.T) {
 	if fmt.Sprint(product["foreign_price"]) != "2.75" || fmt.Sprint(product["weight_grams"]) != "1.84" || product["total_stock"] != 20.0 || product["final_price"] != int64(111999) {
 		t.Fatalf("real legacy fields were not parsed correctly: %#v", product)
 	}
-	if warnings, exists := product["warnings"].([]string); !exists || len(warnings) != 0 {
-		t.Fatalf("known real fixture did not retain the required empty warnings array: %v", product["warnings"])
+	if warnings, exists := product["warnings"].([]string); !exists || !reflect.DeepEqual(warnings, []string{"naming_mixed_kind_without_space:name"}) {
+		t.Fatalf("known real fixture naming diagnostics = %v", product["warnings"])
 	}
 	for _, raw := range []string{"Sharh1", "Sharh2", "FOROSH", "KHARYD", "ALLANBAR", "ANBAR"} {
 		if _, exists := product[raw]; exists {

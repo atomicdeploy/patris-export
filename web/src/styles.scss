@@ -789,6 +789,22 @@ body.is-loading .data-table {
     box-shadow: inset 3px 0 0 var(--row-stock-accent);
 }
 
+.data-table tbody tr.naming-warning td {
+    background-color: rgba(245, 158, 11, 0.11);
+}
+
+.data-table tbody tr.naming-warning td.selection-column {
+    box-shadow: inset 4px 0 0 #d97706;
+}
+
+[dir="rtl"] .data-table tbody tr.naming-warning td.selection-column {
+    box-shadow: inset -4px 0 0 #d97706;
+}
+
+.dark-mode .data-table tbody tr.naming-warning td {
+    background-color: rgba(245, 158, 11, 0.17);
+}
+
 .row-coloring-disabled {
     .data-table tbody tr.code-group td,
     .data-table tbody tr.code-subgroup td {

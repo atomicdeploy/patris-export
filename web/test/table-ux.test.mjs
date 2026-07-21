@@ -6,6 +6,7 @@ const source = await readFile(new URL('../src/table-ux.js', import.meta.url), 'u
 const viewerSource = await readFile(new URL('../src/viewer.html', import.meta.url), 'utf8');
 const appSource = await readFile(new URL('../src/app.js', import.meta.url), 'utf8');
 const buildSource = await readFile(new URL('../build.js', import.meta.url), 'utf8');
+const stylesSource = await readFile(new URL('../src/styles.scss', import.meta.url), 'utf8');
 const { LARGE_TABLE_ROW_COUNT, tablePerformanceFixture } = await import('./fixtures/table-performance-1002.mjs');
 const {
     DEFAULT_ROW_ICON_FALLBACK,
@@ -18,6 +19,7 @@ const {
     duplicateSafeRecordKeys,
     fitMenuPosition,
     formatStructuredValue,
+    hasNamingConventionWarnings,
     iconMarkup,
     keyboardColumnWidth,
     isWarehouseColumnField,
@@ -176,6 +178,15 @@ test('ordered icon rules match transformed canonical values and keep a fallback'
     assert.equal(resolveRowIcon({ Sharh1: 'must not match' }, rawRule, DEFAULT_ROW_ICON_FALLBACK).ruleId, '');
     assert.equal(canonicalRuleField('Code'), 'product_code');
     assert.equal(canonicalRowValue({ Code: '001' }, 'product_code'), '001');
+});
+
+test('naming-convention warnings visibly classify only affected rows', () => {
+    assert.equal(hasNamingConventionWarnings({ warnings: ['naming_multiple_spaces:name'] }), true);
+    assert.equal(hasNamingConventionWarnings({ warnings: 'naming_leading_space:name' }), true);
+    assert.equal(hasNamingConventionWarnings({ warnings: ['price_missing'] }), false);
+    assert.equal(hasNamingConventionWarnings({ warnings: [] }), false);
+    assert.match(appSource, /classList\.toggle\('naming-warning', hasNamingConventionWarnings\(record\)\)/);
+    assert.match(stylesSource, /tr\.naming-warning td/);
 });
 
 test('table rows use a single roving tab stop and predictable arrow commands', () => {

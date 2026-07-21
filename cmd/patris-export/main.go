@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/atomicdeploy/patris-export/pkg/appconfig"
+	"github.com/atomicdeploy/patris-export/pkg/canonical"
 	"github.com/atomicdeploy/patris-export/pkg/converter"
 	"github.com/atomicdeploy/patris-export/pkg/datasource"
 	edgepkg "github.com/atomicdeploy/patris-export/pkg/edge"
@@ -23,6 +24,7 @@ import (
 	"github.com/atomicdeploy/patris-export/pkg/filecopy"
 	"github.com/atomicdeploy/patris-export/pkg/ipc"
 	"github.com/atomicdeploy/patris-export/pkg/licensing"
+	"github.com/atomicdeploy/patris-export/pkg/naming"
 	"github.com/atomicdeploy/patris-export/pkg/nativeui"
 	"github.com/atomicdeploy/patris-export/pkg/oneshot"
 	"github.com/atomicdeploy/patris-export/pkg/paradox"
@@ -812,6 +814,9 @@ func convertFile(dbFile string, charMap converter.CharMapping, useStdout bool, c
 		CatalogProvider: catalogProvider,
 		GeneratedAt:     time.Now(),
 	})
+	if summary := summarizeNamingWarnings(result); summary.Violations > 0 {
+		warningColor.Fprintf(os.Stderr, "Warning: %d naming-convention violation(s) across %d row(s); inspect the warnings field for rule and field IDs.\n", summary.Violations, summary.Rows)
+	}
 	if !useStdout {
 		infoColor.Printf("📊 Found %d records\n", len(result.Rows))
 	}
@@ -820,6 +825,14 @@ func convertFile(dbFile string, charMap converter.CharMapping, useStdout bool, c
 		return result, err
 	}
 	return result, nil
+}
+
+func summarizeNamingWarnings(result recordpipe.Result) naming.Summary {
+	rows := append([]map[string]interface{}(nil), result.Rows...)
+	if result.Contract != nil {
+		rows = append(rows, canonical.CategoriesToRows(result.Contract.Categories)...)
+	}
+	return naming.Summarize(rows)
 }
 
 func writeConvertOutput(dbFile string, result recordpipe.Result, useStdout bool, cfg appconfig.Config) error {
