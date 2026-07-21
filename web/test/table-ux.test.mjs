@@ -19,6 +19,7 @@ const {
     isWarehouseColumnField,
     localizedColumnLabel,
     normalizeColumnPreferenceList,
+    localizedRelativeTime,
     normalizeColumnWidths,
     normalizeRowIconRules,
     nextRovingKey,
@@ -245,6 +246,18 @@ test('English and Persian table strings interpolate and SVG names are allowliste
     assert.equal(tableText('fa', 'fallbackProduct'), 'محصول');
     assert.match(iconMarkup('warning'), /^<svg/);
     assert.doesNotMatch(iconMarkup('<script>'), /script/);
+});
+
+test('relative last-update text follows the active interface language', () => {
+    const now = new Date('2026-07-21T12:00:00.000Z');
+    const twoMinutesAgo = new Date('2026-07-21T11:58:00.000Z');
+    const oneHourAhead = new Date('2026-07-21T13:00:00.000Z');
+
+    assert.equal(localizedRelativeTime(twoMinutesAgo, 'en', now), '2 minutes ago');
+    assert.equal(localizedRelativeTime(oneHourAhead, 'en', now), 'in 1 hour');
+    assert.equal(localizedRelativeTime(twoMinutesAgo, 'fa', now), '۲ دقیقه پیش');
+    assert.equal(localizedRelativeTime(oneHourAhead, 'fa', now), '۱ ساعت دیگر');
+    assert.doesNotMatch(localizedRelativeTime(twoMinutesAgo, 'fa', now), /ago|minute/i);
 });
 
 test('every declared viewer translation key has English and Persian text', () => {

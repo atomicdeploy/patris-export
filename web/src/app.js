@@ -7,10 +7,14 @@ import {
     escapeHtml,
     eventLogChangeDetailsMarkup,
     eventLogDisclosureText,
+    eventLogLocalizedText,
+    eventLogTokenLabel,
     isEventLogChangeDetails,
     modifiedRecordIdentityKey,
+    normalizeEventLogContent,
     recordIdentityKey,
-    retainRecentEventLogChanges
+    retainRecentEventLogChanges,
+    upgradeEventLogEntryLocalization
 } from './event-log.js';
 import {
     CANONICAL_ROW_FIELDS,
@@ -29,6 +33,7 @@ import {
     isWarehouseColumnField,
     localizedColumnLabel,
     normalizeColumnPreferenceList,
+    localizedRelativeTime,
     normalizeColumnWidths,
     normalizeRowIconFallback,
     normalizeRowIconRule,
@@ -373,7 +378,8 @@ function loadSettings() {
         try {
             state.eventLog = retainRecentEventLogChanges(
                 JSON.parse(savedEventLog)
-                    .filter(entry => entry && entry.title)
+                    .map(upgradeEventLogEntryLocalization)
+                    .filter(entry => entry && (entry.title || entry.titleKey))
                     .slice(0, MAX_EVENT_LOG_ENTRIES),
                 MAX_DETAILED_EVENT_LOG_ENTRIES
             );
@@ -514,11 +520,13 @@ function buildConfigDiff(previousConfig, nextConfig) {
     }
 
     const signature = stableStringify(changed);
+    const message = configDiffMessageDescriptor(changed);
     return {
         changed,
         signature,
         dedupeKey: hashString(signature),
-        message: formatConfigDiffMessage(changed),
+        messageKey: message.key,
+        messageValues: message.values,
         details: formatConfigDiffDetails(changed)
     };
 }
@@ -571,14 +579,24 @@ function hashString(value) {
     return (hash >>> 0).toString(16);
 }
 
-function formatConfigDiffMessage(changed) {
+function configDiffMessageDescriptor(changed) {
     if (changed.length === 1) {
         const change = changed[0];
-        return `${change.path}: ${formatConfigDiffValue(change.before)} -> ${formatConfigDiffValue(change.after)}`;
+        return {
+            key: 'settingsChangeSingle',
+            values: {
+                path: change.path,
+                before: formatConfigDiffValue(change.before),
+                after: formatConfigDiffValue(change.after)
+            }
+        };
     }
     const names = changed.slice(0, 4).map(change => change.path).join(', ');
     const suffix = changed.length > 4 ? ', ...' : '';
-    return `${changed.length} settings changed: ${names}${suffix}`;
+    return {
+        key: 'settingsChangeMultiple',
+        values: { count: changed.length, names, suffix }
+    };
 }
 
 function formatConfigDiffDetails(changed) {
@@ -718,7 +736,7 @@ async function saveConfigToServer(config) {
         console.info('💾 Settings synced to config file.');
     } catch (error) {
         console.error('❌ Failed to sync settings to config file:', error);
-        showInAppToast(t('settingsSaveFailed'), error.message, { error: true, broadcastToTabs: true, source: 'config_update', eventType: 'config_update' });
+        showInAppToast(t('settingsSaveFailed'), error.message, { titleKey: 'settingsSaveFailed', error: true, broadcastToTabs: true, source: 'config_update', eventType: 'config_update' });
     }
 }
 
@@ -1534,19 +1552,7 @@ function handleFooterToggleClick(event) {
 }
 
 function formatRelativeTime(date) {
-    if (!date) return 'never';
-    const diffMs = Date.now() - date.getTime();
-    const future = diffMs < 0;
-    const abs = Math.abs(diffMs);
-    const units = [
-        ['day', 86400000],
-        ['hour', 3600000],
-        ['minute', 60000],
-        ['second', 1000]
-    ];
-    const [unit, size] = units.find(([, ms]) => abs >= ms) || units[units.length - 1];
-    const count = Math.max(1, Math.round(abs / size));
-    return future ? `in ${count} ${unit}${count === 1 ? '' : 's'}` : `${count} ${unit}${count === 1 ? '' : 's'} ago`;
+    return localizedRelativeTime(date, state.settings.language);
 }
 
 function updateLastUpdateDisplay() {
@@ -2223,10 +2229,20 @@ function setFavicon(href) {
 }
 
 function showInAppToast(title, message, options = {}) {
+    const displayTitle = options.titleKey
+        ? t(options.titleKey, options.titleValues || {})
+        : (title || 'Patris Export');
+    const displayMessage = options.messageKey
+        ? t(options.messageKey, options.messageValues || {})
+        : (message || '');
     if (options.log !== false) {
         recordEventLog({
-            title: title || 'Patris Export',
-            message: message || '',
+            title: displayTitle,
+            titleKey: options.titleKey,
+            titleValues: options.titleValues,
+            message: displayMessage,
+            messageKey: options.messageKey,
+            messageValues: options.messageValues,
             level: options.error || options.nativeError ? 'warning' : (options.level || 'info'),
             type: options.eventType || options.source || 'toast',
             source: options.source || 'web-ui',
@@ -2251,11 +2267,11 @@ function showInAppToast(title, message, options = {}) {
 
     const titleEl = document.createElement('div');
     titleEl.className = 'app-toast-title';
-    titleEl.textContent = title || 'Patris Export';
+    titleEl.textContent = displayTitle;
 
     const messageEl = document.createElement('div');
     messageEl.className = 'app-toast-message';
-    messageEl.textContent = message || '';
+    messageEl.textContent = displayMessage;
 
     toast.appendChild(titleEl);
     toast.appendChild(messageEl);
@@ -2277,15 +2293,14 @@ function showInAppToast(title, message, options = {}) {
 
 function recordEventLog(entry = {}) {
     const changes = isEventLogChangeDetails(entry.changes) ? entry.changes : null;
+    const content = normalizeEventLogContent(entry, { title: 'Patris Export event' });
     const logEntry = {
         id: entry.id || createTabId(),
         time: entry.timestamp || new Date().toISOString(),
         level: normalizeEventLevel(entry.level),
         type: String(entry.type || 'event'),
         source: String(entry.source || entry.type || 'web-ui'),
-        title: String(entry.title || 'Patris Export event'),
-        titleKey: entry.titleKey ? String(entry.titleKey) : '',
-        message: String(entry.message || ''),
+        ...content,
         details: entry.details ? String(entry.details) : '',
         ...(changes ? { changes } : {})
     };
@@ -2364,16 +2379,19 @@ function eventLogChangeLabels() {
 function eventLogEntrySummaryMarkup(entry, disclosure = '') {
     const parsedTime = new Date(entry.time);
     const displayTime = Number.isNaN(parsedTime.getTime()) ? entry.time : formatDateTime(parsedTime);
-    const title = entry.titleKey ? t(entry.titleKey) : entry.title;
+    const title = eventLogLocalizedText(entry, 'title', state.settings.language);
+    const message = eventLogLocalizedText(entry, 'message', state.settings.language);
+    const type = eventLogTokenLabel(entry.type, state.settings.language, 'type');
+    const source = eventLogTokenLabel(entry.source, state.settings.language, 'source');
     return `
         <span class="event-log-entry-meta">
             <time datetime="${escapeHtml(entry.time)}">${escapeHtml(displayTime)}</time>
-            <span>${escapeHtml(entry.type)}</span>
-            <span>${escapeHtml(entry.source)}</span>
+            <span>${escapeHtml(type)}</span>
+            <span>${escapeHtml(source)}</span>
         </span>
         <span class="event-log-entry-body">
             <strong>${escapeHtml(title)}</strong>
-            ${entry.message ? `<span class="event-log-entry-message">${escapeHtml(entry.message)}</span>` : ''}
+            ${message ? `<span class="event-log-entry-message">${escapeHtml(message)}</span>` : ''}
             ${!disclosure && entry.details ? `<code>${escapeHtml(entry.details)}</code>` : ''}
             ${!disclosure && entry.changeDetailsExpired ? `<span class="event-log-detail-expired">${escapeHtml(t('eventLogDetailsExpired'))}</span>` : ''}
         </span>
@@ -2495,7 +2513,13 @@ async function uploadDroppedSource(file) {
     }
     if (!isSupportedSourceFile(file)) {
         setDropOverlayVisible(true, 'invalid');
-        showInAppToast(t('unsupportedFile'), t('unsupportedFileHelp'), { error: true, source: 'source_drop', eventType: 'source_switch' });
+        showInAppToast(t('unsupportedFile'), t('unsupportedFileHelp'), {
+            titleKey: 'unsupportedFile',
+            messageKey: 'unsupportedFileHelp',
+            error: true,
+            source: 'source_drop',
+            eventType: 'source_switch'
+        });
         setTimeout(() => setDropOverlayVisible(false), 1500);
         return;
     }
@@ -2532,10 +2556,19 @@ async function uploadDroppedSource(file) {
 
         state.fileName = payload.path || payload.file || file.name;
         updateFooterFileName();
-        showInAppToast(t('sourceLoaded'), t('sourceLoadedMessage', {
+        const sourceLoadedValues = {
             file: payload.file || file.name,
             count: payload.records ?? t('unknown')
-        }), { broadcastToTabs: true, source: 'source_drop', eventType: 'source_switch', level: 'success' });
+        };
+        showInAppToast(t('sourceLoaded'), t('sourceLoadedMessage', sourceLoadedValues), {
+            titleKey: 'sourceLoaded',
+            messageKey: 'sourceLoadedMessage',
+            messageValues: sourceLoadedValues,
+            broadcastToTabs: true,
+            source: 'source_drop',
+            eventType: 'source_switch',
+            level: 'success'
+        });
 
         if (!state.ws || state.ws.readyState !== WebSocket.OPEN) {
             await fetchInitialData();
@@ -2543,7 +2576,7 @@ async function uploadDroppedSource(file) {
         }
     } catch (error) {
         console.error('Failed to switch dropped source:', error);
-        showInAppToast(t('sourceSwitchFailed'), error.message, { error: true, source: 'source_drop', eventType: 'source_switch' });
+        showInAppToast(t('sourceSwitchFailed'), error.message, { titleKey: 'sourceSwitchFailed', error: true, source: 'source_drop', eventType: 'source_switch' });
         setLoadingState(false);
     } finally {
         state.isUploadingSource = false;
@@ -2762,7 +2795,13 @@ function reloadForResourceUpdate(nextResourceVersion, source) {
 
     console.info('🔄 Embedded web resources changed from %s to %s via %s. Reloading viewer...', state.resourceVersion, nextResourceVersion, source);
     updateStatus('connected', t('updatingUI'));
-    showInAppToast(t('updatingInterface'), t('updatingInterfaceMessage'), { source: 'resource_update', eventType: 'resource_update', level: 'update' });
+    showInAppToast(t('updatingInterface'), t('updatingInterfaceMessage'), {
+        titleKey: 'updatingInterface',
+        messageKey: 'updatingInterfaceMessage',
+        source: 'resource_update',
+        eventType: 'resource_update',
+        level: 'update'
+    });
 
     sessionStorage.setItem('patris-resource-reload', JSON.stringify({
         from: state.resourceVersion,
@@ -2820,10 +2859,10 @@ async function sendNativeToast(title, message) {
         });
         const result = await response.json();
         if (result.native_error) {
-            showInAppToast(t('nativeToastUnavailable'), result.native_error, { error: true, source: 'native_toast', eventType: 'toast', nativeError: result.native_error });
+            showInAppToast(t('nativeToastUnavailable'), result.native_error, { titleKey: 'nativeToastUnavailable', error: true, source: 'native_toast', eventType: 'toast', nativeError: result.native_error });
         }
     } catch (error) {
-        showInAppToast(t('toastRequestFailed'), error.message, { error: true, source: 'native_toast', eventType: 'toast' });
+        showInAppToast(t('toastRequestFailed'), error.message, { titleKey: 'toastRequestFailed', error: true, source: 'native_toast', eventType: 'toast' });
     }
 }
 
@@ -2836,14 +2875,14 @@ async function requestSourceRefresh() {
     try {
         if (state.ws && state.ws.readyState === WebSocket.OPEN) {
             state.ws.send(JSON.stringify({ type: 'refresh' }));
-            showInAppToast(t('refreshRequested'), t('refreshRequestedMessage'), { broadcastToTabs: true, source: 'manual_refresh', eventType: 'refresh', level: 'update' });
+            showInAppToast(t('refreshRequested'), t('refreshRequestedMessage'), { titleKey: 'refreshRequested', messageKey: 'refreshRequestedMessage', broadcastToTabs: true, source: 'manual_refresh', eventType: 'refresh', level: 'update' });
         } else {
             await fetchInitialData();
-            showInAppToast(t('refreshed'), t('refreshedMessage'), { broadcastToTabs: true, source: 'manual_refresh', eventType: 'refresh', level: 'success' });
+            showInAppToast(t('refreshed'), t('refreshedMessage'), { titleKey: 'refreshed', messageKey: 'refreshedMessage', broadcastToTabs: true, source: 'manual_refresh', eventType: 'refresh', level: 'success' });
         }
     } catch (error) {
         console.error('Failed to refresh data source:', error);
-        showInAppToast(t('refreshFailed'), error.message, { error: true, source: 'manual_refresh', eventType: 'refresh' });
+        showInAppToast(t('refreshFailed'), error.message, { titleKey: 'refreshFailed', error: true, source: 'manual_refresh', eventType: 'refresh' });
     } finally {
         if (button) {
             setTimeout(() => {
@@ -3022,9 +3061,9 @@ function handleWebSocketMessage(data) {
             flashFavicon();
 
             recordEventLog({
-                title: 'Rows changed',
                 titleKey: 'eventLogRowsChanged',
-                message: titleMessage,
+                messageKey: 'eventLogChangeSummary',
+                messageValues: changeCounts,
                 level: 'update',
                 type: 'row_updated',
                 source: 'websocket',
@@ -3047,7 +3086,12 @@ function handleWebSocketMessage(data) {
     } else if (data.type === 'config_update') {
         const diff = applyConfig(data.config, 'file watcher');
         if (shouldNotifyConfigReload(diff)) {
-            showInAppToast(t('settingsReloaded'), diff.message || t('settingsReloadedMessage'), {
+            const messageKey = diff.messageKey || 'settingsReloadedMessage';
+            const messageValues = diff.messageValues || {};
+            showInAppToast(t('settingsReloaded'), t(messageKey, messageValues), {
+                titleKey: 'settingsReloaded',
+                messageKey,
+                messageValues,
                 source: 'config_update',
                 eventType: 'config_update',
                 level: 'update',
@@ -3629,7 +3673,7 @@ function resetAllColumnWidths() {
     state.settings.columnWidths = {};
     renderTableHeader();
     saveSettings();
-    showInAppToast(t('widthsReset'), '', { source: 'table_settings', eventType: 'table_settings' });
+    showInAppToast(t('widthsReset'), '', { titleKey: 'widthsReset', source: 'table_settings', eventType: 'table_settings' });
 }
 
 // Create filter control based on field type
@@ -4603,7 +4647,7 @@ function openGridCommandMenu(commands, { point = null, trigger = null, focusMenu
             event.stopPropagation();
             closeRowCommandMenu({ restoreFocus: true });
             Promise.resolve(command.execute()).catch(error => {
-                showInAppToast(t('copyFailed'), error.message, { error: true, source: `${kind || 'grid'}_action`, eventType: `${kind || 'grid'}_action` });
+                showInAppToast(t('copyFailed'), error.message, { titleKey: 'copyFailed', error: true, source: `${kind || 'grid'}_action`, eventType: `${kind || 'grid'}_action` });
             });
         });
         menu.appendChild(item);
@@ -4697,11 +4741,11 @@ async function executeRowCommand(commandID, record) {
             return;
         case 'copy_code':
             await copyTextToClipboard(recordCode);
-            showInAppToast(t('copied'), t('codeCopied'), { source: 'row_action', eventType: 'row_action' });
+            showInAppToast(t('copied'), t('codeCopied'), { titleKey: 'copied', messageKey: 'codeCopied', source: 'row_action', eventType: 'row_action' });
             return;
         case 'copy_json':
             await copyTextToClipboard(JSON.stringify(record, null, 2));
-            showInAppToast(t('copied'), t('jsonCopied'), { source: 'row_action', eventType: 'row_action' });
+            showInAppToast(t('copied'), t('jsonCopied'), { titleKey: 'copied', messageKey: 'jsonCopied', source: 'row_action', eventType: 'row_action' });
             return;
         case 'toggle_selection':
             if (state.selectedKeys.has(selectionKey)) state.selectedKeys.delete(selectionKey);
@@ -4738,12 +4782,12 @@ async function copyConnectionStatus() {
         source: state.fileName || '',
         process: state.processStatus || null
     }, null, 2));
-    showInAppToast(t('copied'), t('statusCopied'), { source: 'connection', eventType: 'copy_status' });
+    showInAppToast(t('copied'), t('statusCopied'), { titleKey: 'copied', messageKey: 'statusCopied', source: 'connection', eventType: 'copy_status' });
 }
 
 async function copyEventLog() {
     await copyTextToClipboard(JSON.stringify(state.eventLog, null, 2));
-    showInAppToast(t('copied'), t('eventLogCopied'), { source: 'event_log', eventType: 'copy_event_log' });
+    showInAppToast(t('copied'), t('eventLogCopied'), { titleKey: 'copied', messageKey: 'eventLogCopied', source: 'event_log', eventType: 'copy_event_log' });
 }
 
 // Sort by field
@@ -4797,6 +4841,8 @@ function downloadCanonicalWorkbook() {
     link.click();
     link.remove();
     showInAppToast(t('excelExportStarted'), t('excelExportStartedMessage'), {
+        titleKey: 'excelExportStarted',
+        messageKey: 'excelExportStartedMessage',
         source: 'xlsx_export',
         eventType: 'xlsx_export'
     });
@@ -5465,7 +5511,7 @@ function init() {
     document.getElementById('closeEventLog')?.addEventListener('click', closeRouteDialog);
     document.getElementById('clearEventLog')?.addEventListener('click', () => clearEventLog());
     document.getElementById('headerFileChip')?.addEventListener('click', () => {
-        if (state.fileName) showInAppToast(t('currentSourceFile'), state.fileName, { broadcastToTabs: true, source: 'file_info', eventType: 'source_info' });
+        if (state.fileName) showInAppToast(t('currentSourceFile'), state.fileName, { titleKey: 'currentSourceFile', broadcastToTabs: true, source: 'file_info', eventType: 'source_info' });
     });
     
     // Export button and dropdown
@@ -5619,7 +5665,7 @@ function init() {
 
     document.getElementById('testNotificationSound').addEventListener('click', () => {
         playNotificationSound(true);
-        showInAppToast(t('soundTest'), t('soundTestMessage'), { broadcastToTabs: true, source: 'sound_test', eventType: 'notification_test' });
+        showInAppToast(t('soundTest'), t('soundTestMessage'), { titleKey: 'soundTest', messageKey: 'soundTestMessage', broadcastToTabs: true, source: 'sound_test', eventType: 'notification_test' });
     });
 
     document.getElementById('testNativeToast').addEventListener('click', () => {

@@ -157,6 +157,23 @@ const TABLE_MESSAGES = {
         eventLogBoundedPreview: 'Bounded preview: {count} rows, fields, or long values were omitted.',
         eventLogTechnicalDetails: 'Technical details',
         eventLogDetailsExpired: 'Detailed row values were compacted; the original counts remain available.',
+        eventLogTypeOther: '{label} event',
+        eventLogSourceOther: '{label} source',
+        eventTokenRowUpdated: 'Row update',
+        eventTokenConfigUpdate: 'Configuration update',
+        eventTokenWebUI: 'Web interface',
+        eventTokenWebSocket: 'Live connection',
+        eventTokenServer: 'Server',
+        eventTokenNotification: 'Notification',
+        eventTokenManualRefresh: 'Manual refresh',
+        eventTokenResourceUpdate: 'Interface update',
+        eventTokenDataSource: 'Data source',
+        eventTokenTableSettings: 'Table settings',
+        eventTokenRowAction: 'Row action',
+        eventTokenEventLog: 'Event log',
+        eventTokenConnection: 'Connection',
+        eventTokenNotificationTest: 'Notification test',
+        eventTokenExcelExport: 'Excel export',
         total: 'Total',
         filtered: 'Filtered',
         records: 'Records',
@@ -264,6 +281,8 @@ const TABLE_MESSAGES = {
         refreshFailed: 'Refresh failed',
         settingsReloaded: 'Settings reloaded',
         settingsReloadedMessage: 'Configuration file changes were applied.',
+        settingsChangeSingle: 'Setting {path} changed: {before} → {after}',
+        settingsChangeMultiple: '{count} settings changed: {names}{suffix}',
         excelExportStarted: 'Excel export started',
         excelExportStartedMessage: 'The canonical workbook includes records and non-secret provenance metadata.',
         soundTest: 'Sound test',
@@ -451,6 +470,23 @@ const TABLE_MESSAGES = {
         eventLogBoundedPreview: 'برای حفظ کارایی، {count} ردیف، فیلد یا مقدار طولانی دیگر نمایش داده نشده است.',
         eventLogTechnicalDetails: 'جزئیات فنی',
         eventLogDetailsExpired: 'جزئیات ردیف‌ها فشرده شده‌اند؛ شمارش اصلی همچنان در دسترس است.',
+        eventLogTypeOther: 'رویداد {label}',
+        eventLogSourceOther: 'منبع {label}',
+        eventTokenRowUpdated: 'به‌روزرسانی ردیف‌ها',
+        eventTokenConfigUpdate: 'به‌روزرسانی تنظیمات',
+        eventTokenWebUI: 'رابط وب',
+        eventTokenWebSocket: 'اتصال زنده',
+        eventTokenServer: 'سرور',
+        eventTokenNotification: 'اعلان',
+        eventTokenManualRefresh: 'به‌روزرسانی دستی',
+        eventTokenResourceUpdate: 'به‌روزرسانی رابط',
+        eventTokenDataSource: 'منبع داده',
+        eventTokenTableSettings: 'تنظیمات جدول',
+        eventTokenRowAction: 'عملیات ردیف',
+        eventTokenEventLog: 'گزارش رویدادها',
+        eventTokenConnection: 'اتصال',
+        eventTokenNotificationTest: 'آزمون اعلان',
+        eventTokenExcelExport: 'خروجی اکسل',
         total: 'کل',
         filtered: 'فیلترشده',
         records: 'رکوردها',
@@ -558,6 +594,8 @@ const TABLE_MESSAGES = {
         refreshFailed: 'به‌روزرسانی ناموفق بود',
         settingsReloaded: 'تنظیمات دوباره بارگذاری شد',
         settingsReloadedMessage: 'تغییرات فایل تنظیمات اعمال شد.',
+        settingsChangeSingle: 'تنظیم {path} تغییر کرد: {before} ← {after}',
+        settingsChangeMultiple: '{count} تنظیم تغییر کرد: {names}{suffix}',
         excelExportStarted: 'ساخت خروجی اکسل آغاز شد',
         excelExportStartedMessage: 'فایل استاندارد شامل رکوردها و اطلاعات غیرمحرمانه منبع است.',
         soundTest: 'آزمایش صدا',
@@ -742,6 +780,54 @@ export function tableText(language, key, values = {}) {
         (text, [name, value]) => text.replaceAll(`{${name}}`, String(value)),
         template
     );
+}
+
+const RELATIVE_TIME_UNITS = Object.freeze({
+    en: Object.freeze({
+        day: Object.freeze(['day', 'days']),
+        hour: Object.freeze(['hour', 'hours']),
+        minute: Object.freeze(['minute', 'minutes']),
+        second: Object.freeze(['second', 'seconds'])
+    }),
+    fa: Object.freeze({
+        day: Object.freeze(['روز', 'روز']),
+        hour: Object.freeze(['ساعت', 'ساعت']),
+        minute: Object.freeze(['دقیقه', 'دقیقه']),
+        second: Object.freeze(['ثانیه', 'ثانیه'])
+    })
+});
+
+export function localizedRelativeTime(value, language = 'en', now = Date.now()) {
+    const date = value instanceof Date ? value : new Date(value);
+    const referenceTime = now instanceof Date ? now.getTime() : Number(now);
+    if (Number.isNaN(date.getTime()) || !Number.isFinite(referenceTime)) {
+        return tableLanguage(language) === 'fa' ? 'هرگز' : 'Never';
+    }
+
+    const diffMs = date.getTime() - referenceTime;
+    const absoluteMs = Math.abs(diffMs);
+    const units = [
+        ['day', 86400000],
+        ['hour', 3600000],
+        ['minute', 60000],
+        ['second', 1000]
+    ];
+    const [unit, size] = units.find(([, milliseconds]) => absoluteMs >= milliseconds) || units[units.length - 1];
+    const count = Math.max(1, Math.round(absoluteMs / size));
+    const locale = tableLanguage(language);
+    const label = RELATIVE_TIME_UNITS[locale][unit][count === 1 ? 0 : 1];
+    const localizedCount = locale === 'fa'
+        ? new Intl.NumberFormat('fa-IR', { useGrouping: false }).format(count)
+        : String(count);
+
+    if (locale === 'fa') {
+        return diffMs > 0
+            ? `${localizedCount} ${label} دیگر`
+            : `${localizedCount} ${label} پیش`;
+    }
+    return diffMs > 0
+        ? `in ${localizedCount} ${label}`
+        : `${localizedCount} ${label} ago`;
 }
 
 export function tableTranslationCoverage() {
