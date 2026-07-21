@@ -77,6 +77,7 @@ type Envelope struct {
 	DeletedCodes     []Tombstone `json:"deleted_codes,omitempty"`
 	QuarantinedCodes []string    `json:"quarantined_codes"`
 	Warnings         []string    `json:"warnings"`
+	fieldPresence    map[string]fieldPresence
 }
 
 func (envelope *Envelope) UnmarshalJSON(data []byte) error {
@@ -97,6 +98,16 @@ func (envelope *Envelope) UnmarshalJSON(data []byte) error {
 		return err
 	}
 	*envelope = Envelope(decoded)
+	envelope.fieldPresence = make(map[string]fieldPresence, 3)
+	for _, field := range []string{"local_currency", "formula_id", "deleted_codes"} {
+		if value, exists := raw[field]; exists {
+			if strings.TrimSpace(string(value)) == "null" {
+				envelope.fieldPresence[field] = fieldNull
+			} else {
+				envelope.fieldPresence[field] = fieldValue
+			}
+		}
+	}
 	return nil
 }
 
@@ -248,8 +259,8 @@ func eventID(envelope *Envelope) string {
 	type identity struct {
 		Schema           string      `json:"schema"`
 		EventType        string      `json:"event_type"`
-		LocalCurrency    string      `json:"local_currency"`
-		FormulaID        string      `json:"formula_id"`
+		LocalCurrency    string      `json:"local_currency,omitempty"`
+		FormulaID        string      `json:"formula_id,omitempty"`
 		Source           Source      `json:"source"`
 		GeneratedAt      string      `json:"generated_at"`
 		Products         []string    `json:"products"`
@@ -289,9 +300,19 @@ func cloneEnvelope(value *Envelope) *Envelope {
 	copy := *value
 	copy.Products = cloneProducts(value.Products)
 	copy.Categories = cloneCategories(value.Categories)
-	copy.ExcludedCodes = append([]string(nil), value.ExcludedCodes...)
+	if value.ExcludedCodes != nil {
+		copy.ExcludedCodes = append(make([]string, 0, len(value.ExcludedCodes)), value.ExcludedCodes...)
+	}
 	copy.DeletedCodes = append([]Tombstone(nil), value.DeletedCodes...)
-	copy.QuarantinedCodes = append([]string(nil), value.QuarantinedCodes...)
+	if value.QuarantinedCodes != nil {
+		copy.QuarantinedCodes = append(make([]string, 0, len(value.QuarantinedCodes)), value.QuarantinedCodes...)
+	}
+	if value.fieldPresence != nil {
+		copy.fieldPresence = make(map[string]fieldPresence, len(value.fieldPresence))
+		for field, state := range value.fieldPresence {
+			copy.fieldPresence[field] = state
+		}
+	}
 	if value.Warnings != nil {
 		copy.Warnings = append(make([]string, 0, len(value.Warnings)), value.Warnings...)
 	}

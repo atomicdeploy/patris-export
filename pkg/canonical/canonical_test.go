@@ -417,6 +417,7 @@ func TestProductSyncDecoderRequiresCanonicalShippingPair(t *testing.T) {
 		"lowercase currency":  `{"product_code":"A","shipping_price_per_kg":120,"shipping_price_per_kg_currency":"cny"}`,
 		"other currency":      `{"product_code":"A","shipping_price_per_kg":120,"shipping_price_per_kg_currency":"USD"}`,
 		"whitespace currency": `{"product_code":"A","shipping_price_per_kg":120,"shipping_price_per_kg_currency":" CNY "}`,
+		"quoted price":        `{"product_code":"A","shipping_price_per_kg":"120","shipping_price_per_kg_currency":"CNY"}`,
 	} {
 		t.Run(name, func(t *testing.T) {
 			var product Product

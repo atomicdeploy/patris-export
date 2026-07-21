@@ -521,7 +521,7 @@ func parseKalaProduct(ctx context.Context, row map[string]interface{}, provider 
 // required by the existing spreadsheet and SQL sink boundary.
 func (product Product) Map() map[string]interface{} {
 	row := map[string]interface{}{"product_code": product.ProductCode}
-	putString(row, "category_code", product.CategoryCode, fieldAbsent)
+	putString(row, "category_code", product.CategoryCode, product.presence("category_code"))
 	putString(row, "name", product.Name, product.presence("name"))
 	putString(row, "serial", product.Serial, product.presence("serial"))
 	putString(row, "unit", product.Unit, product.presence("unit"))
@@ -584,7 +584,7 @@ func (product *Product) UnmarshalJSON(data []byte) error {
 
 	product.fieldPresence = map[string]fieldPresence{}
 	for _, field := range []string{
-		"name", "serial", "unit", "sale_price_source", "purchase_price_source",
+		"category_code", "name", "serial", "unit", "sale_price_source", "purchase_price_source",
 		"warehouse_stock", "total_stock", "minimum_stock", "foreign_currency", "foreign_price",
 		"weight_grams", "location", "source_updated_at", "shipping_method_id",
 		"shipping_price_per_kg", "shipping_price_per_kg_currency", "markup_percent", "irt_per_cny",
@@ -607,6 +607,14 @@ func (product *Product) UnmarshalJSON(data []byte) error {
 	if shippingCurrencyPresent && product.presence("shipping_price_per_kg_currency") != fieldNull {
 		if product.ShippingPricePerKgCurrency != pricingcatalog.CurrencyCNY && product.ShippingPricePerKgCurrency != pricingcatalog.CurrencyIRR {
 			return fmt.Errorf("product shipping_price_per_kg_currency must be CNY or IRR")
+		}
+	}
+	for _, field := range []string{"foreign_price", "weight_grams", "shipping_price_per_kg", "markup_percent", "irt_per_cny"} {
+		if value, exists := raw[field]; exists {
+			value = bytes.TrimSpace(value)
+			if len(value) > 0 && value[0] == '"' {
+				return fmt.Errorf("product %s must be a JSON number or null", field)
+			}
 		}
 	}
 	product.warehouseNulls = map[string]bool{}

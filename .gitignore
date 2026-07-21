@@ -50,6 +50,7 @@ Thumbs.db
 !testdata/*.txt
 !testdata/canonical-static-config.json
 !testdata/patris-product-sync.synthetic.json
+!testdata/patris-product-sync.standalone.json
 
 # Web/Node.js
 web/node_modules/

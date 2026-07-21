@@ -269,7 +269,7 @@ Set GITHUB_TOKEN for private repositories and higher API rate limits.`,
 	updateCmd.Flags().String("api-url", "", "Update from a Patris Export API base URL using /api/update/manifest")
 	updateCmd.Flags().String("manifest-url", "", "Update from an explicit Patris Export executable manifest URL")
 
-	rootCmd.AddCommand(convertCmd, infoCmd, companyCmd, viewCmd, serveCmd, stubCmd, ipcCmd, tuiCmd, updateCmd, newLicenseCommand())
+	rootCmd.AddCommand(convertCmd, infoCmd, companyCmd, viewCmd, serveCmd, stubCmd, ipcCmd, tuiCmd, updateCmd, newVerifyCommand(), newLicenseCommand())
 
 	if err := rootCmd.Execute(); err != nil {
 		nativeui.ShowNativeDependencyError(err)
