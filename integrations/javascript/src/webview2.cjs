@@ -1,6 +1,14 @@
 'use strict';
 
-const { PatrisHostError, assertEnvelope, errorEnvelope } = require('./contract.cjs');
+const {
+  PatrisHostError,
+  assertEnvelope,
+  errorEnvelope
+} = require('./contract.cjs');
+const {
+  isPrivilegedCallAuthorized,
+  requirePrivilegedAuthorizer
+} = require('./authorization.cjs');
 
 function createWebView2RendererClient(options = {}) {
   const webview = options.webview;
@@ -35,7 +43,17 @@ function createWebView2RendererClient(options = {}) {
         }));
       }, timeoutMs);
       pending.set(request.requestId, { resolve, timer });
-      webview.postMessage({ channel: 'patris:request', action, request });
+      try {
+        webview.postMessage({ channel: 'patris:request', action, request });
+      } catch (error) {
+        pending.delete(request.requestId);
+        clearTimeout(timer);
+        resolve(errorEnvelope(new PatrisHostError(
+          'WEBVIEW2_SEND_FAILED',
+          'The WebView2 native bridge could not accept the Patris request.',
+          { retryable: true, cause: error }
+        ), { requestId: request.requestId }));
+      }
     });
   }
 
@@ -63,22 +81,38 @@ function createWebView2MessageHandler(options = {}) {
   const host = options.host;
   const getSourceUrl = options.getSourceUrl;
   const postMessage = options.postMessage;
+  const authorize = options.authorize;
   if (!host || typeof host.handle !== 'function' || typeof host.handleStatus !== 'function') {
     throw new PatrisHostError('HOST_INVALID', 'A privileged Patris host is required.');
   }
   if (typeof getSourceUrl !== 'function' || typeof postMessage !== 'function') {
     throw new PatrisHostError('WEBVIEW2_HOST_INVALID', 'Privileged WebView2 source-URL and postMessage adapters are required.');
   }
+  requirePrivilegedAuthorizer(authorize, 'WEBVIEW2_AUTHORIZER_REQUIRED', 'A privileged WebView2 session/capability authorizer is required.');
   return async function handleWebMessage(event) {
     const payload = event && event.data;
     if (!payload || payload.channel !== 'patris:request' || !payload.request) return false;
-    const sourceUrl = await getSourceUrl(event);
-    const envelope = payload.action === 'status'
-      ? await host.handleStatus(sourceUrl, payload.request.requestId)
-      : await host.handle(sourceUrl, payload.request);
+    const requestId = payload.request.requestId;
+    const action = payload.action === 'status' ? 'status' : payload.action === 'invoke' ? 'invoke' : 'invalid';
+    const method = action === 'invoke' ? String(payload.request.method || '') : null;
+    let sourceUrl = '';
+    try { sourceUrl = String(await getSourceUrl(event) || ''); } catch { sourceUrl = ''; }
+    let envelope;
+    if (action === 'invalid') {
+      envelope = errorEnvelope(new PatrisHostError('WEBVIEW2_REQUEST_INVALID', 'The WebView2 Patris request action is invalid.'), { requestId });
+    } else if (!await isPrivilegedCallAuthorized(authorize, event, { sourceUrl, action, method })) {
+      envelope = errorEnvelope(new PatrisHostError(
+        'WEBVIEW2_NOT_AUTHORIZED',
+        'The current host session is not authorized to use Patris Export.'
+      ), { requestId });
+    } else {
+      envelope = action === 'status'
+        ? await host.handleStatus(sourceUrl, requestId)
+        : await host.handle(sourceUrl, payload.request);
+    }
     await postMessage({
       channel: 'patris:result',
-      requestId: payload.request.requestId,
+      requestId,
       envelope
     }, event);
     return true;

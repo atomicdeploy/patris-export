@@ -1,6 +1,6 @@
 'use strict';
 
-const { createTauriRendererClient } = require('../src/tauri.cjs');
+const { createTauriRendererClient } = require('..');
 
 function createPatrisClient(invoke) {
   return createTauriRendererClient({ invoke });

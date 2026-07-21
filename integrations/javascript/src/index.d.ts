@@ -36,6 +36,17 @@ export interface PatrisRendererClient {
   status(): Promise<PatrisResult<PatrisHostStatus>>;
 }
 
+export interface PatrisAuthorizationContext {
+  sourceUrl: string;
+  action: 'invoke' | 'status';
+  method: string | null;
+}
+
+export type PatrisPrivilegedAuthorizer = (
+  event: unknown,
+  context: Readonly<PatrisAuthorizationContext>
+) => boolean | Promise<boolean>;
+
 export interface PatrisHostStatus {
   lifecycle: 'idle' | 'initializing' | 'ready' | 'failed' | 'closing' | 'closed';
   ready: boolean;
@@ -106,8 +117,19 @@ export function registerElectronPatrisHost(options: {
     removeHandler(channel: string): void;
   };
   host: PrivilegedPatrisHost;
+  authorize: PatrisPrivilegedAuthorizer;
   invokeChannel?: string;
   statusChannel?: string;
+}): () => void;
+
+export function registerElectronShutdownBarrier(options: {
+  app: {
+    on(name: 'before-quit', listener: (event: { preventDefault(): void }) => void): void;
+    removeListener(name: 'before-quit', listener: (event: { preventDefault(): void }) => void): void;
+    quit(): void;
+  };
+  cleanup(): void | Promise<void>;
+  onError?(error: unknown): void;
 }): () => void;
 
 export function createTauriRendererClient(options: {
@@ -119,6 +141,7 @@ export function createTauriRendererClient(options: {
 export function createTauriCommandHandlers(options: {
   host: PrivilegedPatrisHost;
   getSourceUrl(event: unknown): string | Promise<string>;
+  authorize: PatrisPrivilegedAuthorizer;
 }): {
   patrisInvoke(event: unknown, request: PatrisRequest): Promise<PatrisResult>;
   patrisStatus(event: unknown, request?: { requestId?: string | number | null }): Promise<PatrisResult<PatrisHostStatus>>;
@@ -138,6 +161,7 @@ export function createWebView2RendererClient(options: {
 export function createWebView2MessageHandler(options: {
   host: PrivilegedPatrisHost;
   getSourceUrl(event: unknown): string | Promise<string>;
+  authorize: PatrisPrivilegedAuthorizer;
   postMessage(payload: unknown, event: unknown): void | Promise<void>;
 }): (event: unknown) => Promise<boolean>;
 

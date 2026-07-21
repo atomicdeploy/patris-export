@@ -138,6 +138,5 @@ module.exports = {
   compileOriginAllowlist,
   errorEnvelope,
   normalizeOrigin,
-  publicError,
   successEnvelope
 };

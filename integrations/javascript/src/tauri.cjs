@@ -1,6 +1,14 @@
 'use strict';
 
-const { PatrisHostError, assertEnvelope, errorEnvelope } = require('./contract.cjs');
+const {
+  PatrisHostError,
+  assertEnvelope,
+  errorEnvelope
+} = require('./contract.cjs');
+const {
+  isPrivilegedCallAuthorized,
+  requirePrivilegedAuthorizer
+} = require('./authorization.cjs');
 
 function createTauriRendererClient(options = {}) {
   const invoke = options.invoke;
@@ -30,18 +38,35 @@ function createTauriRendererClient(options = {}) {
 function createTauriCommandHandlers(options = {}) {
   const host = options.host;
   const getSourceUrl = options.getSourceUrl;
+  const authorize = options.authorize;
   if (!host || typeof host.handle !== 'function' || typeof host.handleStatus !== 'function') {
     throw new PatrisHostError('HOST_INVALID', 'A privileged Patris host is required.');
   }
   if (typeof getSourceUrl !== 'function') {
     throw new PatrisHostError('TAURI_ORIGIN_INVALID', 'A privileged Tauri source-URL resolver is required.');
   }
+  requirePrivilegedAuthorizer(authorize, 'TAURI_AUTHORIZER_REQUIRED', 'A privileged Tauri session/capability authorizer is required.');
+  async function authorized(event, request, action) {
+    let sourceUrl = '';
+    try { sourceUrl = String(await getSourceUrl(event) || ''); } catch { sourceUrl = ''; }
+    const requestId = request && request.requestId;
+    const method = action === 'invoke' && request ? String(request.method || '') : null;
+    if (!await isPrivilegedCallAuthorized(authorize, event, { sourceUrl, action, method })) {
+      return errorEnvelope(new PatrisHostError(
+        'TAURI_NOT_AUTHORIZED',
+        'The current host session is not authorized to use Patris Export.'
+      ), { requestId });
+    }
+    return action === 'status'
+      ? host.handleStatus(sourceUrl, requestId)
+      : host.handle(sourceUrl, request);
+  }
   return Object.freeze({
     async patrisInvoke(event, request) {
-      return host.handle(await getSourceUrl(event), request);
+      return authorized(event, request || {}, 'invoke');
     },
     async patrisStatus(event, request = {}) {
-      return host.handleStatus(await getSourceUrl(event), request.requestId);
+      return authorized(event, request, 'status');
     }
   });
 }

@@ -9,25 +9,32 @@ references that native applications must bind in their privileged layer.
 executable and REST API remain the fallbacks.
 
 See the adapter-specific [`CHANGELOG.md`](CHANGELOG.md) for release notes.
+All supported JavaScript and TypeScript APIs are exported from the package
+root. The `src/` file layout is internal and is not a public subpath contract.
 
 The security boundary is deliberate:
 
 ```text
 untrusted renderer
   -> typed allowlisted IPC/message call
-  -> privileged Electron/Tauri/WebView2 host (validates its own source URL)
+  -> privileged host (validates source URL plus host-owned session/capability)
   -> Patris DLL worker
   -> Patris executable on loopback
   -> configured Patris REST endpoint
 ```
 
-No adapter creates or transfers an authentication token. Application login is
-the host application's responsibility. The Patris bridge is an integration
-transport, not a second login system.
+No adapter creates or transfers an authentication token. The privileged host
+must resolve application login and capabilities from its own trusted session
+state on every call. The Patris bridge is an integration transport, not a
+second login system.
 
 For Digitalogic, keep the existing WordPress session and capability checks on
 the canonical `/panel/` route. Do not exchange that browser session for a bearer
-token or forward a renderer-supplied credential through this bridge.
+token or forward a renderer-supplied credential through this bridge. Electron
+registration requires a privileged `authorize` callback for every status and
+method call. Origin comparison alone is not authorization: all same-origin
+WordPress routes share one origin even when the current session or route lacks
+panel capabilities.
 
 ## Stable renderer contract
 
@@ -48,7 +55,9 @@ Success:
 ```json
 {
   "ok": true,
-  "result": [{ "code": "1001", "name": "Example module" }],
+  "result": {
+    "1001": { "name": "Example module", "final_price": "150000" }
+  },
   "meta": { "requestId": 1, "method": "records.list", "mode": "dll" }
 }
 ```
@@ -78,7 +87,7 @@ different transport.
 
 ```js
 const path = require('node:path');
-const { createConfiguredHost } = require('./src/index.cjs');
+const { createConfiguredHost } = require('@atomicdeploy/patris-export-hosts');
 
 const host = createConfiguredHost({
   allowedOrigins: ['app://digitalogic', 'https://digitalogic.ir'],
@@ -114,7 +123,10 @@ fallback management. Keep that implementation and wrap the instance rather
 than implementing a second bridge:
 
 ```js
-const { PrivilegedPatrisHost, wrapExistingElectronBridge } = require('./src');
+const {
+  PrivilegedPatrisHost,
+  wrapExistingElectronBridge
+} = require('@atomicdeploy/patris-export-hosts');
 
 const host = new PrivilegedPatrisHost({
   allowedOrigins: ['app://digitalogic', 'https://digitalogic.ir'],
@@ -130,41 +142,95 @@ Register handlers in the main process and expose the renderer client from a
 sandboxed preload:
 
 ```js
-const { ipcMain } = require('electron');
-const { registerElectronPatrisHost } = require('./src/electron.cjs');
+const { app, ipcMain } = require('electron');
+const {
+  registerElectronPatrisHost,
+  registerElectronShutdownBarrier
+} = require('@atomicdeploy/patris-export-hosts');
 
-const unregister = registerElectronPatrisHost({ ipcMain, host });
-app.once('before-quit', async () => {
-  unregister();
-  await host.close();
+const unregister = registerElectronPatrisHost({
+  ipcMain,
+  host,
+  authorize: async (event, { sourceUrl, method }) => {
+    const url = new URL(sourceUrl);
+    if (!url.pathname.startsWith('/panel/')) return false;
+    // This callback runs in the main process. Resolve the existing WordPress
+    // session/capability state from event.sender/session; never inspect a
+    // renderer-supplied token or authorization flag.
+    return wordpressSession.can(event.sender, method === 'config.set'
+      ? 'manage_woocommerce'
+      : 'read_digitalogic_panel');
+  }
+});
+registerElectronShutdownBarrier({
+  app,
+  cleanup: async () => {
+    unregister();
+    await host.close();
+  },
+  onError: (error) => console.error('Patris shutdown failed', error)
 });
 ```
 
-Use [`examples/electron-preload.cjs`](examples/electron-preload.cjs) with
-`contextIsolation: true`, `sandbox: true`, and `nodeIntegration: false`.
+Use the self-contained [`examples/electron-preload.cjs`](examples/electron-preload.cjs)
+with `contextIsolation: true`, `sandbox: true`, and `nodeIntegration: false`.
+It requires only Electron's sandbox-provided module; do not add local-file or
+package imports to that preload unless the host application's build first
+bundles them into the same file.
+
 Electron origin checks use `event.senderFrame.url`; a URL sent inside the
 renderer payload is ignored. Prefer a registered `app://digitalogic` scheme for
-packaged local content instead of allowing the broad `file://` origin.
+packaged local content instead of allowing the broad `file://` origin. The
+authorizer receives the privileged Electron event plus derived source/action/
+method metadata and must return exactly `true`; missing, throwing, or false
+authorizers fail closed. The shutdown barrier prevents the first `before-quit`,
+awaits cleanup once, removes itself, and only then re-enters `app.quit()` so
+Electron cannot exit ahead of the DLL worker or sidecar.
 
 ## Tauri
 
-Bundle [`src/tauri.cjs`](src/tauri.cjs) into the web frontend and supply Tauri's
-`invoke` function:
+Bundle the package-root renderer client into the web frontend and supply
+Tauri's `invoke` function:
 
 ```js
 const { invoke } = require('@tauri-apps/api/core');
-const { createTauriRendererClient } = require('./src/tauri.cjs');
+const {
+  createTauriRendererClient
+} = require('@atomicdeploy/patris-export-hosts');
 const patris = createTauriRendererClient({ invoke });
 const response = await patris.call('records.list');
 ```
 
 Implement two privileged commands, `patris_invoke` and `patris_status`. They
-must derive the caller URL/window label from Tauri's command context, compare it
-with an exact allowlist, and then call the same host contract. Never accept an
-origin, path, native handle, or endpoint from the command payload. In a native
-Tauri build, load `patris-export.dll`/`libpatris-export.so` from the signed
-application resource directory or launch the Patris sidecar; JavaScript must
-not call `libloading`, FFI plugins, or shell commands directly.
+must derive the caller URL/window label from Tauri's command context, enforce
+an exact origin allowlist, and authorize the host-owned session/capability on
+every call. The JavaScript reference handler makes that fail-closed contract
+explicit:
+
+```js
+const {
+  createTauriCommandHandlers
+} = require('@atomicdeploy/patris-export-hosts');
+
+const commands = createTauriCommandHandlers({
+  host,
+  getSourceUrl: (event) => event.privilegedWindowUrl,
+  authorize: async (event, { sourceUrl, method }) => {
+    const url = new URL(sourceUrl);
+    return url.pathname.startsWith('/panel/')
+      && wordpressSession.can(event.windowLabel, method === 'config.set'
+        ? 'manage_woocommerce'
+        : 'read_digitalogic_panel');
+  }
+});
+```
+
+Missing, throwing, or false authorizers deny the request. Never accept an
+origin, path, native handle, endpoint, auth flag, or credential from the
+command payload. In a native Tauri build, load
+`patris-export.dll`/`libpatris-export.so` from the signed application resource
+directory or launch the Patris sidecar; JavaScript must not call `libloading`,
+FFI plugins, or shell commands directly.
 
 The JavaScript renderer adapter and framework-neutral command-routing reference
 are covered by the Node test suite. This repository does not ship a compiled
@@ -176,23 +242,50 @@ This does not affect Electron, the C ABI, or the Patris executable fallback.
 
 ## WebView2
 
-Bundle [`src/webview2.cjs`](src/webview2.cjs) into trusted app content:
+Bundle the package-root renderer client into trusted app content:
 
 ```js
-const { createWebView2RendererClient } = require('./src/webview2.cjs');
+const {
+  createWebView2RendererClient
+} = require('@atomicdeploy/patris-export-hosts');
 const patris = createWebView2RendererClient({ webview: window.chrome.webview });
 const response = await patris.call('records.list');
 ```
 
+The JavaScript host-routing reference requires the same independent
+authorization decision:
+
+```js
+const {
+  createWebView2MessageHandler
+} = require('@atomicdeploy/patris-export-hosts');
+
+const handleMessage = createWebView2MessageHandler({
+  host,
+  getSourceUrl: (event) => event.privilegedSourceUrl,
+  authorize: (event, { sourceUrl, method }) => {
+    const url = new URL(sourceUrl);
+    return url.pathname.startsWith('/panel/')
+      && wordpressSession.can(event.webviewId, method === 'config.set'
+        ? 'manage_woocommerce'
+        : 'read_digitalogic_panel');
+  },
+  postMessage: (payload, event) => event.reply(payload)
+});
+```
+
 The native .NET/C++ host listens for `patris:request`, reads the source from the
 WebView2 event/navigation state, checks an exact origin such as
-`https://patris.local`, and answers with `patris:result`. The host should use a
-virtual-host mapping to packaged read-only content. Do not expose a broad COM
-host object, DLL path, filesystem primitive, or process launcher to the page.
-`createWebView2MessageHandler` is the JavaScript reference harness used by the
-tests. This repository does not ship a compiled .NET/C++ WebView2 host; the
-native application must mirror this routing and origin policy in its own message
-callback and validate it in that host's test suite.
+`https://patris.local`, resolves the host-owned login/capability state, and
+answers with `patris:result`. `createWebView2MessageHandler` is the JavaScript
+reference harness; its required `authorize(event, context)` callback runs for
+every valid request and denies on missing, false, or thrown authorization. A
+renderer-supplied flag or credential never satisfies that callback. The host
+should use a virtual-host mapping to packaged read-only content. Do not expose a
+broad COM host object, DLL path, filesystem primitive, or process launcher to
+the page. This repository does not ship a compiled .NET/C++ WebView2 host; the
+native application must mirror both origin and session/capability checks in its
+own message callback and validate them in that host's test suite.
 
 ## Packaging
 
