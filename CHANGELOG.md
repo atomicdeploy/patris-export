@@ -17,6 +17,9 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - The Web UI now provides localized header context menus, a full-table column-resize guide, optional sticky first-column behavior, and independently selectable warehouse columns under a two-row Warehouse Stock header.
 - Excel exports now support localized English/Persian human-readable headers, configurable pre-calculated or live-formula pricing, optional zebra rows, RTL/LTR workbook views, and one numeric column per available warehouse.
 - A macro-enabled Patris/Digitalogic business-dashboard example includes refresh, search, reset, configurable endpoints, and company-logo placement without embedding credentials.
+- The standalone home and character-map routes now share the viewer's complete
+  English/Persian translation runtime, embedded Vazirmatn font, persisted
+  language preference, RTL/LTR layout, and localized accessible controls.
 
 ### Changed
 
@@ -43,6 +46,9 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   static builds fail early with an actionable message when their pxlib archive
   is unavailable.
 - Dialog More menus now perform their advertised actions with consistent spacing, and warehouse stock is no longer collapsed into pill badges.
+- The welcome route now uses the shared allowlisted SVG primitives instead of
+  raw emoji, and embedded bundle replacement no longer interprets JavaScript
+  dollar-replacement tokens while generating offline HTML.
 
 ## [1.2.0] - 2026-07-17
 
