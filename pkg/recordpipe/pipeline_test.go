@@ -17,7 +17,7 @@ import (
 )
 
 func TestBuildRawSkipsTransformAndMapping(t *testing.T) {
-	rows := []map[string]interface{}{{"Code": "100", "Name": "Raw", "ANBAR1": 2}}
+	rows := []map[string]interface{}{{"Code": "100", "Name": "Raw", "ANBAR1": 2, "Sort": "ignored", "SortCode": "ignored too"}}
 	result := Build(rows, "kala.db", Options{
 		Raw: true,
 		Mapping: recordmap.Config{
@@ -36,6 +36,11 @@ func TestBuildRawSkipsTransformAndMapping(t *testing.T) {
 	}
 	if _, exists := result.Rows[0]["ANBAR1"]; !exists {
 		t.Fatal("raw mode should keep numbered ANBAR fields")
+	}
+	for _, field := range []string{"Sort", "SortCode"} {
+		if _, exists := result.Rows[0][field]; exists {
+			t.Fatalf("raw mode leaked ignored field %s: %#v", field, result.Rows[0])
+		}
 	}
 }
 

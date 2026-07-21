@@ -37,7 +37,7 @@ func Build(rawRows []map[string]interface{}, source string, options Options) Res
 
 func BuildContext(ctx context.Context, rawRows []map[string]interface{}, source string, options Options) Result {
 	if options.Raw {
-		rows := recordmap.CopyRows(rawRows)
+		rows := copyRowsWithoutSortFields(rawRows)
 		return Result{
 			Rows:     rows,
 			Payload:  rows,
@@ -70,6 +70,20 @@ func BuildContext(ctx context.Context, rawRows []map[string]interface{}, source 
 		KeyField: keyField,
 		Raw:      false,
 	}
+}
+
+func copyRowsWithoutSortFields(records []map[string]interface{}) []map[string]interface{} {
+	rows := make([]map[string]interface{}, 0, len(records))
+	for _, record := range records {
+		row := make(map[string]interface{}, len(record))
+		for field, value := range record {
+			if !converter.IsSortField(field) {
+				row[field] = value
+			}
+		}
+		rows = append(rows, row)
+	}
+	return rows
 }
 
 func paradoxToRows(records []paradox.Record) []map[string]interface{} {

@@ -23,6 +23,13 @@ const (
 // Regular expression to match numbered ANBAR fields (ANBAR1, ANBAR2, etc.)
 var anbarFieldRegex = regexp.MustCompile(`^ANBAR\d+$`)
 
+// IsSortField reports whether a Paradox field is an internal sorting column.
+// These fields are transport metadata and must never be converted, exported,
+// or compared as business data.
+func IsSortField(field string) bool {
+	return strings.HasPrefix(field, "Sort")
+}
+
 // Exporter handles exporting Paradox database records
 type Exporter struct {
 	converter func(string) string
@@ -86,6 +93,8 @@ func (e *Exporter) ExportToJSONWriter(records []paradox.Record, writer io.Writer
 
 // ExportToCSVWriter exports records to CSV format writing to the provided io.Writer
 func (e *Exporter) ExportToCSVWriter(records []paradox.Record, fields []paradox.Field, writer io.Writer) error {
+	fields = exportFields(fields)
+
 	// Convert string fields if converter is set
 	if e.converter != nil {
 		records = e.ConvertRecords(records)
@@ -133,6 +142,11 @@ func (e *Exporter) ConvertRecords(records []paradox.Record) []paradox.Record {
 	for i, record := range records {
 		convertedRecord := make(paradox.Record)
 		for key, value := range record {
+			// Sort fields are internal Paradox indexes. Discard them before
+			// even inspecting/converting values to avoid needless work.
+			if IsSortField(key) {
+				continue
+			}
 			if strVal, ok := value.(string); ok {
 				// Only convert non-empty strings
 				if strings.TrimSpace(strVal) != "" {
@@ -201,8 +215,8 @@ func (e *Exporter) TransformRecordsMap(records []map[string]interface{}) map[str
 		// Create a copy of the record without Code field (it becomes the key)
 		transformedRecord := make(map[string]interface{})
 		for key, value := range record {
-			if key != "Code" {
-				transformedRecord[key] = value
+			if key != "Code" && !IsSortField(key) {
+				transformedRecord[key] = splitDescriptionLines(key, value)
 			}
 		}
 
@@ -237,7 +251,7 @@ func (e *Exporter) TransformRecords(records []paradox.Record) map[string]interfa
 
 		for key, value := range record {
 			// Skip Sort fields
-			if strings.HasPrefix(key, "Sort") {
+			if IsSortField(key) {
 				continue
 			}
 
@@ -261,7 +275,7 @@ func (e *Exporter) TransformRecords(records []paradox.Record) map[string]interfa
 			}
 
 			// Add all other fields
-			optimized[key] = value
+			optimized[key] = splitDescriptionLines(key, value)
 		}
 
 		// Add ANBAR array if we collected any, in sorted order by field number
@@ -282,6 +296,32 @@ func (e *Exporter) TransformRecords(records []paradox.Record) map[string]interfa
 	}
 
 	return result
+}
+
+func exportFields(fields []paradox.Field) []paradox.Field {
+	filtered := make([]paradox.Field, 0, len(fields))
+	for _, field := range fields {
+		if !IsSortField(field.Name) {
+			filtered = append(filtered, field)
+		}
+	}
+	return filtered
+}
+
+func splitDescriptionLines(field string, value interface{}) interface{} {
+	if field != "Sharh1" && field != "Sharh2" {
+		return value
+	}
+	text, ok := value.(string)
+	if !ok {
+		return value
+	}
+	text = strings.ReplaceAll(text, "\r\n", "\n")
+	text = strings.ReplaceAll(text, "\r", "\n")
+	if !strings.Contains(text, "\n") {
+		return value
+	}
+	return strings.Split(text, "\n")
 }
 
 // makeArraysInline converts multi-line numeric arrays to single-line format

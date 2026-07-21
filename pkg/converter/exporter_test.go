@@ -51,8 +51,8 @@ func TestExportToJSONWriter(t *testing.T) {
 }`,
 		},
 		{
-			name:    "Empty records",
-			records: []paradox.Record{},
+			name:     "Empty records",
+			records:  []paradox.Record{},
 			expected: `{}`,
 		},
 		{
@@ -80,6 +80,23 @@ func TestExportToJSONWriter(t *testing.T) {
   "special": {
     "Code": "special",
     "Name": "Test \"quoted\" & <special>"
+  }
+}`,
+		},
+		{
+			name: "Multiline descriptions become arrays",
+			records: []paradox.Record{
+				{
+					"Code":   "multiline",
+					"Sharh1": "first\r\nsecond",
+					"Sharh2": "one\r\n\rthree",
+				},
+			},
+			expected: `{
+  "multiline": {
+    "Code": "multiline",
+    "Sharh1": ["first", "second"],
+    "Sharh2": ["one", "", "three"]
   }
 }`,
 		},
@@ -195,6 +212,25 @@ func TestExportToCSVWriter(t *testing.T) {
 			expectedRows: [][]string{
 				{"special", "Test \"quoted\", with, commas"},
 			},
+		},
+		{
+			name: "CSV excludes Sort fields",
+			records: []paradox.Record{
+				{
+					"Code":     "100",
+					"Sort":     "ignored",
+					"SortCode": "ignored too",
+					"Name":     "Kept",
+				},
+			},
+			fields: []paradox.Field{
+				{Name: "Code"},
+				{Name: "Sort"},
+				{Name: "SortCode"},
+				{Name: "Name"},
+			},
+			expectedHeaders: []string{"Code", "Name"},
+			expectedRows:    [][]string{{"100", "Kept"}},
 		},
 	}
 
@@ -324,4 +360,3 @@ func TestExportToCSVWriterError(t *testing.T) {
 		t.Errorf("Expected error message to contain 'failed to write CSV', got: %v", err)
 	}
 }
-

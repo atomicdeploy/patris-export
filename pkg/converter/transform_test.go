@@ -1,6 +1,8 @@
 package converter
 
 import (
+	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/atomicdeploy/patris-export/pkg/paradox"
@@ -210,5 +212,54 @@ func TestTransformRecords(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestConvertRecordsSkipsSortFieldsBeforeConversion(t *testing.T) {
+	calls := 0
+	exp := NewExporter(func(value string) string {
+		calls++
+		if strings.Contains(value, "must not convert") {
+			t.Fatalf("converter was called for an ignored Sort field: %q", value)
+		}
+		return strings.ToUpper(value)
+	})
+	records := []paradox.Record{{
+		"Code":     "100",
+		"Name":     "kept",
+		"Sort":     "must not convert",
+		"SortCode": "must not convert either",
+	}}
+
+	got := exp.ConvertRecords(records)
+	if calls != 2 {
+		t.Fatalf("converter calls = %d, want 2 for Code and Name only", calls)
+	}
+	if got[0]["Code"] != "100" || got[0]["Name"] != "KEPT" {
+		t.Fatalf("kept fields were not converted: %#v", got[0])
+	}
+	for _, field := range []string{"Sort", "SortCode"} {
+		if _, exists := got[0][field]; exists {
+			t.Fatalf("ignored field %s survived conversion: %#v", field, got[0])
+		}
+		if _, exists := records[0][field]; !exists {
+			t.Fatalf("ConvertRecords mutated the caller's input: %#v", records[0])
+		}
+	}
+}
+
+func TestTransformRecordsSplitsMultilineDescriptions(t *testing.T) {
+	exp := NewExporter(nil)
+	got := exp.TransformRecords([]paradox.Record{{
+		"Code":   "100",
+		"Sharh1": "first\r\nsecond",
+		"Sharh2": "one\r\n\rthree",
+	}})
+	record := got["100"].(map[string]interface{})
+	if want := []string{"first", "second"}; !reflect.DeepEqual(record["Sharh1"], want) {
+		t.Fatalf("Sharh1 = %#v, want %#v", record["Sharh1"], want)
+	}
+	if want := []string{"one", "", "three"}; !reflect.DeepEqual(record["Sharh2"], want) {
+		t.Fatalf("Sharh2 = %#v, want %#v", record["Sharh2"], want)
 	}
 }
