@@ -16,6 +16,11 @@ rtl_text_direction = false
 xlsx_language = "auto"
 xlsx_mode = "precalculated"
 xlsx_zebra_rows = true
+# Keep MySQL credentials in PATRIS_EXPORT_MYSQL_DSN. For a private CA, uncomment
+# these protected local settings; they are redacted from browser configuration.
+# mysql_tls_ca_file = 'C:\Patris\certificates\database-ca.pem'
+# mysql_tls_server_name = "mysql.service.internal"
+mysql_connect_timeout = "10s"
 
 [runtime]
 debug = false

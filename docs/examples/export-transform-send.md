@@ -85,6 +85,27 @@ patris-export --mapping .\mapping.kala.json convert C:\Patris\data4\kala.db `
   --batch-size 250
 ```
 
+For a private certificate authority, keep the CA path and optional certificate
+server name in protected server configuration (or environment variables), not
+browser-managed configuration:
+
+```yaml
+export:
+  mysql_tls_ca_file: C:/Patris/certificates/database-ca.pem
+  mysql_tls_server_name: mysql.service.internal
+  mysql_connect_timeout: 10s
+```
+
+The equivalent environment variables are
+`PATRIS_EXPORT_MYSQL_TLS_CA_FILE`,
+`PATRIS_EXPORT_MYSQL_TLS_SERVER_NAME`, and
+`PATRIS_EXPORT_MYSQL_CONNECT_TIMEOUT`. A CA file is read with a 4 MiB bound,
+added to the operating-system trust roots, and forces verified TLS 1.2 or
+newer. It overrides `tls=preferred`, `tls=skip-verify`, or plaintext fallback
+from the DSN. Do not use an insecure TLS mode in production. Browser config,
+WebSocket snapshots, config broadcasts, and browser saves omit and preserve the
+DSN, CA path, and server-name override.
+
 `--xlsx-language auto` follows `ui.language`; `--xlsx-mode precalculated`
 writes the transformed final values, while `formula` emits auditable Excel
 formulas that remain blank until every required input is numeric. Warehouse
@@ -125,6 +146,22 @@ The result line reports `inserted`, `updated`, `unchanged`, `deleted`, `failed`,
 and `elapsed` milliseconds; it never includes the DSN. A dry run against a
 missing SQLite path does not create the file or its parent directory.
 
+MySQL/MariaDB connections use a finite 10-second connection bound by default
+(configurable from 100 ms through 2 minutes) in addition to any DSN I/O
+timeouts and caller cancellation. Connection, TLS, authentication, permission,
+constraint, timeout, cancellation, transient, unavailable, schema, and unknown
+failures are converted to typed secret-safe diagnostics. Raw driver messages
+are retained only as an in-process wrapped cause and are never serialized or
+printed by the SQL target API. Classification does not automatically replay a
+whole transaction: a lost connection during commit can have an ambiguous
+outcome and must be reconciled before retrying.
+
+The shared `recordsink.ProbeSQLTarget` operation is non-mutating: it performs a
+bounded ping plus `SELECT VERSION()` and a best-effort session TLS-status read.
+Its result contains only connection state, driver/vendor, a bounded printable
+version, TLS state, and elapsed time. It is the backend primitive for the
+authenticated connection-test UI follow-up.
+
 Watch mode uses this same `recordpipe` -> `recordsink` route for its initial
 write and every debounced update; there is no separate live SQL implementation:
 
@@ -146,9 +183,9 @@ Remove-Item Env:PATRIS_EXPORT_TEST_MYSQL_DSN
 ```
 
 The MariaDB test is skipped unless its dedicated test DSN is present and drops
-only the uniquely named table it creates. A browser connection test, manual UI
-sync controls, custom-CA TLS registration, and `soft_delete_missing` remain
-separate follow-up work.
+only the uniquely named table it creates. Authenticated browser connection-test
+and manual-sync controls, `soft_delete_missing`, and the broader database CI
+matrix remain separate follow-up work.
 
 ## Watch and Send Updates
 

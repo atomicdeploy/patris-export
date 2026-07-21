@@ -262,22 +262,36 @@ func TestApplyEnvRuntimeTempPolicy(t *testing.T) {
 
 func TestSQLExportDefaultsAndEnvironmentOverrides(t *testing.T) {
 	cfg := Default()
-	if cfg.Export.BatchSize != 500 || cfg.Export.Reconciliation != "upsert_only" || cfg.Export.DryRun {
+	if cfg.Export.BatchSize != 500 || cfg.Export.Reconciliation != "upsert_only" || cfg.Export.DryRun || cfg.Export.MySQLConnectTimeout != "10s" {
 		t.Fatalf("unsafe SQL export defaults: %+v", cfg.Export)
 	}
 
 	t.Setenv("PATRIS_EXPORT_BATCH_SIZE", "17")
 	t.Setenv("PATRIS_EXPORT_SQL_RECONCILIATION", "DELETE_MISSING")
 	t.Setenv("PATRIS_EXPORT_SQL_DRY_RUN", "true")
+	t.Setenv("PATRIS_EXPORT_MYSQL_TLS_CA_FILE", " C:/protected/mysql/ca.pem ")
+	t.Setenv("PATRIS_EXPORT_MYSQL_TLS_SERVER_NAME", " db.internal.example ")
+	t.Setenv("PATRIS_EXPORT_MYSQL_CONNECT_TIMEOUT", "250ms")
 	ApplyEnv(&cfg)
-	if cfg.Export.BatchSize != 17 || cfg.Export.Reconciliation != "delete_missing" || !cfg.Export.DryRun {
+	if cfg.Export.BatchSize != 17 || cfg.Export.Reconciliation != "delete_missing" || !cfg.Export.DryRun ||
+		cfg.Export.MySQLTLSCAFile != "C:/protected/mysql/ca.pem" || cfg.Export.MySQLTLSServerName != "db.internal.example" ||
+		cfg.Export.MySQLConnectTimeout != "250ms" {
 		t.Fatalf("SQL export environment was not applied: %+v", cfg.Export)
 	}
 
 	cfg.Export.Reconciliation = "typo_that_must_not_delete"
+	cfg.Export.MySQLConnectTimeout = "24h"
 	normalize(&cfg)
 	if cfg.Export.Reconciliation != "upsert_only" {
 		t.Fatalf("invalid reconciliation did not fail safe: %q", cfg.Export.Reconciliation)
+	}
+	if cfg.Export.MySQLConnectTimeout != "2m0s" {
+		t.Fatalf("SQL connection timeout was not bounded: %q", cfg.Export.MySQLConnectTimeout)
+	}
+	cfg.Export.MySQLConnectTimeout = "not-a-duration"
+	normalize(&cfg)
+	if cfg.Export.MySQLConnectTimeout != "10s" {
+		t.Fatalf("invalid SQL connection timeout did not use the safe default: %q", cfg.Export.MySQLConnectTimeout)
 	}
 }
 
