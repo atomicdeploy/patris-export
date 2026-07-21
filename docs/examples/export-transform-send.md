@@ -184,8 +184,16 @@ Remove-Item Env:PATRIS_EXPORT_TEST_MYSQL_DSN
 
 The MariaDB test is skipped unless its dedicated test DSN is present and drops
 only the uniquely named table it creates. Authenticated browser connection-test
-and manual-sync controls, `soft_delete_missing`, and the broader database CI
-matrix remain separate follow-up work.
+and manual-sync controls plus `soft_delete_missing` remain separate follow-up
+work.
+
+Every pull request also runs a disposable compatibility matrix against MySQL
+8.4 and MariaDB 11.4. The matrix proves parity with the same SQLite fixture,
+leading-zero key preservation, additive schema evolution without changing
+user-owned columns, and transactional rollback on a later batch failure.
+Matrix credentials are test-only values inside isolated CI service containers;
+production DSNs remain protected configuration and are never stored in the
+repository or returned to a browser.
 
 ## Watch and Send Updates
 
