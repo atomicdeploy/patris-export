@@ -319,6 +319,14 @@ func (s *Server) Config() appconfig.Config {
 	return s.config.Get()
 }
 
+// browserConfig returns the configuration shape that may be sent to the Web
+// UI. Database credentials remain server-side and can only be supplied through
+// protected config files, environment variables, or command-line options.
+func browserConfig(cfg appconfig.Config) appconfig.Config {
+	cfg.Export.MySQLDSN = ""
+	return cfg
+}
+
 func (s *Server) currentDBPath() string {
 	s.dataSourceMu.RLock()
 	defer s.dataSourceMu.RUnlock()
@@ -849,10 +857,10 @@ func (s *Server) appMetadata() map[string]interface{} {
 
 func (s *Server) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 	if s.config == nil {
-		writeJSON(w, appconfig.Default())
+		writeJSON(w, browserConfig(appconfig.Default()))
 		return
 	}
-	writeJSON(w, s.config.Get())
+	writeJSON(w, browserConfig(s.config.Get()))
 }
 
 func (s *Server) handlePutConfig(w http.ResponseWriter, r *http.Request) {
@@ -865,6 +873,10 @@ func (s *Server) handlePutConfig(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf("Failed to decode config: %v", err), http.StatusBadRequest)
 		return
 	}
+	// The browser is not a credential-management surface. Preserve the
+	// protected server-side DSN even if an old cached config or a crafted
+	// request includes a mysql_dsn value.
+	cfg.Export.MySQLDSN = s.config.Get().Export.MySQLDSN
 	cfg, err := s.ReplaceConfig(cfg)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("Failed to save config: %v", err), http.StatusInternalServerError)
@@ -872,7 +884,7 @@ func (s *Server) handlePutConfig(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, map[string]interface{}{
 		"success": true,
-		"config":  cfg,
+		"config":  browserConfig(cfg),
 	})
 }
 
@@ -1275,7 +1287,7 @@ func (s *Server) initialSnapshotMessage(result recordpipe.Result, dbPath, reason
 		message["source_changed"] = true
 	}
 	if s.config != nil {
-		message["config"] = s.config.Get()
+		message["config"] = browserConfig(s.config.Get())
 	}
 	if result.Contract != nil {
 		message["contract"] = result.SyncEnvelope(nil)
@@ -1869,7 +1881,7 @@ func (s *Server) broadcastConfig(cfg appconfig.Config) {
 	message := map[string]interface{}{
 		"type":      "config_update",
 		"timestamp": time.Now().Format(time.RFC3339),
-		"config":    cfg,
+		"config":    browserConfig(cfg),
 	}
 	s.broadcastMessage(message)
 }
