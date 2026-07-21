@@ -1,0 +1,16 @@
+{
+  "schema": "patris.product-sync",
+  "event_type": "snapshot",
+  "event_id": "sha256:ab188e19ce426fdb627306f2a0d95dfb4049012a097cb0f303c578da089faa63",
+  "source": {
+    "id": "fixture",
+    "dataset": "kala.json",
+    "revision": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "generated_at": "2026-07-21T00:00:00Z",
+  "products": [],
+  "categories": [],
+  "excluded_codes": [],
+  "quarantined_codes": [],
+  "warnings": []
+}
