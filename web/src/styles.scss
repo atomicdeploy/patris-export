@@ -745,6 +745,33 @@ body.is-loading .data-table {
     }
 }
 
+// Large datasets use a single windowed body renderer. A fixed logical row
+// height lets spacer rows preserve native table scrolling while mounted rows
+// retain the same selection, context-menu, RTL, and sticky-column behavior.
+.data-table.virtualized-grid tbody tr[data-row-key] {
+    height: 54px;
+}
+
+.data-table.virtualized-grid tbody tr[data-row-key] > td {
+    height: 54px;
+    max-height: 54px;
+    white-space: nowrap;
+}
+
+.data-table tbody tr.virtual-row-spacer {
+    pointer-events: none;
+    cursor: default;
+    transition: none;
+}
+
+.data-table tbody tr.virtual-row-spacer > td {
+    padding: 0 !important;
+    border: 0 !important;
+    background: transparent !important;
+    box-shadow: none !important;
+    line-height: 0;
+}
+
 .data-table tbody tr.code-group td {
     font-weight: 700;
     background: var(--row-group-bg);

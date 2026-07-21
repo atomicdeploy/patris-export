@@ -29,6 +29,7 @@ import {
     deriveGridFields,
     duplicateSafeRecordKeys,
     fitMenuPosition,
+    formatStructuredValue,
     iconMarkup,
     keyboardColumnWidth,
     isWarehouseColumnField,
@@ -47,10 +48,15 @@ import {
     resolveRowIcon,
     rowCommandDefinitions,
     selectionSummary,
+    stableStructuredJSON,
     stableRecordKey,
     structuredValueText,
+    tableVirtualizationEnabled,
     tableLanguage,
     tableText,
+    TABLE_VIRTUAL_OVERSCAN,
+    TABLE_VIRTUAL_ROW_HEIGHT,
+    virtualizedRowSegments,
     warehouseColumnName
 } from './table-ux.js';
 
@@ -98,6 +104,9 @@ const state = {
     selectedKeys: new Set(),
     recordSelectionKeys: new WeakMap(),
     rovingRowKey: '',
+    tableRecordKeys: [],
+    virtualWindowSignature: '',
+    virtualRenderFrame: 0,
     rowMenu: {
         record: null,
         trigger: null,
@@ -1044,7 +1053,7 @@ function detectFieldType(field, records) {
     }
     
     // Check for categorical (limited unique values)
-    const uniqueValues = new Set(values.map(structuredValueText));
+    const uniqueValues = new Set(values.map(value => structuredValueText(value, { locale: state.settings.language })));
     if (uniqueValues.size <= FIELD_DETECTION.CATEGORICAL_MAX_UNIQUE && 
         uniqueValues.size < values.length * FIELD_DETECTION.CATEGORICAL_RATIO) {
         return 'categorical';
@@ -1073,7 +1082,7 @@ function calculateFieldStats(field, records) {
             stats.hasNull = true;
         } else {
             values.push(value);
-            stats.uniqueValues.add(structuredValueText(value));
+            stats.uniqueValues.add(structuredValueText(value, { locale: state.settings.language }));
         }
     }
     
@@ -1616,11 +1625,25 @@ function initTableWheelScroll() {
 function initScrollAnchorTracking() {
     const tableContainer = document.querySelector('.table-container');
     if (!tableContainer) return;
-    tableContainer.addEventListener('scroll', () => scheduleSaveScrollAnchor(), { passive: true });
+    tableContainer.addEventListener('scroll', () => {
+        scheduleSaveScrollAnchor();
+        scheduleVirtualTableRender();
+    }, { passive: true });
     window.addEventListener('beforeunload', () => saveScrollAnchorFromViewport({ immediate: true }));
     document.addEventListener('visibilitychange', () => {
         if (document.visibilityState === 'hidden') {
             saveScrollAnchorFromViewport({ immediate: true });
+        }
+    });
+}
+
+function scheduleVirtualTableRender() {
+    if (!tableVirtualizationEnabled(state.tableRecordKeys.length) || state.virtualRenderFrame) return;
+    state.virtualRenderFrame = requestAnimationFrame(() => {
+        state.virtualRenderFrame = 0;
+        const signature = currentVirtualWindowSignature();
+        if (signature && signature !== state.virtualWindowSignature) {
+            renderTable(new Set(), { virtualScroll: true });
         }
     });
 }
@@ -2302,7 +2325,7 @@ function recordEventLog(entry = {}) {
         type: String(entry.type || 'event'),
         source: String(entry.source || entry.type || 'web-ui'),
         ...content,
-        details: entry.details ? String(entry.details) : '',
+        details: entry.details ? structuredValueText(entry.details, { locale: state.settings.language }) : '',
         ...(changes ? { changes } : {})
     };
     state.eventLog.unshift(logEntry);
@@ -4297,13 +4320,26 @@ function restoreTableBodyFocus(tbody, key) {
 
 function updateRovingRow(key, { focus = false } = {}) {
     const rows = [...document.querySelectorAll('#tableBody tr[data-row-key]')];
-    const visibleKeys = rows.map(row => row.dataset.rowKey);
-    state.rovingRowKey = resolvedRovingKey(key, visibleKeys);
+    const logicalKeys = state.tableRecordKeys.length > 0
+        ? state.tableRecordKeys
+        : rows.map(row => row.dataset.rowKey);
+    state.rovingRowKey = resolvedRovingKey(key, logicalKeys);
     rows.forEach(row => {
         row.tabIndex = row.dataset.rowKey === state.rovingRowKey ? 0 : -1;
     });
     if (focus) {
-        rows.find(row => row.dataset.rowKey === state.rovingRowKey)?.focus({ preventScroll: true });
+        const logicalIndex = logicalKeys.indexOf(state.rovingRowKey);
+        const mounted = rows.find(row => row.dataset.rowKey === state.rovingRowKey);
+        if (mounted) {
+            // A pinned row may be mounted far outside the current viewport.
+            // Align the logical row before focusing it so sparse intervals do
+            // not leave keyboard focus on an off-screen record.
+            scrollTableRowIntoView(logicalIndex);
+            mounted.focus({ preventScroll: true });
+            return;
+        }
+        scrollTableRowIntoView(logicalIndex);
+        renderTable(new Set(), { virtualScroll: true, focusKey: state.rovingRowKey });
     }
 }
 
@@ -4314,21 +4350,86 @@ function rowAccessibleLabel(record, selectionKey) {
 }
 
 function renderTableCellValue(cell, field, value) {
-    if (field !== 'Code' && field !== 'Serial' && typeof value !== 'object'
-        && value !== null && value !== undefined && value !== '' && !isNaN(value)) {
+    const numeric = typeof value === 'number'
+        || (typeof value === 'string' && value.trim() !== '' && !isNaN(value));
+    if (field !== 'Code' && field !== 'Serial' && numeric) {
         cell.textContent = formatNumberWithSeparator(value);
         cell.style.textAlign = 'right';
         return;
     }
-    cell.textContent = structuredValueText(value);
+    cell.textContent = structuredValueText(value, { locale: state.settings.language });
+}
+
+function tableRecordsToShow() {
+    let records = state.settings.enablePagination
+        ? state.filteredRecords.slice(0, state.settings.pageSize)
+        : state.filteredRecords;
+    const anchorCode = state.scrollAnchor?.code ? String(state.scrollAnchor.code) : '';
+    if (state.settings.enablePagination && anchorCode) {
+        const anchorIndex = state.filteredRecords.findIndex(record => stableRecordKey(record) === anchorCode);
+        if (anchorIndex >= state.settings.pageSize) {
+            records = state.filteredRecords.slice(0, anchorIndex + 1);
+        }
+    }
+    return records;
+}
+
+function tableViewportPlan(rowCount, pinnedIndices = []) {
+    const container = document.querySelector('.table-container');
+    const headerHeight = document.querySelector('.data-table thead')?.getBoundingClientRect().height || 0;
+    return virtualizedRowSegments({
+        rowCount,
+        rowHeight: TABLE_VIRTUAL_ROW_HEIGHT,
+        viewportHeight: container?.clientHeight || (TABLE_VIRTUAL_ROW_HEIGHT * 12),
+        headerHeight,
+        scrollTop: container?.scrollTop || 0,
+        overscan: TABLE_VIRTUAL_OVERSCAN,
+        pinnedIndices
+    });
+}
+
+function currentVirtualWindowSignature() {
+    if (!tableVirtualizationEnabled(state.tableRecordKeys.length)) return '';
+    const plan = tableViewportPlan(state.tableRecordKeys.length);
+    return `${plan.rowCount}:${plan.firstVisible}:${plan.segments.map(segment => `${segment.start}-${segment.end}`).join('|')}`;
+}
+
+function scrollTableRowIntoView(index) {
+    if (!Number.isInteger(index) || index < 0) return;
+    const container = document.querySelector('.table-container');
+    if (!container) return;
+    const headerHeight = document.querySelector('.data-table thead')?.getBoundingClientRect().height || 0;
+    const top = headerHeight + index * TABLE_VIRTUAL_ROW_HEIGHT;
+    const bottom = top + TABLE_VIRTUAL_ROW_HEIGHT;
+    const viewportTop = container.scrollTop + headerHeight;
+    const viewportBottom = container.scrollTop + container.clientHeight;
+    if (top < viewportTop) container.scrollTop = Math.max(0, top - headerHeight);
+    else if (bottom > viewportBottom) container.scrollTop = Math.max(0, bottom - container.clientHeight);
+}
+
+function createVirtualSpacerRow(rowCount, columnCount) {
+    if (rowCount <= 0) return null;
+    const row = document.createElement('tr');
+    row.className = 'virtual-row-spacer';
+    row.setAttribute('aria-hidden', 'true');
+    row.setAttribute('role', 'presentation');
+    const cell = document.createElement('td');
+    cell.colSpan = Math.max(1, columnCount);
+    cell.style.height = `${rowCount * TABLE_VIRTUAL_ROW_HEIGHT}px`;
+    cell.setAttribute('role', 'presentation');
+    row.appendChild(cell);
+    return row;
 }
 
 // Render table body
-function renderTable(changedIndices = new Set()) {
+function renderTable(changedIndices = new Set(), options = {}) {
+    const renderStarted = performance.now();
     const tbody = document.getElementById('tableBody');
+    const table = document.getElementById('dataTable');
     const loading = document.getElementById('loading');
     const emptyState = document.getElementById('emptyState');
     const focusedRowKey = captureTableBodyFocus(tbody);
+    table?.setAttribute('aria-busy', 'true');
 
     refreshRecordSelectionKeys();
     pruneSelectedKeys(state.selectedKeys, state.records, recordSelectionKey);
@@ -4339,31 +4440,65 @@ function renderTable(changedIndices = new Set()) {
     if (state.filteredRecords.length === 0) {
         tbody.innerHTML = '';
         state.rovingRowKey = '';
+        state.tableRecordKeys = [];
+        state.virtualWindowSignature = '';
+        table?.classList.remove('virtualized-grid');
+        table?.setAttribute('aria-rowcount', String(document.querySelectorAll('#tableHead tr').length));
+        table?.setAttribute('aria-busy', 'false');
         emptyState.style.display = 'flex';
         return;
     }
 
     emptyState.style.display = 'none';
-
-    let recordsToShow = state.settings.enablePagination
-        ? state.filteredRecords.slice(0, state.settings.pageSize)
-        : state.filteredRecords;
-    const anchorCode = state.scrollAnchor?.code ? String(state.scrollAnchor.code) : '';
-    if (state.settings.enablePagination && anchorCode) {
-        const anchorIndex = state.filteredRecords.findIndex(record => String(record.Code ?? '') === anchorCode);
-        if (anchorIndex >= state.settings.pageSize) {
-            recordsToShow = state.filteredRecords.slice(0, anchorIndex + 1);
-        }
-    }
-
-    const visibleSelectionKeys = recordsToShow.map(recordSelectionKey);
+    const recordsToShow = tableRecordsToShow();
+    const allSelectionKeys = recordsToShow.map(recordSelectionKey);
     const visibleFields = state.fields.filter(field => !state.hiddenColumns.has(field));
     const frozenField = state.settings.freezeFirstColumn ? visibleFields[0] : '';
-    state.rovingRowKey = resolvedRovingKey(focusedRowKey || state.rovingRowKey, visibleSelectionKeys);
+    state.tableRecordKeys = allSelectionKeys;
+    state.rovingRowKey = resolvedRovingKey(options.focusKey || focusedRowKey || state.rovingRowKey, allSelectionKeys);
+
+    const pinnedKeys = new Set([
+        state.rovingRowKey,
+        focusedRowKey,
+        options.focusKey,
+        state.scrollAnchor?.code
+            ? allSelectionKeys[recordsToShow.findIndex(record => stableRecordKey(record) === String(state.scrollAnchor.code))]
+            : ''
+    ].filter(Boolean));
+    if (state.settings.autoScrollToChanged && changedIndices.size > 0) {
+        const firstOriginalIndex = Math.min(...changedIndices);
+        const changedRecord = state.records[firstOriginalIndex];
+        const changedKey = changedRecord ? recordSelectionKey(changedRecord) : '';
+        if (changedKey) pinnedKeys.add(changedKey);
+    }
+    const pinnedIndices = [...pinnedKeys]
+        .map(key => allSelectionKeys.indexOf(key))
+        .filter(index => index >= 0);
+    const virtualized = tableVirtualizationEnabled(recordsToShow.length);
+    const plan = virtualized
+        ? tableViewportPlan(recordsToShow.length, pinnedIndices)
+        : {
+            rowCount: recordsToShow.length,
+            rowHeight: TABLE_VIRTUAL_ROW_HEIGHT,
+            firstVisible: 0,
+            segments: [{ start: 0, end: recordsToShow.length, spacerRows: 0 }],
+            trailingSpacerRows: 0,
+            renderedRows: recordsToShow.length
+        };
+    const headerRows = document.querySelectorAll('#tableHead tr').length;
+    const columnCount = visibleFields.length + 2;
+    table?.classList.toggle('virtualized-grid', virtualized);
+    table?.setAttribute('aria-rowcount', String(recordsToShow.length + headerRows));
+    table?.setAttribute('aria-colcount', String(columnCount));
+    state.virtualWindowSignature = virtualized ? currentVirtualWindowSignature() : '';
 
     tbody.innerHTML = '';
 
-    recordsToShow.forEach(record => {
+    plan.segments.forEach(segment => {
+        const spacer = createVirtualSpacerRow(segment.spacerRows, columnCount);
+        if (spacer) tbody.appendChild(spacer);
+        for (let recordIndex = segment.start; recordIndex < segment.end; recordIndex += 1) {
+        const record = recordsToShow[recordIndex];
         const row = document.createElement('tr');
         const codeInfo = parsePatrisCode(record.Code);
         const recordCode = stableRecordKey(record);
@@ -4372,6 +4507,7 @@ function renderTable(changedIndices = new Set()) {
             row.dataset.code = recordCode;
         }
         row.dataset.rowKey = selectionKey;
+        row.setAttribute('aria-rowindex', String(headerRows + recordIndex + 1));
         row.tabIndex = selectionKey === state.rovingRowKey ? 0 : -1;
         row.setAttribute('aria-selected', state.selectedKeys.has(selectionKey) ? 'true' : 'false');
         row.setAttribute('aria-label', rowAccessibleLabel(record, selectionKey));
@@ -4410,7 +4546,7 @@ function renderTable(changedIndices = new Set()) {
             if (isWarehouseColumnField(field)) td.classList.add('warehouse-column');
             if (String(field).toLowerCase() === 'warnings') {
                 td.classList.add('warning-column');
-                td.title = structuredValueText(value);
+                td.title = structuredValueText(value, { locale: state.settings.language });
             }
 
             if (field === frozenField) {
@@ -4468,7 +4604,7 @@ function renderTable(changedIndices = new Set()) {
                 });
             } else if (['ArrowUp', 'ArrowDown', 'Home', 'End'].includes(event.key)) {
                 event.preventDefault();
-                updateRovingRow(nextRovingKey(visibleSelectionKeys, selectionKey, event.key), { focus: true });
+                updateRovingRow(nextRovingKey(allSelectionKeys, selectionKey, event.key), { focus: true });
             } else if (event.key === ' ') {
                 event.preventDefault();
                 executeRowCommand('toggle_selection', record);
@@ -4480,11 +4616,21 @@ function renderTable(changedIndices = new Set()) {
         });
 
         tbody.appendChild(row);
+        }
     });
-    if (!(state.settings.autoScrollToChanged && changedIndices.size > 0)) {
+    const trailingSpacer = createVirtualSpacerRow(plan.trailingSpacerRows, columnCount);
+    if (trailingSpacer) tbody.appendChild(trailingSpacer);
+    if (!options.virtualScroll && !(state.settings.autoScrollToChanged && changedIndices.size > 0)) {
         restoreScrollAnchorAfterRender();
     }
-    restoreTableBodyFocus(tbody, focusedRowKey);
+    restoreTableBodyFocus(tbody, options.focusKey || focusedRowKey);
+    if (table) {
+        table.dataset.virtualized = String(virtualized);
+        table.dataset.totalRows = String(recordsToShow.length);
+        table.dataset.renderedRows = String(plan.renderedRows);
+        table.dataset.renderDurationMs = (performance.now() - renderStarted).toFixed(2);
+        table.setAttribute('aria-busy', 'false');
+    }
 }
 
 function createRowSelectionCell(record, selectionKey, row) {
@@ -4608,7 +4754,7 @@ function dialogCommands(panelID) {
             { id: 'clear_event_log', icon: 'trash', label: t('eventLogClear'), execute: () => clearEventLog() }
         ],
         inspectorPanel: [
-            { id: 'copy_inspected_json', icon: 'braces', label: t('copyJSON'), execute: () => copyTextToClipboard(JSON.stringify(state.inspectedRecord || {}, null, 2)) },
+            { id: 'copy_inspected_json', icon: 'braces', label: t('copyJSON'), execute: () => copyTextToClipboard(stableStructuredJSON(state.inspectedRecord || {}, 2)) },
             { id: 'open_columns', icon: 'columns', label: t('openColumns'), execute: () => openModalRoute('columns') }
         ]
     };
@@ -4745,7 +4891,7 @@ async function executeRowCommand(commandID, record) {
             showInAppToast(t('copied'), t('codeCopied'), { titleKey: 'copied', messageKey: 'codeCopied', source: 'row_action', eventType: 'row_action' });
             return;
         case 'copy_json':
-            await copyTextToClipboard(JSON.stringify(record, null, 2));
+            await copyTextToClipboard(stableStructuredJSON(record, 2));
             showInAppToast(t('copied'), t('jsonCopied'), { titleKey: 'copied', messageKey: 'jsonCopied', source: 'row_action', eventType: 'row_action' });
             return;
         case 'toggle_selection':
@@ -4777,17 +4923,17 @@ async function copyTextToClipboard(text) {
 }
 
 async function copyConnectionStatus() {
-    await copyTextToClipboard(JSON.stringify({
+    await copyTextToClipboard(stableStructuredJSON({
         connection: state.connectionStatus,
         websocket: state.ws?.readyState ?? null,
         source: state.fileName || '',
         process: state.processStatus || null
-    }, null, 2));
+    }, 2));
     showInAppToast(t('copied'), t('statusCopied'), { titleKey: 'copied', messageKey: 'statusCopied', source: 'connection', eventType: 'copy_status' });
 }
 
 async function copyEventLog() {
-    await copyTextToClipboard(JSON.stringify(state.eventLog, null, 2));
+    await copyTextToClipboard(stableStructuredJSON(state.eventLog, 2));
     showInAppToast(t('copied'), t('eventLogCopied'), { titleKey: 'copied', messageKey: 'eventLogCopied', source: 'event_log', eventType: 'copy_event_log' });
 }
 
@@ -4814,17 +4960,18 @@ function sortRecords() {
         
         // Special handling for Code field - right-pad to 9 characters for sorting
         if (canonicalColumnKey(state.sortField) === 'product_code') {
-            aVal = String(aVal || '').padEnd(9, ' ');
-            bVal = String(bVal || '').padEnd(9, ' ');
+            aVal = formatStructuredValue(aVal, { mode: 'machine' }).padEnd(9, ' ');
+            bVal = formatStructuredValue(bVal, { mode: 'machine' }).padEnd(9, ' ');
             // Use pure string comparison for Code to respect padding
             let result = aVal < bVal ? -1 : (aVal > bVal ? 1 : 0);
             return state.sortDirection === 'asc' ? result : -result;
         } else {
-            // Convert to string for comparison
-            aVal = String(aVal || '');
-            bVal = String(bVal || '');
-            // Use locale comparison with numeric support for other fields
-            let result = aVal.localeCompare(bVal, undefined, { numeric: true, sensitivity: 'base' });
+            aVal = formatStructuredValue(aVal, { mode: 'sort', locale: state.settings.language });
+            bVal = formatStructuredValue(bVal, { mode: 'sort', locale: state.settings.language });
+            const locale = state.settings.language === 'fa' ? 'fa-IR' : 'en-US';
+            // Stable structured text gives arrays/maps deterministic sort keys;
+            // numeric comparison preserves the expected ordering for scalars.
+            let result = aVal.localeCompare(bVal, locale, { numeric: true, sensitivity: 'base' });
             return state.sortDirection === 'asc' ? result : -result;
         }
     });
@@ -4861,7 +5008,7 @@ function exportData(format) {
     if (format === 'json') {
         // Export as JSON in transformed format (Code as keys)
         const transformed = transformRecordsForExport(data);
-        const jsonStr = JSON.stringify(transformed, null, 2);
+        const jsonStr = stableStructuredJSON(transformed, 2);
         const blob = new Blob([jsonStr], { type: 'application/json' });
         downloadFile(blob, 'patris-export.json');
     } else if (format === 'csv') {
@@ -5122,7 +5269,7 @@ function convertToCSV(data) {
     // Create data rows
     const rows = data.map(record => {
         return state.fields.map(field => {
-            return csvCell(structuredValueText(getFieldValue(record, field)));
+            return csvCell(formatStructuredValue(getFieldValue(record, field), { mode: 'machine' }));
         }).join(',');
     });
     
@@ -5182,7 +5329,7 @@ function filterRecords() {
             return state.fields.some(field => {
                 const value = getFieldValue(record, field);
                 if (value === null || value === undefined) return false;
-                return structuredValueText(value).toLowerCase().includes(searchLower);
+                return structuredValueText(value, { locale: state.settings.language }).toLowerCase().includes(searchLower);
             });
         });
     }
@@ -5219,7 +5366,7 @@ function passesFilter(record, field, filter) {
     
     switch (filter.type) {
         case 'categorical':
-            return structuredValueText(value) === filter.value;
+            return structuredValueText(value, { locale: state.settings.language }) === filter.value;
             
         case 'numeric':
             const numValue = typeof value === 'string' ? parseFloat(value) : value;
@@ -5249,7 +5396,7 @@ function passesFilter(record, field, filter) {
             return true;
             
         case 'text':
-            return structuredValueText(value).toLowerCase().includes(filter.value.toLowerCase());
+            return structuredValueText(value, { locale: state.settings.language }).toLowerCase().includes(filter.value.toLowerCase());
 
         case 'code':
             const parsed = parsePatrisCode(value);
@@ -5369,7 +5516,11 @@ function inspectRecord(record) {
         
         const value = getFieldValue(record, field);
         
-        valueDiv.textContent = value !== null && value !== undefined ? String(value) : '(null)';
+        valueDiv.textContent = formatStructuredValue(value, {
+            mode: 'display',
+            locale: state.settings.language,
+            nullText: state.settings.language === 'fa' ? 'تهی' : '(null)'
+        });
         
         fieldDiv.appendChild(nameDiv);
         fieldDiv.appendChild(valueDiv);
