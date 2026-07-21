@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/atomicdeploy/patris-export/pkg/appconfig"
+	"github.com/atomicdeploy/patris-export/pkg/canonical"
 	"github.com/atomicdeploy/patris-export/pkg/recordpipe"
 	"github.com/spf13/cobra"
 )
@@ -59,5 +60,21 @@ func TestConvertXLSXFlagOverrides(t *testing.T) {
 	applyConvertFlagOverrides(cmd, &cfg)
 	if cfg.Export.XLSXLanguage != "fa" || cfg.Export.XLSXMode != "formula" || cfg.Export.XLSXZebraRows {
 		t.Fatalf("XLSX CLI overrides = %+v", cfg.Export)
+	}
+}
+
+func TestSummarizeNamingWarningsIncludesCanonicalCategoryOnlyRows(t *testing.T) {
+	result := recordpipe.Result{
+		Rows: []map[string]interface{}{},
+		Contract: &canonical.Envelope{Categories: []canonical.Category{{
+			CategoryCode: "100",
+			Name:         "Category",
+			Warnings:     []string{"naming_multiple_spaces:name"},
+		}}},
+	}
+
+	summary := summarizeNamingWarnings(result)
+	if summary.Rows != 1 || summary.Violations != 1 {
+		t.Fatalf("category-only naming summary = %+v, want one row and one violation", summary)
 	}
 }
