@@ -13,6 +13,19 @@ COMMIT?=$(shell git rev-parse --short=12 HEAD 2>/dev/null || echo unknown)
 VERSION_PKG=github.com/atomicdeploy/patris-export/pkg/version
 LICENSING_PKG=github.com/atomicdeploy/patris-export/pkg/licensing
 ENABLE_ALM?=0
+PXLIB_BACKEND?=dynamic
+comma:=,
+empty:=
+space:=$(empty) $(empty)
+ifeq ($(PXLIB_BACKEND),dynamic)
+PXLIB_BUILD_TAGS=
+else ifeq ($(PXLIB_BACKEND),cgo)
+PXLIB_BUILD_TAGS=pxlib_cgo
+else ifeq ($(PXLIB_BACKEND),cgo-static)
+PXLIB_BUILD_TAGS=pxlib_cgo pxlib_cgo_static
+else
+$(error PXLIB_BACKEND must be dynamic, cgo, or cgo-static)
+endif
 ALM_ENABLED=$(filter 1 true yes on,$(ENABLE_ALM))
 ifneq ($(ALM_ENABLED),)
 ifeq ($(strip $(ALM_APP_ID)),)
@@ -24,15 +37,17 @@ endif
 BUILD_VARIANT=alm-compat
 LICENSING_MODE=alm_compat_utf8_v1
 LICENSE_REQUIRED=true
-GO_BUILD_TAG_ARGS=-tags alm_compat
+ALM_BUILD_TAGS=alm_compat
 ALM_LDFLAG=-X $(LICENSING_PKG).almAppID=$(ALM_APP_ID)
 else
 BUILD_VARIANT=standard
 LICENSING_MODE=none
 LICENSE_REQUIRED=false
-GO_BUILD_TAG_ARGS=
+ALM_BUILD_TAGS=
 ALM_LDFLAG=
 endif
+BUILD_TAGS=$(strip $(PXLIB_BUILD_TAGS) $(ALM_BUILD_TAGS))
+GO_BUILD_TAG_ARGS=$(if $(BUILD_TAGS),-tags "$(subst $(space),$(comma),$(BUILD_TAGS))")
 LDFLAGS=-ldflags "-X $(VERSION_PKG).Version=$(VERSION) -X $(VERSION_PKG).BuildDate=$(BUILD_DATE) -X $(VERSION_PKG).Commit=$(COMMIT) $(ALM_LDFLAG)"
 
 help: ## Show this help message
@@ -51,7 +66,7 @@ build-web: ## Build the web frontend
 
 variant-manifest:
 	@mkdir -p $(BUILD_DIR)
-	@printf '{\n  "variant": "$(BUILD_VARIANT)",\n  "licensing_mode": "$(LICENSING_MODE)",\n  "license_required": $(LICENSE_REQUIRED)\n}\n' > $(BUILD_DIR)/BUILD-VARIANT.json
+	@printf '{\n  "variant": "$(BUILD_VARIANT)",\n  "licensing_mode": "$(LICENSING_MODE)",\n  "license_required": $(LICENSE_REQUIRED),\n  "native_backend": "$(PXLIB_BACKEND)"\n}\n' > $(BUILD_DIR)/BUILD-VARIANT.json
 
 alm-current-guard:
 	@if [ "$(BUILD_VARIANT)" = "alm-compat" ] && [ "$$(go env GOOS)" != "windows" ]; then echo "The alm_compat profile requires Windows WMI/CIM and cannot produce a non-Windows runtime artifact." >&2; exit 1; fi

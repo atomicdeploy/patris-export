@@ -29,6 +29,11 @@ func TestSyntheticProductSyncGoldenFixture(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Git may materialize tracked text fixtures with CRLF on Windows. JSON is
+	// insensitive to the line-ending representation, so compare the canonical
+	// LF form emitted by json.MarshalIndent instead of making this test depend
+	// on the checkout's core.autocrlf setting.
+	expected = bytes.ReplaceAll(expected, []byte("\r\n"), []byte("\n"))
 	if !bytes.Equal(actual, expected) {
 		t.Fatalf("synthetic product-sync golden fixture drifted; regenerate %s from syntheticGoldenEnvelope", path)
 	}

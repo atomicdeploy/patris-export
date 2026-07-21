@@ -1,3 +1,5 @@
+//go:build windows && !pxlib_cgo
+
 package paradox
 
 import (

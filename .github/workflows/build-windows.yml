@@ -60,6 +60,29 @@ jobs:
     - name: Build Windows artifacts
       shell: cmd
       run: build.cmd --target windows-native --ci --no-assets
+
+    - name: Audit and test optional pxlib backends
+      shell: pwsh
+      run: |
+        $pxlibRoot = (Resolve-Path ".deps\pxlib-windows-native").Path
+        $bash = (Get-Command bash.exe -ErrorAction Stop).Source
+        $gcc = (& $bash -lc 'cygpath -w "$(command -v gcc)"').Trim()
+        if (-not (Test-Path -LiteralPath $gcc)) {
+          throw "Unable to resolve the MinGW compiler used by the MSYS2 build: $gcc"
+        }
+        $env:CGO_ENABLED = "1"
+        $env:CC = $gcc
+        $env:CGO_CFLAGS = "-I$pxlibRoot\include"
+        $env:CGO_LDFLAGS = "-L$pxlibRoot\lib -L$pxlibRoot\bin"
+        $env:PATH = "$pxlibRoot\bin;$(Split-Path -Parent $env:CC);$env:PATH"
+        go vet -tags pxlib_cgo ./...
+        if ($LASTEXITCODE -ne 0) { throw "Direct-CGO pxlib vet failed." }
+        go test -count=1 -tags pxlib_cgo ./...
+        if ($LASTEXITCODE -ne 0) { throw "Direct-CGO pxlib tests failed." }
+        go vet -tags "pxlib_cgo,pxlib_cgo_static" ./...
+        if ($LASTEXITCODE -ne 0) { throw "Static-CGO pxlib vet failed." }
+        go test -count=1 -tags "pxlib_cgo,pxlib_cgo_static" ./...
+        if ($LASTEXITCODE -ne 0) { throw "Static-CGO pxlib tests failed." }
     
     - name: Test Windows executable
       shell: bash

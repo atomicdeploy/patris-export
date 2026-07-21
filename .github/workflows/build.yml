@@ -49,6 +49,33 @@ jobs:
       shell: bash
       run: bash ./build.sh --target linux --ci --skip-pxlib --no-assets
 
+    - name: Audit and test optional pxlib backends
+      shell: bash
+      run: |
+        set -euo pipefail
+        go vet -tags pxlib_cgo ./...
+        go test -count=1 -tags pxlib_cgo ./...
+        go vet -tags 'pxlib_cgo,pxlib_cgo_static' ./...
+        go test -count=1 -tags 'pxlib_cgo,pxlib_cgo_static' ./...
+
+    - name: Reject incomplete optional-backend tags
+      shell: bash
+      run: |
+        set -euo pipefail
+        diagnostic="$(mktemp)"
+        trap 'rm -f "$diagnostic"' EXIT
+        if CGO_ENABLED=0 go test -count=1 -tags pxlib_cgo ./pkg/paradox >"$diagnostic" 2>&1; then
+          echo 'pxlib_cgo unexpectedly built with CGO_ENABLED=0.' >&2
+          exit 1
+        fi
+        grep -F 'pxlib_cgo_requires_CGO_ENABLED_1' "$diagnostic"
+        : > "$diagnostic"
+        if go test -count=1 -tags pxlib_cgo_static ./pkg/paradox >"$diagnostic" 2>&1; then
+          echo 'pxlib_cgo_static unexpectedly built without pxlib_cgo.' >&2
+          exit 1
+        fi
+        grep -F 'pxlib_cgo_static_requires_pxlib_cgo' "$diagnostic"
+
     - name: Collect and smoke-test Linux runtime
       shell: bash
       run: |
