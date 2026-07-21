@@ -9,6 +9,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Added
 
+- Product names and descriptions are checked for leading/trailing spaces,
+  repeated spaces, and unseparated Persian/English/digit transitions. Stable
+  warning codes are exported, summarized on the CLI, and highlighted in the
+  Web UI without logging source values.
 - Opt-in `cgo` and `cgo-static` pxlib backends now complement the default
   runtime-dynamic loader across Make, shell, and local Windows builds; manifests
   identify the selected backend and static packages omit the pxlib runtime DLL.

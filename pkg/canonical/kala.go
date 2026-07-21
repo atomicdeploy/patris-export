@@ -18,6 +18,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/atomicdeploy/patris-export/pkg/converter"
+	"github.com/atomicdeploy/patris-export/pkg/naming"
 	"github.com/atomicdeploy/patris-export/pkg/pricingcatalog"
 	"golang.org/x/text/unicode/norm"
 )
@@ -329,7 +330,7 @@ func parseKalaCategories(rows []map[string]interface{}, codeCounts map[string]in
 		byCode[code] = Category{
 			CategoryCode:  code,
 			Name:          normalizeText(firstValue(row, "name", "Name", "part_number")),
-			Warnings:      []string{},
+			Warnings:      naming.Merge(row[naming.InternalWarningsField], naming.Warnings(row)),
 			fieldPresence: presence,
 		}
 	}
@@ -435,7 +436,7 @@ func emptyCategoryHeader(code string, row map[string]interface{}) bool {
 }
 
 func parseKalaProduct(ctx context.Context, row map[string]interface{}, provider pricingcatalog.Provider, integrationActive bool) Product {
-	warnings := []string{}
+	warnings := naming.Merge(row[naming.InternalWarningsField], naming.Warnings(row))
 	code := codeString(firstValue(row, "product_code", "code", "Code"))
 	foreignPrice := extractForeignPrice(row, &warnings)
 	weight, location := extractWeightAndLocation(row, &warnings)

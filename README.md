@@ -2,6 +2,11 @@
 
 A fast and performant application for reading, parsing, and converting Paradox/BDE database files (`*.db`) from Patris81 software.
 
+Product names and descriptions are validated for unsafe surrounding or
+repeated spaces and unseparated Persian/English/digit transitions. The CLI
+prints a value-free summary, exported rows carry stable warning codes, and the
+Web UI highlights every affected row.
+
 [![Build and Release](https://github.com/atomicdeploy/patris-export/actions/workflows/build.yml/badge.svg)](https://github.com/atomicdeploy/patris-export/actions/workflows/build.yml)
 [![Go Version](https://img.shields.io/badge/Go-1.25-blue.svg)](https://go.dev)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)

@@ -23,6 +23,7 @@ import (
 	"github.com/atomicdeploy/patris-export/pkg/filecopy"
 	"github.com/atomicdeploy/patris-export/pkg/ipc"
 	"github.com/atomicdeploy/patris-export/pkg/licensing"
+	"github.com/atomicdeploy/patris-export/pkg/naming"
 	"github.com/atomicdeploy/patris-export/pkg/nativeui"
 	"github.com/atomicdeploy/patris-export/pkg/oneshot"
 	"github.com/atomicdeploy/patris-export/pkg/paradox"
@@ -812,6 +813,9 @@ func convertFile(dbFile string, charMap converter.CharMapping, useStdout bool, c
 		CatalogProvider: catalogProvider,
 		GeneratedAt:     time.Now(),
 	})
+	if summary := naming.Summarize(result.Rows); summary.Violations > 0 {
+		warningColor.Fprintf(os.Stderr, "Warning: %d naming-convention violation(s) across %d row(s); inspect the warnings field for rule and field IDs.\n", summary.Violations, summary.Rows)
+	}
 	if !useStdout {
 		infoColor.Printf("📊 Found %d records\n", len(result.Rows))
 	}

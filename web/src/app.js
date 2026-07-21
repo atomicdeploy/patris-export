@@ -30,6 +30,7 @@ import {
     duplicateSafeRecordKeys,
     fitMenuPosition,
     formatStructuredValue,
+    hasNamingConventionWarnings,
     iconMarkup,
     keyboardColumnWidth,
     isWarehouseColumnField,
@@ -4514,6 +4515,7 @@ function renderTable(changedIndices = new Set(), options = {}) {
         row.classList.toggle('selected', state.selectedKeys.has(selectionKey));
         row.classList.add(`code-${codeInfo.type}`);
         row.classList.add(anbarTotal(record) > 0 ? 'has-stock' : 'no-stock');
+        row.classList.toggle('naming-warning', hasNamingConventionWarnings(record));
 
         // Find the original index in state.records
         const originalIndex = state.records.indexOf(record);

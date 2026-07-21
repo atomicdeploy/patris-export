@@ -9,6 +9,7 @@ import (
 
 	"github.com/atomicdeploy/patris-export/pkg/canonical"
 	"github.com/atomicdeploy/patris-export/pkg/converter"
+	"github.com/atomicdeploy/patris-export/pkg/naming"
 	"github.com/atomicdeploy/patris-export/pkg/paradox"
 	"github.com/atomicdeploy/patris-export/pkg/pricingcatalog"
 	"github.com/atomicdeploy/patris-export/pkg/recorddiff"
@@ -50,6 +51,12 @@ func BuildContext(ctx context.Context, rawRows []map[string]interface{}, source 
 	exp := converter.NewExporter(converter.Patris2Fa)
 	if _, ok := canonical.ProfileFor(source, options.Canonical); ok {
 		rows := paradoxToRows(exp.ConvertRecords(records))
+		for index, row := range rows {
+			warnings := naming.Merge(nil, append(naming.Warnings(rawRows[index]), naming.Warnings(row)...))
+			if len(warnings) > 0 {
+				row[naming.InternalWarningsField] = warnings
+			}
+		}
 		rows, contract := canonical.Transform(ctx, rows, source, options.Canonical, options.CatalogProvider, options.GeneratedAt)
 		return Result{
 			Rows:     rows,
@@ -59,9 +66,28 @@ func BuildContext(ctx context.Context, rawRows []map[string]interface{}, source 
 			Contract: contract,
 		}
 	}
-	keyed := exp.ConvertAndTransformRecords(records)
+	converted := exp.ConvertRecords(records)
+	namingWarningsByCode := make(map[string][]string, len(converted))
+	for index, record := range converted {
+		code := fmt.Sprint(record["Code"])
+		convertedRow := make(map[string]interface{}, len(record))
+		for field, value := range record {
+			convertedRow[field] = value
+		}
+		namingWarningsByCode[code] = naming.Merge(namingWarningsByCode[code], append(naming.Warnings(rawRows[index]), naming.Warnings(convertedRow)...))
+	}
+	keyed := exp.TransformRecords(converted)
 	rows := rowsFromKeyed(keyed, "Code")
+	namingWarnings := make([][]string, len(rows))
+	for index, row := range rows {
+		namingWarnings[index] = naming.Merge(namingWarningsByCode[fmt.Sprint(row["Code"])], naming.Warnings(row))
+	}
 	rows = recordmap.Apply(rows, options.Mapping, source)
+	for index, warnings := range namingWarnings {
+		if len(warnings) > 0 {
+			rows[index]["warnings"] = naming.Merge(rows[index]["warnings"], warnings)
+		}
+	}
 	keyField := recordmap.KeyField(options.Mapping, source)
 	payload := recordmap.Keyed(rows, keyField, true)
 	return Result{

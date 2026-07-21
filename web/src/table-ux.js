@@ -1494,6 +1494,12 @@ export function resolveRowIcon(record, rules, fallback) {
     return { ...normalizeRowIconFallback(fallback), ruleId: '' };
 }
 
+export function hasNamingConventionWarnings(record) {
+    const warnings = record?.warnings;
+    const values = Array.isArray(warnings) ? warnings : (typeof warnings === 'string' ? [warnings] : []);
+    return values.some(warning => String(warning).trim().startsWith('naming_'));
+}
+
 export function canonicalRowValue(record, field) {
     if (!record || typeof record !== 'object') return undefined;
     const canonicalField = canonicalRuleField(field);
