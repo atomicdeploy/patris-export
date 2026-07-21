@@ -14,6 +14,7 @@ import (
 
 	"github.com/atomicdeploy/patris-export/pkg/pricingcatalog"
 	"github.com/atomicdeploy/patris-export/pkg/recorddiff"
+	"gopkg.in/yaml.v3"
 )
 
 type fixedResolutionProvider struct {
@@ -37,7 +38,7 @@ func canonicalTestConfig(code string) (Config, pricingcatalog.Provider) {
 			CNYToIRT:           &fx,
 			SelectedWarehouses: []string{"1", "2"},
 			Methods: []pricingcatalog.Method{{
-				ID: "air_express", Enabled: &enabled, PricePerKgCNY: &rate,
+				ID: "air_express", Enabled: &enabled, PricePerKg: &rate, Currency: pricingcatalog.CurrencyCNY,
 			}},
 			Assignments: map[string]pricingcatalog.Assignment{
 				code: {MethodID: "air_express", ProfitPercent: &markup},
@@ -48,12 +49,26 @@ func canonicalTestConfig(code string) (Config, pricingcatalog.Provider) {
 }
 
 func TestLandedPriceExactWorkbookFixture(t *testing.T) {
-	got, err := LandedPrice("240", "120", "24.5", "30", "29000")
+	got, err := LandedPrice("240", "120", pricingcatalog.CurrencyCNY, "24.5", "30", "29000")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if got != 2009410 {
 		t.Fatalf("landed_price = %d, want 2009410", got)
+	}
+}
+
+func TestLandedPriceTreatsEquivalentCNYAndIRRFreightEqually(t *testing.T) {
+	cny, err := LandedPrice("1000", "100", pricingcatalog.CurrencyCNY, "10", "30", "30000")
+	if err != nil {
+		t.Fatal(err)
+	}
+	irr, err := LandedPrice("1000", "30000000", pricingcatalog.CurrencyIRR, "10", "30", "30000")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cny != 4290000 || irr != cny {
+		t.Fatalf("equivalent freight diverged: CNY=%d IRR=%d, want 4290000 IRT", cny, irr)
 	}
 }
 
@@ -65,7 +80,7 @@ func TestTransformKeepsExactDecimalInputsThroughFinalRounding(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.Pricing = pricingcatalog.Config{Mode: pricingcatalog.ModeStatic, Static: pricingcatalog.StaticConfig{
 		Revision: "exact-r1", CNYToIRT: &fx,
-		Methods:     []pricingcatalog.Method{{ID: "air", Enabled: &enabled, PricePerKgCNY: &freight}},
+		Methods:     []pricingcatalog.Method{{ID: "air", Enabled: &enabled, PricePerKg: &freight, Currency: pricingcatalog.CurrencyCNY}},
 		Assignments: map[string]pricingcatalog.Assignment{"A": {MethodID: "air", ProfitPercent: &markup}},
 	}}
 	rows, envelope := Transform(context.Background(), []map[string]interface{}{{
@@ -96,14 +111,105 @@ func TestSharh1ExtraNumericSlotsAreAmbiguousAndNull(t *testing.T) {
 }
 
 func TestLandedPriceRoundsOnceHalfUpAndRejectsInvalidInput(t *testing.T) {
-	got, err := LandedPrice("0", "0", "0.005", "0", "100")
+	got, err := LandedPrice("0", "0", pricingcatalog.CurrencyCNY, "0.005", "0", "100")
 	if err != nil || got != 1 {
 		t.Fatalf("half-up result = %d, %v; want 1", got, err)
 	}
 	for _, invalid := range []string{"", "NaN", "Inf", "-1", "1e999999"} {
-		if _, err := LandedPrice(invalid, "1", "1", "1", "1"); err == nil {
+		if _, err := LandedPrice(invalid, "1", pricingcatalog.CurrencyCNY, "1", "1", "1"); err == nil {
 			t.Fatalf("invalid decimal %q was accepted", invalid)
 		}
+	}
+	if _, err := LandedPrice("1", "1", "USD", "1", "1", "1"); err == nil {
+		t.Fatal("unsupported shipping currency was accepted")
+	}
+	for _, currency := range []string{" CNY", "CNY ", "\tIRR"} {
+		if _, err := LandedPrice("1", "1", currency, "1", "1", "1"); err == nil {
+			t.Fatalf("non-lexical shipping currency %q was accepted", currency)
+		}
+	}
+}
+
+func TestWhitespaceShippingCurrencyNeverProducesFinalPrice(t *testing.T) {
+	staticConfig := pricingcatalog.Config{}
+	if err := json.Unmarshal([]byte(`{"mode":"static","static":{"cny_to_irt":30000,"shipping_methods":[{"id":"air","price_per_kg":120,"currency":" CNY "}],"assignments":{"A":{"shipping_method_id":"air","profit_percent":30}}}}`), &staticConfig); err != nil {
+		t.Fatal(err)
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/integration/catalog" {
+			fmt.Fprint(w, `{"data":{"schema":"digitalogic.integration-catalog","revision":"r1","currency":{"local":"IRT","cny_to_local":30000,"cny_to_irt":30000},"pricing":{"formula_id":"landed_price"},"shipping_methods":[{"id":"air","price_per_kg":120,"currency":"CNY "}]}}`)
+			return
+		}
+		fmt.Fprint(w, `{"data":{"shipping_method_id":"air","profit_percent":30,"profit_percent_source":"global_default","pricing_warnings":[]}}`)
+	}))
+	defer server.Close()
+	httpConfig := pricingcatalog.Config{Mode: pricingcatalog.ModeDigitalogic, Digitalogic: pricingcatalog.DigitalogicConfig{BaseURL: server.URL}}
+
+	for name, test := range map[string]struct {
+		provider pricingcatalog.Provider
+	}{
+		"static": {provider: pricingcatalog.NewProvider(staticConfig)},
+		"HTTP":   {provider: pricingcatalog.NewProvider(httpConfig)},
+	} {
+		t.Run(name, func(t *testing.T) {
+			row := parseKalaProduct(context.Background(), map[string]interface{}{
+				"Code": "A", "foreign_price": "10", "weight_grams": "1000", "ALLANBAR": 1,
+			}, test.provider, true).Map()
+			if _, exists := row["final_price"]; exists {
+				t.Fatalf("invalid currency produced final_price: %#v", row)
+			}
+			warnings := row["warnings"].([]string)
+			if !hasAny(warnings, "shipping_price_per_kg_currency_invalid") || !hasAny(warnings, "final_price_unavailable") {
+				t.Fatalf("invalid currency warnings missing: %v", warnings)
+			}
+		})
+	}
+}
+
+func TestStaticConfigMixedShippingNullsRemainExplicitInProducts(t *testing.T) {
+	tests := []struct {
+		name         string
+		decode       func(*pricingcatalog.Config) error
+		wantPrice    interface{}
+		wantCurrency interface{}
+	}{
+		{
+			name: "JSON amount and null currency",
+			decode: func(cfg *pricingcatalog.Config) error {
+				return json.Unmarshal([]byte(`{"mode":"static","static":{"cny_to_irt":30000,"shipping_methods":[{"id":"air","price_per_kg":120,"currency":null}],"assignments":{"A":{"shipping_method_id":"air","profit_percent":30}}}}`), cfg)
+			},
+			wantPrice: json.Number("120"), wantCurrency: nil,
+		},
+		{
+			name: "YAML null amount and currency",
+			decode: func(cfg *pricingcatalog.Config) error {
+				return yaml.Unmarshal([]byte("mode: static\nstatic:\n  cny_to_irt: 30000\n  shipping_methods:\n    - id: air\n      price_per_kg: null\n      currency: CNY\n  assignments:\n    A:\n      shipping_method_id: air\n      profit_percent: 30\n"), cfg)
+			},
+			wantPrice: nil, wantCurrency: pricingcatalog.CurrencyCNY,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var pricing pricingcatalog.Config
+			if err := test.decode(&pricing); err != nil {
+				t.Fatal(err)
+			}
+			row := parseKalaProduct(context.Background(), map[string]interface{}{
+				"Code": "A", "foreign_price": "10", "weight_grams": "1000", "ALLANBAR": 1,
+			}, pricingcatalog.NewProvider(pricing), true).Map()
+			if value, exists := row["shipping_price_per_kg"]; !exists || !reflect.DeepEqual(value, test.wantPrice) {
+				t.Fatalf("shipping price presence/value = %#v, present %t; want %#v", value, exists, test.wantPrice)
+			}
+			if value, exists := row["shipping_price_per_kg_currency"]; !exists || !reflect.DeepEqual(value, test.wantCurrency) {
+				t.Fatalf("shipping currency presence/value = %#v, present %t; want %#v", value, exists, test.wantCurrency)
+			}
+			if _, exists := row["final_price"]; exists {
+				t.Fatalf("mixed null shipping pair produced final_price: %#v", row)
+			}
+		})
 	}
 }
 
@@ -171,7 +277,7 @@ func TestKalaProfileOmitsUnavailableStandalonePricingAndIntegrationFields(t *tes
 	}}
 	products, _ := Transform(context.Background(), rows, "kala.db", cfg, provider, time.Time{})
 	product := products[0]
-	for _, absent := range []string{"foreign_price", "weight_grams", "shipping_method_id", "shipping_price_per_kg_cny", "markup_percent", "irt_per_cny", "final_price", "pricing_catalog_status"} {
+	for _, absent := range []string{"foreign_price", "weight_grams", "shipping_method_id", "shipping_price_per_kg", "shipping_price_per_kg_currency", "markup_percent", "irt_per_cny", "final_price", "pricing_catalog_status"} {
 		if _, exists := product[absent]; exists {
 			t.Fatalf("standalone output included unavailable field %q: %#v", absent, product)
 		}
@@ -257,7 +363,7 @@ func TestIntegratedProfilePreservesExplicitReferenceNulls(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		if r.URL.Path == "/integration/catalog" {
-			fmt.Fprint(w, `{"data":{"schema":"digitalogic.integration-catalog","revision":"r1","currency":{"local":"IRT","cny_to_local":null,"cny_to_irt":null,"effective_date":null,"warnings":[]},"pricing":{"formula_id":"landed_price"},"selected_warehouses":[],"shipping_methods":[{"id":"air","price_per_kg_cny":null}]}}`)
+			fmt.Fprint(w, `{"data":{"schema":"digitalogic.integration-catalog","revision":"r1","currency":{"local":"IRT","cny_to_local":null,"cny_to_irt":null,"effective_date":null,"warnings":[]},"pricing":{"formula_id":"landed_price"},"selected_warehouses":[],"shipping_methods":[{"id":"air","price_per_kg":null,"currency":null}]}}`)
 			return
 		}
 		if r.URL.Path == "/integration/pricing-assignments/batch" {
@@ -273,7 +379,7 @@ func TestIntegratedProfilePreservesExplicitReferenceNulls(t *testing.T) {
 	rows, _ := Transform(context.Background(), []map[string]interface{}{{
 		"Code": "NULL-REFERENCE", "foreign_price": "2", "weight_grams": "3",
 	}}, "kala.db", cfg, pricingcatalog.NewProvider(cfg.Pricing), time.Unix(1, 0))
-	for _, field := range []string{"irt_per_cny", "currency_effective_date", "shipping_price_per_kg_cny", "markup_percent"} {
+	for _, field := range []string{"irt_per_cny", "currency_effective_date", "shipping_price_per_kg", "shipping_price_per_kg_currency", "markup_percent"} {
 		if value, exists := rows[0][field]; !exists || value != nil {
 			t.Fatalf("explicit reference null %q was not preserved: %#v", field, rows[0])
 		}
@@ -301,6 +407,30 @@ func TestProductSyncDecoderRejectsUnknownFields(t *testing.T) {
 	}
 	if err := json.Unmarshal([]byte(`{"schema":"patris.product-sync","deleted_codes":[{"product_code":"A","deleted":true,"obsolete_field":true}]}`), &envelope); err == nil {
 		t.Fatal("unknown tombstone field was silently accepted")
+	}
+}
+
+func TestProductSyncDecoderRequiresCanonicalShippingPair(t *testing.T) {
+	for name, payload := range map[string]string{
+		"price only":          `{"product_code":"A","shipping_price_per_kg":120}`,
+		"currency only":       `{"product_code":"A","shipping_price_per_kg_currency":"CNY"}`,
+		"lowercase currency":  `{"product_code":"A","shipping_price_per_kg":120,"shipping_price_per_kg_currency":"cny"}`,
+		"other currency":      `{"product_code":"A","shipping_price_per_kg":120,"shipping_price_per_kg_currency":"USD"}`,
+		"whitespace currency": `{"product_code":"A","shipping_price_per_kg":120,"shipping_price_per_kg_currency":" CNY "}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			var product Product
+			if err := json.Unmarshal([]byte(payload), &product); err == nil {
+				t.Fatalf("invalid shipping pair was accepted: %s", payload)
+			}
+		})
+	}
+	for _, currency := range []string{pricingcatalog.CurrencyCNY, pricingcatalog.CurrencyIRR} {
+		var product Product
+		payload := fmt.Sprintf(`{"product_code":"A","shipping_price_per_kg":120,"shipping_price_per_kg_currency":%q}`, currency)
+		if err := json.Unmarshal([]byte(payload), &product); err != nil {
+			t.Fatalf("%s shipping pair rejected: %v", currency, err)
+		}
 	}
 }
 
@@ -359,7 +489,7 @@ func TestCatalogFetchTimeDoesNotChangeRecordOrEventIdentity(t *testing.T) {
 	fx := pricingcatalog.Decimal("29000")
 	base := pricingcatalog.Resolution{
 		CatalogRevision: "r1", CatalogStatus: "fresh", MethodID: "air",
-		ShippingPricePerKgCNY: &freight, MarkupPercent: &markup, IRTPerCNY: &fx,
+		ShippingPricePerKg: &freight, ShippingPricePerKgCurrency: pricingcatalog.CurrencyCNY, MarkupPercent: &markup, IRTPerCNY: &fx,
 	}
 	cfg := DefaultConfig()
 	row := []map[string]interface{}{{"Code": "A", "Sharh1": "0 0 0 24.5", "Sharh2": "240 g", "ALLANBAR": 1}}
@@ -400,7 +530,7 @@ func TestDigitalogicProfilePrefetches1002CodesInThreeBatchRequests(t *testing.T)
 		switch r.URL.Path {
 		case "/integration/catalog":
 			atomic.AddInt32(&catalogRequests, 1)
-			fmt.Fprint(w, `{"data":{"schema":"digitalogic.integration-catalog","revision":"r1","currency":{"local":"IRT","cny_to_local":29000,"cny_to_irt":29000},"pricing":{"formula_id":"landed_price"},"shipping_methods":[{"id":"air","price_per_kg_cny":120}]}}`)
+			fmt.Fprint(w, `{"data":{"schema":"digitalogic.integration-catalog","revision":"r1","currency":{"local":"IRT","cny_to_local":29000,"cny_to_irt":29000},"pricing":{"formula_id":"landed_price"},"shipping_methods":[{"id":"air","price_per_kg":120,"currency":"CNY"}]}}`)
 		case "/integration/pricing-assignments/batch":
 			atomic.AddInt32(&batchRequests, 1)
 			var request struct {

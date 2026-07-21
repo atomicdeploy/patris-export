@@ -11,7 +11,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 - Canonical JSON, CSV, HTTP, spreadsheet, SQL, and outbound-update rows now share a sparse field boundary: never-received values are omitted while explicitly received nulls remain null.
 - Product-sync is now one living standard with strict current-field decoding; obsolete aliases and compatibility branches are rejected.
-- Shipping integration uses only `shipping_method_id` and `shipping_price_per_kg_cny`.
+- Shipping integration uses the paired `shipping_price_per_kg` and `shipping_price_per_kg_currency` fields; users must select uppercase `CNY` or `IRR` for every configured method.
+- Landed-price calculation converts CNY freight through the CNY-to-IRT rate, converts IRR freight at ten IRR per IRT, then applies markup and rounds once.
 - Missing source/reference values are omitted, while `null` is preserved only when explicitly supplied upstream.
 - Successful product-sync responses must include typed status, identity, retry, pending, and deferred fields; missing or explicit-null fields fail closed.
 - Persisted custom headers cannot use any product-sync-secret name; receiver credentials remain environment-backed only.

@@ -15,15 +15,16 @@ func TestCanonicalXLSXRoundTripPreservesTypesLayoutAndMetadata(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "canonical.xlsx")
 	rows := []map[string]interface{}{
 		{
-			"product_code":              "00113007045",
-			"name":                      "ماژول آزمون",
-			"foreign_price":             json.Number("24.5"),
-			"weight_grams":              json.Number("240"),
-			"shipping_price_per_kg_cny": json.Number("120"),
-			"markup_percent":            json.Number("30"),
-			"irt_per_cny":               json.Number("29000"),
-			"final_price":               int64(2009410),
-			"warnings":                  []string{"price_verified"},
+			"product_code":                   "00113007045",
+			"name":                           "ماژول آزمون",
+			"foreign_price":                  json.Number("24.5"),
+			"weight_grams":                   json.Number("240"),
+			"shipping_price_per_kg":          json.Number("120"),
+			"shipping_price_per_kg_currency": "CNY",
+			"markup_percent":                 json.Number("30"),
+			"irt_per_cny":                    json.Number("29000"),
+			"final_price":                    int64(2009410),
+			"warnings":                       []string{"price_verified"},
 		},
 	}
 	options := XLSXOptions{
@@ -55,7 +56,7 @@ func TestCanonicalXLSXRoundTripPreservesTypesLayoutAndMetadata(t *testing.T) {
 	if err != nil || len(recordRows) != 2 {
 		t.Fatalf("records rows = %#v, err=%v", recordRows, err)
 	}
-	wantHeaders := []string{"product_code", "name", "foreign_price", "weight_grams", "shipping_price_per_kg_cny", "markup_percent", "irt_per_cny", "final_price", "warnings"}
+	wantHeaders := []string{"product_code", "name", "foreign_price", "weight_grams", "shipping_price_per_kg", "shipping_price_per_kg_currency", "markup_percent", "irt_per_cny", "final_price", "warnings"}
 	if strings.Join(recordRows[0], "|") != strings.Join(wantHeaders, "|") {
 		t.Fatalf("canonical column order = %v, want %v", recordRows[0], wantHeaders)
 	}
@@ -118,7 +119,7 @@ func TestCanonicalXLSXRoundTripPreservesTypesLayoutAndMetadata(t *testing.T) {
 	}
 
 	worksheetXML := zipEntry(t, path, "xl/worksheets/sheet1.xml")
-	if !strings.Contains(worksheetXML, `<autoFilter ref="$A$1:$I$2"`) {
+	if !strings.Contains(worksheetXML, `<autoFilter ref="$A$1:$J$2"`) {
 		t.Fatalf("autofilter missing from Records sheet: %s", worksheetXML)
 	}
 }

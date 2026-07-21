@@ -15,6 +15,8 @@ const (
 	ModeNone           = "none"
 	ModeStatic         = "static"
 	ModeDigitalogic    = "digitalogic"
+	CurrencyCNY        = "CNY"
+	CurrencyIRR        = "IRR"
 	defaultFreshFor    = 5 * time.Minute
 	defaultMaxStale    = time.Hour
 	defaultTimeout     = 15 * time.Second
@@ -62,10 +64,16 @@ type DigitalogicConfig struct {
 }
 
 type Method struct {
-	ID            string   `json:"id" yaml:"id" toml:"id"`
-	Name          string   `json:"name,omitempty" yaml:"name,omitempty" toml:"name,omitempty"`
-	Enabled       *bool    `json:"enabled,omitempty" yaml:"enabled,omitempty" toml:"enabled,omitempty"`
-	PricePerKgCNY *Decimal `json:"price_per_kg_cny,omitempty" yaml:"price_per_kg_cny,omitempty" toml:"price_per_kg_cny,omitempty"`
+	ID         string   `json:"id" yaml:"id" toml:"id"`
+	Name       string   `json:"name,omitempty" yaml:"name,omitempty" toml:"name,omitempty"`
+	Enabled    *bool    `json:"enabled,omitempty" yaml:"enabled,omitempty" toml:"enabled,omitempty"`
+	PricePerKg *Decimal `json:"price_per_kg,omitempty" yaml:"price_per_kg,omitempty" toml:"price_per_kg,omitempty"`
+	Currency   string   `json:"currency,omitempty" yaml:"currency,omitempty" toml:"currency,omitempty"`
+
+	pricePerKgPresent bool
+	pricePerKgNull    bool
+	currencyPresent   bool
+	currencyNull      bool
 }
 
 type Assignment struct {
@@ -76,18 +84,20 @@ type Assignment struct {
 // Resolution is the complete set of external inputs needed by
 // landed_price for one immutable product Code.
 type Resolution struct {
-	CatalogRevision       string
-	CatalogStatus         string
-	CatalogFetchedAt      time.Time
-	CurrencyEffectiveDate string
-	SelectedWarehouses    []string
-	MethodID              string
-	ShippingPricePerKgCNY *Decimal
-	MarkupPercent         *Decimal
-	MarkupPercentSource   string
-	IRTPerCNY             *Decimal
-	ExplicitNulls         map[string]bool
-	Warnings              []string
+	CatalogRevision            string
+	CatalogStatus              string
+	CatalogFetchedAt           time.Time
+	CurrencyEffectiveDate      string
+	SelectedWarehouses         []string
+	MethodID                   string
+	ShippingPricePerKg         *Decimal
+	ShippingPricePerKgCurrency string
+	MarkupPercent              *Decimal
+	MarkupPercentSource        string
+	IRTPerCNY                  *Decimal
+	ExplicitNulls              map[string]bool
+	ShippingPricePairPresent   bool
+	Warnings                   []string
 }
 
 type Provider interface {
@@ -122,6 +132,11 @@ func Normalize(cfg Config) Config {
 	for code, assignment := range cfg.Static.Assignments {
 		assignment.MethodID = strings.TrimSpace(assignment.MethodID)
 		cfg.Static.Assignments[code] = assignment
+	}
+	for index := range cfg.Static.Methods {
+		cfg.Static.Methods[index].ID = strings.TrimSpace(cfg.Static.Methods[index].ID)
+		cfg.Static.Methods[index].Name = strings.TrimSpace(cfg.Static.Methods[index].Name)
+		cfg.Static.Methods[index].Currency = normalizeShippingCurrency(cfg.Static.Methods[index].Currency)
 	}
 	if cfg.Static.DefaultAssignment != nil {
 		cfg.Static.DefaultAssignment.MethodID = strings.TrimSpace(cfg.Static.DefaultAssignment.MethodID)
@@ -247,7 +262,29 @@ func (p *staticProvider) Resolve(_ context.Context, code string) Resolution {
 		if !exists {
 			resolution.Warnings = append(resolution.Warnings, "shipping_method_unknown")
 		} else {
-			resolution.ShippingPricePerKgCNY = cloneDecimal(method.PricePerKgCNY)
+			pricePresent, currencyPresent := method.shippingPairPresence()
+			if pricePresent {
+				resolution.ShippingPricePerKg = cloneDecimal(method.PricePerKg)
+			}
+			if currencyPresent {
+				resolution.ShippingPricePerKgCurrency = method.Currency
+			}
+			resolution.ShippingPricePairPresent = pricePresent && currencyPresent
+			if pricePresent != currencyPresent {
+				resolution.Warnings = append(resolution.Warnings, "shipping_price_per_kg_pair_incomplete")
+			}
+			if method.pricePerKgNull {
+				if resolution.ExplicitNulls == nil {
+					resolution.ExplicitNulls = make(map[string]bool)
+				}
+				resolution.ExplicitNulls["shipping_price_per_kg"] = true
+			}
+			if method.currencyNull {
+				if resolution.ExplicitNulls == nil {
+					resolution.ExplicitNulls = make(map[string]bool)
+				}
+				resolution.ExplicitNulls["shipping_price_per_kg_currency"] = true
+			}
 			if method.Enabled != nil && !*method.Enabled {
 				resolution.Warnings = append(resolution.Warnings, "shipping_method_disabled")
 			}
@@ -258,9 +295,31 @@ func (p *staticProvider) Resolve(_ context.Context, code string) Resolution {
 
 func finishResolution(value Resolution) Resolution {
 	value.MarkupPercentSource = strings.TrimSpace(value.MarkupPercentSource)
-	if !validPositive(value.ShippingPricePerKgCNY) {
-		value.ShippingPricePerKgCNY = nil
+	value.ShippingPricePerKgCurrency = normalizeShippingCurrency(value.ShippingPricePerKgCurrency)
+	priceExplicitlyNull := value.ExplicitNulls["shipping_price_per_kg"]
+	currencyExplicitlyNull := value.ExplicitNulls["shipping_price_per_kg_currency"]
+	priceAvailable := validPositive(value.ShippingPricePerKg)
+	currencyAvailable := validShippingCurrency(value.ShippingPricePerKgCurrency)
+	if !priceAvailable {
+		value.ShippingPricePerKg = nil
 		value.Warnings = append(value.Warnings, "shipping_price_per_kg_missing")
+	}
+	if !currencyAvailable {
+		if value.ShippingPricePerKgCurrency != "" && !currencyExplicitlyNull {
+			value.Warnings = append(value.Warnings, "shipping_price_per_kg_currency_invalid")
+		}
+		value.ShippingPricePerKgCurrency = ""
+		value.Warnings = append(value.Warnings, "shipping_price_per_kg_currency_missing")
+	}
+	if (priceAvailable || priceExplicitlyNull) != (currencyAvailable || currencyExplicitlyNull) {
+		value.ShippingPricePerKg = nil
+		value.ShippingPricePerKgCurrency = ""
+		delete(value.ExplicitNulls, "shipping_price_per_kg")
+		delete(value.ExplicitNulls, "shipping_price_per_kg_currency")
+		value.ShippingPricePairPresent = false
+		value.Warnings = append(value.Warnings, "shipping_price_per_kg_pair_incomplete")
+	} else if priceAvailable || priceExplicitlyNull {
+		value.ShippingPricePairPresent = true
 	}
 	if !validNonNegative(value.MarkupPercent) {
 		value.MarkupPercent = nil
@@ -273,6 +332,19 @@ func finishResolution(value Resolution) Resolution {
 	}
 	value.Warnings = normalizedStrings(value.Warnings)
 	return value
+}
+
+func normalizeShippingCurrency(value string) string {
+	return value
+}
+
+func validShippingCurrency(value string) bool {
+	switch normalizeShippingCurrency(value) {
+	case CurrencyCNY, CurrencyIRR:
+		return true
+	default:
+		return false
+	}
 }
 
 func validPositive(value *Decimal) bool {

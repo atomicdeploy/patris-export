@@ -17,15 +17,21 @@ warehouses, and parses:
 - the product-specific shipping method and percentage markup;
 - `landed_price` with exact decimal arithmetic and one final half-up round.
 
-The formula is:
+The formula produces IRT and accepts freight quoted in either CNY or IRR:
 
 ```text
-round_once((foreign_CNY + weight_g / 1000 * shipping_price_per_kg_CNY)
-  * (1 + markup_percent / 100) * IRT_per_CNY)
+goods_IRT = foreign_CNY * IRT_per_CNY
+shipping_IRT = if shipping_currency == CNY
+  then weight_g / 1000 * shipping_price_per_kg * IRT_per_CNY
+  else weight_g / 1000 * shipping_price_per_kg / 10
+final_price = round_once((goods_IRT + shipping_IRT)
+  * (1 + markup_percent / 100))
 ```
 
 The reference fixture `24.5 CNY + 240 g at 120 CNY/kg`, with `30%` markup and
-`29,000 IRT/CNY`, is `2,009,410 IRT`.
+`29,000 IRT/CNY`, is `2,009,410 IRT`. A CNY freight quote and an equivalent IRR
+quote produce the same final IRT amount; for example, `100 CNY/kg` at
+`30,000 IRT/CNY` equals `30,000,000 IRR/kg`.
 
 Missing or conflicting price, weight, shipping method, shipping price, markup,
 or FX values omit `final_price` and add sorted machine-readable warnings. They
@@ -40,9 +46,12 @@ real value is omitted from JSON and from the union of CSV/XLSX/SQL columns. A
 JSON `null` is emitted only when the source or pricing reference explicitly
 supplied `null`; it is never shorthand for missing, unavailable, invalid, or
 unparseable data. Pricing, formula, and shipping-method keys are emitted only
-when static pricing is explicitly populated or a Digitalogic endpoint is
-configured. The only shipping names are `shipping_method_id`,
-`shipping_price_per_kg_cny`, and `shipping_methods`.
+when static pricing is explicitly populated or a remote pricing endpoint is
+configured. Product rows use `shipping_method_id`, `shipping_price_per_kg`,
+and `shipping_price_per_kg_currency`. Catalog methods use `id`, `price_per_kg`,
+and `currency`. The amount and currency keys are one required pair: both are
+present or both are omitted. Currency values are the uppercase tokens `CNY`
+and `IRR`; no inferred default or alternate field name is accepted.
 
 This is a living integration standard. The current field set and routes are the
 only supported shape; producers and consumers change together.
@@ -69,7 +78,7 @@ Static mode is the standalone default. It works without WordPress or a network:
         "currency_effective_date": "2026-07-16",
         "selected_warehouses": ["1", "2", "6"],
         "shipping_methods": [
-          {"id": "air_express", "enabled": true, "price_per_kg_cny": 120}
+          {"id": "air_express", "enabled": true, "price_per_kg": 120, "currency": "CNY"}
         ],
         "assignments": {
           "113007045": {
@@ -82,6 +91,12 @@ Static mode is the standalone default. It works without WordPress or a network:
   }
 }
 ```
+
+Every configured shipping method requires an explicit currency selection. For
+an IRR quote, the same method entry can instead use
+`{"price_per_kg": 22000000, "currency": "IRR"}`. Missing or unsupported
+currency values omit the flattened shipping pair and add warnings rather than
+guessing a unit.
 
 ## Digitalogic provider
 
@@ -242,7 +257,8 @@ exports and catalog values must never be committed as golden fixtures.
       "foreign_price": 24.5,
       "weight_grams": 240,
       "shipping_method_id": "air_express",
-      "shipping_price_per_kg_cny": 120,
+      "shipping_price_per_kg": 120,
+      "shipping_price_per_kg_currency": "CNY",
       "markup_percent": 30,
       "irt_per_cny": 29000,
       "final_price": 2009410,

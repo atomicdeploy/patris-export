@@ -47,7 +47,7 @@ func syntheticGoldenEnvelope() *Envelope {
 		CurrencyEffectiveDate: "2026-01-01",
 		SelectedWarehouses:    []string{"1", "2"},
 		Methods: []pricingcatalog.Method{{
-			ID: "synthetic-air", Name: "Synthetic Air", Enabled: &enabled, PricePerKgCNY: &freight,
+			ID: "synthetic-air", Name: "Synthetic Air", Enabled: &enabled, PricePerKg: &freight, Currency: pricingcatalog.CurrencyCNY,
 		}},
 		Assignments: map[string]pricingcatalog.Assignment{
 			"101001001": {MethodID: "synthetic-air", ProfitPercent: &markup},
