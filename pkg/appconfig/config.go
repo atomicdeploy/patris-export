@@ -544,7 +544,30 @@ func sparseConfigMap(cfg Config) (map[string]interface{}, error) {
 	if err != nil {
 		return nil, err
 	}
-	return diffMap(defaultMap, current), nil
+	payload := diffMap(defaultMap, current)
+	preserveExplicitUIColumnLists(payload, current, cfg.UI)
+	return payload, nil
+}
+
+func preserveExplicitUIColumnLists(payload, current map[string]interface{}, ui UIConfig) {
+	if ui.HiddenColumns == nil && ui.ColumnOrder == nil {
+		return
+	}
+	currentUI, ok := current["ui"].(map[string]interface{})
+	if !ok {
+		return
+	}
+	payloadUI, _ := payload["ui"].(map[string]interface{})
+	if payloadUI == nil {
+		payloadUI = map[string]interface{}{}
+		payload["ui"] = payloadUI
+	}
+	if ui.HiddenColumns != nil {
+		payloadUI["hidden_columns"] = currentUI["hidden_columns"]
+	}
+	if ui.ColumnOrder != nil {
+		payloadUI["column_order"] = currentUI["column_order"]
+	}
 }
 
 func configToMap(cfg Config) (map[string]interface{}, error) {

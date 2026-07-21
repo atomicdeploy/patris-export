@@ -132,6 +132,17 @@ test('UIConfig column preferences override and migrate the legacy browser cache'
     ]);
     assert.equal(configured.migrateHiddenColumns, false);
     assert.equal(configured.migrateColumnOrder, false);
+
+    const clearedAfterRestart = resolvePersistedColumnPreferences({
+        hidden_columns: [],
+        column_order: []
+    }, legacy);
+    assert.deepEqual(clearedAfterRestart.hiddenColumns, []);
+    assert.deepEqual(clearedAfterRestart.columnOrder, []);
+    assert.equal(clearedAfterRestart.cacheHiddenColumns, true);
+    assert.equal(clearedAfterRestart.cacheColumnOrder, true);
+    assert.equal(clearedAfterRestart.migrateHiddenColumns, false);
+    assert.equal(clearedAfterRestart.migrateColumnOrder, false);
 });
 
 test('ordered icon rules match transformed canonical values and keep a fallback', () => {

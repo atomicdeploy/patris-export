@@ -179,6 +179,52 @@ func TestUITableUXPersistsThroughConfigPath(t *testing.T) {
 	}
 }
 
+func TestUIColumnPreferenceClearsSurviveSparseRestart(t *testing.T) {
+	for _, extension := range []string{"json", "yaml", "toml"} {
+		t.Run(extension, func(t *testing.T) {
+			configPath := filepath.Join(t.TempDir(), "patris-export."+extension)
+			mgr, err := LoadFiles([]string{configPath})
+			if err != nil {
+				t.Fatalf("LoadFiles failed: %v", err)
+			}
+			if err := mgr.Update(func(cfg *Config) {
+				cfg.UI.HiddenColumns = []string{}
+				cfg.UI.ColumnOrder = []string{}
+			}); err != nil {
+				t.Fatalf("clear column preferences failed: %v", err)
+			}
+
+			data, err := os.ReadFile(configPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if text := string(data); !containsAll(text, "hidden_columns", "column_order") {
+				t.Fatalf("explicit empty column preferences were dropped from sparse config:\n%s", text)
+			}
+
+			reloaded, err := LoadFiles([]string{configPath})
+			if err != nil {
+				t.Fatalf("restart reload failed: %v", err)
+			}
+			ui := reloaded.Get().UI
+			if ui.HiddenColumns == nil || ui.ColumnOrder == nil || len(ui.HiddenColumns) != 0 || len(ui.ColumnOrder) != 0 {
+				t.Fatalf("explicit cleared preferences did not survive restart: %+v", ui)
+			}
+			if err := reloaded.Save(); err != nil {
+				t.Fatalf("second sparse save failed: %v", err)
+			}
+			secondRestart, err := LoadFiles([]string{configPath})
+			if err != nil {
+				t.Fatalf("second restart reload failed: %v", err)
+			}
+			ui = secondRestart.Get().UI
+			if ui.HiddenColumns == nil || ui.ColumnOrder == nil {
+				t.Fatalf("explicit cleared preferences were dropped after restart and save: %+v", ui)
+			}
+		})
+	}
+}
+
 func TestApplyEnvNotificationOptions(t *testing.T) {
 	t.Setenv("PATRIS_EXPORT_NOTIFICATIONS", "true")
 	t.Setenv("PATRIS_EXPORT_NOTIFY_CLIENT_CONNECTED", "true")
