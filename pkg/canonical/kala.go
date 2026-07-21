@@ -44,34 +44,35 @@ var reservedNonMerchandiseCodes = map[string]struct{}{
 }
 
 type Product struct {
-	ProductCode            string                  `json:"product_code"`
-	CategoryCode           string                  `json:"category_code"`
-	Name                   string                  `json:"name"`
-	Serial                 string                  `json:"serial"`
-	Unit                   string                  `json:"unit"`
-	SalePriceSource        *float64                `json:"sale_price_source"`
-	PurchasePriceSource    *float64                `json:"purchase_price_source"`
-	WarehouseStock         map[string]float64      `json:"warehouse_stock"`
-	TotalStock             *float64                `json:"total_stock"`
-	MinimumStock           *float64                `json:"minimum_stock"`
-	ForeignCurrency        string                  `json:"foreign_currency"`
-	ForeignPrice           *pricingcatalog.Decimal `json:"foreign_price"`
-	WeightGrams            *pricingcatalog.Decimal `json:"weight_grams"`
-	Location               string                  `json:"location"`
-	ShippingMethodID       string                  `json:"shipping_method_id,omitempty"`
-	ShippingPricePerKgCNY  *pricingcatalog.Decimal `json:"shipping_price_per_kg_cny,omitempty"`
-	MarkupPercent          *pricingcatalog.Decimal `json:"markup_percent"`
-	IRTPerCNY              *pricingcatalog.Decimal `json:"irt_per_cny"`
-	PricingCatalogRevision string                  `json:"pricing_catalog_revision"`
-	PricingCatalogStatus   string                  `json:"pricing_catalog_status"`
-	CurrencyEffectiveDate  string                  `json:"currency_effective_date"`
-	FinalPrice             *int64                  `json:"final_price"`
-	SourceUpdatedAt        string                  `json:"source_updated_at"`
-	Warnings               []string                `json:"warnings"`
-	RecordHash             string                  `json:"record_hash,omitempty"`
-	fieldPresence          map[string]fieldPresence
-	warehouseNulls         map[string]bool
-	integrationActive      bool
+	ProductCode                string                  `json:"product_code"`
+	CategoryCode               string                  `json:"category_code"`
+	Name                       string                  `json:"name"`
+	Serial                     string                  `json:"serial"`
+	Unit                       string                  `json:"unit"`
+	SalePriceSource            *float64                `json:"sale_price_source"`
+	PurchasePriceSource        *float64                `json:"purchase_price_source"`
+	WarehouseStock             map[string]float64      `json:"warehouse_stock"`
+	TotalStock                 *float64                `json:"total_stock"`
+	MinimumStock               *float64                `json:"minimum_stock"`
+	ForeignCurrency            string                  `json:"foreign_currency"`
+	ForeignPrice               *pricingcatalog.Decimal `json:"foreign_price"`
+	WeightGrams                *pricingcatalog.Decimal `json:"weight_grams"`
+	Location                   string                  `json:"location"`
+	ShippingMethodID           string                  `json:"shipping_method_id,omitempty"`
+	ShippingPricePerKg         *pricingcatalog.Decimal `json:"shipping_price_per_kg,omitempty"`
+	ShippingPricePerKgCurrency string                  `json:"shipping_price_per_kg_currency,omitempty"`
+	MarkupPercent              *pricingcatalog.Decimal `json:"markup_percent"`
+	IRTPerCNY                  *pricingcatalog.Decimal `json:"irt_per_cny"`
+	PricingCatalogRevision     string                  `json:"pricing_catalog_revision"`
+	PricingCatalogStatus       string                  `json:"pricing_catalog_status"`
+	CurrencyEffectiveDate      string                  `json:"currency_effective_date"`
+	FinalPrice                 *int64                  `json:"final_price"`
+	SourceUpdatedAt            string                  `json:"source_updated_at"`
+	Warnings                   []string                `json:"warnings"`
+	RecordHash                 string                  `json:"record_hash,omitempty"`
+	fieldPresence              map[string]fieldPresence
+	warehouseNulls             map[string]bool
+	integrationActive          bool
 }
 
 type fieldPresence uint8
@@ -447,8 +448,8 @@ func parseKalaProduct(ctx context.Context, row map[string]interface{}, provider 
 	totalStock := totalStock(row, warehouseStock, resolution.SelectedWarehouses, &warnings)
 
 	var finalPrice *int64
-	if foreignPrice != nil && weight != nil && resolution.ShippingPricePerKgCNY != nil && resolution.MarkupPercent != nil && resolution.IRTPerCNY != nil {
-		value, err := LandedPrice(weight.String(), resolution.ShippingPricePerKgCNY.String(), foreignPrice.String(), resolution.MarkupPercent.String(), resolution.IRTPerCNY.String())
+	if foreignPrice != nil && weight != nil && resolution.ShippingPricePerKg != nil && resolution.ShippingPricePerKgCurrency != "" && resolution.MarkupPercent != nil && resolution.IRTPerCNY != nil {
+		value, err := LandedPrice(weight.String(), resolution.ShippingPricePerKg.String(), resolution.ShippingPricePerKgCurrency, foreignPrice.String(), resolution.MarkupPercent.String(), resolution.IRTPerCNY.String())
 		if err != nil {
 			warnings = append(warnings, "landed_price_calculation_failed")
 		} else {
@@ -486,32 +487,33 @@ func parseKalaProduct(ctx context.Context, row map[string]interface{}, provider 
 	}
 
 	return Product{
-		ProductCode:            code,
-		Name:                   normalizeText(firstValue(row, "name", "Name", "part_number")),
-		Serial:                 normalizeText(firstValue(row, "serial", "Serial")),
-		Unit:                   normalizeText(firstValue(row, "unit", "Vahed")),
-		SalePriceSource:        nullableNumber(firstValue(row, "sale_price_source", "FOROSH", "fee_kol")),
-		PurchasePriceSource:    nullableNumber(firstValue(row, "purchase_price_source", "KHARYD", "purchase_price")),
-		WarehouseStock:         warehouseStock,
-		TotalStock:             totalStock,
-		MinimumStock:           nullableNumber(firstValue(row, "minimum_stock", "Sefaresh", "minimum")),
-		ForeignCurrency:        "CNY",
-		ForeignPrice:           foreignPrice,
-		WeightGrams:            weight,
-		Location:               location,
-		ShippingMethodID:       resolution.MethodID,
-		ShippingPricePerKgCNY:  resolution.ShippingPricePerKgCNY,
-		MarkupPercent:          resolution.MarkupPercent,
-		IRTPerCNY:              resolution.IRTPerCNY,
-		PricingCatalogRevision: resolution.CatalogRevision,
-		PricingCatalogStatus:   resolution.CatalogStatus,
-		CurrencyEffectiveDate:  resolution.CurrencyEffectiveDate,
-		FinalPrice:             finalPrice,
-		SourceUpdatedAt:        normalizeText(firstValue(row, "source_updated_at", "updated_at", "Dates")),
-		Warnings:               normalizedWarnings(warnings),
-		fieldPresence:          presence,
-		warehouseNulls:         warehouseNulls,
-		integrationActive:      integrationActive,
+		ProductCode:                code,
+		Name:                       normalizeText(firstValue(row, "name", "Name", "part_number")),
+		Serial:                     normalizeText(firstValue(row, "serial", "Serial")),
+		Unit:                       normalizeText(firstValue(row, "unit", "Vahed")),
+		SalePriceSource:            nullableNumber(firstValue(row, "sale_price_source", "FOROSH", "fee_kol")),
+		PurchasePriceSource:        nullableNumber(firstValue(row, "purchase_price_source", "KHARYD", "purchase_price")),
+		WarehouseStock:             warehouseStock,
+		TotalStock:                 totalStock,
+		MinimumStock:               nullableNumber(firstValue(row, "minimum_stock", "Sefaresh", "minimum")),
+		ForeignCurrency:            "CNY",
+		ForeignPrice:               foreignPrice,
+		WeightGrams:                weight,
+		Location:                   location,
+		ShippingMethodID:           resolution.MethodID,
+		ShippingPricePerKg:         resolution.ShippingPricePerKg,
+		ShippingPricePerKgCurrency: resolution.ShippingPricePerKgCurrency,
+		MarkupPercent:              resolution.MarkupPercent,
+		IRTPerCNY:                  resolution.IRTPerCNY,
+		PricingCatalogRevision:     resolution.CatalogRevision,
+		PricingCatalogStatus:       resolution.CatalogStatus,
+		CurrencyEffectiveDate:      resolution.CurrencyEffectiveDate,
+		FinalPrice:                 finalPrice,
+		SourceUpdatedAt:            normalizeText(firstValue(row, "source_updated_at", "updated_at", "Dates")),
+		Warnings:                   normalizedWarnings(warnings),
+		fieldPresence:              presence,
+		warehouseNulls:             warehouseNulls,
+		integrationActive:          integrationActive,
 	}
 }
 
@@ -536,7 +538,8 @@ func (product Product) Map() map[string]interface{} {
 	putString(row, "location", product.Location, product.presence("location"))
 	if product.integrationActive {
 		putString(row, "shipping_method_id", product.ShippingMethodID, product.presence("shipping_method_id"))
-		putPointer(row, "shipping_price_per_kg_cny", pointerDecimalValue(product.ShippingPricePerKgCNY), product.presence("shipping_price_per_kg_cny"))
+		putPointer(row, "shipping_price_per_kg", pointerDecimalValue(product.ShippingPricePerKg), product.presence("shipping_price_per_kg"))
+		putString(row, "shipping_price_per_kg_currency", product.ShippingPricePerKgCurrency, product.presence("shipping_price_per_kg_currency"))
 		putPointer(row, "markup_percent", pointerDecimalValue(product.MarkupPercent), product.presence("markup_percent"))
 		putPointer(row, "irt_per_cny", pointerDecimalValue(product.IRTPerCNY), product.presence("irt_per_cny"))
 		putString(row, "pricing_catalog_revision", product.PricingCatalogRevision, product.presence("pricing_catalog_revision"))
@@ -566,7 +569,7 @@ func (product *Product) UnmarshalJSON(data []byte) error {
 		"product_code", "category_code", "name", "serial", "unit", "sale_price_source",
 		"purchase_price_source", "warehouse_stock", "total_stock", "minimum_stock",
 		"foreign_currency", "foreign_price", "weight_grams", "location", "shipping_method_id",
-		"shipping_price_per_kg_cny", "markup_percent", "irt_per_cny", "pricing_catalog_revision",
+		"shipping_price_per_kg", "shipping_price_per_kg_currency", "markup_percent", "irt_per_cny", "pricing_catalog_revision",
 		"pricing_catalog_status", "currency_effective_date", "final_price", "source_updated_at",
 		"warnings", "record_hash",
 	}); err != nil {
@@ -584,7 +587,7 @@ func (product *Product) UnmarshalJSON(data []byte) error {
 		"name", "serial", "unit", "sale_price_source", "purchase_price_source",
 		"warehouse_stock", "total_stock", "minimum_stock", "foreign_currency", "foreign_price",
 		"weight_grams", "location", "source_updated_at", "shipping_method_id",
-		"shipping_price_per_kg_cny", "markup_percent", "irt_per_cny",
+		"shipping_price_per_kg", "shipping_price_per_kg_currency", "markup_percent", "irt_per_cny",
 		"pricing_catalog_revision", "pricing_catalog_status", "currency_effective_date",
 		"final_price",
 	} {
@@ -594,6 +597,16 @@ func (product *Product) UnmarshalJSON(data []byte) error {
 			} else {
 				product.fieldPresence[field] = fieldValue
 			}
+		}
+	}
+	_, shippingPricePresent := raw["shipping_price_per_kg"]
+	_, shippingCurrencyPresent := raw["shipping_price_per_kg_currency"]
+	if shippingPricePresent != shippingCurrencyPresent {
+		return fmt.Errorf("product shipping_price_per_kg and shipping_price_per_kg_currency must be present together")
+	}
+	if shippingCurrencyPresent && product.presence("shipping_price_per_kg_currency") != fieldNull {
+		if product.ShippingPricePerKgCurrency != pricingcatalog.CurrencyCNY && product.ShippingPricePerKgCurrency != pricingcatalog.CurrencyIRR {
+			return fmt.Errorf("product shipping_price_per_kg_currency must be CNY or IRR")
 		}
 	}
 	product.warehouseNulls = map[string]bool{}
@@ -610,7 +623,7 @@ func (product *Product) UnmarshalJSON(data []byte) error {
 	}
 
 	for _, field := range []string{
-		"shipping_method_id", "shipping_price_per_kg_cny", "markup_percent", "irt_per_cny",
+		"shipping_method_id", "shipping_price_per_kg", "shipping_price_per_kg_currency", "markup_percent", "irt_per_cny",
 		"pricing_catalog_revision", "pricing_catalog_status", "currency_effective_date", "final_price",
 	} {
 		if _, exists := raw[field]; exists {

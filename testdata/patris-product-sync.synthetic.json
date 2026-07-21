@@ -1,13 +1,13 @@
 {
   "schema": "patris.product-sync",
   "event_type": "snapshot",
-  "event_id": "sha256:91f8d8fdf0008f125499f56a7100eaba86fd6bb42f0fc3f2a4bcb4e6e8add87f",
+  "event_id": "sha256:2ba1d1a409ff898c96d25c58c71a4f4e8350fd210b7911796e73d8c6d0ea4fa1",
   "local_currency": "IRT",
   "formula_id": "landed_price",
   "source": {
     "id": "synthetic-fixture",
     "dataset": "synthetic-kala.db",
-    "revision": "sha256:09b6c03ae06bab9965f91b8b025a7fc222295ca9b758b5b42506adec4525b047"
+    "revision": "sha256:f07443283761d7eacd51185784d7b867f15941872676282788c201006a5d29f6"
   },
   "generated_at": "2026-01-02T03:04:05Z",
   "products": [
@@ -26,11 +26,12 @@
       "pricing_catalog_status": "static",
       "product_code": "101001001",
       "purchase_price_source": 90000,
-      "record_hash": "sha256:1d12723b608041d7aa675a0699a8d4f7da13578c918bbfad16085880e4c8131c",
+      "record_hash": "sha256:816d941557f3c2998a9d27908a9d4e2051e25aa4eaf6543ca3d594ef3fcbe05e",
       "sale_price_source": 100000,
       "serial": "SYNTH-PN-001",
       "shipping_method_id": "synthetic-air",
-      "shipping_price_per_kg_cny": 120,
+      "shipping_price_per_kg": 120,
+      "shipping_price_per_kg_currency": "CNY",
       "source_updated_at": "2026-01-01T00:00:00Z",
       "total_stock": 5,
       "unit": "unit",
@@ -50,7 +51,7 @@
       "pricing_catalog_revision": "synthetic-catalog",
       "pricing_catalog_status": "static",
       "product_code": "101001002",
-      "record_hash": "sha256:924dd0f1461c6a860e987248d6064a69d11c73dae9911a0c8f406ba79c94b9ea",
+      "record_hash": "sha256:ddfabf4f2d4c705aa4a695afe6f7fa1b71015be351a16d6d94faf34b33f9091a",
       "serial": "SYNTH-PN-002",
       "total_stock": 0,
       "unit": "unit",
@@ -63,6 +64,7 @@
         "foreign_price_missing",
         "markup_percent_missing",
         "shipping_method_missing",
+        "shipping_price_per_kg_currency_missing",
         "shipping_price_per_kg_missing",
         "weight_missing"
       ]
