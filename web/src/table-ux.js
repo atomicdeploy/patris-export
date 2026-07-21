@@ -992,16 +992,216 @@ export function stableRecordKey(record) {
     return value === null || value === undefined ? '' : String(value).trim();
 }
 
-export function structuredValueText(value) {
-    if (value === null || value === undefined) return '';
-    if (Array.isArray(value)) return value.map(structuredValueText).filter(Boolean).join(', ');
-    if (typeof value === 'object') {
-        return Object.entries(value)
-            .sort(([left], [right]) => left.localeCompare(right, undefined, { numeric: true, sensitivity: 'base' }))
-            .map(([key, nested]) => `${key}: ${structuredValueText(nested)}`)
-            .join(', ');
+const STRUCTURED_VALUE_MAX_DEPTH = 32;
+const STRUCTURED_VALUE_LOCALES = {
+    en: {
+        collator: new Intl.Collator('en-US', { numeric: true, sensitivity: 'base' }),
+        number: new Intl.NumberFormat('en-US', { useGrouping: false, maximumFractionDigits: 20 })
+    },
+    fa: {
+        collator: new Intl.Collator('fa-IR', { numeric: true, sensitivity: 'base' }),
+        number: new Intl.NumberFormat('fa-IR', { useGrouping: false, maximumFractionDigits: 20 })
     }
-    return String(value);
+};
+
+export const TABLE_VIRTUALIZATION_THRESHOLD = 200;
+// The existing 28px row action plus vertical cell padding requires 54px.
+// Keep this synchronized with the virtualized-grid rule in styles.scss.
+export const TABLE_VIRTUAL_ROW_HEIGHT = 54;
+export const TABLE_VIRTUAL_OVERSCAN = 8;
+
+// Keep machine output independent of the host locale. Human output deliberately
+// uses the selected interface locale, with an ordinal tie-breaker so Collator
+// equivalence never makes object-key ordering depend on insertion order.
+function compareMachineKeys(left, right) {
+    return left < right ? -1 : (left > right ? 1 : 0);
+}
+
+function compareDisplayKeys(left, right, locale) {
+    const collator = STRUCTURED_VALUE_LOCALES[locale === 'fa' ? 'fa' : 'en'].collator;
+    const compared = collator.compare(left, right);
+    return compared || compareMachineKeys(left, right);
+}
+
+function normalizeStructuredValue(value, seen = new WeakSet(), depth = 0) {
+    if (value === null || value === undefined) return null;
+    if (typeof value === 'string' || typeof value === 'boolean') return value;
+    if (typeof value === 'number') return Number.isFinite(value) ? value : null;
+    if (typeof value === 'bigint') return value.toString();
+    if (typeof value === 'function' || typeof value === 'symbol') return null;
+    if (depth >= STRUCTURED_VALUE_MAX_DEPTH) return '[MaxDepth]';
+    if (typeof value !== 'object') return String(value);
+
+    if (Object.prototype.toString.call(value) === '[object Date]') {
+        try {
+            return value.toISOString();
+        } catch {
+            return null;
+        }
+    }
+    if (seen.has(value)) return '[Circular]';
+    seen.add(value);
+    try {
+        if (Array.isArray(value)) {
+            return value.map(item => normalizeStructuredValue(item, seen, depth + 1));
+        }
+        const normalized = Object.create(null);
+        Object.keys(value).sort(compareMachineKeys).forEach(key => {
+            try {
+                Object.defineProperty(normalized, key, {
+                    value: normalizeStructuredValue(value[key], seen, depth + 1),
+                    enumerable: true,
+                    configurable: true,
+                    writable: true
+                });
+            } catch {
+                Object.defineProperty(normalized, key, {
+                    value: '[Unavailable]',
+                    enumerable: true,
+                    configurable: true,
+                    writable: true
+                });
+            }
+        });
+        return normalized;
+    } finally {
+        seen.delete(value);
+    }
+}
+
+export function stableStructuredJSON(value, space = 0) {
+    return JSON.stringify(normalizeStructuredValue(value), null, space);
+}
+
+function humanStructuredValue(value, options, seen = new WeakSet(), depth = 0, nested = false) {
+    const locale = options.locale === 'fa' ? 'fa' : 'en';
+    if (value === null) return options.nullText ?? (locale === 'fa' ? 'تهی' : 'null');
+    if (value === undefined) return options.nullText ?? (locale === 'fa' ? 'تعریف‌نشده' : 'undefined');
+    if (typeof value === 'string') return nested && value === '' ? '""' : value;
+    if (typeof value === 'boolean') {
+        if (locale === 'fa') return value ? 'درست' : 'نادرست';
+        return value ? 'true' : 'false';
+    }
+    if (typeof value === 'number') {
+        if (!Number.isFinite(value)) return String(value);
+        return STRUCTURED_VALUE_LOCALES[locale].number.format(value);
+    }
+    if (typeof value === 'bigint') return value.toString();
+    if (typeof value === 'function' || typeof value === 'symbol') return options.nullText ?? '';
+    if (depth >= STRUCTURED_VALUE_MAX_DEPTH) return '[MaxDepth]';
+    if (typeof value !== 'object') return String(value);
+    if (Object.prototype.toString.call(value) === '[object Date]') {
+        try {
+            return value.toISOString();
+        } catch {
+            return options.nullText ?? '';
+        }
+    }
+    if (seen.has(value)) return '[Circular]';
+    seen.add(value);
+    try {
+        if (Array.isArray(value)) {
+            return value.map(item => humanStructuredValue(item, options, seen, depth + 1, true)).join(', ');
+        }
+        const keys = Object.keys(value).sort((left, right) => compareDisplayKeys(left, right, locale));
+        const entries = keys.map(key => {
+            let nestedValue;
+            try {
+                nestedValue = humanStructuredValue(value[key], options, seen, depth + 1, true);
+            } catch {
+                nestedValue = '[Unavailable]';
+            }
+            return `${key}: ${nestedValue}`;
+        });
+        return entries.join(', ');
+    } finally {
+        seen.delete(value);
+    }
+}
+
+// All viewer presentation/export paths call this formatter. `display` is
+// locale-aware for people; `machine` preserves nested values as stable JSON;
+// `sort` prefixes the stable machine representation with a type rank.
+export function formatStructuredValue(value, options = {}) {
+    const mode = options.mode || 'display';
+    if (mode === 'json') return stableStructuredJSON(value, options.space || 0);
+    if (mode === 'machine') {
+        if (value === null || value === undefined) return '';
+        if (typeof value === 'object') return stableStructuredJSON(value);
+        if (typeof value === 'number' && !Number.isFinite(value)) return '';
+        return String(value);
+    }
+    if (mode === 'sort') {
+        const rank = value === null || value === undefined ? 0
+            : typeof value === 'boolean' ? 1
+                : typeof value === 'number' || typeof value === 'bigint' ? 2
+                    : typeof value === 'string' ? 3
+                        : Array.isArray(value) ? 4 : 5;
+        return `${rank}:${formatStructuredValue(value, { ...options, mode: 'machine' })}`;
+    }
+    return humanStructuredValue(value, options);
+}
+
+export function structuredValueText(value, options = {}) {
+    return formatStructuredValue(value, { ...options, mode: 'display' });
+}
+
+export function tableVirtualizationEnabled(rowCount, threshold = TABLE_VIRTUALIZATION_THRESHOLD) {
+    return Math.max(0, Number(rowCount) || 0) > Math.max(0, Number(threshold) || 0);
+}
+
+// Produces one viewport interval plus any pinned logical-focus/anchor rows.
+// Sparse intervals keep the active row mounted without forcing every row
+// between it and the visible viewport into the DOM.
+export function virtualizedRowSegments(options = {}) {
+    const rowCount = Math.max(0, Math.floor(Number(options.rowCount) || 0));
+    const rowHeight = Math.max(1, Number(options.rowHeight) || TABLE_VIRTUAL_ROW_HEIGHT);
+    const viewportHeight = Math.max(rowHeight, Number(options.viewportHeight) || rowHeight);
+    const headerHeight = Math.max(0, Number(options.headerHeight) || 0);
+    const scrollTop = Math.max(0, Number(options.scrollTop) || 0);
+    const overscan = Math.max(0, Math.floor(Number(options.overscan) || 0));
+    const viewportTop = Math.max(0, scrollTop - headerHeight);
+    const firstVisible = Math.min(rowCount, Math.floor(viewportTop / rowHeight));
+    const visibleRows = Math.max(1, Math.ceil(viewportHeight / rowHeight));
+    const start = Math.max(0, firstVisible - overscan);
+    const end = Math.min(rowCount, firstVisible + visibleRows + overscan);
+    const intervals = end > start ? [[start, end]] : [];
+
+    const pinned = [...new Set(options.pinnedIndices || [])]
+        .map(index => Math.floor(Number(index)))
+        .filter(index => Number.isFinite(index) && index >= 0 && index < rowCount)
+        .sort((left, right) => left - right);
+    pinned.forEach(index => intervals.push([index, index + 1]));
+    intervals.sort((left, right) => left[0] - right[0]);
+
+    const merged = [];
+    intervals.forEach(([intervalStart, intervalEnd]) => {
+        const previous = merged[merged.length - 1];
+        if (previous && intervalStart <= previous[1]) {
+            previous[1] = Math.max(previous[1], intervalEnd);
+        } else {
+            merged.push([intervalStart, intervalEnd]);
+        }
+    });
+
+    let cursor = 0;
+    const segments = merged.map(([segmentStart, segmentEnd]) => {
+        const segment = {
+            start: segmentStart,
+            end: segmentEnd,
+            spacerRows: segmentStart - cursor
+        };
+        cursor = segmentEnd;
+        return segment;
+    });
+    return {
+        rowCount,
+        rowHeight,
+        firstVisible,
+        segments,
+        trailingSpacerRows: rowCount - cursor,
+        renderedRows: segments.reduce((total, segment) => total + segment.end - segment.start, 0)
+    };
 }
 
 export function duplicateSafeRecordKeys(records) {

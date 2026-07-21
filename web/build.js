@@ -59,6 +59,8 @@ async function build() {
   const charmapHtml = fs.readFileSync('src/charmap.html', 'utf8');
 
   // Inline everything into viewer.html
+  // Function replacers keep JavaScript replacement tokens such as `$&`
+  // literal in every embedded route.
   const finalViewerHtml = viewerHtml
     .replace('<!-- STYLES -->', () => `<style>${embeddedFontCSS()}${css}</style>`)
     .replace('<!-- SCRIPTS -->', () => `<script>${js}</script>`);
@@ -68,7 +70,6 @@ async function build() {
   const finalCharmapHtml = charmapHtml
     .replace('<!-- EMBEDDED_FONT -->', () => embeddedFontCSS())
     .replace('<!-- PAGE_SCRIPTS -->', () => charmapJs);
-
   // Ensure dist directory exists
   if (!fs.existsSync('dist')) {
     fs.mkdirSync('dist');
