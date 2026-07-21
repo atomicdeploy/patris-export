@@ -35,6 +35,9 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Fixed
 
+- Browser configuration responses, initial WebSocket snapshots, and config
+  update events no longer expose the MySQL DSN; browser saves preserve the
+  protected server-side value and ignore client-supplied replacements.
 - Excel dashboard refresh now validates Code identity before mutating reviewed
   rows, rejects empty/non-JSON Digitalogic responses, uses deterministic
   canonical-over-legacy label precedence, and strips private Office path/author

@@ -544,6 +544,80 @@ func TestServerJSON(t *testing.T) {
 	})
 }
 
+func TestBrowserConfigRedactsAndPreservesMySQLDSN(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "patris-export.json")
+	manager, err := appconfig.Load(configPath)
+	if err != nil {
+		t.Fatalf("load config manager: %v", err)
+	}
+	const protectedDSN = "protected-dsn-test-value"
+	if err := manager.Update(func(cfg *appconfig.Config) {
+		cfg.Export.MySQLDSN = protectedDSN
+	}); err != nil {
+		t.Fatalf("store protected DSN: %v", err)
+	}
+
+	jsonPath := filepath.Join(tmpDir, "records.json")
+	if err := os.WriteFile(jsonPath, []byte(`{"001":{"Code":"001","Name":"Test"}}`), 0600); err != nil {
+		t.Fatalf("write test records: %v", err)
+	}
+	srv, err := NewServerWithOptions(jsonPath, nil, Options{Config: manager}, false)
+	if err != nil {
+		t.Fatalf("create server: %v", err)
+	}
+	defer srv.Close()
+
+	assertRedacted := func(t *testing.T, value interface{}) {
+		t.Helper()
+		data, err := json.Marshal(value)
+		if err != nil {
+			t.Fatalf("marshal browser payload: %v", err)
+		}
+		body := string(data)
+		if strings.Contains(body, protectedDSN) || strings.Contains(body, `"mysql_dsn"`) {
+			t.Fatalf("browser payload exposed protected SQL configuration: %s", body)
+		}
+	}
+
+	get := httptest.NewRecorder()
+	srv.router.ServeHTTP(get, httptest.NewRequest(http.MethodGet, "/api/config", nil))
+	if get.Code != http.StatusOK {
+		t.Fatalf("GET /api/config status = %d: %s", get.Code, get.Body.String())
+	}
+	assertRedacted(t, json.RawMessage(get.Body.Bytes()))
+
+	initial := srv.initialSnapshotMessage(recordpipe.Result{Rows: []map[string]interface{}{}, KeyField: "Code"}, jsonPath, "")
+	assertRedacted(t, initial)
+
+	events, unsubscribe := srv.SubscribeEvents(1)
+	defer unsubscribe()
+	srv.broadcastConfig(manager.Get())
+	select {
+	case event := <-events:
+		assertRedacted(t, event)
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for config broadcast")
+	}
+
+	clientConfig := browserConfig(manager.Get())
+	clientConfig.UI.Theme = "dark"
+	clientConfig.Export.MySQLDSN = "browser-supplied-dsn-must-be-ignored"
+	body, err := json.Marshal(clientConfig)
+	if err != nil {
+		t.Fatalf("marshal browser update: %v", err)
+	}
+	put := httptest.NewRecorder()
+	srv.router.ServeHTTP(put, httptest.NewRequest(http.MethodPut, "/api/config", bytes.NewReader(body)))
+	if put.Code != http.StatusOK {
+		t.Fatalf("PUT /api/config status = %d: %s", put.Code, put.Body.String())
+	}
+	assertRedacted(t, json.RawMessage(put.Body.Bytes()))
+	if got := manager.Get(); got.Export.MySQLDSN != protectedDSN || got.UI.Theme != "dark" {
+		t.Fatalf("browser update did not preserve protected DSN and apply UI setting: DSN preserved=%t theme=%q", got.Export.MySQLDSN == protectedDSN, got.UI.Theme)
+	}
+}
+
 func TestCanonicalKalaParityAcrossRESTCSVXLSXAndWebSocket(t *testing.T) {
 	configPath := filepath.Join("..", "..", "testdata", "canonical-static-config.json")
 	manager, err := appconfig.Load(configPath)
