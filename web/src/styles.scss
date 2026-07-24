@@ -986,6 +986,22 @@ body.is-loading .data-table {
     }
 }
 
+.btn-danger {
+    background: $danger-color;
+    color: #fff;
+
+    &:hover {
+        background: #dc2626;
+        opacity: 1;
+    }
+
+    &:disabled {
+        background: rgba($danger-color, 0.42);
+        cursor: not-allowed;
+        opacity: 0.72;
+    }
+}
+
 // Loading
 .loading {
     display: flex;
@@ -1800,6 +1816,684 @@ body.is-loading .data-table {
     }
 }
 
+.sql-target-button {
+    position: relative;
+}
+
+.sql-target-indicator {
+    width: 0.55rem;
+    height: 0.55rem;
+    flex: 0 0 0.55rem;
+    border: 2px solid $bg-light;
+    border-radius: 999px;
+    background: $text-light-secondary;
+    box-shadow: 0 0 0 1px rgba($text-light-secondary, 0.2);
+
+    &.success {
+        background: $success-color;
+        box-shadow: 0 0 0 1px rgba($success-color, 0.24);
+    }
+
+    &.warning {
+        background: $warning-color;
+        box-shadow: 0 0 0 1px rgba($warning-color, 0.24);
+    }
+
+    .dark-mode & {
+        border-color: $bg-dark;
+    }
+}
+
+.sql-target-modal {
+    width: min(1080px, calc(100vw - 2rem));
+    max-height: min(880px, calc(100vh - 2rem));
+}
+
+.sql-target-header {
+    position: relative;
+    padding-bottom: 1.1rem;
+    border-bottom: 1px solid rgba($primary-color, 0.14);
+    background:
+        radial-gradient(circle at 10% 0%, rgba($primary-color, 0.14), transparent 44%),
+        linear-gradient(135deg, rgba($primary-color, 0.055), rgba($success-color, 0.035));
+
+    .dark-mode & {
+        border-bottom-color: rgba($primary-color, 0.28);
+        background:
+            radial-gradient(circle at 10% 0%, rgba($primary-color, 0.23), transparent 44%),
+            linear-gradient(135deg, rgba($primary-color, 0.11), rgba($success-color, 0.055));
+    }
+
+    .settings-path {
+        max-width: 70ch;
+        font-family: inherit;
+        font-size: 0.84rem;
+        line-height: 1.55;
+    }
+}
+
+.sql-target-heading {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.9rem;
+    min-width: 0;
+}
+
+.sql-target-heading-icon,
+.sql-target-lock-icon,
+.sql-target-action-icon {
+    display: inline-grid;
+    place-items: center;
+    flex: 0 0 auto;
+    color: $primary-hover;
+    background: rgba($primary-color, 0.11);
+    border: 1px solid rgba($primary-color, 0.18);
+
+    svg {
+        width: 1.45rem;
+        height: 1.45rem;
+        fill: none;
+        stroke: currentColor;
+        stroke-width: 1.8;
+        stroke-linecap: round;
+        stroke-linejoin: round;
+    }
+
+    .dark-mode & {
+        color: #a5b4fc;
+        background: rgba($primary-color, 0.18);
+        border-color: rgba($primary-color, 0.3);
+    }
+}
+
+.sql-target-heading-icon {
+    width: 3rem;
+    height: 3rem;
+    border-radius: 0.85rem;
+}
+
+.sql-target-title-line {
+    display: flex;
+    align-items: center;
+    gap: 0.65rem;
+    flex-wrap: wrap;
+}
+
+.sql-target-lock-button[hidden] {
+    display: none;
+}
+
+.sql-target-session-chip,
+.sql-target-operation-chip {
+    display: inline-flex;
+    align-items: center;
+    width: max-content;
+    min-height: 1.55rem;
+    padding: 0.15rem 0.55rem;
+    border: 1px solid $border-light;
+    border-radius: 999px;
+    background: $bg-light-secondary;
+    color: $text-light-secondary;
+    font-size: 0.72rem;
+    font-weight: 800;
+    letter-spacing: 0.02em;
+
+    &.success {
+        border-color: rgba($success-color, 0.3);
+        background: rgba($success-color, 0.1);
+        color: #047857;
+    }
+
+    &.danger {
+        border-color: rgba($danger-color, 0.3);
+        background: rgba($danger-color, 0.09);
+        color: #b91c1c;
+    }
+
+    .dark-mode & {
+        border-color: $border-dark;
+        background: $bg-dark-secondary;
+        color: $text-dark-secondary;
+
+        &.success {
+            border-color: rgba($success-color, 0.4);
+            background: rgba($success-color, 0.14);
+            color: #6ee7b7;
+        }
+
+        &.danger {
+            border-color: rgba($danger-color, 0.42);
+            background: rgba($danger-color, 0.14);
+            color: #fca5a5;
+        }
+    }
+}
+
+.sql-target-body {
+    display: grid;
+    gap: 1rem;
+    background:
+        linear-gradient(rgba($primary-color, 0.018), rgba($primary-color, 0.018)),
+        $bg-light-secondary;
+
+    .dark-mode & {
+        background:
+            linear-gradient(rgba($primary-color, 0.035), rgba($primary-color, 0.035)),
+            $bg-dark-secondary;
+    }
+}
+
+.sql-target-notice {
+    padding: 0.7rem 0.85rem;
+    border: 1px solid $border-light;
+    border-inline-start: 3px solid $primary-color;
+    border-radius: 0.65rem;
+    background: $bg-light;
+    color: $text-light-secondary;
+    font-size: 0.84rem;
+    box-shadow: $shadow;
+
+    &[data-tone='success'] {
+        border-inline-start-color: $success-color;
+        color: #047857;
+    }
+
+    &[data-tone='warning'] {
+        border-inline-start-color: $warning-color;
+        color: #9a6700;
+    }
+
+    &[data-tone='danger'] {
+        border-inline-start-color: $danger-color;
+        color: #b91c1c;
+    }
+
+    .dark-mode & {
+        border-color: $border-dark;
+        border-inline-start-color: $primary-color;
+        background: $bg-dark;
+        color: $text-dark-secondary;
+
+        &[data-tone='success'] {
+            border-inline-start-color: $success-color;
+            color: #6ee7b7;
+        }
+
+        &[data-tone='warning'] {
+            border-inline-start-color: $warning-color;
+            color: #fcd34d;
+        }
+
+        &[data-tone='danger'] {
+            border-inline-start-color: $danger-color;
+            color: #fca5a5;
+        }
+    }
+}
+
+.sql-target-unlock {
+    display: grid;
+    grid-template-columns: minmax(0, 1.2fr) minmax(280px, 0.8fr);
+    gap: 1rem;
+    align-items: center;
+    padding: 1.1rem;
+    border: 1px solid $border-light;
+    border-radius: 0.85rem;
+    background: $bg-light;
+    box-shadow: $shadow;
+
+    h3 {
+        margin: 0 0 0.35rem;
+        font-size: 1.02rem;
+    }
+
+    p {
+        margin: 0;
+        color: $text-light-secondary;
+    }
+
+    .dark-mode & {
+        border-color: $border-dark;
+        background: $bg-dark;
+
+        p {
+            color: $text-dark-secondary;
+        }
+    }
+}
+
+.sql-target-unlock-copy {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.85rem;
+}
+
+.sql-target-lock-icon {
+    width: 2.65rem;
+    height: 2.65rem;
+    border-radius: 0.8rem;
+}
+
+.sql-target-unlock-form {
+    display: grid;
+    gap: 0.65rem;
+    padding: 0.85rem;
+    border: 1px solid rgba($primary-color, 0.17);
+    border-radius: 0.7rem;
+    background: rgba($primary-color, 0.035);
+
+    .settings-help {
+        margin: 0;
+        font-size: 0.76rem;
+        line-height: 1.5;
+    }
+
+    .btn {
+        justify-self: start;
+    }
+
+    .dark-mode & {
+        border-color: rgba($primary-color, 0.28);
+        background: rgba($primary-color, 0.08);
+    }
+}
+
+#sqlTargetUnlocked {
+    display: grid;
+    gap: 1rem;
+
+    &[hidden] {
+        display: none;
+    }
+
+    &[aria-busy='true'] {
+        .sql-target-section {
+            opacity: 0.78;
+        }
+    }
+}
+
+.sql-target-section {
+    padding: 1rem;
+    border: 1px solid $border-light;
+    border-radius: 0.85rem;
+    background: $bg-light;
+    box-shadow: $shadow;
+    transition: opacity 0.15s ease;
+
+    .dark-mode & {
+        border-color: $border-dark;
+        background: $bg-dark;
+    }
+}
+
+.sql-target-section-heading {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 1rem;
+    margin-bottom: 0.85rem;
+
+    h3 {
+        margin: 0.1rem 0 0;
+        font-size: 1rem;
+    }
+}
+
+.sql-target-eyebrow {
+    margin: 0;
+    color: $primary-hover;
+    font-size: 0.68rem;
+    font-weight: 900;
+    letter-spacing: 0.09em;
+    text-transform: uppercase;
+
+    .dark-mode & {
+        color: #a5b4fc;
+    }
+}
+
+.sql-target-status-grid,
+.sql-target-connection-grid,
+.sql-target-count-grid {
+    display: grid;
+    gap: 0.65rem;
+    margin: 0;
+
+    > div {
+        display: grid;
+        gap: 0.22rem;
+        min-width: 0;
+        padding: 0.72rem 0.8rem;
+        border: 1px solid $border-light;
+        border-radius: 0.65rem;
+        background: $bg-light-secondary;
+
+        .dark-mode & {
+            border-color: $border-dark;
+            background: $bg-dark-secondary;
+        }
+    }
+
+    dt {
+        color: $text-light-secondary;
+        font-size: 0.7rem;
+        font-weight: 700;
+
+        .dark-mode & {
+            color: $text-dark-secondary;
+        }
+    }
+
+    dd {
+        min-width: 0;
+        margin: 0;
+        overflow: hidden;
+        color: $text-light;
+        font-size: 0.88rem;
+        font-weight: 800;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        font-variant-numeric: tabular-nums;
+
+        .dark-mode & {
+            color: $text-dark;
+        }
+    }
+}
+
+.sql-target-status-grid {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.sql-target-connection-grid {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.sql-target-action-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 0.8rem;
+}
+
+.sql-target-action-card {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+    gap: 0.75rem;
+    align-items: start;
+    padding: 0.9rem;
+    border: 1px solid $border-light;
+    border-radius: 0.75rem;
+    background: $bg-light-secondary;
+
+    h4 {
+        margin: 0 0 0.25rem;
+        font-size: 0.9rem;
+    }
+
+    p {
+        margin: 0;
+        color: $text-light-secondary;
+        font-size: 0.78rem;
+        line-height: 1.55;
+    }
+
+    > .btn,
+    > .sql-target-confirm {
+        grid-column: 1 / -1;
+    }
+
+    > .btn {
+        justify-self: start;
+    }
+
+    &.sync {
+        border-color: rgba($warning-color, 0.32);
+        background: rgba($warning-color, 0.045);
+    }
+
+    .dark-mode & {
+        border-color: $border-dark;
+        background: $bg-dark-secondary;
+
+        p {
+            color: $text-dark-secondary;
+        }
+
+        &.sync {
+            border-color: rgba($warning-color, 0.4);
+            background: rgba($warning-color, 0.08);
+        }
+    }
+}
+
+.sql-target-action-title-line {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 0.65rem;
+    margin-bottom: 0.25rem;
+
+    h4 {
+        margin: 0;
+    }
+}
+
+.sql-target-action-icon {
+    width: 2.4rem;
+    height: 2.4rem;
+    border-radius: 0.7rem;
+
+    &.preview {
+        color: #0369a1;
+        border-color: rgba(#0ea5e9, 0.24);
+        background: rgba(#0ea5e9, 0.1);
+    }
+
+    &.sync {
+        color: #b45309;
+        border-color: rgba($warning-color, 0.3);
+        background: rgba($warning-color, 0.11);
+    }
+}
+
+.sql-target-confirm {
+    margin: 0;
+    border: 1px solid rgba($warning-color, 0.22);
+    background: rgba($warning-color, 0.06);
+    font-size: 0.78rem;
+
+    &:hover {
+        background: rgba($warning-color, 0.1);
+    }
+}
+
+.sql-target-empty {
+    padding: 1rem;
+    border: 1px dashed $border-light;
+    border-radius: 0.7rem;
+    color: $text-light-secondary;
+    text-align: center;
+
+    .dark-mode & {
+        border-color: $border-dark;
+        color: $text-dark-secondary;
+    }
+}
+
+.sql-target-result {
+    display: grid;
+    gap: 0.75rem;
+
+    &[hidden] {
+        display: none;
+    }
+}
+
+.sql-target-result-summary {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 0.65rem;
+
+    > div {
+        display: grid;
+        gap: 0.22rem;
+    }
+
+    span {
+        color: $text-light-secondary;
+        font-size: 0.7rem;
+
+        .dark-mode & {
+            color: $text-dark-secondary;
+        }
+    }
+
+    strong {
+        font-size: 0.86rem;
+        font-variant-numeric: tabular-nums;
+    }
+}
+
+.sql-target-count-grid {
+    grid-template-columns: repeat(5, minmax(0, 1fr));
+
+    dd {
+        font-size: 1.15rem;
+    }
+}
+
+.sql-target-evidence {
+    display: grid;
+    gap: 0.7rem;
+    padding: 0.8rem;
+    border: 1px solid rgba($primary-color, 0.2);
+    border-radius: 0.7rem;
+    background: rgba($primary-color, 0.035);
+
+    &[hidden] {
+        display: none;
+    }
+
+    .dark-mode & {
+        border-color: rgba($primary-color, 0.32);
+        background: rgba($primary-color, 0.08);
+    }
+}
+
+.sql-target-evidence-heading {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 0.75rem;
+
+    h4 {
+        margin: 0.12rem 0 0;
+        font-size: 0.88rem;
+    }
+}
+
+.sql-target-evidence-grid {
+    display: grid;
+    grid-template-columns: repeat(5, minmax(0, 1fr));
+    gap: 0.45rem;
+    margin: 0;
+
+    > div {
+        display: grid;
+        gap: 0.18rem;
+        min-width: 0;
+        padding: 0.5rem 0.55rem;
+        border-radius: 0.55rem;
+        background: rgba($bg-light, 0.8);
+
+        .dark-mode & {
+            background: rgba($bg-dark-secondary, 0.75);
+        }
+    }
+
+    dt {
+        color: $text-light-secondary;
+        font-size: 0.64rem;
+        font-weight: 700;
+
+        .dark-mode & {
+            color: $text-dark-secondary;
+        }
+    }
+
+    dd {
+        margin: 0;
+        overflow: hidden;
+        font-size: 0.86rem;
+        font-weight: 850;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        font-variant-numeric: tabular-nums;
+    }
+}
+
+.sql-target-failure {
+    padding: 0.8rem;
+    border: 1px solid rgba($danger-color, 0.28);
+    border-radius: 0.7rem;
+    background: rgba($danger-color, 0.06);
+    color: #b91c1c;
+
+    &[hidden] {
+        display: none;
+    }
+
+    > strong {
+        display: block;
+        margin-bottom: 0.55rem;
+    }
+
+    dl {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 0.55rem;
+        margin: 0;
+    }
+
+    dl > div {
+        display: grid;
+        gap: 0.15rem;
+    }
+
+    dt {
+        font-size: 0.68rem;
+        opacity: 0.8;
+    }
+
+    dd {
+        margin: 0;
+        overflow: hidden;
+        font-family: var(--font-mono);
+        font-size: 0.78rem;
+        font-weight: 800;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+    }
+
+    .dark-mode & {
+        border-color: rgba($danger-color, 0.42);
+        background: rgba($danger-color, 0.12);
+        color: #fca5a5;
+    }
+}
+
+[dir='rtl'] {
+    .sql-target-status-grid dd,
+    .sql-target-connection-grid dd,
+    .sql-target-count-grid dd,
+    .sql-target-result-summary strong,
+    .sql-target-failure dd {
+        direction: ltr;
+        text-align: end;
+    }
+}
+
 .event-log-button {
     display: inline-flex;
     align-items: center;
@@ -2543,6 +3237,51 @@ body.is-loading .data-table {
     .settings-subsection-heading {
         flex-direction: column;
     }
+
+    .sql-target-modal {
+        width: calc(100vw - 1rem);
+    }
+
+    .sql-target-header,
+    .sql-target-section-heading {
+        align-items: stretch;
+    }
+
+    .sql-target-heading {
+        min-width: 0;
+    }
+
+    .sql-target-heading-icon {
+        width: 2.55rem;
+        height: 2.55rem;
+    }
+
+    .sql-target-unlock,
+    .sql-target-action-grid {
+        grid-template-columns: 1fr;
+    }
+
+    .sql-target-status-grid,
+    .sql-target-connection-grid,
+    .sql-target-result-summary {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .sql-target-count-grid {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .sql-target-count-grid > div:last-child {
+        grid-column: 1 / -1;
+    }
+
+    .sql-target-failure dl {
+        grid-template-columns: 1fr;
+    }
+
+    .sql-target-evidence-grid {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
     
     .inspector-panel {
         height: 70vh;
@@ -2556,6 +3295,33 @@ body.is-loading .data-table {
     .data-table th,
     .data-table td {
         padding: 0.5rem;
+    }
+}
+
+@media (max-width: 460px) {
+    .sql-target-heading-icon {
+        display: none;
+    }
+
+    .sql-target-title-line {
+        align-items: flex-start;
+        flex-direction: column;
+    }
+
+    .sql-target-unlock {
+        padding: 0.85rem;
+    }
+
+    .sql-target-status-grid,
+    .sql-target-connection-grid,
+    .sql-target-result-summary,
+    .sql-target-count-grid,
+    .sql-target-evidence-grid {
+        grid-template-columns: 1fr;
+    }
+
+    .sql-target-count-grid > div:last-child {
+        grid-column: auto;
     }
 }
 

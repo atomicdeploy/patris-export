@@ -1,6 +1,7 @@
 import { normalizeCategoriesPayload, normalizeRecordsPayload } from './records.js';
 import { createExportMenuController } from './export-menu.js';
 import { canonicalWorkbookPath } from './xlsx-export.mjs';
+import { createSQLTargetController } from './sql-target.js';
 import {
     MAX_DETAILED_EVENT_LOG_ENTRIES,
     createEventLogChangeSnapshot,
@@ -177,6 +178,7 @@ const BROADCAST_CHANNEL_NAME = 'patris-export-frontend';
 const BROADCAST_STORAGE_KEY = 'patris-broadcast-message';
 const BROADCAST_MESSAGE_TTL_MS = 30000;
 const INTERNAL_RELOAD_QUERY_PARAMS = ['resource_version', 'reloaded_at'];
+let sqlTargetController = null;
 
 cleanInternalReloadUrl();
 
@@ -1208,6 +1210,7 @@ function applySettings() {
     applyFooterVisibility();
     applyRowColorSettings();
     applyTableTranslations();
+    sqlTargetController?.setLanguage();
     renderRowIconRulesEditor();
     updateSelectionCount();
     updateLastUpdateDisplay();
@@ -1777,6 +1780,7 @@ const MODAL_ROUTES = {
     settings: 'settingsPanel',
     columns: 'columnsPanel',
     connection: 'connectionPanel',
+    'sql-target': 'sqlTargetPanel',
     logs: 'eventLogPanel'
 };
 
@@ -1968,6 +1972,7 @@ function applyModalHash() {
         if (panelId === 'columnsPanel') renderColumnManager();
         if (panelId === 'settingsPanel') applyConfigToSettingsForm();
         if (panelId === 'connectionPanel') renderConnectionPanel();
+        if (panelId === 'sqlTargetPanel') void sqlTargetController?.open();
         if (panelId === 'eventLogPanel') renderEventLogPanel();
         openPanel(panelId);
         return;
@@ -1978,7 +1983,7 @@ function applyModalHash() {
 }
 
 function activePanelId() {
-    return ['settingsPanel', 'columnsPanel', 'connectionPanel', 'eventLogPanel']
+    return ['settingsPanel', 'columnsPanel', 'connectionPanel', 'sqlTargetPanel', 'eventLogPanel']
         .find(id => document.getElementById(id)?.classList.contains('open')) || '';
 }
 
@@ -2660,7 +2665,7 @@ function openPanel(panelId) {
 }
 
 function closePanels() {
-    ['settingsPanel', 'columnsPanel', 'connectionPanel', 'eventLogPanel'].forEach(id => {
+    ['settingsPanel', 'columnsPanel', 'connectionPanel', 'sqlTargetPanel', 'eventLogPanel'].forEach(id => {
         const panel = document.getElementById(id);
         if (panel) panel.classList.remove('open');
     });
@@ -4740,6 +4745,7 @@ function dialogCommands(panelID) {
         settingsPanel: [
             { id: 'open_columns', icon: 'columns', label: t('openColumns'), execute: () => openModalRoute('columns') },
             { id: 'open_connection', icon: 'info', label: t('openConnection'), execute: () => openModalRoute('connection') },
+            { id: 'open_sql_target', icon: 'database', label: t('openSQLTarget'), execute: () => openModalRoute('sql-target') },
             { id: 'open_logs', icon: 'list', label: t('openEventLog'), execute: () => openModalRoute('logs') }
         ],
         columnsPanel: [
@@ -4750,6 +4756,11 @@ function dialogCommands(panelID) {
         connectionPanel: [
             { id: 'refresh_source', icon: 'refresh', label: t('refreshSource'), execute: requestSourceRefresh },
             { id: 'copy_status', icon: 'copy', label: t('copyStatus'), execute: copyConnectionStatus }
+        ],
+        sqlTargetPanel: [
+            { id: 'refresh_sql_target', icon: 'refresh', label: t('sqlTargetRefresh'), execute: () => void sqlTargetController?.refresh() },
+            { id: 'lock_sql_target', icon: 'close', label: t('sqlTargetLock'), execute: () => void sqlTargetController?.lock() },
+            { id: 'open_connection', icon: 'info', label: t('openConnection'), execute: () => openModalRoute('connection') }
         ],
         eventLogPanel: [
             { id: 'copy_event_log', icon: 'copy', label: t('copyEventLog'), execute: copyEventLog },
@@ -5635,6 +5646,12 @@ function init() {
     initTableWheelScroll();
     initScrollAnchorTracking();
     initRowCommandMenu();
+    sqlTargetController = createSQLTargetController({
+        documentRef: document,
+        fetchImpl: window.fetch.bind(window),
+        translate: t,
+        getLanguage: () => state.settings.language
+    });
     initRouter();
     setInterval(updateLastUpdateDisplay, 30000);
     
@@ -5667,6 +5684,8 @@ function init() {
     document.getElementById('footerConnectionButton')?.addEventListener('click', () => openModalRoute('connection'));
     document.getElementById('eventLogBtn')?.addEventListener('click', () => openModalRoute('logs'));
     document.getElementById('closeEventLog')?.addEventListener('click', closeRouteDialog);
+    document.getElementById('sqlTargetBtn')?.addEventListener('click', () => openModalRoute('sql-target'));
+    document.getElementById('closeSQLTarget')?.addEventListener('click', closeRouteDialog);
     document.getElementById('clearEventLog')?.addEventListener('click', () => clearEventLog());
     document.getElementById('headerFileChip')?.addEventListener('click', () => {
         if (state.fileName) showInAppToast(t('currentSourceFile'), state.fileName, { titleKey: 'currentSourceFile', broadcastToTabs: true, source: 'file_info', eventType: 'source_info' });
