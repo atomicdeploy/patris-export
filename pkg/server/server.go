@@ -73,6 +73,7 @@ type Server struct {
 	catalogProvider      pricingcatalog.Provider
 	catalogProviderKey   string
 	catalogProviderMu    sync.Mutex
+	sqlOperations        *sqlOperationsState
 }
 
 type Options struct {
@@ -150,6 +151,7 @@ func NewServerWithOptions(dbPath string, charMap converter.CharMapping, options 
 		dataSource:       ds,
 		wsClients:        make(map[*websocket.Conn]*sync.Mutex),
 		eventSubscribers: make(map[chan map[string]interface{}]struct{}),
+		sqlOperations:    newSQLOperationsState(),
 		useTempFile:      copyBeforeRead,
 		config:           options.Config,
 		version:          options.Version,
@@ -224,6 +226,13 @@ func (s *Server) setupRoutes() {
 	s.router.HandleFunc("/api/update/executable", s.handleGetExecutable).Methods("GET", "HEAD")
 	s.router.HandleFunc("/api/processes/patris81", s.handleGetPatris81Processes).Methods("GET")
 	s.router.HandleFunc("/api/processes/file", s.handleGetFileProcesses).Methods("GET")
+	s.router.HandleFunc("/api/sql-target/session", s.handlePostSQLTargetSession).Methods("POST")
+	s.router.HandleFunc("/api/sql-target/session", s.handleDeleteSQLTargetSession).Methods("DELETE")
+	s.router.HandleFunc("/api/sql-target/status", s.handleGetSQLTargetStatus).Methods("GET")
+	s.router.HandleFunc("/api/sql-target/test", s.handlePostSQLTargetTest).Methods("POST")
+	s.router.HandleFunc("/api/sql-target/preview", s.handlePostSQLTargetPreview).Methods("POST")
+	s.router.HandleFunc("/api/sql-target/sync", s.handlePostSQLTargetSync).Methods("POST")
+	s.router.HandleFunc("/api/sql-target/last-result", s.handleGetSQLTargetLastResult).Methods("GET")
 	s.router.HandleFunc("/static/notification.ogg", s.handleNotificationAudio).Methods("GET", "HEAD")
 	s.router.HandleFunc("/static/patris-api-icon.png", s.handleAppIcon).Methods("GET", "HEAD")
 	s.router.HandleFunc("/favicon.ico", s.handleFavicon).Methods("GET", "HEAD")

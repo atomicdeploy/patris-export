@@ -199,8 +199,11 @@ outcome and must be reconciled before retrying.
 The shared `recordsink.ProbeSQLTarget` operation is non-mutating: it performs a
 bounded ping plus `SELECT VERSION()` and a best-effort session TLS-status read.
 Its result contains only connection state, driver/vendor, a bounded printable
-version, TLS state, and elapsed time. It is the backend primitive for the
-authenticated connection-test UI follow-up.
+version, TLS state, and elapsed time. The authenticated HTTP boundary omits the
+version along with all protected target details. See
+[SQL target operations API](../SQL-TARGET-OPERATIONS-API.md) for its short-lived
+operator session, redacted status, connection test, dry-run preview, explicit
+manual sync, and last-result contract.
 
 Watch mode uses this same `recordpipe` -> `recordsink` route for its initial
 write and every debounced update; there is no separate live SQL implementation:
