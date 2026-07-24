@@ -72,6 +72,7 @@ var (
 	mysqlTable      string
 	exportBatchSize int
 	exportReconcile string
+	reconcileToken  string
 	exportDryRun    bool
 	xlsxLanguage    string
 	xlsxMode        string
@@ -162,7 +163,8 @@ Supports Persian/Farsi encoding conversion and file watching.
 	convertCmd.Flags().StringVar(&mysqlDSN, "mysql-dsn", "", "MySQL DSN for --format mysql (or PATRIS_EXPORT_MYSQL_DSN)")
 	convertCmd.Flags().StringVar(&mysqlTable, "mysql-table", "", "MySQL table name for --format mysql")
 	convertCmd.Flags().IntVar(&exportBatchSize, "batch-size", 0, "Maximum rows per prepared SQL batch")
-	convertCmd.Flags().StringVar(&exportReconcile, "reconciliation", "", "SQL reconciliation mode: upsert_only (safe default) or delete_missing")
+	convertCmd.Flags().StringVar(&exportReconcile, "reconciliation", "", "SQL reconciliation mode: upsert_only (safe default), soft_delete_missing, or delete_missing")
+	convertCmd.Flags().StringVar(&reconcileToken, "reconciliation-token", "", "Exact dry-run confirmation digest required to apply soft_delete_missing")
 	convertCmd.Flags().BoolVar(&exportDryRun, "dry-run", false, "Preview SQL insert/update/delete counts without changing the destination")
 	convertCmd.Flags().StringVar(&xlsxLanguage, "xlsx-language", "", "Excel header language: auto, en, or fa (auto follows the configured UI language)")
 	convertCmd.Flags().StringVar(&xlsxMode, "xlsx-mode", "", "Excel price output mode: precalculated or formula")
@@ -894,12 +896,13 @@ func writeConvertOutput(dbFile string, result recordpipe.Result, useStdout bool,
 			outputFile = filepath.Join(outputDir, baseName+".sqlite")
 		}
 		syncResult, err := recordsink.SyncSQLite(context.Background(), outputFile, recordsink.SQLOptions{
-			Table:          tableName,
-			KeyField:       result.KeyField,
-			Batch:          cfg.Export.BatchSize,
-			Reconciliation: recordsink.ReconciliationMode(cfg.Export.Reconciliation),
-			DryRun:         cfg.Export.DryRun,
-			ProtectedKeys:  quarantinedCodes(result),
+			Table:               tableName,
+			KeyField:            result.KeyField,
+			Batch:               cfg.Export.BatchSize,
+			Reconciliation:      recordsink.ReconciliationMode(cfg.Export.Reconciliation),
+			ReconciliationToken: reconcileToken,
+			DryRun:              cfg.Export.DryRun,
+			ProtectedKeys:       quarantinedCodes(result),
 		}, result.Rows)
 		if err != nil {
 			return err
@@ -913,15 +916,16 @@ func writeConvertOutput(dbFile string, result recordpipe.Result, useStdout bool,
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 		defer cancel()
 		syncResult, err := recordsink.SyncSQLWithResult(ctx, recordsink.SQLOptions{
-			Driver:         "mysql",
-			DSN:            dsn,
-			Table:          tableName,
-			KeyField:       result.KeyField,
-			Batch:          cfg.Export.BatchSize,
-			Reconciliation: recordsink.ReconciliationMode(cfg.Export.Reconciliation),
-			DryRun:         cfg.Export.DryRun,
-			ProtectedKeys:  quarantinedCodes(result),
-			ConnectTimeout: recordsink.ParseSQLConnectTimeout(cfg.Export.MySQLConnectTimeout),
+			Driver:              "mysql",
+			DSN:                 dsn,
+			Table:               tableName,
+			KeyField:            result.KeyField,
+			Batch:               cfg.Export.BatchSize,
+			Reconciliation:      recordsink.ReconciliationMode(cfg.Export.Reconciliation),
+			ReconciliationToken: reconcileToken,
+			DryRun:              cfg.Export.DryRun,
+			ProtectedKeys:       quarantinedCodes(result),
+			ConnectTimeout:      recordsink.ParseSQLConnectTimeout(cfg.Export.MySQLConnectTimeout),
 			MySQLTLS: recordsink.MySQLTLSOptions{
 				CAFile:     cfg.Export.MySQLTLSCAFile,
 				ServerName: cfg.Export.MySQLTLSServerName,
@@ -945,6 +949,24 @@ func writeConvertOutput(dbFile string, result recordpipe.Result, useStdout bool,
 			sqlResult.Reconciliation,
 			sqlResult.DryRun,
 		)
+		if evidence := sqlResult.ReconciliationEvidence; evidence != nil {
+			infoColor.Printf(
+				"Reconciliation evidence: source=%d protected=%d target=%d missing=%d would_soft_delete=%d already_soft_deleted=%d would_restore=%d partial_source_risk=%t apply_allowed=%t guard=%s\n",
+				evidence.SourceRows,
+				evidence.ProtectedRows,
+				evidence.TargetRows,
+				evidence.MissingRows,
+				evidence.WouldSoftDelete,
+				evidence.AlreadySoftDeleted,
+				evidence.WouldRestore,
+				evidence.PartialSourceRisk,
+				evidence.ApplyAllowed,
+				evidence.GuardCode,
+			)
+			if evidence.ConfirmationToken != "" {
+				infoColor.Printf("Soft-delete confirmation token: %s\n", evidence.ConfirmationToken)
+			}
+		}
 		if sqlResult.DryRun {
 			successColor.Printf("SQL dry-run preview completed for: %s\n", outputFile)
 			return nil

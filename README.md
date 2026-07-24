@@ -146,13 +146,21 @@ patris-export convert kala.db \
   --sqlite-table products \
   --batch-size 250
 
-# Preview authoritative reconciliation; upsert_only is the safe default.
+# Preview guarded soft deletion; upsert_only is the safe default.
 patris-export convert kala.db \
   -f sqlite \
   --sqlite-path output/patris-products.sqlite \
   --sqlite-table products \
-  --reconciliation delete_missing \
+  --reconciliation soft_delete_missing \
   --dry-run
+
+# Apply only the unchanged deletion keyset using the preview's sha256 digest.
+patris-export convert kala.db \
+  -f sqlite \
+  --sqlite-path output/patris-products.sqlite \
+  --sqlite-table products \
+  --reconciliation soft_delete_missing \
+  --reconciliation-token 'sha256:<exact-preview-digest>'
 
 # Watch and send canonical JSON changes to a configured receiver.
 # PATRIS_PRODUCT_SYNC_SECRET is injected into the process environment by

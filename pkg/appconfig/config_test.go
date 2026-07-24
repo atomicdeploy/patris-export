@@ -293,6 +293,11 @@ func TestSQLExportDefaultsAndEnvironmentOverrides(t *testing.T) {
 	if cfg.Export.MySQLConnectTimeout != "10s" {
 		t.Fatalf("invalid SQL connection timeout did not use the safe default: %q", cfg.Export.MySQLConnectTimeout)
 	}
+	cfg.Export.Reconciliation = "SOFT_DELETE_MISSING"
+	normalize(&cfg)
+	if cfg.Export.Reconciliation != "soft_delete_missing" {
+		t.Fatalf("soft-delete reconciliation was not preserved: %q", cfg.Export.Reconciliation)
+	}
 }
 
 func TestXLSXExportDefaultsConfigAndEnvironment(t *testing.T) {

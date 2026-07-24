@@ -25,7 +25,7 @@ func TestSQLTargetMatrixParitySchemaEvolutionAndRollback(t *testing.T) {
 		t.Skip("set PATRIS_EXPORT_TEST_MYSQL_DSN to run the disposable MySQL/MariaDB compatibility proof")
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
 
 	mysqlDB, err := sql.Open("mysql", dsn)
@@ -125,6 +125,88 @@ func TestSQLTargetMatrixParitySchemaEvolutionAndRollback(t *testing.T) {
 	assertMatrixUserColumn(t, ctx, mysqlDB, "mysql", table, "0001")
 	assertMatrixUserColumn(t, ctx, sqliteDB, "sqlite", table, "0001")
 
+	softDeleteSnapshot := []map[string]interface{}{
+		{"product_code": "0002", "name": "Beta", "final_price": int64(200), "warehouse_stock": int64(3)},
+	}
+	mysqlSoftDelete := options
+	mysqlSoftDelete.Reconciliation = SoftDeleteMissing
+	mysqlSoftDelete.DryRun = true
+	mysqlPreview, err := SyncSQLWithResult(ctx, mysqlSoftDelete, softDeleteSnapshot)
+	if err != nil {
+		t.Fatal("preview MySQL/MariaDB soft delete:", err)
+	}
+	assertSQLResultCounts(t, mysqlPreview, 0, 0, 1, 1, 0)
+
+	sqliteSoftDelete := SQLOptions{
+		Table: table, KeyField: "product_code", Batch: 1,
+		Reconciliation: SoftDeleteMissing, DryRun: true,
+	}
+	sqlitePreview, err := SyncSQLite(ctx, sqlitePath, sqliteSoftDelete, softDeleteSnapshot)
+	if err != nil {
+		t.Fatal("preview SQLite soft delete:", err)
+	}
+	assertSQLResultCounts(t, sqlitePreview, 0, 0, 1, 1, 0)
+	if mysqlPreview.ReconciliationEvidence == nil || sqlitePreview.ReconciliationEvidence == nil ||
+		mysqlPreview.ReconciliationEvidence.ConfirmationToken == "" ||
+		mysqlPreview.ReconciliationEvidence.ConfirmationToken != sqlitePreview.ReconciliationEvidence.ConfirmationToken {
+		t.Fatalf("soft-delete preview parity mismatch: mysql=%+v sqlite=%+v",
+			mysqlPreview.ReconciliationEvidence, sqlitePreview.ReconciliationEvidence)
+	}
+
+	mysqlSoftDelete.DryRun = false
+	mysqlSoftDelete.ReconciliationToken = mysqlPreview.ReconciliationEvidence.ConfirmationToken
+	mysqlResult, err = SyncSQLWithResult(ctx, mysqlSoftDelete, softDeleteSnapshot)
+	if err != nil {
+		t.Fatal("apply MySQL/MariaDB soft delete:", err)
+	}
+	assertSQLResultCounts(t, mysqlResult, 0, 0, 1, 1, 0)
+
+	sqliteSoftDelete.DryRun = false
+	sqliteSoftDelete.ReconciliationToken = sqlitePreview.ReconciliationEvidence.ConfirmationToken
+	sqliteResult, err = SyncSQLite(ctx, sqlitePath, sqliteSoftDelete, softDeleteSnapshot)
+	if err != nil {
+		t.Fatal("apply SQLite soft delete:", err)
+	}
+	assertSQLResultCounts(t, sqliteResult, 0, 0, 1, 1, 0)
+	assertMatrixSoftDeleteParity(t, ctx, mysqlDB, sqliteDB, table, map[string]bool{
+		"0001": true,
+		"0002": false,
+	})
+
+	mysqlSoftDelete.DryRun = true
+	mysqlSoftDelete.ReconciliationToken = ""
+	mysqlRestorePreview, err := SyncSQLWithResult(ctx, mysqlSoftDelete, evolved)
+	if err != nil {
+		t.Fatal("preview MySQL/MariaDB soft-delete restore:", err)
+	}
+	assertSQLResultCounts(t, mysqlRestorePreview, 0, 1, 1, 0, 0)
+	sqliteSoftDelete.DryRun = true
+	sqliteSoftDelete.ReconciliationToken = ""
+	sqliteRestorePreview, err := SyncSQLite(ctx, sqlitePath, sqliteSoftDelete, evolved)
+	if err != nil {
+		t.Fatal("preview SQLite soft-delete restore:", err)
+	}
+	assertSQLResultCounts(t, sqliteRestorePreview, 0, 1, 1, 0, 0)
+
+	mysqlSoftDelete.DryRun = false
+	mysqlSoftDelete.ReconciliationToken = mysqlRestorePreview.ReconciliationEvidence.ConfirmationToken
+	mysqlResult, err = SyncSQLWithResult(ctx, mysqlSoftDelete, evolved)
+	if err != nil {
+		t.Fatal("restore MySQL/MariaDB soft-deleted row:", err)
+	}
+	assertSQLResultCounts(t, mysqlResult, 0, 1, 1, 0, 0)
+	sqliteSoftDelete.DryRun = false
+	sqliteSoftDelete.ReconciliationToken = sqliteRestorePreview.ReconciliationEvidence.ConfirmationToken
+	sqliteResult, err = SyncSQLite(ctx, sqlitePath, sqliteSoftDelete, evolved)
+	if err != nil {
+		t.Fatal("restore SQLite soft-deleted row:", err)
+	}
+	assertSQLResultCounts(t, sqliteResult, 0, 1, 1, 0, 0)
+	assertMatrixSoftDeleteParity(t, ctx, mysqlDB, sqliteDB, table, map[string]bool{
+		"0001": false,
+		"0002": false,
+	})
+
 	failing := []map[string]interface{}{
 		{"product_code": "0001", "name": "Alpha", "final_price": int64(999), "warehouse_stock": int64(7), "rollback_guard": "accepted"},
 		{"product_code": "0003", "name": "Gamma", "final_price": int64(300), "warehouse_stock": int64(1), "rollback_guard": "reject"},
@@ -142,6 +224,45 @@ func TestSQLTargetMatrixParitySchemaEvolutionAndRollback(t *testing.T) {
 	if got := readMatrixProducts(t, ctx, sqliteDB, "sqlite", table); !reflect.DeepEqual(got, sqliteProducts) {
 		t.Fatalf("SQLite batch failure did not roll back: got=%+v want=%+v", got, sqliteProducts)
 	}
+}
+
+func assertMatrixSoftDeleteParity(
+	t *testing.T,
+	ctx context.Context,
+	mysqlDB, sqliteDB *sql.DB,
+	table string,
+	expected map[string]bool,
+) {
+	t.Helper()
+	mysqlState := readMatrixSoftDeleteState(t, ctx, mysqlDB, "mysql", table)
+	sqliteState := readMatrixSoftDeleteState(t, ctx, sqliteDB, "sqlite", table)
+	if !reflect.DeepEqual(mysqlState, sqliteState) || !reflect.DeepEqual(mysqlState, expected) {
+		t.Fatalf("soft-delete state parity mismatch: mysql=%v sqlite=%v want=%v", mysqlState, sqliteState, expected)
+	}
+}
+
+func readMatrixSoftDeleteState(t *testing.T, ctx context.Context, db *sql.DB, driver, table string) map[string]bool {
+	t.Helper()
+	query := "SELECT `product_code`, `patris_export_deleted` FROM " + quoteIdent(driver, table) + " ORDER BY `product_code`"
+	rows, err := db.QueryContext(ctx, query)
+	if err != nil {
+		t.Fatal("read matrix soft-delete state:", err)
+	}
+	defer rows.Close()
+
+	result := make(map[string]bool)
+	for rows.Next() {
+		var code string
+		var deleted bool
+		if err := rows.Scan(&code, &deleted); err != nil {
+			t.Fatal("scan matrix soft-delete state:", err)
+		}
+		result[code] = deleted
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal("iterate matrix soft-delete state:", err)
+	}
+	return result
 }
 
 func readMatrixProducts(t *testing.T, ctx context.Context, db *sql.DB, driver, table string) []matrixProduct {

@@ -128,23 +128,63 @@ export:
 ```
 
 `upsert_only` inserts and updates supplied Codes but preserves destination rows
-that are absent from the current input. Use `delete_missing` only for a known
-complete authoritative snapshot. Canonical quarantine/protected Codes remain
-preserved even in `delete_missing` mode.
+that are absent from the current input. `soft_delete_missing` sets the reserved
+boolean `patris_export_deleted` column for absent rows and clears it when a row
+returns. The column is additive, non-null, defaults to false, and cannot be
+supplied or mapped by source records. Identifier aliases that normalize to that
+reserved name are rejected too. A pre-existing reserved column is accepted only
+when it has a compatible boolean type, is non-null, and defaults to false.
+`delete_missing` remains the explicit hard deletion mode. Canonical
+quarantine/protected Codes are retained by both modes.
 
-Preview the exact operation counts without changing the destination:
+Soft-delete apply is a two-step operation. First preview the deletion keyset and
+operation counts without changing data or schema:
 
 ```powershell
 patris-export convert C:\Patris\data4\kala.db -f sqlite `
   --sqlite-path .\exports\patris-products.sqlite `
   --sqlite-table products `
-  --reconciliation delete_missing `
+  --reconciliation soft_delete_missing `
   --dry-run
 ```
 
-The result line reports `inserted`, `updated`, `unchanged`, `deleted`, `failed`,
-and `elapsed` milliseconds; it never includes the DSN. A dry run against a
-missing SQLite path does not create the file or its parent directory.
+The evidence line reports source, protected, target, missing, newly marked,
+already marked, and restored counts, plus `partial_source_risk` and whether
+apply is allowed. It prints a `sha256:` confirmation digest only when the source
+is non-empty. Review those counts, then apply the unchanged plan with that exact
+digest:
+
+```powershell
+patris-export convert C:\Patris\data4\kala.db -f sqlite `
+  --sqlite-path .\exports\patris-products.sqlite `
+  --sqlite-table products `
+  --reconciliation soft_delete_missing `
+  --reconciliation-token 'sha256:<exact digest from the preview>'
+```
+
+The digest binds the mode, table, key field, deterministic prepared source
+fields and typed values, source and protected keys, and every destination key
+plus its tombstone state without serializing any of them. An empty source is
+always blocked and never receives a digest. A same-key source-value change, a
+changed or partial source, a newly added target row, a target tombstone change,
+or a changed protected set invalidates the prior digest before schema or data
+mutation. This makes an accidental partial read or stale preview visible and
+requires a new preview rather than silently applying a different plan.
+
+For `soft_delete_missing`, the result's `deleted` count means rows newly marked
+as deleted; already marked rows are not counted again. The same digest can be
+retried after a confirmed rollback because source and destination state did not
+change. A successful apply changes the bound destination state and therefore
+requires a fresh preview; applying that fresh no-op plan is idempotent. A
+returning source row is restored by setting `patris_export_deleted` to false and
+is reported in evidence. After an ambiguous commit outcome, run a new preview
+and inspect live state before retry.
+
+The standard result also reports `inserted`, `updated`, `unchanged`, `failed`,
+and `elapsed` milliseconds; it never includes connection material or keys. A
+dry run against a missing SQLite path does not create the file or its parent
+directory. Hard `delete_missing` should be used only for a separately verified,
+complete authoritative snapshot.
 
 MySQL/MariaDB connections use a finite 10-second connection bound by default
 (configurable from 100 ms through 2 minutes) in addition to any DSN I/O
@@ -175,7 +215,7 @@ Reproduce the SQLite initial-write/update proof locally, and optionally run the
 same proof against a disposable MariaDB/MySQL database:
 
 ```powershell
-go test ./pkg/recordsink -run TestSQLiteSyncInitialUpdateDryRunAndProtectedDelete -v
+go test ./pkg/recordsink -run 'TestSQLiteSoftDelete|TestSoftDelete' -v
 
 $env:PATRIS_EXPORT_TEST_MYSQL_DSN = "test_user:test_password@tcp(127.0.0.1:3306)/patris_test?parseTime=true&timeout=5s&readTimeout=30s&writeTimeout=30s"
 go test ./pkg/recordsink -run TestMariaDBSyncInitialWriteAndUpdate -v
@@ -184,13 +224,13 @@ Remove-Item Env:PATRIS_EXPORT_TEST_MYSQL_DSN
 
 The MariaDB test is skipped unless its dedicated test DSN is present and drops
 only the uniquely named table it creates. Authenticated browser connection-test
-and manual-sync controls plus `soft_delete_missing` remain separate follow-up
-work.
+and manual-sync controls remain separate follow-up work.
 
 Every pull request also runs a disposable compatibility matrix against MySQL
 8.4 and MariaDB 11.4. The matrix proves parity with the same SQLite fixture,
 leading-zero key preservation, additive schema evolution without changing
-user-owned columns, and transactional rollback on a later batch failure.
+user-owned columns, guarded soft-delete/restore behavior, and transactional
+rollback on a later batch failure.
 Matrix credentials are test-only values inside isolated CI service containers;
 production DSNs remain protected configuration and are never stored in the
 repository or returned to a browser.

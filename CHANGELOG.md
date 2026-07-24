@@ -11,7 +11,12 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 - Pull requests now prove SQL sink parity and transactional rollback against
   disposable MySQL 8.4, MariaDB 11.4, and SQLite targets while preserving
-  leading-zero keys, additive schemas, and user-owned columns.
+  leading-zero keys, additive schemas, user-owned columns, and guarded
+  soft-delete/restore behavior.
+- SQL targets now support guarded `soft_delete_missing` reconciliation through
+  a reserved boolean tombstone, non-mutating operator evidence, exact preview
+  confirmation, empty-source blocking, stale-plan detection, restoration, and
+  rollback-safe retries with fresh-preview idempotency.
 - MySQL/MariaDB targets now have a shared bounded read-only connection probe,
   protected custom-CA/server-name configuration, verified TLS 1.2+ connector,
   and typed secret-safe retry diagnostics for future authenticated UI controls.

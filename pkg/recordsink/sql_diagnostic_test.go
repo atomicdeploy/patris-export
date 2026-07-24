@@ -34,6 +34,7 @@ func TestClassifySQLErrorUsesStableRetryCategories(t *testing.T) {
 		{name: "network timeout", stage: SQLStageConnect, err: &net.DNSError{IsTimeout: true}, code: SQLFailureTimeout, retryable: true},
 		{name: "network unavailable", stage: SQLStageConnect, err: &net.DNSError{IsTemporary: true}, code: SQLFailureUnavailable, retryable: true},
 		{name: "certificate hostname", stage: SQLStageConnect, err: x509.HostnameError{Certificate: &x509.Certificate{}, Host: "private.internal"}, code: SQLFailureTLSVerification},
+		{name: "reconciliation guard", stage: SQLStageSync, err: &ReconciliationGuardError{Code: ReconciliationGuardPreviewMismatch}, code: SQLFailureReconciliation},
 		{name: "configuration", stage: SQLStageConfiguration, err: errors.New("raw config details"), code: SQLFailureInvalidConfiguration},
 		{name: "schema", stage: SQLStageSchema, err: errors.New("raw schema details"), code: SQLFailureSchema},
 		{name: "unknown", stage: SQLStageSync, err: errors.New("raw unknown details"), code: SQLFailureUnknown},
@@ -79,5 +80,31 @@ func TestClassifySQLErrorPreservesAnExistingSafeFailure(t *testing.T) {
 	classified := ClassifySQLError(SQLStageSync, fmt.Errorf("outer: %w", original))
 	if classified != original {
 		t.Fatalf("existing safe failure was reclassified: got=%p want=%p", classified, original)
+	}
+}
+
+func TestReconciliationFailureIncludesOnlyStableGuardReason(t *testing.T) {
+	failure := ClassifySQLError(SQLStageSync, fmt.Errorf("private plan details: %w", &ReconciliationGuardError{Code: ReconciliationGuardPreviewMismatch}))
+	if failure.Code != SQLFailureReconciliation || failure.Reason != ReconciliationGuardPreviewMismatch || failure.Retryable {
+		t.Fatalf("reconciliation classification = %+v", failure)
+	}
+	encoded, err := json.Marshal(failure)
+	if err != nil {
+		t.Fatal(err)
+	}
+	outward := failure.Error() + string(encoded)
+	if strings.Contains(outward, "private plan details") || !strings.Contains(outward, string(ReconciliationGuardPreviewMismatch)) {
+		t.Fatalf("reconciliation diagnostic was unsafe or unclear: %s", outward)
+	}
+
+	const privateReason = ReconciliationGuardCode("private-runtime-detail")
+	failure = ClassifySQLError(SQLStageSync, &ReconciliationGuardError{Code: privateReason})
+	encoded, err = json.Marshal(failure)
+	if err != nil {
+		t.Fatal(err)
+	}
+	outward = failure.Error() + string(encoded)
+	if strings.Contains(outward, string(privateReason)) || failure.Reason != ReconciliationGuardUnknown {
+		t.Fatalf("unrecognized guard reason escaped the stable outward vocabulary: %s", outward)
 	}
 }

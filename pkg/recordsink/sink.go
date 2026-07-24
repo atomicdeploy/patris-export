@@ -23,16 +23,17 @@ import (
 )
 
 type SQLOptions struct {
-	Driver         string
-	DSN            string `json:"-"`
-	Table          string
-	KeyField       string
-	Batch          int
-	Reconciliation ReconciliationMode
-	DryRun         bool
-	ProtectedKeys  []string
-	ConnectTimeout time.Duration
-	MySQLTLS       MySQLTLSOptions `json:"-"`
+	Driver              string
+	DSN                 string `json:"-"`
+	Table               string
+	KeyField            string
+	Batch               int
+	Reconciliation      ReconciliationMode
+	ReconciliationToken string `json:"-"`
+	DryRun              bool
+	ProtectedKeys       []string
+	ConnectTimeout      time.Duration
+	MySQLTLS            MySQLTLSOptions `json:"-"`
 }
 
 // ReconciliationMode controls what happens to destination rows that are not
@@ -41,26 +42,28 @@ type SQLOptions struct {
 type ReconciliationMode string
 
 const (
-	UpsertOnly    ReconciliationMode = "upsert_only"
-	DeleteMissing ReconciliationMode = "delete_missing"
+	UpsertOnly        ReconciliationMode = "upsert_only"
+	SoftDeleteMissing ReconciliationMode = "soft_delete_missing"
+	DeleteMissing     ReconciliationMode = "delete_missing"
 )
 
 // SQLResult is safe to return to callers and UI layers: it contains operation
 // diagnostics only and never includes the destination DSN.
 type SQLResult struct {
-	Inserted       int                `json:"inserted"`
-	Updated        int                `json:"updated"`
-	Unchanged      int                `json:"unchanged"`
-	Deleted        int                `json:"deleted"`
-	Failed         int                `json:"failed"`
-	ElapsedMS      int64              `json:"elapsed_ms"`
-	DryRun         bool               `json:"dry_run"`
-	Reconciliation ReconciliationMode `json:"reconciliation"`
+	Inserted               int                        `json:"inserted"`
+	Updated                int                        `json:"updated"`
+	Unchanged              int                        `json:"unchanged"`
+	Deleted                int                        `json:"deleted"`
+	Failed                 int                        `json:"failed"`
+	ElapsedMS              int64                      `json:"elapsed_ms"`
+	DryRun                 bool                       `json:"dry_run"`
+	Reconciliation         ReconciliationMode         `json:"reconciliation"`
+	ReconciliationEvidence *SQLReconciliationEvidence `json:"reconciliation_evidence,omitempty"`
 }
 
 // SnapshotOptions configures the compatibility WriteSQLite/SyncSnapshotSQL
-// wrappers. WriteSQLite remains upsert_only unless Reconciliation is explicitly
-// DeleteMissing. ProtectedKeys are retained during that opt-in reconciliation.
+// wrappers. Use SyncSQLite or SyncSQLDB directly when a soft-delete preview and
+// its confirmation evidence are required.
 type SnapshotOptions struct {
 	ProtectedKeys  []string
 	Batch          int
@@ -209,8 +212,9 @@ func SyncSnapshotSQL(ctx context.Context, db *sql.DB, driver, table, keyField st
 }
 
 // SyncSQLDB executes the common SQLite/MySQL sink against an already-open
-// database. Data writes and delete_missing reconciliation share one
-// transaction; schema evolution remains additive and is performed before it.
+// database. Data writes and reconciliation share one transaction; schema
+// evolution remains additive and is performed before it. Soft-delete apply
+// requires the digest returned by an exact dry-run preview.
 func SyncSQLDB(ctx context.Context, db *sql.DB, options SQLOptions, rows []map[string]interface{}) (result SQLResult, err error) {
 	started := time.Now()
 	result.DryRun = options.DryRun
@@ -251,18 +255,29 @@ func SyncSQLDB(ctx context.Context, db *sql.DB, options SQLOptions, rows []map[s
 	if keyField == "" {
 		if len(fields) > 0 {
 			keyField = fields[0]
-		} else if len(options.ProtectedKeys) > 0 || result.Reconciliation == DeleteMissing {
+		} else if len(options.ProtectedKeys) > 0 || result.Reconciliation != UpsertOnly {
 			return result, fmt.Errorf("SQL key field is required for reconciliation")
 		}
+	}
+	if result.Reconciliation == SoftDeleteMissing {
+		rows, err = prepareSoftDeleteRows(rows, keyField)
+		if err != nil {
+			return result, err
+		}
+		fields = recordmap.Fields(rows, keyField)
 	}
 	keys, err := snapshotKeys(rows, keyField, nil)
 	if err != nil {
 		return result, err
 	}
-	if result.Reconciliation == UpsertOnly && len(rows) == 0 {
-		return result, nil
+	keepKeys := keys
+	if result.Reconciliation != UpsertOnly {
+		keepKeys, err = appendProtectedKeys(keys, options.ProtectedKeys)
+		if err != nil {
+			return result, err
+		}
 	}
-	if !tableExists && len(rows) == 0 {
+	if result.Reconciliation == UpsertOnly && len(rows) == 0 {
 		return result, nil
 	}
 
@@ -278,6 +293,32 @@ func SyncSQLDB(ctx context.Context, db *sql.DB, options SQLOptions, rows []map[s
 		if keyField != "" && !beforeColumns[strings.ToLower(keyField)] {
 			return result, fmt.Errorf("existing table %q has no key column %q", table, keyField)
 		}
+	}
+	// Authorize before any additive schema change. A second check inside the
+	// data transaction closes the race between preview validation and apply.
+	if result.Reconciliation == SoftDeleteMissing && (!options.DryRun || !tableExists) {
+		evidence, expectedToken, evidenceErr := buildSoftDeleteEvidence(
+			ctx,
+			db,
+			driver,
+			table,
+			keyField,
+			tableExists,
+			beforeColumns[strings.ToLower(SoftDeleteColumn)],
+			rows,
+			keys,
+			keepKeys,
+		)
+		if evidenceErr != nil {
+			return result, evidenceErr
+		}
+		result.ReconciliationEvidence = &evidence
+		if err := authorizeSoftDelete(result.ReconciliationEvidence, expectedToken, options.ReconciliationToken, options.DryRun); err != nil {
+			return result, err
+		}
+	}
+	if !tableExists && len(rows) == 0 {
+		return result, nil
 	}
 
 	if !options.DryRun && len(rows) > 0 {
@@ -313,6 +354,27 @@ func SyncSQLDB(ctx context.Context, db *sql.DB, options SQLOptions, rows []map[s
 			_ = tx.Rollback()
 		}
 	}()
+	if result.Reconciliation == SoftDeleteMissing {
+		evidence, expectedToken, evidenceErr := buildSoftDeleteEvidence(
+			ctx,
+			tx,
+			driver,
+			table,
+			keyField,
+			true,
+			beforeColumns[strings.ToLower(SoftDeleteColumn)],
+			rows,
+			keys,
+			keepKeys,
+		)
+		if evidenceErr != nil {
+			return result, evidenceErr
+		}
+		result.ReconciliationEvidence = &evidence
+		if err := authorizeSoftDelete(result.ReconciliationEvidence, expectedToken, options.ReconciliationToken, options.DryRun); err != nil {
+			return result, err
+		}
+	}
 
 	toWrite, counts, err := classifyRows(ctx, tx, driver, table, keyField, fields, rows, beforeColumns, batch)
 	if err != nil {
@@ -322,18 +384,15 @@ func SyncSQLDB(ctx context.Context, db *sql.DB, options SQLOptions, rows []map[s
 	result.Updated = counts.Updated
 	result.Unchanged = counts.Unchanged
 
-	keepKeys := keys
 	if result.Reconciliation == DeleteMissing {
-		keepKeys, err = appendProtectedKeys(keys, options.ProtectedKeys)
-		if err != nil {
-			return result, err
-		}
 		if options.DryRun {
 			result.Deleted, err = countRowsAbsentFromSnapshot(ctx, tx, driver, table, keyField, keepKeys)
 			if err != nil {
 				return result, err
 			}
 		}
+	} else if result.Reconciliation == SoftDeleteMissing && options.DryRun {
+		result.Deleted = result.ReconciliationEvidence.WouldSoftDelete
 	}
 	if options.DryRun {
 		return result, nil
@@ -346,6 +405,11 @@ func SyncSQLDB(ctx context.Context, db *sql.DB, options SQLOptions, rows []map[s
 	}
 	if result.Reconciliation == DeleteMissing {
 		result.Deleted, err = deleteRowsAbsentFromSnapshot(ctx, tx, driver, table, keyField, keepKeys, options.Batch)
+		if err != nil {
+			return result, err
+		}
+	} else if result.Reconciliation == SoftDeleteMissing {
+		result.Deleted, err = softDeleteRowsAbsentFromSnapshot(ctx, tx, driver, table, keyField, keepKeys, options.Batch)
 		if err != nil {
 			return result, err
 		}
@@ -399,6 +463,8 @@ func normalizeReconciliation(value ReconciliationMode) (ReconciliationMode, erro
 	switch ReconciliationMode(strings.ToLower(strings.TrimSpace(string(value)))) {
 	case "", UpsertOnly:
 		return UpsertOnly, nil
+	case SoftDeleteMissing:
+		return SoftDeleteMissing, nil
 	case DeleteMissing:
 		return DeleteMissing, nil
 	default:
@@ -553,6 +619,11 @@ func queryExistingRows(ctx context.Context, tx *sql.Tx, query string, fields []s
 func rowMatchesExisting(row, existing map[string]interface{}, fields []string, existingColumns map[string]bool) bool {
 	for _, field := range fields {
 		if !existingColumns[strings.ToLower(field)] {
+			// Applying soft-delete adds this reserved column with a false default,
+			// so a dry run must model the additive schema change accurately.
+			if strings.EqualFold(field, SoftDeleteColumn) && booleanText(row[field]) == "0" {
+				continue
+			}
 			if row[field] != nil {
 				return false
 			}
@@ -747,61 +818,11 @@ func deleteRowsAbsentFromSnapshot(ctx context.Context, tx *sql.Tx, driver, table
 		count, err := result.RowsAffected()
 		return int(count), err
 	}
-	tempTable := "_patris_snapshot_keys"
-	drop := fmt.Sprintf("DROP TEMPORARY TABLE IF EXISTS %s", quoteIdent(driver, tempTable))
-	if isSQLite(driver) {
-		drop = fmt.Sprintf("DROP TABLE IF EXISTS temp.%s", quoteIdent(driver, tempTable))
-	}
-	if _, err := tx.ExecContext(ctx, drop); err != nil {
+	tempTable, cleanup, err := stageSnapshotKeys(ctx, tx, driver, keyField, keys, requestedBatch)
+	if err != nil {
 		return 0, err
 	}
-	createPrefix := "CREATE TEMP TABLE"
-	if !isSQLite(driver) {
-		createPrefix = "CREATE TEMPORARY TABLE"
-	}
-	create := fmt.Sprintf(
-		"%s %s (%s %s PRIMARY KEY)",
-		createPrefix,
-		quoteIdent(driver, tempTable),
-		quoteIdent(driver, "snapshot_key"),
-		columnType(driver, keyField, keyField, nil),
-	)
-	if _, err := tx.ExecContext(ctx, create); err != nil {
-		return 0, err
-	}
-	defer func() { _, _ = tx.ExecContext(context.Background(), drop) }()
-
-	batch := effectiveBatchSize(driver, requestedBatch, 1)
-	for start := 0; start < len(keys); start += batch {
-		end := start + batch
-		if end > len(keys) {
-			end = len(keys)
-		}
-		chunk := keys[start:end]
-		placeholders := strings.TrimSuffix(strings.Repeat("(?),", len(chunk)), ",")
-		insert := fmt.Sprintf(
-			"INSERT INTO %s (%s) VALUES %s",
-			quoteIdent(driver, tempTable),
-			quoteIdent(driver, "snapshot_key"),
-			placeholders,
-		)
-		stmt, err := tx.PrepareContext(ctx, insert)
-		if err != nil {
-			return 0, err
-		}
-		values := make([]interface{}, len(chunk))
-		for i, key := range chunk {
-			values[i] = key
-		}
-		_, execErr := stmt.ExecContext(ctx, values...)
-		closeErr := stmt.Close()
-		if execErr != nil {
-			return 0, execErr
-		}
-		if closeErr != nil {
-			return 0, closeErr
-		}
-	}
+	defer cleanup()
 
 	target := quoteIdent(driver, table)
 	targetKey := quoteIdent(driver, keyField)
@@ -825,6 +846,8 @@ func createTable(ctx context.Context, db *sql.DB, driver, table string, fields [
 		def := fmt.Sprintf("%s %s", quoteIdent(driver, field), columnType(driver, field, keyField, rows))
 		if field == keyField {
 			def += " PRIMARY KEY"
+		} else if strings.EqualFold(field, SoftDeleteColumn) {
+			def += " NOT NULL DEFAULT 0"
 		}
 		cols = append(cols, def)
 	}
@@ -846,6 +869,9 @@ func ensureColumns(ctx context.Context, db *sql.DB, driver, table string, fields
 			continue
 		}
 		definition := fmt.Sprintf("%s %s", quoteIdent(driver, field), columnType(driver, field, keyField, rows))
+		if strings.EqualFold(field, SoftDeleteColumn) {
+			definition += " NOT NULL DEFAULT 0"
+		}
 		query := fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s", quoteIdent(driver, table), definition)
 		if _, err := db.ExecContext(ctx, query); err != nil {
 			return fmt.Errorf("add %s.%s column: %w", table, field, err)
@@ -937,6 +963,8 @@ func columnType(driver, field, keyField string, rows []map[string]interface{}) s
 
 func canonicalFieldKind(field string) valueKind {
 	switch strings.ToLower(strings.TrimSpace(field)) {
+	case SoftDeleteColumn:
+		return valueKindBoolean
 	case "final_price":
 		return valueKindInteger
 	case "sale_price_source", "purchase_price_source", "total_stock", "minimum_stock", "foreign_price", "weight_grams", "shipping_price_per_kg", "markup_percent", "irt_per_cny":

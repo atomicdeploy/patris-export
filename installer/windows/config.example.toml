@@ -16,6 +16,9 @@ rtl_text_direction = false
 xlsx_language = "auto"
 xlsx_mode = "precalculated"
 xlsx_zebra_rows = true
+# SQL reconciliation defaults to upsert_only. soft_delete_missing must first be
+# previewed with --dry-run and then applied with --reconciliation-token.
+reconciliation = "upsert_only"
 # Keep MySQL credentials in PATRIS_EXPORT_MYSQL_DSN. For a private CA, uncomment
 # these protected local settings; they are redacted from browser configuration.
 # mysql_tls_ca_file = 'C:\Patris\certificates\database-ca.pem'
