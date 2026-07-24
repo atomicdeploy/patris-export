@@ -380,6 +380,18 @@ func (s *Server) runSQLTargetSync(
 		operation = "preview"
 	}
 	startedAt := s.sqlOperations.currentTime()
+	writeSourceFailure := func(sourceErr error) {
+		failure, status := safeSQLSourceFailure(sourceErr)
+		diagnostic := sqlOperationDiagnostic{
+			Operation:  operation,
+			Status:     "failed",
+			StartedAt:  startedAt,
+			FinishedAt: s.sqlOperations.currentTime(),
+			Failure:    failure,
+		}
+		s.sqlOperations.storeLast(diagnostic)
+		writeJSONStatus(w, status, map[string]interface{}{"success": false, "diagnostic": diagnostic})
+	}
 	var result recordpipe.Result
 	if s.sqlOperations.records != nil {
 		result, err = s.sqlOperations.records(ctx)
@@ -390,19 +402,14 @@ func (s *Server) runSQLTargetSync(
 		err = ctx.Err()
 	}
 	if err != nil {
-		failure, status := safeSQLSourceFailure(err)
-		diagnostic := sqlOperationDiagnostic{
-			Operation:  operation,
-			Status:     "failed",
-			StartedAt:  startedAt,
-			FinishedAt: s.sqlOperations.currentTime(),
-			Failure:    failure,
-		}
-		s.sqlOperations.storeLast(diagnostic)
-		writeJSONStatus(w, status, map[string]interface{}{"success": false, "diagnostic": diagnostic})
+		writeSourceFailure(err)
 		return
 	}
-	sourceFingerprint := sqlSourceFingerprint(result)
+	sourceFingerprint, err := sqlSourceFingerprint(ctx, result)
+	if err != nil {
+		writeSourceFailure(err)
+		return
+	}
 	if !dryRun && subtle.ConstantTimeCompare(issued.sourceFingerprint[:], sourceFingerprint[:]) != 1 {
 		s.writePreviewRequired(w, reconciliation)
 		return
@@ -411,6 +418,10 @@ func (s *Server) runSQLTargetSync(
 	options := s.sqlTargetSyncOptions(cfg, result, table, dryRun)
 	if !dryRun {
 		options.ReconciliationToken = reconciliationToken
+	}
+	if err := ctx.Err(); err != nil {
+		writeSourceFailure(err)
+		return
 	}
 	syncResult, syncErr := s.sqlOperations.sync(ctx, options, result.Rows)
 	syncResult = safeSQLResult(syncResult, options, recordCount, syncErr)
@@ -561,12 +572,12 @@ func (s *Server) sqlTargetFingerprint(cfg appconfig.Config, table string) ([sha2
 	return sha256.Sum256(encoded), nil
 }
 
-func sqlSourceFingerprint(result recordpipe.Result) [sha256.Size]byte {
-	protectedKeys := []string(nil)
+func sqlSourceFingerprint(ctx context.Context, result recordpipe.Result) ([sha256.Size]byte, error) {
+	var protectedKeys []string
 	if result.Contract != nil {
-		protectedKeys = append(protectedKeys, result.Contract.QuarantinedCodes...)
+		protectedKeys = result.Contract.QuarantinedCodes
 	}
-	return recordsink.SQLSourceFingerprint(result.Rows, result.KeyField, protectedKeys)
+	return recordsink.SQLSourceFingerprintContext(ctx, result.Rows, result.KeyField, protectedKeys)
 }
 
 func issuedPreviewGrantMatches(

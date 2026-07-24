@@ -9,11 +9,8 @@ import (
 	"errors"
 	"fmt"
 	"hash"
-	"sort"
 	"strings"
 	"time"
-
-	"github.com/atomicdeploy/patris-export/pkg/recordmap"
 )
 
 // SoftDeleteColumn is reserved for recordsink-managed tombstone state. Source
@@ -78,13 +75,29 @@ type sqlQueryer interface {
 }
 
 func prepareSoftDeleteRows(rows []map[string]interface{}, keyField string) ([]map[string]interface{}, error) {
+	return prepareSoftDeleteRowsContext(context.Background(), rows, keyField)
+}
+
+func prepareSoftDeleteRowsContext(ctx context.Context, rows []map[string]interface{}, keyField string) ([]map[string]interface{}, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if isSoftDeleteIdentifier(keyField) {
 		return nil, &ReconciliationGuardError{Code: ReconciliationGuardReservedField}
 	}
 	prepared := make([]map[string]interface{}, len(rows))
 	for index, row := range rows {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		copyRow := make(map[string]interface{}, len(row)+1)
 		for field, value := range row {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
 			if isSoftDeleteIdentifier(field) {
 				return nil, &ReconciliationGuardError{Code: ReconciliationGuardReservedField}
 			}
@@ -92,6 +105,9 @@ func prepareSoftDeleteRows(rows []map[string]interface{}, keyField string) ([]ma
 		}
 		copyRow[SoftDeleteColumn] = false
 		prepared[index] = copyRow
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 	return prepared, nil
 }
@@ -104,6 +120,12 @@ func buildSoftDeleteEvidence(
 	sourceRows []map[string]interface{},
 	sourceKeys, keepKeys []string,
 ) (SQLReconciliationEvidence, string, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return SQLReconciliationEvidence{}, "", err
+	}
 	evidence := SQLReconciliationEvidence{
 		SourceRows:           len(sourceKeys),
 		ProtectedRows:        len(keepKeys) - len(sourceKeys),
@@ -111,7 +133,10 @@ func buildSoftDeleteEvidence(
 		ApplyAllowed:         len(sourceKeys) > 0,
 	}
 	if !tableExists {
-		token := softDeleteConfirmationToken(table, keyField, sourceRows, sourceKeys, keepKeys, nil)
+		token, err := softDeleteConfirmationTokenContext(ctx, table, keyField, sourceRows, sourceKeys, keepKeys, nil)
+		if err != nil {
+			return evidence, "", err
+		}
 		return evidence, token, nil
 	}
 	if markerExists {
@@ -120,8 +145,14 @@ func buildSoftDeleteEvidence(
 		}
 	}
 
-	sourceSet := stringSet(sourceKeys)
-	keepSet := stringSet(keepKeys)
+	sourceSet, err := stringSetContext(ctx, sourceKeys)
+	if err != nil {
+		return evidence, "", err
+	}
+	keepSet, err := stringSetContext(ctx, keepKeys)
+	if err != nil {
+		return evidence, "", err
+	}
 	fields := quoteIdent(driver, keyField)
 	if markerExists {
 		fields += ", " + quoteIdent(driver, SoftDeleteColumn)
@@ -135,6 +166,9 @@ func buildSoftDeleteEvidence(
 
 	targetStates := make([]softDeleteTargetState, 0)
 	for rows.Next() {
+		if err := ctx.Err(); err != nil {
+			return evidence, "", err
+		}
 		var keyValue interface{}
 		var markerValue interface{}
 		if markerExists {
@@ -146,6 +180,9 @@ func buildSoftDeleteEvidence(
 			return evidence, "", err
 		}
 		key := databaseKey(keyValue)
+		if err := ctx.Err(); err != nil {
+			return evidence, "", err
+		}
 		if strings.TrimSpace(key) == "" {
 			return evidence, "", errors.New("soft-delete target contains an empty key")
 		}
@@ -170,9 +207,15 @@ func buildSoftDeleteEvidence(
 	if err := rows.Err(); err != nil {
 		return evidence, "", err
 	}
+	if err := ctx.Err(); err != nil {
+		return evidence, "", err
+	}
 	evidence.TargetRows = len(targetStates)
 	evidence.PartialSourceRisk = evidence.MissingRows > 0
-	token := softDeleteConfirmationToken(table, keyField, sourceRows, sourceKeys, keepKeys, targetStates)
+	token, err := softDeleteConfirmationTokenContext(ctx, table, keyField, sourceRows, sourceKeys, keepKeys, targetStates)
+	if err != nil {
+		return evidence, "", err
+	}
 	return evidence, token, nil
 }
 
@@ -322,15 +365,57 @@ func softDeleteConfirmationToken(
 	sourceKeys, keepKeys []string,
 	targetStates []softDeleteTargetState,
 ) string {
+	token, _ := softDeleteConfirmationTokenContext(
+		context.Background(),
+		table,
+		keyField,
+		sourceRows,
+		sourceKeys,
+		keepKeys,
+		targetStates,
+	)
+	return token
+}
+
+func softDeleteConfirmationTokenContext(
+	ctx context.Context,
+	table, keyField string,
+	sourceRows []map[string]interface{},
+	sourceKeys, keepKeys []string,
+	targetStates []softDeleteTargetState,
+) (string, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 	digest := sha256.New()
-	writeDigestPart(digest, "patris-soft-delete-v2")
-	writeDigestPart(digest, strings.ToLower(strings.TrimSpace(table)))
-	writeDigestPart(digest, strings.ToLower(strings.TrimSpace(keyField)))
-	writeSourceRowsDigest(digest, sourceRows, keyField)
-	writeDigestList(digest, sourceKeys)
-	writeDigestList(digest, keepKeys)
-	writeTargetStatesDigest(digest, targetStates)
-	return SoftDeleteConfirmationTokenPrefix + hex.EncodeToString(digest.Sum(nil))
+	for _, value := range []string{
+		"patris-soft-delete-v2",
+		strings.ToLower(strings.TrimSpace(table)),
+		strings.ToLower(strings.TrimSpace(keyField)),
+	} {
+		if err := writeDigestStringContext(ctx, digest, value); err != nil {
+			return "", err
+		}
+	}
+	if err := writeSourceRowsDigestContext(ctx, digest, sourceRows, keyField); err != nil {
+		return "", err
+	}
+	if err := writeDigestListContext(ctx, digest, sourceKeys); err != nil {
+		return "", err
+	}
+	if err := writeDigestListContext(ctx, digest, keepKeys); err != nil {
+		return "", err
+	}
+	if err := writeTargetStatesDigestContext(ctx, digest, targetStates); err != nil {
+		return "", err
+	}
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	return SoftDeleteConfirmationTokenPrefix + hex.EncodeToString(digest.Sum(nil)), nil
 }
 
 // SQLSourceFingerprint returns a deterministic, typed digest of the exact
@@ -338,39 +423,82 @@ func softDeleteConfirmationToken(
 // distinguishes values that JSON alone collapses, such as int64 from float64,
 // []byte from string, and time.Time from its formatted text.
 func SQLSourceFingerprint(rows []map[string]interface{}, keyField string, protectedKeys []string) [sha256.Size]byte {
-	digest := sha256.New()
-	writeDigestPart(digest, "patris-sql-source-v1")
-	writeDigestPart(digest, strings.TrimSpace(keyField))
-	writeSourceRowsDigest(digest, rows, keyField)
-	writeDigestList(digest, protectedKeys)
-	var fingerprint [sha256.Size]byte
-	copy(fingerprint[:], digest.Sum(nil))
+	fingerprint, _ := SQLSourceFingerprintContext(context.Background(), rows, keyField, protectedKeys)
 	return fingerprint
 }
 
+// SQLSourceFingerprintContext is SQLSourceFingerprint with cooperative
+// cancellation throughout field collection, stable ordering, typed value
+// hashing, and protected-key hashing.
+func SQLSourceFingerprintContext(
+	ctx context.Context,
+	rows []map[string]interface{},
+	keyField string,
+	protectedKeys []string,
+) ([sha256.Size]byte, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return [sha256.Size]byte{}, err
+	}
+	digest := sha256.New()
+	if err := writeDigestStringContext(ctx, digest, "patris-sql-source-v1"); err != nil {
+		return [sha256.Size]byte{}, err
+	}
+	if err := writeDigestStringContext(ctx, digest, strings.TrimSpace(keyField)); err != nil {
+		return [sha256.Size]byte{}, err
+	}
+	if err := writeSourceRowsDigestContext(ctx, digest, rows, keyField); err != nil {
+		return [sha256.Size]byte{}, err
+	}
+	if err := writeDigestListContext(ctx, digest, protectedKeys); err != nil {
+		return [sha256.Size]byte{}, err
+	}
+	var fingerprint [sha256.Size]byte
+	copy(fingerprint[:], digest.Sum(nil))
+	return fingerprint, nil
+}
+
 func writeSourceRowsDigest(digest hash.Hash, rows []map[string]interface{}, keyField string) {
-	fields := recordmap.Fields(rows, keyField)
+	_ = writeSourceRowsDigestContext(context.Background(), digest, rows, keyField)
+}
+
+func writeSourceRowsDigestContext(ctx context.Context, digest hash.Hash, rows []map[string]interface{}, keyField string) error {
+	fields, err := sqlFieldsContext(ctx, rows, keyField)
+	if err != nil {
+		return err
+	}
 	writeDigestCount(digest, len(fields))
 	for _, field := range fields {
-		writeDigestPart(digest, field)
+		if err := writeDigestStringContext(ctx, digest, field); err != nil {
+			return err
+		}
 	}
 
-	ordered := append([]map[string]interface{}(nil), rows...)
-	sort.SliceStable(ordered, func(left, right int) bool {
-		return databaseKey(ordered[left][keyField]) < databaseKey(ordered[right][keyField])
-	})
+	ordered, err := stableDigestRowsContext(ctx, rows, keyField)
+	if err != nil {
+		return err
+	}
 	writeDigestCount(digest, len(ordered))
 	for _, row := range ordered {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		for _, field := range fields {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
 			value, exists := row[field]
 			if !exists {
 				value = nil
 			}
-			typeName, text := softDeleteDigestValue(value)
-			writeDigestPart(digest, typeName)
-			writeDigestPart(digest, text)
+			if err := writeSoftDeleteDigestValueContext(ctx, digest, value); err != nil {
+				return err
+			}
 		}
 	}
+	return ctx.Err()
 }
 
 func softDeleteDigestValue(value interface{}) (string, string) {
@@ -384,28 +512,60 @@ func softDeleteDigestValue(value interface{}) (string, string) {
 }
 
 func writeTargetStatesDigest(digest hash.Hash, states []softDeleteTargetState) {
+	_ = writeTargetStatesDigestContext(context.Background(), digest, states)
+}
+
+func writeTargetStatesDigestContext(ctx context.Context, digest hash.Hash, states []softDeleteTargetState) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	ordered := append([]softDeleteTargetState(nil), states...)
-	sort.Slice(ordered, func(left, right int) bool {
-		return ordered[left].Key < ordered[right].Key
-	})
+	if err := stableSortTargetStatesContext(ctx, ordered); err != nil {
+		return err
+	}
 	writeDigestCount(digest, len(ordered))
 	for _, state := range ordered {
-		writeDigestPart(digest, state.Key)
+		if err := writeDigestStringContext(ctx, digest, state.Key); err != nil {
+			return err
+		}
 		if state.Deleted {
-			writeDigestPart(digest, "1")
+			if err := writeDigestStringContext(ctx, digest, "1"); err != nil {
+				return err
+			}
 		} else {
-			writeDigestPart(digest, "0")
+			if err := writeDigestStringContext(ctx, digest, "0"); err != nil {
+				return err
+			}
 		}
 	}
+	return ctx.Err()
 }
 
 func writeDigestList(digest hash.Hash, values []string) {
+	_ = writeDigestListContext(context.Background(), digest, values)
+}
+
+func writeDigestListContext(ctx context.Context, digest hash.Hash, values []string) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	ordered := append([]string(nil), values...)
-	sort.Strings(ordered)
+	if err := stableSortStringsContext(ctx, ordered); err != nil {
+		return err
+	}
 	writeDigestCount(digest, len(ordered))
 	for _, value := range ordered {
-		writeDigestPart(digest, value)
+		if err := writeDigestStringContext(ctx, digest, value); err != nil {
+			return err
+		}
 	}
+	return ctx.Err()
 }
 
 func writeDigestCount(digest hash.Hash, count int) {
@@ -415,18 +575,270 @@ func writeDigestCount(digest hash.Hash, count int) {
 }
 
 func writeDigestPart(digest hash.Hash, value string) {
+	_ = writeDigestStringContext(context.Background(), digest, value)
+}
+
+const sqlDigestChunkSize = 64 * 1024
+
+func writeDigestStringContext(ctx context.Context, digest hash.Hash, value string) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	var length [8]byte
 	binary.BigEndian.PutUint64(length[:], uint64(len(value)))
 	_, _ = digest.Write(length[:])
-	_, _ = digest.Write([]byte(value))
+	for start := 0; start < len(value); start += sqlDigestChunkSize {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		end := start + sqlDigestChunkSize
+		if end > len(value) {
+			end = len(value)
+		}
+		_, _ = digest.Write([]byte(value[start:end]))
+	}
+	return ctx.Err()
+}
+
+func writeDigestBytesContext(ctx context.Context, digest hash.Hash, value []byte) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	var length [8]byte
+	binary.BigEndian.PutUint64(length[:], uint64(len(value)))
+	_, _ = digest.Write(length[:])
+	for start := 0; start < len(value); start += sqlDigestChunkSize {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		end := start + sqlDigestChunkSize
+		if end > len(value) {
+			end = len(value)
+		}
+		_, _ = digest.Write(value[start:end])
+	}
+	return ctx.Err()
+}
+
+func sqlFieldsContext(ctx context.Context, rows []map[string]interface{}, keyField string) ([]string, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	seen := map[string]bool{}
+	fields := []string{}
+	if keyField != "" {
+		seen[keyField] = true
+		fields = append(fields, keyField)
+	}
+	for _, row := range rows {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		for field := range row {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+			if !seen[field] {
+				seen[field] = true
+				fields = append(fields, field)
+			}
+		}
+	}
+	if len(fields) <= 1 {
+		return fields, ctx.Err()
+	}
+	sortStart := 0
+	if keyField != "" && fields[0] == keyField {
+		sortStart = 1
+	}
+	if err := stableSortStringsContext(ctx, fields[sortStart:]); err != nil {
+		return nil, err
+	}
+	return fields, ctx.Err()
+}
+
+type sqlDigestRow struct {
+	row map[string]interface{}
+	key string
+}
+
+func stableDigestRowsContext(ctx context.Context, rows []map[string]interface{}, keyField string) ([]map[string]interface{}, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	ordered := make([]sqlDigestRow, len(rows))
+	for index, row := range rows {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		key := databaseKey(row[keyField])
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		ordered[index] = sqlDigestRow{row: row, key: key}
+	}
+	if err := stableSortDigestRowsContext(ctx, ordered); err != nil {
+		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	result := make([]map[string]interface{}, len(ordered))
+	for index, entry := range ordered {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		result[index] = entry.row
+	}
+	return result, ctx.Err()
+}
+
+func stableSortStringsContext(ctx context.Context, values []string) error {
+	return stableSortContext(ctx, values, func(left, right string) bool {
+		return left < right
+	})
+}
+
+func stableSortDigestRowsContext(ctx context.Context, values []sqlDigestRow) error {
+	return stableSortContext(ctx, values, func(left, right sqlDigestRow) bool {
+		return left.key < right.key
+	})
+}
+
+func stableSortTargetStatesContext(ctx context.Context, values []softDeleteTargetState) error {
+	return stableSortContext(ctx, values, func(left, right softDeleteTargetState) bool {
+		return left.Key < right.Key
+	})
+}
+
+func stableSortContext[T any](ctx context.Context, values []T, less func(T, T) bool) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if len(values) <= 1 {
+		return nil
+	}
+	scratch := make([]T, len(values))
+	var sortRange func(int, int) error
+	sortRange = func(low, high int) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if high-low <= 1 {
+			return nil
+		}
+		middle := low + (high-low)/2
+		if err := sortRange(low, middle); err != nil {
+			return err
+		}
+		if err := sortRange(middle, high); err != nil {
+			return err
+		}
+		left, right := low, middle
+		for output := low; output < high; output++ {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			switch {
+			case left >= middle:
+				scratch[output] = values[right]
+				right++
+			case right >= high:
+				scratch[output] = values[left]
+				left++
+			case !less(values[right], values[left]):
+				scratch[output] = values[left]
+				left++
+			default:
+				scratch[output] = values[right]
+				right++
+			}
+		}
+		for index := low; index < high; index++ {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			values[index] = scratch[index]
+		}
+		return nil
+	}
+	if err := sortRange(0, len(values)); err != nil {
+		return err
+	}
+	return ctx.Err()
+}
+
+func writeSoftDeleteDigestValueContext(ctx context.Context, digest hash.Hash, value interface{}) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	typeName := "nil"
+	if value != nil {
+		if _, ok := value.(time.Time); ok {
+			typeName = "time.Time"
+		} else {
+			typeName = fmt.Sprintf("%T", value)
+		}
+	}
+	if err := writeDigestStringContext(ctx, digest, typeName); err != nil {
+		return err
+	}
+	switch typed := value.(type) {
+	case nil:
+		return writeDigestStringContext(ctx, digest, "")
+	case time.Time:
+		return writeDigestStringContext(ctx, digest, typed.Format(time.RFC3339Nano))
+	case []byte:
+		return writeDigestBytesContext(ctx, digest, typed)
+	case string:
+		return writeDigestStringContext(ctx, digest, typed)
+	default:
+		text := databaseText(value)
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		return writeDigestStringContext(ctx, digest, text)
+	}
 }
 
 func stringSet(values []string) map[string]struct{} {
+	result, _ := stringSetContext(context.Background(), values)
+	return result
+}
+
+func stringSetContext(ctx context.Context, values []string) (map[string]struct{}, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	result := make(map[string]struct{}, len(values))
 	for _, value := range values {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		result[value] = struct{}{}
 	}
-	return result
+	return result, ctx.Err()
 }
 
 func softDeleteRowsAbsentFromSnapshot(ctx context.Context, tx *sql.Tx, driver, table, keyField string, keys []string, requestedBatch int) (int, error) {

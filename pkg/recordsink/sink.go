@@ -216,6 +216,9 @@ func SyncSnapshotSQL(ctx context.Context, db *sql.DB, driver, table, keyField st
 // evolution remains additive and is performed before it. Soft-delete apply
 // requires the digest returned by an exact dry-run preview.
 func SyncSQLDB(ctx context.Context, db *sql.DB, options SQLOptions, rows []map[string]interface{}) (result SQLResult, err error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	started := time.Now()
 	result.DryRun = options.DryRun
 	result.Reconciliation, err = normalizeReconciliation(options.Reconciliation)
@@ -235,6 +238,9 @@ func SyncSQLDB(ctx context.Context, db *sql.DB, options SQLOptions, rows []map[s
 	if err != nil {
 		return result, err
 	}
+	if err = ctx.Err(); err != nil {
+		return result, err
+	}
 
 	driver := strings.ToLower(strings.TrimSpace(options.Driver))
 	if driver == "" {
@@ -250,7 +256,10 @@ func SyncSQLDB(ctx context.Context, db *sql.DB, options SQLOptions, rows []map[s
 		return result, err
 	}
 
-	fields := recordmap.Fields(rows, options.KeyField)
+	fields, err := sqlFieldsContext(ctx, rows, options.KeyField)
+	if err != nil {
+		return result, err
+	}
 	keyField := strings.TrimSpace(options.KeyField)
 	if keyField == "" {
 		if len(fields) > 0 {
@@ -260,19 +269,22 @@ func SyncSQLDB(ctx context.Context, db *sql.DB, options SQLOptions, rows []map[s
 		}
 	}
 	if result.Reconciliation == SoftDeleteMissing {
-		rows, err = prepareSoftDeleteRows(rows, keyField)
+		rows, err = prepareSoftDeleteRowsContext(ctx, rows, keyField)
 		if err != nil {
 			return result, err
 		}
-		fields = recordmap.Fields(rows, keyField)
+		fields, err = sqlFieldsContext(ctx, rows, keyField)
+		if err != nil {
+			return result, err
+		}
 	}
-	keys, err := snapshotKeys(rows, keyField, nil)
+	keys, err := snapshotKeysContext(ctx, rows, keyField, nil)
 	if err != nil {
 		return result, err
 	}
 	keepKeys := keys
 	if result.Reconciliation != UpsertOnly {
-		keepKeys, err = appendProtectedKeys(keys, options.ProtectedKeys)
+		keepKeys, err = appendProtectedKeysContext(ctx, keys, options.ProtectedKeys)
 		if err != nil {
 			return result, err
 		}
@@ -495,12 +507,28 @@ func effectiveBatchSize(driver string, requested, fieldCount int) int {
 }
 
 func appendProtectedKeys(keys, protected []string) ([]string, error) {
+	return appendProtectedKeysContext(context.Background(), keys, protected)
+}
+
+func appendProtectedKeysContext(ctx context.Context, keys, protected []string) ([]string, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	seen := make(map[string]struct{}, len(keys)+len(protected))
 	result := append([]string(nil), keys...)
 	for _, key := range result {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		seen[key] = struct{}{}
 	}
 	for index, value := range protected {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		key := strings.TrimSpace(value)
 		if key == "" {
 			return nil, fmt.Errorf("protected snapshot key %d is empty", index)
@@ -511,7 +539,7 @@ func appendProtectedKeys(keys, protected []string) ([]string, error) {
 		seen[key] = struct{}{}
 		result = append(result, key)
 	}
-	return result, nil
+	return result, ctx.Err()
 }
 
 type sqlCounts struct {
@@ -781,14 +809,33 @@ func mergeSnapshotOptions(values []SnapshotOptions) SnapshotOptions {
 }
 
 func snapshotKeys(rows []map[string]interface{}, keyField string, protected []string) ([]string, error) {
+	return snapshotKeysContext(context.Background(), rows, keyField, protected)
+}
+
+func snapshotKeysContext(ctx context.Context, rows []map[string]interface{}, keyField string, protected []string) ([]string, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	seen := make(map[string]struct{}, len(rows)+len(protected))
 	keys := make([]string, 0, len(rows)+len(protected))
 	for index, row := range rows {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		value, exists := row[keyField]
-		if !exists || value == nil || strings.TrimSpace(cell(value)) == "" {
+		if !exists || value == nil {
 			return nil, fmt.Errorf("snapshot row %d is missing key field %q", index, keyField)
 		}
 		key := cell(value)
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		if strings.TrimSpace(key) == "" {
+			return nil, fmt.Errorf("snapshot row %d is missing key field %q", index, keyField)
+		}
 		if _, exists := seen[key]; exists {
 			return nil, fmt.Errorf("snapshot contains duplicate %s %q", keyField, key)
 		}
@@ -796,6 +843,9 @@ func snapshotKeys(rows []map[string]interface{}, keyField string, protected []st
 		keys = append(keys, key)
 	}
 	for index, value := range protected {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		key := strings.TrimSpace(value)
 		if key == "" {
 			return nil, fmt.Errorf("protected snapshot key %d is empty", index)
@@ -806,7 +856,7 @@ func snapshotKeys(rows []map[string]interface{}, keyField string, protected []st
 		seen[key] = struct{}{}
 		keys = append(keys, key)
 	}
-	return keys, nil
+	return keys, ctx.Err()
 }
 
 func deleteRowsAbsentFromSnapshot(ctx context.Context, tx *sql.Tx, driver, table, keyField string, keys []string, requestedBatch int) (int, error) {

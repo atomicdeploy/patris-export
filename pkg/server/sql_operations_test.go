@@ -43,6 +43,15 @@ type legacySQLTestSource struct {
 	rawCalls int
 }
 
+type sqlFingerprintCancelValue struct {
+	cancel context.CancelFunc
+}
+
+func (value sqlFingerprintCancelValue) String() string {
+	value.cancel()
+	return "private-fingerprint-value"
+}
+
 func (source *legacySQLTestSource) GetRecords() ([]map[string]interface{}, error) {
 	return source.GetRawRecords()
 }
@@ -1293,6 +1302,54 @@ func TestSQLSourcePreparationCancellationDoesNotWedgeOperations(t *testing.T) {
 	cancelImmediately()
 	if _, err := server.RecordResultContext(cancelled); !errors.Is(err, context.Canceled) {
 		t.Fatalf("pre-cancelled RecordResultContext error=%v, want context.Canceled", err)
+	}
+}
+
+func TestSQLSourceFingerprintCancellationDoesNotReachSink(t *testing.T) {
+	server := newSQLOperationsTestServer(t)
+	credentials := createSQLTestSession(t, server, false)
+	request := newAuthenticatedSQLRequest(credentials, http.MethodPost, "/api/sql-target/preview", nil)
+	requestContext, cancel := context.WithCancel(request.Context())
+	defer cancel()
+	request = request.WithContext(requestContext)
+
+	server.sqlOperations.records = func(context.Context) (recordpipe.Result, error) {
+		return recordpipe.Result{
+			Rows: []map[string]interface{}{{
+				"Code":  "A",
+				"value": sqlFingerprintCancelValue{cancel: cancel},
+			}},
+			KeyField: "Code",
+		}, nil
+	}
+	sinkCalls := 0
+	server.sqlOperations.sync = func(context.Context, recordsink.SQLOptions, []map[string]interface{}) (recordsink.SQLResult, error) {
+		sinkCalls++
+		return recordsink.SQLResult{}, nil
+	}
+
+	response := serveSQLRequest(server, request)
+	if response.Code != http.StatusRequestTimeout {
+		t.Fatalf("fingerprint cancellation status=%d, want 408: %s", response.Code, response.Body)
+	}
+	var payload struct {
+		Success    bool                   `json:"success"`
+		Diagnostic sqlOperationDiagnostic `json:"diagnostic"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&payload); err != nil {
+		t.Fatalf("decode fingerprint cancellation: %v", err)
+	}
+	failure := payload.Diagnostic.Failure
+	if payload.Success || payload.Diagnostic.Status != "failed" ||
+		failure == nil ||
+		failure.Code != string(recordsink.SQLFailureCancelled) ||
+		failure.Stage != "source" ||
+		failure.Retryable ||
+		sinkCalls != 0 {
+		t.Fatalf("unsafe fingerprint cancellation diagnostic=%#v sinkCalls=%d", payload, sinkCalls)
+	}
+	if strings.Contains(response.Body.String(), "private-fingerprint-value") {
+		t.Fatalf("fingerprint cancellation exposed source value: %s", response.Body)
 	}
 }
 
