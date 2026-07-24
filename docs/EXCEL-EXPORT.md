@@ -75,41 +75,73 @@ The Web UI download action sends its active language and the configured export
 mode/zebra preference to this route. Query values override the config for that
 one response.
 
-## Macro dashboard example
+## Dynamic macro template
 
-`docs/examples/Patris-Digitalogic-Dashboard.xlsm` is a credential-free example
-for companies that want a polished Excel front end. Its Settings sheet contains
-editable Patris CSV and Digitalogic WordPress REST endpoints. Refreshes preserve
-the optional manual price override, review status, and notes only when the exact,
-case-sensitive Code still exists; source-derived values are always refreshed.
-The displayed effective price uses the manual override when numeric and falls
-back to the canonical final price. Signed-in or protected deployments should use
-operating-system or Office-supported credential mechanisms; do not store secrets
-in the workbook. Enable macros only after reviewing
-`docs/examples/vba/PatrisDashboard.bas` and
-`docs/examples/vba/ThisWorkbook.cls`, and trust only endpoints you control.
+`docs/examples/Patris-Digitalogic-Price-Calculator.xltm` is the canonical
+calculator template. It intentionally contains no product rows, cached REST
+responses, live exchange/freight/profit values, or credentials. Opening the
+`.xltm` creates a separate macro-enabled workbook instance, so a user's later
+Save As operation does not overwrite the empty template.
 
-Patris refresh validates the required Code header and every nonblank, unique
-Code before it changes the reviewed product table, so an HTML login page or
-malformed CSV cannot erase manual overrides. The optional Digitalogic refresh
-accepts only a nonempty JSON object/array. Its default URL is the Digitalogic
-Google Sheets catalog endpoint documented below, but the workbook leaves this
-protected endpoint blank by default so it never weakens or bypasses the existing
-WordPress session/capability boundary:
+Refresh-on-open and **Sync now** fetch:
 
 ```text
+http://127.0.0.1:18080/api/product-sync
 https://digitalogic.ir/wp-json/digitalogic/v1/google-sheets/catalog
 ```
 
-Use it only through an approved session-aware Office/OS integration. The Windows
-builder removes local absolute paths, neutralizes Office
-author metadata to `AtomicDeploy`, removes volatile core-property timestamps,
+The Patris source is the canonical `patris.product-sync` JSON envelope. The
+Digitalogic source is the same protected, paginated catalog projection consumed
+by the existing Google Apps Script. Excel and Google Sheets therefore stay
+aligned by reading the same living contract; neither workbook writes through
+the other.
+
+The merge key is exact, case-sensitive Patris `product_code` to Digitalogic
+`patris_code`. SKU and product name are never identity fallbacks. Matched rows
+display `WooID <id>` as hyperlink text targeting the projected product
+`permalink`. WooCommerce rows without a Patris record remain visible with their
+`woo:<id>` sync key and warning state.
+
+The Settings sheet displays three live summaries outside the table:
+
+- `بهای یوآن` from `irt_per_cny`;
+- `نرخ حمل CNY` from CNY-denominated `shipping_price_per_kg`;
+- `درصد سود` from `markup_percent`.
+
+One consistent value is shown numerically; multiple live values display a
+`Mixed (n)` warning instead of silently choosing one. The product calculation
+uses each row's canonical inputs, not these display summaries. Missing, null, or
+invalid inputs stay blank and their source warning remains in **Sync Status**.
+The Excel formula uses `COUNT` and an exact currency guard, so it does not emit
+`#N/A`.
+
+The Digitalogic route remains protected. The template reads the names
+`DIGITALOGIC_CONSUMER_KEY` and `DIGITALOGIC_CONSUMER_SECRET` from Settings, then
+loads their values from the Excel process environment. It never stores those
+values in cells or VBA. The Authorization header is permitted only for
+`https://digitalogic.ir/`, and the WooCommerce key must have Read permission
+only.
+
+Refreshes preserve the optional manual price override, review status, and notes
+only while the exact, case-sensitive Code still exists; source-derived values
+always refresh. The displayed effective price uses a numeric manual override and
+otherwise falls back to the canonical final price.
+
+Enable macros only after reviewing:
+
+- `docs/examples/vba/JsonValue.cls`;
+- `docs/examples/vba/JsonRuntime.bas`;
+- `docs/examples/vba/PatrisDashboard.bas`;
+- `docs/examples/vba/ThisWorkbook.cls`.
+
+The Windows builder removes local absolute paths, neutralizes Office author
+metadata to `AtomicDeploy`, removes volatile core-property timestamps,
 normalizes ZIP timestamps, and rejects external links/connections or private
-workstation metadata before publishing the workbook and checksum.
+workstation metadata before publishing the template and checksum.
 
-The workbook package is reopened by the Go/Excelize regression suite for
-formula, type, style, macro-package, and metadata checks and was also opened,
-calculated, and macro-parsed with native Excel 16. LibreOffice compatibility is
-not claimed without a LibreOffice runtime in the validation environment.
+The package is reopened by the Go/Excelize regression suite for macro-package
+and metadata checks. Its VBA is also imported, compiled, calculated, and
+integration-tested with native Excel 16. LibreOffice compatibility is not
+claimed without a LibreOffice runtime in the validation environment.
 
-![Patris and Digitalogic Excel dashboard](examples/Patris-Digitalogic-Dashboard-preview.png)
+![Patris and Digitalogic price calculator template](examples/Patris-Digitalogic-Price-Calculator-preview.png)

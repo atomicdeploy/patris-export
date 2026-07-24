@@ -8,10 +8,10 @@ param(
 $ErrorActionPreference = 'Stop'
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 if ([string]::IsNullOrWhiteSpace($OutputPath)) {
-    $OutputPath = Join-Path $repoRoot 'docs\examples\Patris-Digitalogic-Dashboard.xlsm'
+    $OutputPath = Join-Path $repoRoot 'docs\examples\Patris-Digitalogic-Price-Calculator.xltm'
 }
 if ([string]::IsNullOrWhiteSpace($DistributionCopyPath)) {
-    $DistributionCopyPath = Join-Path $repoRoot 'outputs\patris-excel-15\Patris-Digitalogic-Dashboard.xlsm'
+    $DistributionCopyPath = Join-Path $repoRoot 'outputs\patris-excel-15\Patris-Digitalogic-Price-Calculator.xltm'
 }
 if ([string]::IsNullOrWhiteSpace($PreviewDirectory)) {
     $PreviewDirectory = Join-Path $repoRoot 'outputs\patris-excel-15\preview'
@@ -20,6 +20,8 @@ $OutputPath = [IO.Path]::GetFullPath($OutputPath)
 $DistributionCopyPath = [IO.Path]::GetFullPath($DistributionCopyPath)
 $PreviewDirectory = [IO.Path]::GetFullPath($PreviewDirectory)
 $vbaModulePath = Join-Path $repoRoot 'docs\examples\vba\PatrisDashboard.bas'
+$jsonRuntimePath = Join-Path $repoRoot 'docs\examples\vba\JsonRuntime.bas'
+$jsonValuePath = Join-Path $repoRoot 'docs\examples\vba\JsonValue.cls'
 $thisWorkbookPath = Join-Path $repoRoot 'docs\examples\vba\ThisWorkbook.cls'
 $excelSecurityPath = 'HKCU:\Software\Microsoft\Office\16.0\Excel\Security'
 $excelSecurityPathExisted = Test-Path $excelSecurityPath
@@ -203,9 +205,7 @@ try {
         $workbook.Worksheets.Item($workbook.Worksheets.Count).Delete()
     }
 
-    $raw = $workbook.Worksheets.Item(1)
-    $raw.Name = 'Digitalogic Raw'
-    $instructions = $workbook.Worksheets.Add()
+    $instructions = $workbook.Worksheets.Item(1)
     $instructions.Name = 'Instructions'
     $settings = $workbook.Worksheets.Add()
     $settings.Name = 'Settings'
@@ -214,74 +214,45 @@ try {
     $dashboard = $workbook.Worksheets.Add()
     $dashboard.Name = 'Dashboard'
 
-    foreach ($sheet in @($dashboard, $products, $settings, $instructions, $raw)) {
+    foreach ($sheet in @($dashboard, $products, $settings, $instructions)) {
         $sheet.Cells.Font.Name = 'Aptos'
         $sheet.Cells.Font.Size = 10
         $sheet.Activate()
         $excel.ActiveWindow.DisplayGridlines = $false
     }
 
-    # Products: typed source-of-truth table with formula-driven final price.
+    # Products: an intentionally empty runtime table. Opening the .xltm creates
+    # a new workbook instance; the checked-in template never contains catalog
+    # rows or live configuration values.
     $headers = @(
         'Code', 'Name', 'Part Number', 'Category', 'Warehouse 1', 'Warehouse 2',
         'Total Stock', 'Foreign Price (CNY)', 'Weight (g)', 'Shipping Method',
         'Shipping Price/kg', 'Shipping Currency', 'Profit Margin (%)', 'IRT per CNY',
-        'Final Price (IRT)', 'Manual Price Override (IRT)', 'Review Status', 'Notes',
-        'Effective Price (IRT)', 'Source', 'Search Index'
+        'Final Price (IRT)', 'WooCommerce', 'Woo Price (IRT)', 'Woo Stock', 'Sync Status',
+        'Manual Price Override (IRT)', 'Review Status', 'Notes', 'Effective Price (IRT)',
+        'Source', 'Search Index'
     )
     for ($column = 0; $column -lt $headers.Count; $column++) {
         $products.Cells.Item(1, $column + 1).Value2 = $headers[$column]
     }
-    # The last row uses IRR/kg equivalent to 85 CNY/kg at 25,300 IRT/CNY,
-    # exercising both supported freight-currency branches in the live sheet.
-    $sampleRows = @(
-        @('DG-1001', 'Raspberry Pi 5 8GB', 'SC1112', 'Single-board computers', 8, 5, 13, 88.0, 110, 'air_express', 85, 'CNY', 30, 25300, $null, $null, 'Approved', 'Featured item', $null, 'Example data'),
-        @('DG-1002', 'ESP32-S3 Development Board', 'ESP32-S3-DEVKITC', 'Development boards', 18, 7, 25, 9.4, 38, 'air_express', 85, 'CNY', 30, 25300, $null, $null, 'Needs review', '', $null, 'Example data'),
-        @('DG-1003', 'Arduino Nano Every', 'ABX00028', 'Development boards', 12, 6, 18, 15.2, 26, 'air_express', 85, 'CNY', 30, 25300, $null, $null, 'Approved', '', $null, 'Example data'),
-        @('DG-1004', 'LoRa SX1278 Module', 'RA-02', 'Wireless modules', 20, 10, 30, 4.8, 18, 'air_express', 85, 'CNY', 30, 25300, $null, $null, 'Needs review', '', $null, 'Example data'),
-        @('DG-1005', '5V 10A Switching Power Supply', 'LRS-50-5', 'Power modules', 4, 3, 7, 12.7, 430, 'air_express', 85, 'CNY', 30, 25300, $null, $null, 'Approved', '', $null, 'Example data'),
-        @('DG-1006', 'INA219 Current Sensor', 'GY-219', 'Sensor modules', 15, 9, 24, 2.1, 7, 'air_express', 85, 'CNY', 30, 25300, $null, $null, 'Needs review', '', $null, 'Example data'),
-        @('DG-1007', '2.8 inch SPI TFT Display', 'ILI9341-2.8', 'Display modules', 6, 4, 10, 8.6, 82, 'air_express', 85, 'CNY', 30, 25300, $null, $null, 'Approved', '', $null, 'Example data'),
-        @('DG-1008', 'USB Logic Analyzer 24MHz', 'CY7C68013A', 'Test equipment', 9, 2, 11, 5.5, 52, 'air_express', 21505000, 'IRR', 30, 25300, $null, $null, 'Needs review', '', $null, 'Example data')
-    )
-    for ($row = 0; $row -lt $sampleRows.Count; $row++) {
-        for ($column = 0; $column -lt $sampleRows[$row].Count; $column++) {
-            if ($null -ne $sampleRows[$row][$column]) {
-                $cell = $products.Cells.Item($row + 2, $column + 1)
-                if ($sampleRows[$row][$column] -is [string]) {
-                    $cell.Value2 = [string]$sampleRows[$row][$column]
-                }
-                else {
-                    $cell.Value2 = [double]$sampleRows[$row][$column]
-                }
-            }
-        }
-    }
-    $products.Range('A2:A9').NumberFormat = '@'
-    $products.Range('E2:K9').NumberFormat = '#,##0.########'
-    $products.Range('M2:N9').NumberFormat = '#,##0.########'
-    $products.Range('O2:P9').NumberFormat = '#,##0'
-    $products.Range('O2:O9').FormulaR1C1 = '=IF(AND(COUNT(RC[-7],RC[-6],RC[-4],RC[-2],RC[-1])=5,OR(RC[-3]="CNY",RC[-3]="IRR")),ROUND((RC[-7]*RC[-1]+RC[-6]/1000*IF(RC[-3]="CNY",RC[-4]*RC[-1],RC[-4]/10))*(1+RC[-2]/100),0),"")'
-    $products.Range('S2:S9').FormulaR1C1 = '=IF(ISNUMBER(RC[-3]),RC[-3],RC[-4])'
-    $products.Range('S2:S9').NumberFormat = '#,##0'
-    $products.Range('U2:U9').FormulaR1C1 = '=LOWER(RC[-20]&" "&RC[-19]&" "&RC[-18]&" "&RC[-4]&" "&RC[-3])'
-    $productTable = $products.ListObjects.Add(1, $products.Range('A1:U9'), $null, 1)
+    $productTable = $products.ListObjects.Add(1, $products.Range('A1:Y2'), $null, 1)
     $productTable.Name = 'tblProducts'
     $productTable.TableStyle = 'TableStyleMedium2'
-    $widths = @(13, 31, 19, 23, 13, 13, 13, 20, 13, 18, 18, 16, 18, 15, 20, 24, 16, 28, 21, 17)
+    [void]$productTable.DataBodyRange.Delete()
+    $widths = @(
+        15, 31, 19, 23, 13, 13, 13, 20, 13, 18, 18, 16, 18, 15, 20,
+        16, 18, 14, 31, 24, 16, 28, 21, 19, 18
+    )
     for ($column = 0; $column -lt $widths.Count; $column++) {
         $products.Columns.Item($column + 1).ColumnWidth = $widths[$column]
     }
-    $products.Columns.Item(21).Hidden = $true
-    $products.Range('P2:R9').Interior.Color = ConvertTo-OleColor 'FFF7D6'
-    $products.Range('Q2:Q9').Validation.Delete()
-    $products.Range('Q2:Q9').Validation.Add(3, 1, 1, 'Needs review,Approved,Blocked')
+    $products.Columns.Item(25).Hidden = $true
     $products.Rows.Item(1).RowHeight = 30
-    $products.Range('W1').Value2 = 'Yellow cells are manual. They survive refresh only when the exact, case-sensitive Code still exists.'
-    $products.Range('W1').WrapText = $true
-    $products.Columns.Item(23).ColumnWidth = 30
-    $products.Range('W1').Font.Color = ConvertTo-OleColor '64748B'
-    $products.Range('W1').Interior.Color = ConvertTo-OleColor 'F1F5F9'
+    $products.Range('AA1').Value2 = 'Yellow cells are manual. They survive refresh only when the exact, case-sensitive Code still exists.'
+    $products.Range('AA1').WrapText = $true
+    $products.Columns.Item(27).ColumnWidth = 30
+    $products.Range('AA1').Font.Color = ConvertTo-OleColor '64748B'
+    $products.Range('AA1').Interior.Color = ConvertTo-OleColor 'F1F5F9'
     $products.Activate()
     $excel.ActiveWindow.SplitRow = 1
     $excel.ActiveWindow.FreezePanes = $true
@@ -311,10 +282,10 @@ try {
     $logoSlot.TextFrame2.VerticalAnchor = 3
 
     $cards = @(
-        @{ LabelRange = 'A5:C5'; ValueRange = 'A6:C7'; Label = 'TOTAL PRODUCTS'; Formula = '=ROWS(tblProducts[Code])'; Format = '#,##0' },
+        @{ LabelRange = 'A5:C5'; ValueRange = 'A6:C7'; Label = 'TOTAL PRODUCTS'; Formula = '=COUNTA(tblProducts[Code])'; Format = '#,##0' },
         @{ LabelRange = 'D5:F5'; ValueRange = 'D6:F7'; Label = 'TOTAL STOCK'; Formula = '=SUM(tblProducts[Total Stock])'; Format = '#,##0' },
-        @{ LabelRange = 'G5:I5'; ValueRange = 'G6:I7'; Label = 'AVG. EFFECTIVE PRICE'; Formula = '=IFERROR(AVERAGE(tblProducts[Effective Price (IRT)]),0)'; Format = '#,##0 "IRT"' },
-        @{ LabelRange = 'J5:M5'; ValueRange = 'J6:M7'; Label = 'LAST REFRESH'; Formula = '=Settings!B5'; Format = 'yyyy-mm-dd hh:mm' }
+        @{ LabelRange = 'G5:I5'; ValueRange = 'G6:I7'; Label = 'AVG. EFFECTIVE PRICE'; Formula = '=IF(COUNT(tblProducts[Effective Price (IRT)])=0,"",AVERAGE(tblProducts[Effective Price (IRT)]))'; Format = '#,##0 "IRT"' },
+        @{ LabelRange = 'J5:M5'; ValueRange = 'J6:M7'; Label = 'LAST REFRESH'; Formula = '=IF(Settings!B5="","",Settings!B5)'; Format = 'yyyy-mm-dd hh:mm' }
     )
     foreach ($card in $cards) {
         $labelRange = $dashboard.Range($card.LabelRange)
@@ -350,33 +321,50 @@ try {
     $dashboard.Range('B11').Font.Color = ConvertTo-OleColor '64748B'
     [void](Add-ActionButton $dashboard 'Search products' 'PatrisDashboard.SearchProducts' $dashboard.Range('G10') 92 28)
     [void](Add-ActionButton $dashboard 'Reset' 'PatrisDashboard.ResetSearch' $dashboard.Range('I10') 54 28)
-    [void](Add-ActionButton $dashboard 'Refresh data' 'PatrisDashboard.RefreshAllData' $dashboard.Range('J10') 74 28)
+    [void](Add-ActionButton $dashboard 'Sync now' 'PatrisDashboard.RefreshAllData' $dashboard.Range('J10') 74 28)
     [void](Add-ActionButton $dashboard 'Choose logo' 'PatrisDashboard.ChooseCompanyLogo' $dashboard.Range('L10') 70 28)
 
     $chartObject = $dashboard.ChartObjects().Add($dashboard.Range('A13').Left, $dashboard.Range('A13').Top, $dashboard.Range('A13:H29').Width, $dashboard.Range('A13:H29').Height)
     $chartObject.Name = 'PriceChart'
     $chartObject.Chart.ChartType = 57
     $priceSeries = $chartObject.Chart.SeriesCollection().NewSeries()
-    $priceSeries.Name = "='Products'!`$S`$1"
-    $priceSeries.XValues = "='Products'!`$B`$2:`$B`$9"
-    $priceSeries.Values = "='Products'!`$S`$2:`$S`$9"
+    $priceSeries.Name = "='Products'!`$W`$1"
+    $priceSeries.XValues = "='Products'!`$B`$2"
+    $priceSeries.Values = "='Products'!`$W`$2"
     $chartObject.Chart.HasTitle = $true
     $chartObject.Chart.ChartTitle.Text = 'Effective price snapshot (first 10 products)'
     $chartObject.Chart.HasLegend = $false
     $chartObject.Chart.Axes(2).TickLabels.NumberFormat = '#,##0'
     $chartObject.Chart.ChartArea.Format.Line.ForeColor.RGB = ConvertTo-OleColor 'CBD5E1'
+    $emptyChartMessage = $dashboard.Shapes.AddShape(
+        1,
+        $chartObject.Left + 2,
+        $chartObject.Top + 2,
+        $chartObject.Width - 4,
+        $chartObject.Height - 4
+    )
+    $emptyChartMessage.Name = 'EmptyChartMessage'
+    $emptyChartMessage.Fill.ForeColor.RGB = ConvertTo-OleColor 'F8FAFC'
+    $emptyChartMessage.Line.ForeColor.RGB = ConvertTo-OleColor 'CBD5E1'
+    $emptyChartMessage.TextFrame2.TextRange.Text = "No catalog rows are stored in this template.`nUse Sync now to load live prices."
+    $emptyChartMessage.TextFrame2.TextRange.Font.Name = 'Aptos'
+    $emptyChartMessage.TextFrame2.TextRange.Font.Size = 12
+    $emptyChartMessage.TextFrame2.TextRange.Font.Bold = $true
+    $emptyChartMessage.TextFrame2.TextRange.Font.Fill.ForeColor.RGB = ConvertTo-OleColor '475569'
+    $emptyChartMessage.TextFrame2.TextRange.ParagraphFormat.Alignment = 2
+    $emptyChartMessage.TextFrame2.VerticalAnchor = 3
 
     $dashboard.Range('I13:M13').Merge()
     $dashboard.Range('I13').Value2 = 'HOW TO USE'
     Set-SectionStyle $dashboard.Range('I13:M13') '0F766E' 'FFFFFF' 11
     $dashboard.Range('I14:M25').Merge()
-    $dashboard.Range('I14').Value2 = "1. Review endpoints on Settings.`n`n2. Choose formula or precalculated mode.`n`n3. Add optional manual override/status/notes.`n`n4. Refresh; manual inputs follow exact Code.`n`n5. Search, review, and add your logo."
+    $dashboard.Range('I14').Value2 = "1. This is an empty macro template.`n`n2. Opening it creates a new workbook and syncs live rows.`n`n3. Sync now joins exact Patris Code only.`n`n4. WooID text links to the matching product page.`n`n5. Missing inputs stay blank with warnings—never #N/A."
     $dashboard.Range('I14').WrapText = $true
     $dashboard.Range('I14').VerticalAlignment = -4160
     $dashboard.Range('I14').Interior.Color = ConvertTo-OleColor 'F0FDFA'
     $dashboard.Range('I14').Font.Color = ConvertTo-OleColor '134E4A'
     $dashboard.Range('I27:M29').Merge()
-    $dashboard.Range('I27').Value2 = 'No credentials are stored. Enable macros only after reviewing the checked-in VBA source.'
+    $dashboard.Range('I27').Value2 = 'No credentials or catalog rows are stored in the template. Woo read-only credentials come from Windows environment variables.'
     $dashboard.Range('I27').WrapText = $true
     $dashboard.Range('I27').Font.Color = ConvertTo-OleColor '9A3412'
     $dashboard.Range('I27').Interior.Color = ConvertTo-OleColor 'FFF7ED'
@@ -387,12 +375,12 @@ try {
     $settings.Range('A1:F1').Merge()
     $settings.Range('A1').Value2 = 'CONNECTION AND CALCULATION SETTINGS'
     Set-SectionStyle $settings.Range('A1:F1') '0F172A' 'FFFFFF' 16
-    $settings.Range('A2').Value2 = 'Patris CSV endpoint'
+    $settings.Range('A2').Value2 = 'Patris product-sync endpoint'
     $settings.Range('B2:F2').Merge()
-    $settings.Range('B2').Value2 = 'http://127.0.0.1:18080/api/records.csv'
-    $settings.Range('A3').Value2 = 'Digitalogic WP endpoint'
+    $settings.Range('B2').Value2 = 'http://127.0.0.1:18080/api/product-sync'
+    $settings.Range('A3').Value2 = 'Digitalogic catalog endpoint'
     $settings.Range('B3:F3').Merge()
-    $settings.Range('B3:F3').ClearContents()
+    $settings.Range('B3').Value2 = 'https://digitalogic.ir/wp-json/digitalogic/v1/google-sheets/catalog'
     $settings.Range('A4').Value2 = 'Price output mode'
     $settings.Range('B4').Value2 = 'formula'
     $settings.Range('A5').Value2 = 'Last successful refresh'
@@ -405,17 +393,40 @@ try {
     $settings.Range('A8').Value2 = 'Digitalogic status'
     $settings.Range('B8:F8').Merge()
     $settings.Range('B8').Value2 = 'Not refreshed yet.'
-    $settings.Range('A2:A8').Font.Bold = $true
-    $settings.Range('A2:F8').Borders.Color = ConvertTo-OleColor 'CBD5E1'
-    $settings.Range('B2:F8').Interior.Color = ConvertTo-OleColor 'F8FAFC'
+    $settings.Range('A9').Value2 = 'Read key environment name'
+    $settings.Range('B9:F9').Merge()
+    $settings.Range('B9').Value2 = 'DIGITALOGIC_CONSUMER_KEY'
+    $settings.Range('A10').Value2 = 'Read secret environment name'
+    $settings.Range('B10:F10').Merge()
+    $settings.Range('B10').Value2 = 'DIGITALOGIC_CONSUMER_SECRET'
+    $settings.Range('A11').Value2 = 'Sync automatically on open'
+    $settings.Range('B11').Value2 = 'yes'
+    $settings.Range('B11').Validation.Delete()
+    $settings.Range('B11').Validation.Add(3, 1, 1, 'yes,no')
+    $settings.Range('A2:A11').Font.Bold = $true
+    $settings.Range('A2:F11').Borders.Color = ConvertTo-OleColor 'CBD5E1'
+    $settings.Range('B2:F11').Interior.Color = ConvertTo-OleColor 'F8FAFC'
     $settings.Range('B4').Validation.Delete()
     $settings.Range('B4').Validation.Add(3, 1, 1, 'formula,precalculated')
-    $settings.Range('A10:F14').Merge()
-    $settings.Range('A10').Value2 = "Security note`nThis example performs unauthenticated GET requests only. Do not paste passwords, bearer tokens, cookies, or private keys into the workbook. For protected endpoints, use an approved Office/OS credential mechanism and a trusted HTTPS origin."
-    $settings.Range('A10').WrapText = $true
-    $settings.Range('A10').VerticalAlignment = -4160
-    $settings.Range('A10').Interior.Color = ConvertTo-OleColor 'FEF2F2'
-    $settings.Range('A10').Font.Color = ConvertTo-OleColor '991B1B'
+    $settings.Range('A13:F13').Merge()
+    $settings.Range('A13').Value2 = 'LIVE CONFIGURATION — refreshed from the current product contract'
+    Set-SectionStyle $settings.Range('A13:F13') '0F766E' 'FFFFFF' 11
+    $settings.Range('A16').Value2 = 'بهای یوآن (IRT/CNY)'
+    $settings.Range('A17').Value2 = 'نرخ حمل CNY'
+    $settings.Range('A18').Value2 = 'درصد سود'
+    $settings.Range('B16:F16').Merge()
+    $settings.Range('B17:F17').Merge()
+    $settings.Range('B18:F18').Merge()
+    $settings.Range('A16:A18').Font.Bold = $true
+    $settings.Range('A16:F18').Borders.Color = ConvertTo-OleColor 'CBD5E1'
+    $settings.Range('B16:F18').Interior.Color = ConvertTo-OleColor 'F0FDFA'
+    $settings.Range('A16:F18').ReadingOrder = -5004
+    $settings.Range('A20:F25').Merge()
+    $settings.Range('A20').Value2 = "Security note`nThe template contains no product rows and no credential values. It reads the two credential environment-variable names above, then sends Basic authentication only to https://digitalogic.ir/. Keep the WooCommerce key Read-only."
+    $settings.Range('A20').WrapText = $true
+    $settings.Range('A20').VerticalAlignment = -4160
+    $settings.Range('A20').Interior.Color = ConvertTo-OleColor 'FEF2F2'
+    $settings.Range('A20').Font.Color = ConvertTo-OleColor '991B1B'
 
     # Instructions and audit sheet.
     $instructions.Columns('A').ColumnWidth = 4
@@ -425,14 +436,14 @@ try {
     $instructions.Range('A1').Value2 = 'PATRIS / DIGITALOGIC EXCEL DASHBOARD — QUICK START'
     Set-SectionStyle $instructions.Range('A1:H2') '0F172A' 'FFFFFF' 17
     $instructionRows = @(
-        @('1', 'Review VBA', 'Read docs/examples/vba/PatrisDashboard.bas and ThisWorkbook.cls before enabling macros.'),
-        @('2', 'Trust the file', 'Move the workbook to an approved Trusted Location, or enable macros for this reviewed file only.'),
-        @('3', 'Configure endpoints', 'Set the Patris CSV and optional Digitalogic WordPress endpoints on Settings. Do not store credentials.'),
-        @('4', 'Choose price mode', 'Formula mode calculates live in Excel; precalculated mode uses Patris final_price values.'),
-        @('5', 'Review and refresh', 'Yellow manual override/status/notes cells survive refresh by exact, case-sensitive Code. Source values always refresh.'),
-        @('6', 'Search', 'Enter Code, Name, or Part Number on Dashboard, then click Search products.'),
-        @('7', 'Brand', 'Use Choose logo to place a PNG/JPEG in the reserved dashboard area.'),
-        @('8', 'Deploy safely', 'Use HTTPS and endpoints controlled by your organization. Review workbook macros after every update.')
+        @('1', 'Open the template', 'Double-click the .xltm. Excel creates a new macro-enabled workbook instance; the canonical template remains empty.'),
+        @('2', 'Enable reviewed macros', 'Trust only this reviewed file. Refresh-on-open calls the local Patris service and the protected Digitalogic catalog.'),
+        @('3', 'Keep credentials outside', 'Set the Read-only WooCommerce key and secret in the two Windows environment variables named on Settings.'),
+        @('4', 'Sync live data', 'Use Sync now. Patris and WooCommerce rows join only on exact, case-sensitive Patris Code—never SKU or name.'),
+        @('5', 'Review warnings', 'Missing or invalid source inputs stay blank and appear in Sync Status; formulas never emit #N/A.'),
+        @('6', 'Open Woo pages', 'When a matching WooCommerce page exists, the WooCommerce cell displays WooID <id> as a clickable link.'),
+        @('7', 'Save a working copy', 'Use Save As for the refreshed workbook. Do not overwrite the canonical .xltm template.'),
+        @('8', 'Manual fields', 'Yellow override/status/notes cells survive a refresh only while the exact Code remains present.')
     )
     $instructionRow = 4
     foreach ($item in $instructionRows) {
@@ -457,26 +468,18 @@ try {
     $instructions.Range('A14').Interior.Color = ConvertTo-OleColor 'F0FDFA'
     $instructions.Range('A14').Font.Name = 'Segoe UI'
 
-    $raw.Columns('A').ColumnWidth = 120
-    $raw.Range('A1').Value2 = 'Digitalogic raw response (diagnostic only)'
-    Set-SectionStyle $raw.Range('A1') '334155' 'FFFFFF' 12
-    $raw.Range('A2').Value2 = 'Endpoint'
-    $raw.Range('A3').Value2 = 'Last refresh'
-    $raw.Range('A4').Value2 = 'The optional Digitalogic response will appear here (truncated to Excel cell limits).'
-    $raw.Range('A4').WrapText = $true
-
     # Print areas are also the visual-QA surfaces emitted as PDFs below.
     $dashboard.PageSetup.PrintArea = '$A$1:$M$30'
     $dashboard.PageSetup.Orientation = 2
     $dashboard.PageSetup.Zoom = $false
     $dashboard.PageSetup.FitToPagesWide = 1
     $dashboard.PageSetup.FitToPagesTall = 1
-    $products.PageSetup.PrintArea = '$A$1:$T$9'
+    $products.PageSetup.PrintArea = '$A$1:$Y$2'
     $products.PageSetup.Orientation = 2
     $products.PageSetup.Zoom = $false
     $products.PageSetup.FitToPagesWide = 1
     $products.PageSetup.FitToPagesTall = 1
-    $settings.PageSetup.PrintArea = '$A$1:$F$14'
+    $settings.PageSetup.PrintArea = '$A$1:$F$25'
     $settings.PageSetup.Zoom = $false
     $settings.PageSetup.FitToPagesWide = 1
     $settings.PageSetup.FitToPagesTall = 1
@@ -484,31 +487,37 @@ try {
     $instructions.PageSetup.Zoom = $false
     $instructions.PageSetup.FitToPagesWide = 1
     $instructions.PageSetup.FitToPagesTall = 1
-    $raw.PageSetup.PrintArea = '$A$1:$A$4'
-    $raw.PageSetup.Zoom = $false
-    $raw.PageSetup.FitToPagesWide = 1
-    $raw.PageSetup.FitToPagesTall = 1
-
     $dashboard.Activate()
     $excel.ActiveWindow.Zoom = 90
-    $workbook.SaveAs($OutputPath, 52)
 
-    # Import the auditable checked-in VBA module and attach the non-networking open event.
+    # Import the auditable checked-in parser/runtime, dashboard module, and open event.
+    [void]$workbook.VBProject.VBComponents.Import($jsonValuePath)
+    [void]$workbook.VBProject.VBComponents.Import($jsonRuntimePath)
     [void]$workbook.VBProject.VBComponents.Import($vbaModulePath)
     $thisWorkbookComponent = $workbook.VBProject.VBComponents.Item('ThisWorkbook')
     $thisWorkbookCode = Get-Content -Raw -Encoding UTF8 $thisWorkbookPath
     $thisWorkbookComponent.CodeModule.AddFromString($thisWorkbookCode)
-    $workbook.Save()
 
     # Run a non-networking macro to force VBA parsing and update formulas/chart.
-    $excel.Run("'$($workbook.Name)'!PatrisDashboard.RefreshDashboard")
+    try {
+        $excel.Run("'$($workbook.Name)'!PatrisDashboard.RefreshDashboard")
+    }
+    catch {
+        # Preserve the failed package at the requested diagnostic path so the
+        # native VBA editor can identify the exact compile location.
+        $workbook.SaveAs($OutputPath, 53)
+        $workbook.Save()
+        throw
+    }
+    # 53 = xlOpenXMLTemplateMacroEnabled (.xltm). Opening the canonical file
+    # creates a separate workbook instance for any later Save As operation.
+    $workbook.SaveAs($OutputPath, 53)
     $workbook.Save()
 
     $dashboard.ExportAsFixedFormat(0, (Join-Path $PreviewDirectory 'dashboard.pdf'))
     $products.ExportAsFixedFormat(0, (Join-Path $PreviewDirectory 'products.pdf'))
     $settings.ExportAsFixedFormat(0, (Join-Path $PreviewDirectory 'settings.pdf'))
     $instructions.ExportAsFixedFormat(0, (Join-Path $PreviewDirectory 'instructions.pdf'))
-    $raw.ExportAsFixedFormat(0, (Join-Path $PreviewDirectory 'digitalogic-raw.pdf'))
 
     $excelVersion = [string]$excel.Version
     $vbaComponents = [int]$workbook.VBProject.VBComponents.Count
@@ -521,8 +530,12 @@ try {
 
     Remove-ExcelPrivatePackageMetadata $OutputPath
 
-    Copy-Item -LiteralPath $OutputPath -Destination $DistributionCopyPath -Force
     $hash = Get-FileHash -Algorithm SHA256 -LiteralPath $OutputPath
+    $checksumText = "$($hash.Hash.ToLowerInvariant())  $([IO.Path]::GetFileName($OutputPath))`n"
+    $utf8NoBom = [Text.UTF8Encoding]::new($false)
+    [IO.File]::WriteAllText(($OutputPath + '.sha256'), $checksumText, $utf8NoBom)
+    Copy-Item -LiteralPath $OutputPath -Destination $DistributionCopyPath -Force
+    Copy-Item -LiteralPath ($OutputPath + '.sha256') -Destination ($DistributionCopyPath + '.sha256') -Force
     [pscustomobject]@{
         output = $OutputPath
         distribution_copy = $DistributionCopyPath

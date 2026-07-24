@@ -352,8 +352,8 @@ func TestResolveXLSXLanguage(t *testing.T) {
 	}
 }
 
-func TestDashboardExamplePackageHasNeutralMetadataAndNoExternalConnections(t *testing.T) {
-	path := filepath.Join("..", "..", "docs", "examples", "Patris-Digitalogic-Dashboard.xlsm")
+func TestDynamicCalculatorTemplateHasNeutralMetadataAndNoExternalConnections(t *testing.T) {
+	path := filepath.Join("..", "..", "docs", "examples", "Patris-Digitalogic-Price-Calculator.xltm")
 	archive, err := zip.OpenReader(path)
 	if err != nil {
 		t.Fatal(err)
@@ -393,7 +393,39 @@ func TestDashboardExamplePackageHasNeutralMetadataAndNoExternalConnections(t *te
 	}
 }
 
-func TestDashboardVBASourceValidatesCodesAndDigitalogicJSONBeforeMutation(t *testing.T) {
+func TestDynamicCalculatorTemplateStartsWithoutPersistentCatalogData(t *testing.T) {
+	path := filepath.Join("..", "..", "docs", "examples", "Patris-Digitalogic-Price-Calculator.xltm")
+	book, err := excelize.OpenFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer book.Close()
+
+	for column := 1; column <= 25; column++ {
+		cell, err := excelize.CoordinatesToCellName(column, 2)
+		if err != nil {
+			t.Fatal(err)
+		}
+		value, err := book.GetCellValue("Products", cell, excelize.Options{RawCellValue: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if value != "" {
+			t.Fatalf("template persisted product data at Products!%s: %q", cell, value)
+		}
+	}
+	for _, cell := range []string{"B16", "B17", "B18"} {
+		value, err := book.GetCellValue("Settings", cell, excelize.Options{RawCellValue: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if value != "" {
+			t.Fatalf("template persisted live configuration at Settings!%s: %q", cell, value)
+		}
+	}
+}
+
+func TestDashboardVBASourceValidatesContractsBeforeMutation(t *testing.T) {
 	path := filepath.Join("..", "..", "docs", "examples", "vba", "PatrisDashboard.bas")
 	content, err := os.ReadFile(path)
 	if err != nil {
@@ -402,9 +434,9 @@ func TestDashboardVBASourceValidatesCodesAndDigitalogicJSONBeforeMutation(t *tes
 	source := string(content)
 	deletePosition := strings.Index(source, "table.DataBodyRange.Delete")
 	for _, requiredBeforeDelete := range []string{
-		"If Not HasAnyHeader(headers, \"product_code\", \"Code\", \"code\")",
+		`CStr(JsonRuntime.JsonText(root, "schema")) <> "patris.product-sync"`,
 		"If Len(codeValue) = 0 Then",
-		"If seenCodes.Exists(codeValue) Then",
+		"If headersSeen.Exists(codeValue) Then",
 	} {
 		position := strings.Index(source, requiredBeforeDelete)
 		if position < 0 || deletePosition < 0 || position > deletePosition {
@@ -412,15 +444,31 @@ func TestDashboardVBASourceValidatesCodesAndDigitalogicJSONBeforeMutation(t *tes
 		}
 	}
 	for _, required := range []string{
-		"The Digitalogic endpoint returned an empty response.",
-		"The Digitalogic endpoint did not return a JSON object or array.",
-		"If Not IsValidJsonResponse(responseText) Or _",
-		`Left$(responseText, 1) <> "{"`,
-		"Private Function ParseJsonObject",
-		"Private Function ParseJsonArray",
+		`Private Const DIGITALOGIC_HOST_PREFIX As String = "https://digitalogic.ir/"`,
+		"Digitalogic credentials may only be sent to https://digitalogic.ir/.",
+		"Digitalogic catalog response is missing its rows array.",
+		"Digitalogic returned duplicate exact Patris Code ",
+		`TextToDisplay:="WooID " & wooId`,
+		`If matchedPatris Then`,
+		`"WooCommerce only"`,
+		`=IF(COUNT(RC[-3])=1,RC[-3],IF(COUNT(RC[-8])=1,RC[-8],`,
+		`IF(COUNT(RC[-6])=1,RC[-6],"""")))`,
+		`Environ$(keyName)`,
+		`Environ$(secretName)`,
 	} {
 		if !strings.Contains(source, required) {
 			t.Fatalf("VBA source is missing validation: %s", required)
+		}
+	}
+
+	jsonPath := filepath.Join("..", "..", "docs", "examples", "vba", "JsonRuntime.bas")
+	jsonContent, err := os.ReadFile(jsonPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, required := range []string{"Private Function ParseObject", "Private Function ParseArray", "Duplicate JSON object member"} {
+		if !strings.Contains(string(jsonContent), required) {
+			t.Fatalf("JSON runtime is missing validation: %s", required)
 		}
 	}
 }
