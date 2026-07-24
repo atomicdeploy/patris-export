@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestSQLiteSoftDeleteRequiresExactPreviewAndFreshNoOpRetry(t *testing.T) {
@@ -572,6 +573,32 @@ func assertReconciliationGuard(t *testing.T, err error, expected ReconciliationG
 	var guard *ReconciliationGuardError
 	if !errors.As(err, &guard) || guard.Code != expected {
 		t.Fatalf("reconciliation error = %#v, want guard %q", err, expected)
+	}
+}
+
+func TestSQLSourceFingerprintPreservesDatabaseValueTypes(t *testing.T) {
+	base := []map[string]interface{}{{"Code": "001", "value": int64(1)}}
+	baseFingerprint := SQLSourceFingerprint(base, "Code", []string{"protected"})
+	tests := []struct {
+		name  string
+		value interface{}
+	}{
+		{name: "float", value: float64(1)},
+		{name: "text", value: "1"},
+		{name: "bytes", value: []byte("1")},
+		{name: "time text", value: time.Unix(1, 0).UTC().Format(time.RFC3339Nano)},
+		{name: "timestamp", value: time.Unix(1, 0).UTC()},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			changed := []map[string]interface{}{{"Code": "001", "value": test.value}}
+			if got := SQLSourceFingerprint(changed, "Code", []string{"protected"}); got == baseFingerprint {
+				t.Fatalf("typed source change %T(%v) reused int64 fingerprint", test.value, test.value)
+			}
+		})
+	}
+	if got := SQLSourceFingerprint(base, "Code", []string{"other"}); got == baseFingerprint {
+		t.Fatal("protected-key change reused source fingerprint")
 	}
 }
 

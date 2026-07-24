@@ -1,6 +1,7 @@
 package paradox
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"runtime"
@@ -198,16 +199,33 @@ func (db *Database) GetFields() ([]Field, error) {
 
 // GetRecords returns all records from the database.
 func (db *Database) GetRecords() ([]Record, error) {
+	return db.GetRecordsContext(context.Background())
+}
+
+// GetRecordsContext returns all records while checking cancellation between
+// native calls and decoded fields. A single pxlib call is not interruptible,
+// but it is the smallest unbounded unit and no background goroutine survives a
+// cancelled request.
+func (db *Database) GetRecordsContext(ctx context.Context) ([]Record, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	db.mu.RLock()
 	defer db.mu.RUnlock()
 	defer runtime.KeepAlive(db)
 
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if db.pxdoc == nil {
 		return nil, fmt.Errorf("database is not open")
 	}
 
 	numRecords, err := nonNegativeNativeCount("record", db.lib.pxGetNumRecords(db.pxdoc))
 	if err != nil {
+		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	numFields, err := nativeFieldCount(db.lib.pxGetNumFields(db.pxdoc))
@@ -217,9 +235,15 @@ func (db *Database) GetRecords() ([]Record, error) {
 	records := make([]Record, 0, numRecords)
 
 	for i := 0; i < numRecords; i++ {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		valuesPtr := db.lib.pxRetrieveRecord(db.pxdoc, int32(i))
 		if valuesPtr == nil {
 			continue
+		}
+		if err := ctx.Err(); err != nil {
+			return nil, err
 		}
 
 		values, err := nativeRecordValues(valuesPtr, numFields)
@@ -229,6 +253,9 @@ func (db *Database) GetRecords() ([]Record, error) {
 		record := make(Record)
 
 		for j := 0; j < numFields; j++ {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
 			fieldMeta := db.lib.pxGetField(db.pxdoc, int32(j))
 			if values[j] == nil {
 				continue
@@ -255,6 +282,9 @@ func (db *Database) GetRecords() ([]Record, error) {
 		records = append(records, record)
 	}
 
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	return records, nil
 }
 

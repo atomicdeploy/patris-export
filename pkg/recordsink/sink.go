@@ -165,7 +165,7 @@ func SyncSQLWithResult(ctx context.Context, options SQLOptions, rows []map[strin
 		ctx = context.Background()
 	}
 	connectCtx, cancel := sqlConnectContext(ctx, options.ConnectTimeout)
-	db, err := openSQLTarget(options)
+	db, err := openSQLTarget(ctx, options)
 	if err != nil {
 		cancel()
 		return SQLResult{}, err
@@ -240,7 +240,7 @@ func SyncSQLDB(ctx context.Context, db *sql.DB, options SQLOptions, rows []map[s
 	if driver == "" {
 		driver = "mysql"
 	}
-	table := sanitizeIdentifier(options.Table)
+	table := NormalizeSQLIdentifier(options.Table)
 	if table == "" {
 		table = "patris_export"
 	}
@@ -1110,7 +1110,7 @@ func sqlValue(value interface{}) interface{} {
 }
 
 func quoteIdent(driver, ident string) string {
-	ident = sanitizeIdentifier(ident)
+	ident = NormalizeSQLIdentifier(ident)
 	if ident == "" {
 		ident = "field"
 	}
@@ -1121,7 +1121,10 @@ func quoteIdent(driver, ident string) string {
 	return quote + strings.ReplaceAll(ident, quote, quote+quote) + quote
 }
 
-func sanitizeIdentifier(value string) string {
+// NormalizeSQLIdentifier returns the identifier spelling used by SQL sinks.
+// Callers that must not silently redirect a configured identifier should also
+// require the returned value to exactly match the trimmed input.
+func NormalizeSQLIdentifier(value string) string {
 	value = strings.TrimSpace(value)
 	if value == "" {
 		return ""

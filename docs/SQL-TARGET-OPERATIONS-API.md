@@ -19,10 +19,12 @@ POST /api/sql-target/session
 Origin: http://127.0.0.1:18080
 ```
 
-When both the request peer and the exact origin hostname are loopback
-(`localhost`, `127.0.0.1`, or `::1`), the application can bootstrap the session
-without another credential. This exception does not apply merely because a
-reverse proxy connects to Patris over loopback.
+When the request peer and exact origin hostname are loopback (`localhost`,
+`127.0.0.1`, or `::1`), the application can bootstrap without another
+credential only if `PATRIS_EXPORT_SQL_OPERATOR_TOKEN` is unset and the request
+contains no recognized proxy-forwarding marker. If the operator token is
+configured, direct-loopback callers must send it too. The tokenless exception
+never applies merely because a reverse proxy connects to Patris over loopback.
 
 For every non-loopback origin:
 
@@ -40,7 +42,10 @@ Patris itself serves HTTP. When HTTPS terminates at a reverse proxy, preserve
 the public `Host` or send singular `X-Forwarded-Host` and
 `X-Forwarded-Proto: https` headers. Patris accepts these forwarding headers only
 from a loopback proxy peer; an internet client cannot use them to impersonate a
-secure origin.
+secure origin. The proxy must preserve at least one recognized forwarding
+marker and must require the dedicated operator token. Do not expose this API
+through a proxy that strips all of `Forwarded`, `Via`, `X-Forwarded-*`, and
+`X-Real-IP`: such a request is indistinguishable from a direct local client.
 
 A successful session response sets an `HttpOnly`, `SameSite=Strict` cookie
 scoped to `/api/sql-target` and returns:
@@ -79,7 +84,11 @@ successful response is `{"authenticated":false}`.
 
 All responses use `Cache-Control: no-store`. Connection tests, previews, and
 manual syncs share one server-side operation permit so they cannot overlap.
-`busy` remains readable while an operation is running.
+`busy` remains readable while an operation is running. For bounded API calls,
+the MySQL connector defaults or caps its connect, read, and write deadlines to
+the remaining request deadline. This also bounds driver-level transaction
+commit/rollback I/O that does not otherwise observe a Go context; unbounded
+CLI/watch callers retain their configured DSN behavior.
 
 ### Status
 
@@ -102,8 +111,15 @@ X-Patris-CSRF-Token: opaque-short-lived-value
 }
 ```
 
-The booleans report configuration presence only. They do not return the table,
-host, database, CA path, or certificate server name.
+The booleans report safe configuration readiness only. They do not return the
+table, host, database, CA path, or certificate server name.
+`table_configured=true` requires an explicit `convert.table` or
+`export.mysql_table`; the SQLite table and inferred source names do not count.
+The explicit table must already be in its normalized SQL form: 1 to 64 ASCII
+characters, starting with a letter, ending with a letter or number, and
+containing only letters, numbers, and underscores. An invalid name is never
+silently rewritten and preview/sync returns `422 target_table_invalid` before
+source or sink work.
 
 ### Non-mutating connection test
 
@@ -122,10 +138,36 @@ POST /api/sql-target/preview
 X-Patris-CSRF-Token: opaque-short-lived-value
 ```
 
-The preview reads the current source through `Server.RecordResult`, preserving
-the active transform, canonical contract, field mapping, key, and protected
-quarantine Codes. It calls the shared SQL sink with `dry_run=true`; no schema or
-row mutation is committed.
+The preview reads the current source through `Server.RecordResultContext`,
+preserving the active transform, canonical contract, field mapping, key, and
+protected quarantine Codes. The same operation permit covers source preparation
+and the sink, preventing an overlapping probe or sync from observing a stale
+snapshot. Built-in downloads, temporary copies, JSON reads, projection, and
+native record iteration cooperate with the request deadline. Temporary refreshes
+are staged and atomically published so cancellation cannot replace a stable copy
+with partial data. A single pxlib native call remains the smallest
+non-interruptible unit. The preview calls the shared SQL sink with
+`dry_run=true`; no schema or row mutation is committed.
+
+Every successful, apply-eligible preview returns a random one-time authorization
+inside the direct diagnostic:
+
+```json
+{
+  "preview_grant": "43-character-unpadded-base64url-value",
+  "preview_grant_expires_at": "2026-07-24T12:02:00Z"
+}
+```
+
+The grant expires after at most two minutes and never extends the operator
+session. It is held only as a hash in process memory and is bound to the exact
+operator session, protected target configuration (including DSN, TLS, table,
+mode, and batch), source configuration, and typed source projection. A new
+preview replaces the previous grant. Every apply attempt consumes it before
+validation, source, or sink outcomes, so retries, config/source changes, expiry,
+and replay all require a fresh preview. Values with different SQL material
+types, such as integer versus float or bytes versus text, receive different
+source fingerprints.
 
 For `soft_delete_missing`, a successful, apply-allowed preview adds bounded
 reconciliation evidence:
@@ -159,7 +201,10 @@ POST /api/sql-target/sync
 Content-Type: application/json
 X-Patris-CSRF-Token: opaque-short-lived-value
 
-{"confirm":"manual_sync"}
+{
+  "confirm": "manual_sync",
+  "preview_grant": "43-character-unpadded-base64url-value"
+}
 ```
 
 For `soft_delete_missing`, include the exact token issued by the immediately
@@ -168,21 +213,27 @@ preceding preview:
 ```json
 {
   "confirm": "manual_sync",
+  "preview_grant": "43-character-unpadded-base64url-value",
   "reconciliation_token": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 }
 ```
 
-The body is limited to 4 KiB. Unknown fields, additional JSON values, a missing
-content type, any other confirmation string, whitespace-padded tokens, uppercase
-hex, and malformed or oversized tokens fail before the sink runs. The shared
-sink re-computes the exact plan; a source-value, target-key, or tombstone-state
-change returns `409 reconciliation_blocked` with reason `preview_mismatch`.
+The body is limited to 4 KiB and is parsed before taking the global SQL
+operation permit, so a slow or partial request body cannot block probes or
+previews. Unknown fields, additional JSON values, a missing content type, any
+other confirmation string, malformed grants, whitespace-padded tokens,
+uppercase hex, and malformed or oversized tokens fail before the sink runs.
+Missing, stale, mismatched, expired, or replayed grants return a generic
+`409 reconciliation_blocked` diagnostic with reason `preview_required`. The
+shared sink then re-computes the soft-delete exact plan as an independent
+second defense; a target-key or tombstone-state change returns
+`409 reconciliation_blocked` with reason `preview_mismatch`.
 
-`upsert_only` does not accept a reconciliation token. Browser-triggered
-`delete_missing` apply returns `422 hard_delete_unavailable`: the existing hard
-delete mode has no exact-plan token contract and remains available only through
-an explicitly protected server-side operator workflow. Its non-mutating preview
-remains available.
+`upsert_only` requires the one-time preview grant but does not accept a
+reconciliation token. Browser-triggered `delete_missing` apply returns
+`422 hard_delete_unavailable`: the existing hard-delete mode has no exact-plan
+token contract and remains available only through an explicitly protected
+server-side operator workflow. Its non-mutating preview remains available.
 
 ### Last in-process result
 
@@ -192,7 +243,11 @@ X-Patris-CSRF-Token: opaque-short-lived-value
 ```
 
 Before any operation it returns `{"available":false}`. Otherwise it returns the
-last diagnostic held in memory. A process restart clears it.
+last diagnostic held in memory. A process restart clears it. Preview
+grants, grant expiry, and reconciliation confirmation tokens are returned only
+by the direct preview response; cached diagnostics strip them, set
+`apply_allowed=false`, and use `guard_code=preview_required`, so an apply always
+requires a fresh preview.
 
 Successful diagnostics contain the operation name, timestamps, optional source
 record count, and either a probe or the shared SQL result:

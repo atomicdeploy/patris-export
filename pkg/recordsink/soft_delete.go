@@ -278,7 +278,7 @@ func validateSoftDeleteColumn(ctx context.Context, queryer sqlQueryer, driver, t
 }
 
 func isSoftDeleteIdentifier(value string) bool {
-	return strings.EqualFold(sanitizeIdentifier(value), SoftDeleteColumn)
+	return strings.EqualFold(NormalizeSQLIdentifier(value), SoftDeleteColumn)
 }
 
 func softDeleteDefaultIsFalse(value interface{}) bool {
@@ -331,6 +331,21 @@ func softDeleteConfirmationToken(
 	writeDigestList(digest, keepKeys)
 	writeTargetStatesDigest(digest, targetStates)
 	return SoftDeleteConfirmationTokenPrefix + hex.EncodeToString(digest.Sum(nil))
+}
+
+// SQLSourceFingerprint returns a deterministic, typed digest of the exact
+// source rows and protected-key inputs supplied to a SQL sync. It deliberately
+// distinguishes values that JSON alone collapses, such as int64 from float64,
+// []byte from string, and time.Time from its formatted text.
+func SQLSourceFingerprint(rows []map[string]interface{}, keyField string, protectedKeys []string) [sha256.Size]byte {
+	digest := sha256.New()
+	writeDigestPart(digest, "patris-sql-source-v1")
+	writeDigestPart(digest, strings.TrimSpace(keyField))
+	writeSourceRowsDigest(digest, rows, keyField)
+	writeDigestList(digest, protectedKeys)
+	var fingerprint [sha256.Size]byte
+	copy(fingerprint[:], digest.Sum(nil))
+	return fingerprint
 }
 
 func writeSourceRowsDigest(digest hash.Hash, rows []map[string]interface{}, keyField string) {

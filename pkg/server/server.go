@@ -37,7 +37,6 @@ import (
 	"github.com/atomicdeploy/patris-export/pkg/version"
 	"github.com/atomicdeploy/patris-export/pkg/watcher"
 	"github.com/atomicdeploy/patris-export/web"
-	"github.com/fsnotify/fsnotify"
 	"github.com/gorilla/mux"
 	"github.com/gorilla/websocket"
 )
@@ -61,7 +60,7 @@ type Server struct {
 	lastModTimeMu        sync.RWMutex
 	useTempFile          bool
 	config               *appconfig.Manager
-	configWatcher        *fsnotify.Watcher
+	configWatcher        *appconfig.ConfigWatcher
 	version              version.Info
 	processMu            sync.Mutex
 	processStatusCache   map[string]interface{}
@@ -275,6 +274,17 @@ func categoriesPayload(result recordpipe.Result) map[string]interface{} {
 }
 
 func (s *Server) RecordResult() (recordpipe.Result, error) {
+	return s.RecordResultContext(context.Background())
+}
+
+// RecordResultContext prepares the shared source projection with cooperative
+// cancellation. Context-aware data sources stop file copies, downloads, and
+// JSON reads promptly; native pxlib record extraction checks cancellation
+// immediately before and after its non-interruptible native call.
+func (s *Server) RecordResultContext(ctx context.Context) (recordpipe.Result, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	s.dataSourceMu.RLock()
 	ds := s.dataSource
 	dbPath := s.dbPath
@@ -282,11 +292,32 @@ func (s *Server) RecordResult() (recordpipe.Result, error) {
 	if ds == nil {
 		return recordpipe.Result{}, fmt.Errorf("data source is not initialized")
 	}
-	records, err := ds.GetRawRecords()
+	if err := ctx.Err(); err != nil {
+		return recordpipe.Result{}, err
+	}
+	var (
+		records []map[string]interface{}
+		err     error
+	)
+	if contextSource, ok := ds.(datasource.ContextDataSource); ok {
+		records, err = contextSource.GetRawRecordsContext(ctx)
+	} else {
+		if ctx.Done() != nil {
+			return recordpipe.Result{}, fmt.Errorf("data source does not support bounded record reads")
+		}
+		records, err = ds.GetRawRecords()
+	}
 	if err != nil {
 		return recordpipe.Result{}, err
 	}
-	return recordpipe.Build(records, dbPath, s.recordOptions()), nil
+	if err := ctx.Err(); err != nil {
+		return recordpipe.Result{}, err
+	}
+	result := recordpipe.BuildContext(ctx, records, dbPath, s.recordOptions())
+	if err := ctx.Err(); err != nil {
+		return recordpipe.Result{}, err
+	}
+	return result, nil
 }
 
 // Info returns database schema and metadata using the same shape served by

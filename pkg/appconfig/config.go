@@ -636,7 +636,30 @@ func isEmptyConfigValue(value interface{}) bool {
 	}
 }
 
-func (m *Manager) Watch(onChange func(Config)) (*fsnotify.Watcher, error) {
+const configWatchDebounce = 120 * time.Millisecond
+
+// ConfigWatcher owns both fsnotify and the debounce callback lifecycle. Close
+// joins the watcher goroutine, so no callback can outlive the server that
+// registered it.
+type ConfigWatcher struct {
+	watcher  *fsnotify.Watcher
+	done     chan struct{}
+	close    sync.Once
+	closeErr error
+}
+
+func (watcher *ConfigWatcher) Close() error {
+	if watcher == nil {
+		return nil
+	}
+	watcher.close.Do(func() {
+		watcher.closeErr = watcher.watcher.Close()
+		<-watcher.done
+	})
+	return watcher.closeErr
+}
+
+func (m *Manager) Watch(onChange func(Config)) (*ConfigWatcher, error) {
 	w, err := fsnotify.NewWatcher()
 	if err != nil {
 		return nil, err
@@ -650,8 +673,16 @@ func (m *Manager) Watch(onChange func(Config)) (*fsnotify.Watcher, error) {
 		w.Close()
 		return nil, err
 	}
+	watcher := &ConfigWatcher{watcher: w, done: make(chan struct{})}
 	go func() {
+		defer close(watcher.done)
 		var timer *time.Timer
+		var timerChannel <-chan time.Time
+		defer func() {
+			if timer != nil {
+				timer.Stop()
+			}
+		}()
 		for {
 			select {
 			case event, ok := <-w.Events:
@@ -665,13 +696,22 @@ func (m *Manager) Watch(onChange func(Config)) (*fsnotify.Watcher, error) {
 					continue
 				}
 				if timer != nil {
-					timer.Stop()
-				}
-				timer = time.AfterFunc(120*time.Millisecond, func() {
-					if err := m.Reload(); err == nil && onChange != nil {
-						onChange(m.Get())
+					if !timer.Stop() {
+						select {
+						case <-timer.C:
+						default:
+						}
 					}
-				})
+					timer.Reset(configWatchDebounce)
+				} else {
+					timer = time.NewTimer(configWatchDebounce)
+				}
+				timerChannel = timer.C
+			case <-timerChannel:
+				timerChannel = nil
+				if err := m.Reload(); err == nil && onChange != nil {
+					onChange(m.Get())
+				}
 			case _, ok := <-w.Errors:
 				if !ok {
 					return
@@ -679,7 +719,7 @@ func (m *Manager) Watch(onChange func(Config)) (*fsnotify.Watcher, error) {
 			}
 		}
 	}()
-	return w, nil
+	return watcher, nil
 }
 
 func (c Config) Addr() string {

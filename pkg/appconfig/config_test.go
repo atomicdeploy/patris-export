@@ -6,7 +6,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/atomicdeploy/patris-export/pkg/pricingcatalog"
 )
@@ -52,6 +54,52 @@ func TestLoadFilesLayersJSONYAMLTOML(t *testing.T) {
 	}
 	if mgr.Path() != tomlPath {
 		t.Fatalf("write path = %q, want %q", mgr.Path(), tomlPath)
+	}
+}
+
+func TestConfigWatcherCloseJoinsInFlightCallback(t *testing.T) {
+	manager, err := Load(filepath.Join(t.TempDir(), "watch.json"))
+	if err != nil {
+		t.Fatalf("load watched config: %v", err)
+	}
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var enteredOnce sync.Once
+	watcher, err := manager.Watch(func(Config) {
+		enteredOnce.Do(func() { close(entered) })
+		<-release
+	})
+	if err != nil {
+		t.Fatalf("watch config: %v", err)
+	}
+	if err := manager.Update(func(cfg *Config) { cfg.Server.Port++ }); err != nil {
+		t.Fatalf("update watched config: %v", err)
+	}
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		_ = watcher.Close()
+		t.Fatal("watch callback did not start")
+	}
+
+	closed := make(chan error, 1)
+	go func() { closed <- watcher.Close() }()
+	select {
+	case err := <-closed:
+		t.Fatalf("watcher Close returned before callback exited: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(release)
+	select {
+	case err := <-closed:
+		if err != nil {
+			t.Fatalf("close watcher: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("watcher Close did not join callback")
+	}
+	if err := watcher.Close(); err != nil {
+		t.Fatalf("idempotent watcher Close: %v", err)
 	}
 }
 

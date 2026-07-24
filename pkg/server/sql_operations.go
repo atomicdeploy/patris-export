@@ -32,6 +32,7 @@ const (
 	sqlSessionCookieName     = "patris_sql_operator_session"
 	sqlManualSyncConfirm     = "manual_sync"
 	sqlOperatorSessionTTL    = 10 * time.Minute
+	sqlPreviewGrantTTL       = 2 * time.Minute
 	sqlOperationTimeout      = 2 * time.Minute
 	maximumSQLOperatorTokens = 128
 	maximumSQLRequestBytes   = 4096
@@ -39,12 +40,28 @@ const (
 
 type sqlProbeFunc func(context.Context, recordsink.SQLOptions) (recordsink.SQLProbeResult, error)
 type sqlSyncFunc func(context.Context, recordsink.SQLOptions, []map[string]interface{}) (recordsink.SQLResult, error)
+type sqlRecordFunc func(context.Context) (recordpipe.Result, error)
 
 type sqlOperatorSession struct {
 	csrfHash  [sha256.Size]byte
 	origin    string
 	createdAt time.Time
 	expiresAt time.Time
+}
+
+type sqlAuthorizedSession struct {
+	hash      [sha256.Size]byte
+	expiresAt time.Time
+}
+
+type sqlIssuedPreviewGrant struct {
+	grantHash               [sha256.Size]byte
+	sessionHash             [sha256.Size]byte
+	targetFingerprint       [sha256.Size]byte
+	sourceFingerprint       [sha256.Size]byte
+	reconciliationTokenHash [sha256.Size]byte
+	hasReconciliationToken  bool
+	expiresAt               time.Time
 }
 
 type sqlOperationsState struct {
@@ -60,8 +77,12 @@ type sqlOperationsState struct {
 	lastMu sync.RWMutex
 	last   *sqlOperationDiagnostic
 
-	probe sqlProbeFunc
-	sync  sqlSyncFunc
+	grantMu sync.Mutex
+	grant   *sqlIssuedPreviewGrant
+
+	probe   sqlProbeFunc
+	sync    sqlSyncFunc
+	records sqlRecordFunc
 }
 
 type sqlTargetStatus struct {
@@ -93,14 +114,16 @@ type sqlSafeFailure struct {
 }
 
 type sqlOperationDiagnostic struct {
-	Operation   string                `json:"operation"`
-	Status      string                `json:"status"`
-	StartedAt   time.Time             `json:"started_at"`
-	FinishedAt  time.Time             `json:"finished_at"`
-	RecordCount *int                  `json:"record_count,omitempty"`
-	Probe       *sqlSafeProbeResult   `json:"probe,omitempty"`
-	Result      *recordsink.SQLResult `json:"result,omitempty"`
-	Failure     *sqlSafeFailure       `json:"failure,omitempty"`
+	Operation             string                `json:"operation"`
+	Status                string                `json:"status"`
+	StartedAt             time.Time             `json:"started_at"`
+	FinishedAt            time.Time             `json:"finished_at"`
+	RecordCount           *int                  `json:"record_count,omitempty"`
+	Probe                 *sqlSafeProbeResult   `json:"probe,omitempty"`
+	Result                *recordsink.SQLResult `json:"result,omitempty"`
+	Failure               *sqlSafeFailure       `json:"failure,omitempty"`
+	PreviewGrant          string                `json:"preview_grant,omitempty"`
+	PreviewGrantExpiresAt *time.Time            `json:"preview_grant_expires_at,omitempty"`
 }
 
 type sqlAPIError struct {
@@ -134,12 +157,17 @@ func (s *Server) handlePostSQLTargetSession(w http.ResponseWriter, r *http.Reque
 		writeSQLAPIError(w, http.StatusForbidden, "forbidden", "SQL operator authorization failed.")
 		return
 	}
-	localBootstrap := remoteAddressIsLoopback(r.RemoteAddr) && hostnameIsLoopback(originHost)
+	localBootstrap := remoteAddressIsLoopback(r.RemoteAddr) &&
+		hostnameIsLoopback(originHost) &&
+		!requestHasProxyEvidence(r)
 	if !localBootstrap {
 		if !strings.HasPrefix(origin, "https://") || !s.sqlOperations.operatorTokenAuthorized(r) {
 			writeSQLAPIError(w, http.StatusForbidden, "forbidden", "SQL operator authorization failed.")
 			return
 		}
+	} else if s.sqlOperations.operatorToken != "" && !s.sqlOperations.operatorTokenAuthorized(r) {
+		writeSQLAPIError(w, http.StatusForbidden, "forbidden", "SQL operator authorization failed.")
+		return
 	}
 
 	sessionID, csrfToken, expiresAt, err := s.sqlOperations.createSession(origin)
@@ -200,16 +228,13 @@ func (s *Server) handleGetSQLTargetStatus(w http.ResponseWriter, r *http.Request
 	}
 	cfg := s.Config()
 	_, hasLast := s.sqlOperations.lastDiagnostic()
-	reconciliation := recordsink.ReconciliationMode(cfg.Export.Reconciliation)
-	if reconciliation == "" {
-		reconciliation = recordsink.UpsertOnly
-	}
+	_, tableConfigured := sqlTargetExplicitTable(cfg)
 	writeJSON(w, sqlTargetStatus{
 		Configured:            strings.TrimSpace(cfg.Export.MySQLDSN) != "",
 		Driver:                "mysql",
-		TableConfigured:       strings.TrimSpace(firstNonEmpty(cfg.Convert.Table, cfg.Export.MySQLTable)) != "",
+		TableConfigured:       tableConfigured,
 		BatchSize:             cfg.Export.BatchSize,
-		Reconciliation:        reconciliation,
+		Reconciliation:        safeSQLReconciliationMode(recordsink.ReconciliationMode(cfg.Export.Reconciliation)),
 		ConnectTimeoutMS:      recordsink.ParseSQLConnectTimeout(cfg.Export.MySQLConnectTimeout).Milliseconds(),
 		VerifiedTLSConfigured: strings.TrimSpace(cfg.Export.MySQLTLSCAFile) != "" || strings.TrimSpace(cfg.Export.MySQLTLSServerName) != "",
 		Busy:                  s.sqlOperations.active.Load(),
@@ -248,30 +273,11 @@ func (s *Server) handlePostSQLTargetTest(w http.ResponseWriter, r *http.Request)
 }
 
 func (s *Server) handlePostSQLTargetPreview(w http.ResponseWriter, r *http.Request) {
-	s.handleSQLTargetSync(w, r, true)
-}
-
-func (s *Server) handlePostSQLTargetSync(w http.ResponseWriter, r *http.Request) {
 	setSQLOperationHeaders(w)
-	if !s.requireSQLOperatorSession(w, r) {
-		return
-	}
-	reconciliationToken, ok := decodeManualSyncConfirmation(w, r)
+	session, ok := s.requireSQLOperatorSessionBinding(w, r)
 	if !ok {
 		return
 	}
-	s.runSQLTargetSync(w, r, false, reconciliationToken)
-}
-
-func (s *Server) handleSQLTargetSync(w http.ResponseWriter, r *http.Request, dryRun bool) {
-	setSQLOperationHeaders(w)
-	if !s.requireSQLOperatorSession(w, r) {
-		return
-	}
-	s.runSQLTargetSync(w, r, dryRun, "")
-}
-
-func (s *Server) runSQLTargetSync(w http.ResponseWriter, r *http.Request, dryRun bool, reconciliationToken string) {
 	ctx, cancel := context.WithTimeout(r.Context(), sqlOperationTimeout)
 	defer cancel()
 	if !s.sqlOperations.acquire(ctx) {
@@ -280,8 +286,64 @@ func (s *Server) runSQLTargetSync(w http.ResponseWriter, r *http.Request, dryRun
 	}
 	defer s.sqlOperations.release()
 
+	// A preview attempt always replaces any older authorization, even when the
+	// new preview fails. Only the direct successful response may authorize an
+	// apply.
+	s.sqlOperations.clearPreviewGrant()
+	s.runSQLTargetSync(w, ctx, true, session, "", "")
+}
+
+func (s *Server) handlePostSQLTargetSync(w http.ResponseWriter, r *http.Request) {
+	setSQLOperationHeaders(w)
+	session, ok := s.requireSQLOperatorSessionBinding(w, r)
+	if !ok {
+		return
+	}
+	previewGrant, reconciliationToken, ok := decodeManualSyncConfirmation(w, r)
+	if !ok {
+		// Parsing happens before the global operation permit so a slow request
+		// body cannot wedge probes/previews. Clearing is synchronized; a newer
+		// preview issued after this point remains valid.
+		s.sqlOperations.clearPreviewGrant()
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), sqlOperationTimeout)
+	defer cancel()
+	if !s.sqlOperations.acquire(ctx) {
+		writeSQLAPIError(w, http.StatusGatewayTimeout, "operation_timeout", "The SQL operation could not start before its deadline.")
+		return
+	}
+	defer s.sqlOperations.release()
+
+	s.runSQLTargetSync(w, ctx, false, session, previewGrant, reconciliationToken)
+}
+
+func (s *Server) runSQLTargetSync(
+	w http.ResponseWriter,
+	ctx context.Context,
+	dryRun bool,
+	session sqlAuthorizedSession,
+	previewGrant string,
+	reconciliationToken string,
+) {
+	var issued *sqlIssuedPreviewGrant
+	if !dryRun {
+		// Consume before every apply outcome, including validation, source, or
+		// sink failure. A retry always requires a fresh preview.
+		issued = s.sqlOperations.takePreviewGrant()
+	}
+
 	cfg := s.Config()
-	reconciliation := recordsink.ReconciliationMode(cfg.Export.Reconciliation)
+	reconciliation := safeSQLReconciliationMode(recordsink.ReconciliationMode(cfg.Export.Reconciliation))
+	table, tableConfigured := sqlTargetExplicitTable(cfg)
+	if !tableConfigured {
+		if firstNonEmpty(cfg.Convert.Table, cfg.Export.MySQLTable) != "" {
+			writeSQLAPIError(w, http.StatusUnprocessableEntity, "target_table_invalid", "The explicit MySQL target table must be 1 to 64 characters, start with a letter, end with a letter or number, and contain only letters, numbers, and underscores.")
+			return
+		}
+		writeSQLAPIError(w, http.StatusUnprocessableEntity, "target_table_required", "An explicit MySQL target table is required.")
+		return
+	}
 	if !dryRun {
 		switch reconciliation {
 		case recordsink.DeleteMissing:
@@ -295,33 +357,58 @@ func (s *Server) runSQLTargetSync(w http.ResponseWriter, r *http.Request, dryRun
 			}
 		}
 	}
+	targetFingerprint, err := s.sqlTargetFingerprint(cfg, table)
+	if err != nil {
+		writeSQLAPIError(w, http.StatusInternalServerError, "preview_unavailable", "The SQL preview authorization could not be verified.")
+		return
+	}
+	if !dryRun && !issuedPreviewGrantMatches(
+		issued,
+		s.sqlOperations.currentTime(),
+		previewGrant,
+		reconciliationToken,
+		session.hash,
+		targetFingerprint,
+		reconciliation == recordsink.SoftDeleteMissing,
+	) {
+		s.writePreviewRequired(w, reconciliation)
+		return
+	}
 
 	operation := "sync"
 	if dryRun {
 		operation = "preview"
 	}
 	startedAt := s.sqlOperations.currentTime()
-	result, err := s.RecordResult()
+	var result recordpipe.Result
+	if s.sqlOperations.records != nil {
+		result, err = s.sqlOperations.records(ctx)
+	} else {
+		result, err = s.RecordResultContext(ctx)
+	}
+	if err == nil {
+		err = ctx.Err()
+	}
 	if err != nil {
+		failure, status := safeSQLSourceFailure(err)
 		diagnostic := sqlOperationDiagnostic{
 			Operation:  operation,
 			Status:     "failed",
 			StartedAt:  startedAt,
 			FinishedAt: s.sqlOperations.currentTime(),
-			Failure: &sqlSafeFailure{
-				Code:      "source_unavailable",
-				Stage:     "source",
-				Retryable: true,
-				Message:   "The source records could not be prepared.",
-			},
+			Failure:    failure,
 		}
 		s.sqlOperations.storeLast(diagnostic)
-		writeJSONStatus(w, http.StatusServiceUnavailable, map[string]interface{}{"success": false, "diagnostic": diagnostic})
+		writeJSONStatus(w, status, map[string]interface{}{"success": false, "diagnostic": diagnostic})
 		return
 	}
-
+	sourceFingerprint := sqlSourceFingerprint(result)
+	if !dryRun && subtle.ConstantTimeCompare(issued.sourceFingerprint[:], sourceFingerprint[:]) != 1 {
+		s.writePreviewRequired(w, reconciliation)
+		return
+	}
 	recordCount := len(result.Rows)
-	options := s.sqlTargetSyncOptions(cfg, result, dryRun)
+	options := s.sqlTargetSyncOptions(cfg, result, table, dryRun)
 	if !dryRun {
 		options.ReconciliationToken = reconciliationToken
 	}
@@ -338,9 +425,73 @@ func (s *Server) runSQLTargetSync(w http.ResponseWriter, r *http.Request, dryRun
 	if syncErr != nil {
 		diagnostic.Status = "failed"
 		diagnostic.Failure = safeSQLFailure(recordsink.SQLStageSync, syncErr)
+	} else if dryRun {
+		reconciliationToken := ""
+		grantAllowed := reconciliation == recordsink.UpsertOnly
+		if reconciliation == recordsink.SoftDeleteMissing &&
+			syncResult.ReconciliationEvidence != nil &&
+			syncResult.ReconciliationEvidence.ApplyAllowed &&
+			validSoftDeleteConfirmationToken(syncResult.ReconciliationEvidence.ConfirmationToken) {
+			grantAllowed = true
+			reconciliationToken = syncResult.ReconciliationEvidence.ConfirmationToken
+		}
+		if grantAllowed {
+			grant, grantErr := randomSQLToken()
+			if grantErr != nil {
+				syncErr = grantErr
+				diagnostic.Status = "failed"
+				diagnostic.Failure = safeSQLFailure(recordsink.SQLStageSync, grantErr)
+				diagnostic.Result = nil
+			} else {
+				expiresAt := s.sqlOperations.currentTime().Add(sqlPreviewGrantTTL)
+				if session.expiresAt.Before(expiresAt) {
+					expiresAt = session.expiresAt
+				}
+				issued := s.sqlOperations.issuePreviewGrant(sqlIssuedPreviewGrant{
+					grantHash:               sha256.Sum256([]byte(grant)),
+					sessionHash:             session.hash,
+					targetFingerprint:       targetFingerprint,
+					sourceFingerprint:       sourceFingerprint,
+					reconciliationTokenHash: sha256.Sum256([]byte(reconciliationToken)),
+					hasReconciliationToken:  reconciliationToken != "",
+					expiresAt:               expiresAt,
+				})
+				if !issued {
+					syncErr = &recordsink.ReconciliationGuardError{Code: recordsink.ReconciliationGuardPreviewRequired}
+					diagnostic.Status = "failed"
+					diagnostic.Failure = safeSQLFailure(recordsink.SQLStageSync, syncErr)
+					diagnostic.Result = nil
+				} else {
+					diagnostic.PreviewGrant = grant
+					diagnostic.PreviewGrantExpiresAt = &expiresAt
+				}
+			}
+		}
 	}
 	s.sqlOperations.storeLast(diagnostic)
 	writeSQLOperationDiagnostic(w, diagnostic, syncErr)
+}
+
+func safeSQLSourceFailure(err error) (*sqlSafeFailure, int) {
+	failure := &sqlSafeFailure{
+		Code:      "source_unavailable",
+		Stage:     "source",
+		Retryable: true,
+		Message:   "The source records could not be prepared.",
+	}
+	switch {
+	case errors.Is(err, context.DeadlineExceeded):
+		failure.Code = string(recordsink.SQLFailureTimeout)
+		failure.Message = "The source preparation timed out."
+		return failure, http.StatusGatewayTimeout
+	case errors.Is(err, context.Canceled):
+		failure.Code = string(recordsink.SQLFailureCancelled)
+		failure.Retryable = false
+		failure.Message = "The source preparation was cancelled."
+		return failure, http.StatusRequestTimeout
+	default:
+		return failure, http.StatusServiceUnavailable
+	}
 }
 
 func (s *Server) handleGetSQLTargetLastResult(w http.ResponseWriter, r *http.Request) {
@@ -368,12 +519,12 @@ func (s *Server) sqlTargetProbeOptions(cfg appconfig.Config) recordsink.SQLOptio
 	}
 }
 
-func (s *Server) sqlTargetSyncOptions(cfg appconfig.Config, result recordpipe.Result, dryRun bool) recordsink.SQLOptions {
+func (s *Server) sqlTargetSyncOptions(cfg appconfig.Config, result recordpipe.Result, table string, dryRun bool) recordsink.SQLOptions {
 	options := s.sqlTargetProbeOptions(cfg)
-	options.Table = firstNonEmpty(cfg.Convert.Table, cfg.Export.MySQLTable, recordpipe.SourceTableName(s.currentDBPath()))
+	options.Table = table
 	options.KeyField = result.KeyField
 	options.Batch = cfg.Export.BatchSize
-	options.Reconciliation = recordsink.ReconciliationMode(cfg.Export.Reconciliation)
+	options.Reconciliation = safeSQLReconciliationMode(recordsink.ReconciliationMode(cfg.Export.Reconciliation))
 	options.DryRun = dryRun
 	if result.Contract != nil {
 		options.ProtectedKeys = append([]string(nil), result.Contract.QuarantinedCodes...)
@@ -381,23 +532,130 @@ func (s *Server) sqlTargetSyncOptions(cfg appconfig.Config, result recordpipe.Re
 	return options
 }
 
+func sqlTargetExplicitTable(cfg appconfig.Config) (string, bool) {
+	table := firstNonEmpty(cfg.Convert.Table, cfg.Export.MySQLTable)
+	normalized := recordsink.NormalizeSQLIdentifier(table)
+	return normalized, table != "" && len(table) <= 64 && normalized != "" && normalized == table
+}
+
+func (s *Server) sqlTargetFingerprint(cfg appconfig.Config, table string) ([sha256.Size]byte, error) {
+	s.dataSourceMu.RLock()
+	sourcePath := s.dbPath
+	useTempFile := s.useTempFile
+	s.dataSourceMu.RUnlock()
+	payload := struct {
+		Config      appconfig.Config `json:"config"`
+		Table       string           `json:"table"`
+		SourcePath  string           `json:"source_path"`
+		UseTempFile bool             `json:"use_temp_file"`
+	}{
+		Config:      cfg,
+		Table:       table,
+		SourcePath:  sourcePath,
+		UseTempFile: useTempFile,
+	}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return [sha256.Size]byte{}, err
+	}
+	return sha256.Sum256(encoded), nil
+}
+
+func sqlSourceFingerprint(result recordpipe.Result) [sha256.Size]byte {
+	protectedKeys := []string(nil)
+	if result.Contract != nil {
+		protectedKeys = append(protectedKeys, result.Contract.QuarantinedCodes...)
+	}
+	return recordsink.SQLSourceFingerprint(result.Rows, result.KeyField, protectedKeys)
+}
+
+func issuedPreviewGrantMatches(
+	issued *sqlIssuedPreviewGrant,
+	now time.Time,
+	previewGrant string,
+	reconciliationToken string,
+	sessionHash [sha256.Size]byte,
+	targetFingerprint [sha256.Size]byte,
+	requiresReconciliationToken bool,
+) bool {
+	if issued == nil || !validSQLPreviewGrant(previewGrant) || !now.Before(issued.expiresAt) {
+		return false
+	}
+	grantHash := sha256.Sum256([]byte(previewGrant))
+	reconciliationHash := sha256.Sum256([]byte(reconciliationToken))
+	if subtle.ConstantTimeCompare(issued.grantHash[:], grantHash[:]) != 1 ||
+		subtle.ConstantTimeCompare(issued.sessionHash[:], sessionHash[:]) != 1 ||
+		subtle.ConstantTimeCompare(issued.targetFingerprint[:], targetFingerprint[:]) != 1 ||
+		issued.hasReconciliationToken != requiresReconciliationToken {
+		return false
+	}
+	if requiresReconciliationToken {
+		return validSoftDeleteConfirmationToken(reconciliationToken) &&
+			subtle.ConstantTimeCompare(issued.reconciliationTokenHash[:], reconciliationHash[:]) == 1
+	}
+	return reconciliationToken == ""
+}
+
+func validSQLPreviewGrant(value string) bool {
+	if len(value) != base64.RawURLEncoding.EncodedLen(32) {
+		return false
+	}
+	decoded, err := base64.RawURLEncoding.DecodeString(value)
+	return err == nil && len(decoded) == 32 &&
+		subtle.ConstantTimeCompare([]byte(base64.RawURLEncoding.EncodeToString(decoded)), []byte(value)) == 1
+}
+
+func (s *Server) writePreviewRequired(w http.ResponseWriter, reconciliation recordsink.ReconciliationMode) {
+	err := &recordsink.ReconciliationGuardError{Code: recordsink.ReconciliationGuardPreviewRequired}
+	diagnostic := sqlOperationDiagnostic{
+		Operation:  "sync",
+		Status:     "failed",
+		StartedAt:  s.sqlOperations.currentTime(),
+		FinishedAt: s.sqlOperations.currentTime(),
+		Failure:    safeSQLFailure(recordsink.SQLStageSync, err),
+	}
+	if reconciliation == recordsink.SoftDeleteMissing {
+		diagnostic.Result = &recordsink.SQLResult{
+			DryRun:         false,
+			Reconciliation: recordsink.SoftDeleteMissing,
+			ReconciliationEvidence: &recordsink.SQLReconciliationEvidence{
+				ConfirmationRequired: true,
+				ApplyAllowed:         false,
+				GuardCode:            recordsink.ReconciliationGuardPreviewRequired,
+			},
+		}
+	}
+	s.sqlOperations.storeLast(diagnostic)
+	writeSQLOperationDiagnostic(w, diagnostic, err)
+}
+
 func (s *Server) requireSQLOperatorSession(w http.ResponseWriter, r *http.Request) bool {
+	_, ok := s.requireSQLOperatorSessionBinding(w, r)
+	return ok
+}
+
+func (s *Server) requireSQLOperatorSessionBinding(w http.ResponseWriter, r *http.Request) (sqlAuthorizedSession, bool) {
 	origin, _, ok := protectedRequestOrigin(r)
 	if !ok {
 		writeSQLAPIError(w, http.StatusForbidden, "forbidden", "SQL operator authorization failed.")
-		return false
+		return sqlAuthorizedSession{}, false
 	}
 	cookie, err := r.Cookie(sqlSessionCookieName)
 	if err != nil || cookie.Value == "" {
 		writeSQLAPIError(w, http.StatusForbidden, "forbidden", "SQL operator authorization failed.")
-		return false
+		return sqlAuthorizedSession{}, false
 	}
 	csrfValues := r.Header.Values(sqlCSRFHeader)
-	if len(csrfValues) != 1 || csrfValues[0] == "" || !s.sqlOperations.sessionAuthorized(cookie.Value, csrfValues[0], origin) {
+	if len(csrfValues) != 1 || csrfValues[0] == "" {
 		writeSQLAPIError(w, http.StatusForbidden, "forbidden", "SQL operator authorization failed.")
-		return false
+		return sqlAuthorizedSession{}, false
 	}
-	return true
+	session, authorized := s.sqlOperations.authorizedSession(cookie.Value, csrfValues[0], origin)
+	if !authorized {
+		writeSQLAPIError(w, http.StatusForbidden, "forbidden", "SQL operator authorization failed.")
+		return sqlAuthorizedSession{}, false
+	}
+	return session, true
 }
 
 func (state *sqlOperationsState) createSession(origin string) (string, string, time.Time, error) {
@@ -428,7 +686,7 @@ func (state *sqlOperationsState) createSession(origin string) (string, string, t
 	return sessionID, csrfToken, expiresAt, nil
 }
 
-func (state *sqlOperationsState) sessionAuthorized(sessionID, csrfToken, origin string) bool {
+func (state *sqlOperationsState) authorizedSession(sessionID, csrfToken, origin string) (sqlAuthorizedSession, bool) {
 	sessionHash := sha256.Sum256([]byte(sessionID))
 	csrfHash := sha256.Sum256([]byte(csrfToken))
 	now := state.currentTime()
@@ -437,9 +695,12 @@ func (state *sqlOperationsState) sessionAuthorized(sessionID, csrfToken, origin 
 	state.pruneSessionsLocked(now)
 	session, ok := state.sessions[sessionHash]
 	if !ok || session.origin != origin || !now.Before(session.expiresAt) {
-		return false
+		return sqlAuthorizedSession{}, false
 	}
-	return subtle.ConstantTimeCompare(session.csrfHash[:], csrfHash[:]) == 1
+	if subtle.ConstantTimeCompare(session.csrfHash[:], csrfHash[:]) != 1 {
+		return sqlAuthorizedSession{}, false
+	}
+	return sqlAuthorizedSession{hash: sessionHash, expiresAt: session.expiresAt}, true
 }
 
 func (state *sqlOperationsState) revokeSession(sessionID string) {
@@ -447,6 +708,7 @@ func (state *sqlOperationsState) revokeSession(sessionID string) {
 	state.sessionsMu.Lock()
 	delete(state.sessions, sessionHash)
 	state.sessionsMu.Unlock()
+	state.clearPreviewGrantForSession(sessionHash)
 }
 
 func (state *sqlOperationsState) operatorTokenAuthorized(r *http.Request) bool {
@@ -466,6 +728,7 @@ func (state *sqlOperationsState) pruneSessionsLocked(now time.Time) {
 	for key, session := range state.sessions {
 		if !now.Before(session.expiresAt) {
 			delete(state.sessions, key)
+			state.clearPreviewGrantForSession(key)
 		}
 	}
 }
@@ -505,8 +768,59 @@ func (state *sqlOperationsState) currentTime() time.Time {
 	return state.now().UTC()
 }
 
+func (state *sqlOperationsState) issuePreviewGrant(grant sqlIssuedPreviewGrant) bool {
+	copy := grant
+	state.sessionsMu.Lock()
+	defer state.sessionsMu.Unlock()
+	session, active := state.sessions[grant.sessionHash]
+	if !active || !state.currentTime().Before(session.expiresAt) {
+		return false
+	}
+	state.grantMu.Lock()
+	state.grant = &copy
+	state.grantMu.Unlock()
+	return true
+}
+
+func (state *sqlOperationsState) takePreviewGrant() *sqlIssuedPreviewGrant {
+	state.grantMu.Lock()
+	defer state.grantMu.Unlock()
+	if state.grant == nil {
+		return nil
+	}
+	copy := *state.grant
+	state.grant = nil
+	return &copy
+}
+
+func (state *sqlOperationsState) clearPreviewGrant() {
+	state.grantMu.Lock()
+	state.grant = nil
+	state.grantMu.Unlock()
+}
+
+func (state *sqlOperationsState) clearPreviewGrantForSession(sessionHash [sha256.Size]byte) {
+	state.grantMu.Lock()
+	if state.grant != nil && subtle.ConstantTimeCompare(state.grant.sessionHash[:], sessionHash[:]) == 1 {
+		state.grant = nil
+	}
+	state.grantMu.Unlock()
+}
+
 func (state *sqlOperationsState) storeLast(diagnostic sqlOperationDiagnostic) {
 	copy := cloneSQLOperationDiagnostic(diagnostic)
+	copy.PreviewGrant = ""
+	copy.PreviewGrantExpiresAt = nil
+	if copy.Result != nil && copy.Result.ReconciliationEvidence != nil {
+		evidence := copy.Result.ReconciliationEvidence
+		if evidence.ConfirmationToken != "" {
+			evidence.ConfirmationToken = ""
+			evidence.ApplyAllowed = false
+			if evidence.SourceRows > 0 && evidence.ConfirmationRequired && evidence.GuardCode == "" {
+				evidence.GuardCode = recordsink.ReconciliationGuardPreviewRequired
+			}
+		}
+	}
 	state.lastMu.Lock()
 	state.last = &copy
 	state.lastMu.Unlock()
@@ -542,6 +856,10 @@ func cloneSQLOperationDiagnostic(value sqlOperationDiagnostic) sqlOperationDiagn
 	if value.Failure != nil {
 		failure := *value.Failure
 		copy.Failure = &failure
+	}
+	if value.PreviewGrantExpiresAt != nil {
+		expiresAt := *value.PreviewGrantExpiresAt
+		copy.PreviewGrantExpiresAt = &expiresAt
 	}
 	return copy
 }
@@ -632,6 +950,19 @@ func effectiveRequestOrigin(r *http.Request) (string, string, bool) {
 		}
 	}
 	return canonicalHTTPOrigin(scheme, authority)
+}
+
+func requestHasProxyEvidence(r *http.Request) bool {
+	for name := range r.Header {
+		lowerName := strings.ToLower(name)
+		if lowerName == "forwarded" ||
+			lowerName == "via" ||
+			lowerName == "x-real-ip" ||
+			strings.HasPrefix(lowerName, "x-forwarded-") {
+			return true
+		}
+	}
+	return false
 }
 
 func canonicalHTTPOrigin(scheme, authority string) (string, string, bool) {
@@ -735,14 +1066,7 @@ func safeSQLResult(result recordsink.SQLResult, options recordsink.SQLOptions, r
 	result.Failed = nonNegativeSQLCount(result.Failed)
 	result.ElapsedMS = max(result.ElapsedMS, 0)
 	result.DryRun = options.DryRun
-	switch options.Reconciliation {
-	case recordsink.SoftDeleteMissing:
-		result.Reconciliation = recordsink.SoftDeleteMissing
-	case recordsink.DeleteMissing:
-		result.Reconciliation = recordsink.DeleteMissing
-	default:
-		result.Reconciliation = recordsink.UpsertOnly
-	}
+	result.Reconciliation = safeSQLReconciliationMode(options.Reconciliation)
 	if result.Reconciliation == recordsink.SoftDeleteMissing {
 		result.ReconciliationEvidence = safeSQLReconciliationEvidence(result.ReconciliationEvidence, result.DryRun)
 	} else {
@@ -759,6 +1083,17 @@ func safeSQLResult(result recordsink.SQLResult, options recordsink.SQLOptions, r
 		result.Failed = nonNegativeSQLCount(recordCount)
 	}
 	return result
+}
+
+func safeSQLReconciliationMode(value recordsink.ReconciliationMode) recordsink.ReconciliationMode {
+	switch value {
+	case recordsink.SoftDeleteMissing:
+		return recordsink.SoftDeleteMissing
+	case recordsink.DeleteMissing:
+		return recordsink.DeleteMissing
+	default:
+		return recordsink.UpsertOnly
+	}
 }
 
 func safeSQLReconciliationEvidence(value *recordsink.SQLReconciliationEvidence, dryRun bool) *recordsink.SQLReconciliationEvidence {
@@ -834,36 +1169,41 @@ func nonNegativeSQLCount(value int) int {
 	return value
 }
 
-func decodeManualSyncConfirmation(w http.ResponseWriter, r *http.Request) (string, bool) {
+func decodeManualSyncConfirmation(w http.ResponseWriter, r *http.Request) (string, string, bool) {
 	mediaType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
 	if err != nil || mediaType != "application/json" {
 		writeSQLAPIError(w, http.StatusUnsupportedMediaType, "json_required", "Manual sync requires an application/json request.")
-		return "", false
+		return "", "", false
 	}
 	body := http.MaxBytesReader(w, r.Body, maximumSQLRequestBytes)
 	decoder := json.NewDecoder(body)
 	decoder.DisallowUnknownFields()
 	var request struct {
 		Confirm             string `json:"confirm"`
+		PreviewGrant        string `json:"preview_grant,omitempty"`
 		ReconciliationToken string `json:"reconciliation_token,omitempty"`
 	}
 	if err := decoder.Decode(&request); err != nil {
 		writeSQLAPIError(w, http.StatusBadRequest, "invalid_request", "Manual sync requires an explicit confirmation.")
-		return "", false
+		return "", "", false
 	}
 	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
 		writeSQLAPIError(w, http.StatusBadRequest, "invalid_request", "Manual sync requires one JSON object.")
-		return "", false
+		return "", "", false
 	}
 	if request.Confirm != sqlManualSyncConfirm {
 		writeSQLAPIError(w, http.StatusBadRequest, "confirmation_required", "Manual sync requires an explicit confirmation.")
-		return "", false
+		return "", "", false
+	}
+	if request.PreviewGrant != "" && !validSQLPreviewGrant(request.PreviewGrant) {
+		writeSQLAPIError(w, http.StatusBadRequest, "invalid_preview_grant", "The SQL preview grant is invalid.")
+		return "", "", false
 	}
 	if request.ReconciliationToken != "" && !validSoftDeleteConfirmationToken(request.ReconciliationToken) {
 		writeSQLAPIError(w, http.StatusBadRequest, "invalid_reconciliation_token", "The reconciliation preview token is invalid.")
-		return "", false
+		return "", "", false
 	}
-	return request.ReconciliationToken, true
+	return request.PreviewGrant, request.ReconciliationToken, true
 }
 
 func writeSQLOperationDiagnostic(w http.ResponseWriter, diagnostic sqlOperationDiagnostic, err error) {

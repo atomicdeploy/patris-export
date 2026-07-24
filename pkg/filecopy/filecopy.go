@@ -1,6 +1,7 @@
 package filecopy
 
 import (
+	"context"
 	"fmt"
 	"hash/crc32"
 	"io"
@@ -164,6 +165,19 @@ func CalculateHash(filePath string) (string, error) {
 // in a single pass for efficiency. Returns information about the copied file.
 // The source file is opened in read-only mode (os.Open uses O_RDONLY by default).
 func CopyToTemp(sourcePath string) (*FileInfo, error) {
+	return CopyToTempContext(context.Background(), sourcePath)
+}
+
+// CopyToTempContext is CopyToTemp with cooperative cancellation between
+// bounded copy chunks. A single operating-system file read may still complete
+// before cancellation is observed.
+func CopyToTempContext(ctx context.Context, sourcePath string) (*FileInfo, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	// Get file info
 	sourceInfo, err := os.Stat(sourcePath)
 	if err != nil {
@@ -197,17 +211,22 @@ func CopyToTemp(sourcePath string) (*FileInfo, error) {
 	tempFileName := fmt.Sprintf("%s.%08x", baseName, pathHash)
 	tempPath := filepath.Join(tempDir, tempFileName)
 
-	// Open/create destination file
-	dest, err := os.OpenFile(tempPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644)
+	// Write a unique sibling and publish it only after the complete copy is
+	// durable. Cancellation or failure must never truncate the last stable
+	// snapshot that another reader may still be using.
+	dest, err := os.CreateTemp(tempDir, "."+baseName+".partial-*")
 	if err != nil {
-		return nil, fmt.Errorf("failed to create temp file: %w", err)
+		return nil, fmt.Errorf("failed to create staging temp file: %w", err)
 	}
-
-	// Ensure destination is closed properly, handling any write errors
-	var closeErr error
+	stagingPath := dest.Name()
+	closed := false
+	committed := false
 	defer func() {
-		if cerr := dest.Close(); cerr != nil && closeErr == nil {
-			closeErr = cerr
+		if !closed {
+			_ = dest.Close()
+		}
+		if !committed {
+			_ = os.Remove(stagingPath)
 		}
 	}()
 
@@ -215,12 +234,18 @@ func CopyToTemp(sourcePath string) (*FileInfo, error) {
 	hash := crc32.NewIEEE()
 	buffer := make([]byte, ChunkSize)
 	for {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		n, readErr := source.Read(buffer)
 		if readErr != nil && readErr != io.EOF {
 			return nil, fmt.Errorf("failed to read from source: %w", readErr)
 		}
 		if n == 0 {
 			break
+		}
+		if err := ctx.Err(); err != nil {
+			return nil, err
 		}
 
 		// Update hash
@@ -230,21 +255,33 @@ func CopyToTemp(sourcePath string) (*FileInfo, error) {
 
 		// Write to destination
 		if _, err := dest.Write(buffer[:n]); err != nil {
-			closeErr = err
 			return nil, fmt.Errorf("failed to write to temp file: %w", err)
 		}
 	}
 
-	// Check for deferred close errors
-	if closeErr != nil {
-		return nil, fmt.Errorf("failed to close temp file: %w", closeErr)
+	if err := dest.Sync(); err != nil {
+		return nil, fmt.Errorf("failed to sync temp file: %w", err)
 	}
+	if err := dest.Close(); err != nil {
+		return nil, fmt.Errorf("failed to close temp file: %w", err)
+	}
+	closed = true
 
 	// Preserve modification time
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	modTime := sourceInfo.ModTime()
-	if err := os.Chtimes(tempPath, time.Now(), modTime); err != nil {
+	if err := os.Chtimes(stagingPath, time.Now(), modTime); err != nil {
 		return nil, fmt.Errorf("failed to set modification time: %w", err)
 	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if err := replaceFileAtomic(stagingPath, tempPath); err != nil {
+		return nil, fmt.Errorf("failed to publish temp file: %w", err)
+	}
+	committed = true
 
 	return &FileInfo{
 		SourcePath: sourcePath,
@@ -281,6 +318,18 @@ func IsURL(path string) bool {
 // directory. The temp filename is stable for the URL so polling and repeated
 // reads reuse the same location while still refreshing the content.
 func DownloadToTemp(sourceURL string) (*FileInfo, error) {
+	return DownloadToTempContext(context.Background(), sourceURL)
+}
+
+// DownloadToTempContext is DownloadToTemp with caller cancellation propagated
+// through the HTTP request and response-body copy.
+func DownloadToTempContext(ctx context.Context, sourceURL string) (*FileInfo, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	u, err := url.Parse(strings.TrimSpace(sourceURL))
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse URL: %w", err)
@@ -296,7 +345,7 @@ func DownloadToTemp(sourceURL string) (*FileInfo, error) {
 
 	urlHash := crc32.ChecksumIEEE([]byte(sourceURL))
 
-	req, err := http.NewRequest(http.MethodGet, sourceURL, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, sourceURL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
@@ -318,35 +367,54 @@ func DownloadToTemp(sourceURL string) (*FileInfo, error) {
 	}
 	tempPath := filepath.Join(tempDir, fmt.Sprintf("%s.%08x", baseName, urlHash))
 
-	dest, err := os.OpenFile(tempPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644)
+	dest, err := os.CreateTemp(tempDir, "."+baseName+".partial-*")
 	if err != nil {
-		return nil, fmt.Errorf("failed to create temp file: %w", err)
+		return nil, fmt.Errorf("failed to create staging temp file: %w", err)
 	}
-
-	var closeErr error
+	stagingPath := dest.Name()
+	closed := false
+	committed := false
 	defer func() {
-		if cerr := dest.Close(); cerr != nil && closeErr == nil {
-			closeErr = cerr
+		if !closed {
+			_ = dest.Close()
+		}
+		if !committed {
+			_ = os.Remove(stagingPath)
 		}
 	}()
 
 	hash := crc32.NewIEEE()
 	written, err := io.CopyBuffer(io.MultiWriter(dest, hash), resp.Body, make([]byte, ChunkSize))
 	if err != nil {
-		closeErr = err
 		return nil, fmt.Errorf("failed to write downloaded file: %w", err)
 	}
-	if closeErr != nil {
-		return nil, fmt.Errorf("failed to close temp file: %w", closeErr)
+	if err := dest.Sync(); err != nil {
+		return nil, fmt.Errorf("failed to sync downloaded file: %w", err)
+	}
+	if err := dest.Close(); err != nil {
+		return nil, fmt.Errorf("failed to close downloaded file: %w", err)
+	}
+	closed = true
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 
 	modTime := time.Now()
 	if lastModified := resp.Header.Get("Last-Modified"); lastModified != "" {
 		if parsed, err := http.ParseTime(lastModified); err == nil {
 			modTime = parsed
-			_ = os.Chtimes(tempPath, time.Now(), modTime)
 		}
 	}
+	if err := os.Chtimes(stagingPath, time.Now(), modTime); err != nil {
+		return nil, fmt.Errorf("failed to set downloaded file modification time: %w", err)
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if err := replaceFileAtomic(stagingPath, tempPath); err != nil {
+		return nil, fmt.Errorf("failed to publish downloaded file: %w", err)
+	}
+	committed = true
 
 	return &FileInfo{
 		SourcePath: sourceURL,

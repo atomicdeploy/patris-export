@@ -3,9 +3,11 @@ package server
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -17,6 +19,7 @@ import (
 	"time"
 
 	"github.com/atomicdeploy/patris-export/pkg/appconfig"
+	"github.com/atomicdeploy/patris-export/pkg/recordpipe"
 	"github.com/atomicdeploy/patris-export/pkg/recordsink"
 )
 
@@ -34,6 +37,27 @@ type sqlTestCredentials struct {
 	host   string
 	cookie *http.Cookie
 	csrf   string
+}
+
+type legacySQLTestSource struct {
+	rawCalls int
+}
+
+func (source *legacySQLTestSource) GetRecords() ([]map[string]interface{}, error) {
+	return source.GetRawRecords()
+}
+
+func (source *legacySQLTestSource) GetRawRecords() ([]map[string]interface{}, error) {
+	source.rawCalls++
+	return []map[string]interface{}{{"Code": "legacy"}}, nil
+}
+
+func (source *legacySQLTestSource) GetPath() string {
+	return "legacy.json"
+}
+
+func (source *legacySQLTestSource) Close() error {
+	return nil
 }
 
 func newSQLOperationsTestServer(t *testing.T) *Server {
@@ -91,8 +115,8 @@ func createSQLTestSession(t *testing.T, server *Server, remote bool) sqlTestCred
 	request := httptest.NewRequest(http.MethodPost, credentials.origin+"/api/sql-target/session", nil)
 	request.RemoteAddr = remoteAddress
 	request.Header.Set("Origin", credentials.origin)
-	if remote {
-		request.Header.Set(sqlOperatorTokenHeader, sqlTestOperatorToken)
+	if server.sqlOperations.operatorToken != "" {
+		request.Header.Set(sqlOperatorTokenHeader, server.sqlOperations.operatorToken)
 	}
 	response := httptest.NewRecorder()
 	server.router.ServeHTTP(response, request)
@@ -149,18 +173,37 @@ func TestSQLOperatorSessionRequiresExactOriginAndDedicatedAuthorization(t *testi
 		target     string
 		origin     []string
 		remoteAddr string
+		configured string
 		token      string
+		headers    map[string]string
 		wantStatus int
 	}{
 		{
-			name:       "loopback bootstrap",
+			name:       "configured loopback requires token",
+			target:     "http://127.0.0.1:18080/api/sql-target/session",
+			origin:     []string{"http://127.0.0.1:18080"},
+			remoteAddr: "127.0.0.1:41000",
+			configured: sqlTestOperatorToken,
+			wantStatus: http.StatusForbidden,
+		},
+		{
+			name:       "configured loopback accepts exact token",
+			target:     "http://127.0.0.1:18080/api/sql-target/session",
+			origin:     []string{"http://127.0.0.1:18080"},
+			remoteAddr: "127.0.0.1:41000",
+			configured: sqlTestOperatorToken,
+			token:      sqlTestOperatorToken,
+			wantStatus: http.StatusOK,
+		},
+		{
+			name:       "unconfigured direct loopback bootstrap",
 			target:     "http://127.0.0.1:18080/api/sql-target/session",
 			origin:     []string{"http://127.0.0.1:18080"},
 			remoteAddr: "127.0.0.1:41000",
 			wantStatus: http.StatusOK,
 		},
 		{
-			name:       "localhost bootstrap",
+			name:       "unconfigured direct localhost bootstrap",
 			target:     "http://localhost:18080/api/sql-target/session",
 			origin:     []string{"http://localhost:18080"},
 			remoteAddr: "[::1]:41000",
@@ -171,6 +214,7 @@ func TestSQLOperatorSessionRequiresExactOriginAndDedicatedAuthorization(t *testi
 			target:     "http://patris.example/api/sql-target/session",
 			origin:     []string{"http://patris.example"},
 			remoteAddr: "127.0.0.1:41000",
+			configured: sqlTestOperatorToken,
 			token:      sqlTestOperatorToken,
 			wantStatus: http.StatusForbidden,
 		},
@@ -179,6 +223,7 @@ func TestSQLOperatorSessionRequiresExactOriginAndDedicatedAuthorization(t *testi
 			target:     "http://patris.example/api/sql-target/session",
 			origin:     []string{"http://patris.example"},
 			remoteAddr: "203.0.113.19:41000",
+			configured: sqlTestOperatorToken,
 			token:      sqlTestOperatorToken,
 			wantStatus: http.StatusForbidden,
 		},
@@ -187,6 +232,7 @@ func TestSQLOperatorSessionRequiresExactOriginAndDedicatedAuthorization(t *testi
 			target:     "https://patris.example/api/sql-target/session",
 			origin:     []string{"https://patris.example"},
 			remoteAddr: "203.0.113.19:41000",
+			configured: sqlTestOperatorToken,
 			wantStatus: http.StatusForbidden,
 		},
 		{
@@ -194,6 +240,7 @@ func TestSQLOperatorSessionRequiresExactOriginAndDedicatedAuthorization(t *testi
 			target:     "https://patris.example/api/sql-target/session",
 			origin:     []string{"https://patris.example"},
 			remoteAddr: "203.0.113.19:41000",
+			configured: sqlTestOperatorToken,
 			token:      sqlTestEdgeToken,
 			wantStatus: http.StatusForbidden,
 		},
@@ -202,6 +249,7 @@ func TestSQLOperatorSessionRequiresExactOriginAndDedicatedAuthorization(t *testi
 			target:     "https://patris.example/api/sql-target/session",
 			origin:     []string{"https://patris.example"},
 			remoteAddr: "203.0.113.19:41000",
+			configured: sqlTestOperatorToken,
 			token:      sqlTestOperatorToken,
 			wantStatus: http.StatusOK,
 		},
@@ -210,15 +258,46 @@ func TestSQLOperatorSessionRequiresExactOriginAndDedicatedAuthorization(t *testi
 			target:     "http://127.0.0.1:18080/api/sql-target/session",
 			origin:     []string{"https://patris.example"},
 			remoteAddr: "127.0.0.1:41000",
+			configured: sqlTestOperatorToken,
 			token:      sqlTestOperatorToken,
+			headers: map[string]string{
+				"X-Forwarded-Proto": "https",
+				"X-Forwarded-Host":  "patris.example",
+			},
 			wantStatus: http.StatusOK,
+		},
+		{
+			name:       "proxy marker disables tokenless rewritten loopback",
+			target:     "http://127.0.0.1:18080/api/sql-target/session",
+			origin:     []string{"http://127.0.0.1:18080"},
+			remoteAddr: "127.0.0.1:41000",
+			headers:    map[string]string{"X-Forwarded-For": "203.0.113.19"},
+			wantStatus: http.StatusForbidden,
+		},
+		{
+			name:       "standard Forwarded marker disables tokenless rewritten loopback",
+			target:     "http://127.0.0.1:18080/api/sql-target/session",
+			origin:     []string{"http://127.0.0.1:18080"},
+			remoteAddr: "127.0.0.1:41000",
+			headers:    map[string]string{"Forwarded": "for=203.0.113.19;proto=http"},
+			wantStatus: http.StatusForbidden,
+		},
+		{
+			name:       "nonstandard X-Forwarded marker disables tokenless rewritten loopback",
+			target:     "http://127.0.0.1:18080/api/sql-target/session",
+			origin:     []string{"http://127.0.0.1:18080"},
+			remoteAddr: "127.0.0.1:41000",
+			headers:    map[string]string{"X-Forwarded-Prefix": "/patris"},
+			wantStatus: http.StatusForbidden,
 		},
 		{
 			name:       "untrusted peer cannot spoof forwarded TLS",
 			target:     "http://patris.example/api/sql-target/session",
 			origin:     []string{"https://patris.example"},
 			remoteAddr: "203.0.113.19:41000",
+			configured: sqlTestOperatorToken,
 			token:      sqlTestOperatorToken,
+			headers:    map[string]string{"X-Forwarded-Proto": "https"},
 			wantStatus: http.StatusForbidden,
 		},
 		{
@@ -258,6 +337,7 @@ func TestSQLOperatorSessionRequiresExactOriginAndDedicatedAuthorization(t *testi
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
+			server.sqlOperations.operatorToken = test.configured
 			request := httptest.NewRequest(http.MethodPost, test.target, nil)
 			request.RemoteAddr = test.remoteAddr
 			for _, origin := range test.origin {
@@ -266,12 +346,8 @@ func TestSQLOperatorSessionRequiresExactOriginAndDedicatedAuthorization(t *testi
 			if test.token != "" {
 				request.Header.Set(sqlOperatorTokenHeader, test.token)
 			}
-			if test.name == "trusted loopback reverse proxy" {
-				request.Header.Set("X-Forwarded-Proto", "https")
-				request.Header.Set("X-Forwarded-Host", "patris.example")
-			}
-			if test.name == "untrusted peer cannot spoof forwarded TLS" {
-				request.Header.Set("X-Forwarded-Proto", "https")
+			for name, value := range test.headers {
+				request.Header.Set(name, value)
 			}
 			response := serveSQLRequest(server, request)
 			if response.Code != test.wantStatus {
@@ -425,6 +501,120 @@ func TestSQLTargetStatusIsUsefulAndSecretFree(t *testing.T) {
 	}
 }
 
+func TestSQLPreviewGrantCannotOutliveOrReappearAfterSessionRevoke(t *testing.T) {
+	state := newSQLOperationsState()
+	now := time.Now().UTC().Truncate(time.Second)
+	state.now = func() time.Time { return now }
+	sessionID, _, expiresAt, err := state.createSession("http://127.0.0.1:18080")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sessionHash := sha256.Sum256([]byte(sessionID))
+	grant := sqlIssuedPreviewGrant{
+		grantHash:   sha256.Sum256([]byte(strings.Repeat("g", 43))),
+		sessionHash: sessionHash,
+		expiresAt:   expiresAt,
+	}
+	if !state.issuePreviewGrant(grant) {
+		t.Fatal("active session could not issue preview grant")
+	}
+	state.revokeSession(sessionID)
+	if got := state.takePreviewGrant(); got != nil {
+		t.Fatal("revoked session retained preview grant")
+	}
+	if state.issuePreviewGrant(grant) {
+		t.Fatal("revoked session reissued preview grant")
+	}
+}
+
+func TestSQLTargetRequiresExplicitMySQLTableAndSafeMode(t *testing.T) {
+	server := newSQLOperationsTestServer(t)
+	if err := server.config.Update(func(cfg *appconfig.Config) {
+		cfg.Convert.Table = ""
+		cfg.Export.MySQLTable = ""
+		cfg.Export.SQLiteTable = "sqlite_only_must_not_be_selected"
+	}); err != nil {
+		t.Fatalf("configure table fallback: %v", err)
+	}
+	credentials := createSQLTestSession(t, server, false)
+	response := serveSQLRequest(server, newAuthenticatedSQLRequest(credentials, http.MethodGet, "/api/sql-target/status", nil))
+	if response.Code != http.StatusOK {
+		t.Fatalf("fallback status endpoint=%d: %s", response.Code, response.Body)
+	}
+	var status sqlTargetStatus
+	if err := json.NewDecoder(response.Body).Decode(&status); err != nil {
+		t.Fatalf("decode fallback status: %v", err)
+	}
+	if status.TableConfigured {
+		t.Fatalf("status treated an implicit or SQLite-only table as configured: %#v", status)
+	}
+	sourceCalls := 0
+	sinkCalls := 0
+	server.sqlOperations.records = func(context.Context) (recordpipe.Result, error) {
+		sourceCalls++
+		return recordpipe.Result{}, nil
+	}
+	server.sqlOperations.sync = func(context.Context, recordsink.SQLOptions, []map[string]interface{}) (recordsink.SQLResult, error) {
+		sinkCalls++
+		return recordsink.SQLResult{}, nil
+	}
+	preview := serveSQLRequest(server, newAuthenticatedSQLRequest(credentials, http.MethodPost, "/api/sql-target/preview", nil))
+	if preview.Code != http.StatusUnprocessableEntity || !strings.Contains(preview.Body.String(), "target_table_required") {
+		t.Fatalf("implicit-table preview status=%d, want safe 422: %s", preview.Code, preview.Body)
+	}
+	syncRequest := newAuthenticatedSQLRequest(credentials, http.MethodPost, "/api/sql-target/sync", []byte(`{"confirm":"manual_sync"}`))
+	syncRequest.Header.Set("Content-Type", "application/json")
+	syncResponse := serveSQLRequest(server, syncRequest)
+	if syncResponse.Code != http.StatusUnprocessableEntity || !strings.Contains(syncResponse.Body.String(), "target_table_required") {
+		t.Fatalf("implicit-table sync status=%d, want safe 422: %s", syncResponse.Code, syncResponse.Body)
+	}
+	if sourceCalls != 0 || sinkCalls != 0 {
+		t.Fatalf("implicit target reached source=%d or sink=%d", sourceCalls, sinkCalls)
+	}
+
+	for _, malformedTable := range []string{
+		"!!!",
+		"sales.products",
+		"1products",
+		"_products",
+		"products_",
+		strings.Repeat("a", 65),
+	} {
+		if err := server.config.Update(func(cfg *appconfig.Config) {
+			cfg.Convert.Table = malformedTable
+			cfg.Export.MySQLTable = ""
+		}); err != nil {
+			t.Fatalf("configure malformed table %q: %v", malformedTable, err)
+		}
+		response = serveSQLRequest(server, newAuthenticatedSQLRequest(credentials, http.MethodGet, "/api/sql-target/status", nil))
+		if response.Code != http.StatusOK {
+			t.Fatalf("malformed-table %q status endpoint=%d: %s", malformedTable, response.Code, response.Body)
+		}
+		if err := json.NewDecoder(response.Body).Decode(&status); err != nil {
+			t.Fatalf("decode malformed-table %q status: %v", malformedTable, err)
+		}
+		if status.TableConfigured {
+			t.Fatalf("status treated malformed table %q as configured: %#v", malformedTable, status)
+		}
+		preview = serveSQLRequest(server, newAuthenticatedSQLRequest(credentials, http.MethodPost, "/api/sql-target/preview", nil))
+		if preview.Code != http.StatusUnprocessableEntity || !strings.Contains(preview.Body.String(), "target_table_invalid") {
+			t.Fatalf("malformed-table %q preview status=%d, want safe 422: %s", malformedTable, preview.Code, preview.Body)
+		}
+		syncRequest = newAuthenticatedSQLRequest(credentials, http.MethodPost, "/api/sql-target/sync", []byte(`{"confirm":"manual_sync"}`))
+		syncRequest.Header.Set("Content-Type", "application/json")
+		syncResponse = serveSQLRequest(server, syncRequest)
+		if syncResponse.Code != http.StatusUnprocessableEntity || !strings.Contains(syncResponse.Body.String(), "target_table_invalid") {
+			t.Fatalf("malformed-table %q sync status=%d, want safe 422: %s", malformedTable, syncResponse.Code, syncResponse.Body)
+		}
+		if sourceCalls != 0 || sinkCalls != 0 {
+			t.Fatalf("malformed target %q reached source=%d or sink=%d", malformedTable, sourceCalls, sinkCalls)
+		}
+	}
+	if mode := safeSQLReconciliationMode(recordsink.ReconciliationMode("future_or_corrupt_mode")); mode != recordsink.UpsertOnly {
+		t.Fatalf("unknown reconciliation mode=%q, want safe %q", mode, recordsink.UpsertOnly)
+	}
+}
+
 func TestSQLTargetProbeAndLastResultRedactTargetAndDriverErrors(t *testing.T) {
 	server := newSQLOperationsTestServer(t)
 	credentials := createSQLTestSession(t, server, false)
@@ -562,6 +752,12 @@ func TestSQLTargetPreviewAndConfirmedSyncUseCanonicalSharedSink(t *testing.T) {
 		previewPayload.Diagnostic.Result.Inserted != 2 || previewPayload.Diagnostic.Result.ElapsedMS != 0 {
 		t.Fatalf("unexpected preview diagnostic: %#v", previewPayload)
 	}
+	previewGrant := previewPayload.Diagnostic.PreviewGrant
+	if !validSQLPreviewGrant(previewGrant) ||
+		previewPayload.Diagnostic.PreviewGrantExpiresAt == nil ||
+		!previewPayload.Diagnostic.PreviewGrantExpiresAt.After(time.Now().UTC()) {
+		t.Fatalf("preview omitted its short-lived one-time grant: %#v", previewPayload.Diagnostic)
+	}
 	evidence := previewPayload.Diagnostic.Result.ReconciliationEvidence
 	if evidence == nil || evidence.ConfirmationToken != confirmationToken ||
 		!evidence.ConfirmationRequired || !evidence.ApplyAllowed ||
@@ -569,6 +765,33 @@ func TestSQLTargetPreviewAndConfirmedSyncUseCanonicalSharedSink(t *testing.T) {
 		evidence.MissingRows != 1 || evidence.WouldSoftDelete != 1 ||
 		!evidence.PartialSourceRisk {
 		t.Fatalf("preview omitted safe reconciliation evidence: %#v", evidence)
+	}
+	lastPreview := serveSQLRequest(server, newAuthenticatedSQLRequest(credentials, http.MethodGet, "/api/sql-target/last-result", nil))
+	if lastPreview.Code != http.StatusOK {
+		t.Fatalf("cached preview status=%d: %s", lastPreview.Code, lastPreview.Body)
+	}
+	if strings.Contains(lastPreview.Body.String(), confirmationToken) ||
+		strings.Contains(lastPreview.Body.String(), previewGrant) ||
+		strings.Contains(lastPreview.Body.String(), `"preview_grant"`) {
+		t.Fatalf("cached preview replayed a direct-response authorization token: %s", lastPreview.Body)
+	}
+	var cachedPreviewPayload struct {
+		Available  bool                   `json:"available"`
+		Diagnostic sqlOperationDiagnostic `json:"diagnostic"`
+	}
+	if err := json.NewDecoder(lastPreview.Body).Decode(&cachedPreviewPayload); err != nil {
+		t.Fatalf("decode cached preview: %v", err)
+	}
+	cachedEvidence := cachedPreviewPayload.Diagnostic.Result.ReconciliationEvidence
+	if !cachedPreviewPayload.Available || cachedEvidence == nil ||
+		cachedPreviewPayload.Diagnostic.PreviewGrant != "" ||
+		cachedPreviewPayload.Diagnostic.PreviewGrantExpiresAt != nil ||
+		cachedEvidence.ConfirmationToken != "" || cachedEvidence.SourceRows != evidence.SourceRows ||
+		cachedEvidence.TargetRows != evidence.TargetRows || cachedEvidence.MissingRows != evidence.MissingRows ||
+		cachedEvidence.WouldSoftDelete != evidence.WouldSoftDelete ||
+		cachedEvidence.ApplyAllowed ||
+		cachedEvidence.GuardCode != recordsink.ReconciliationGuardPreviewRequired {
+		t.Fatalf("cached preview lost safe evidence or retained its token: %#v", cachedPreviewPayload)
 	}
 
 	rejectedRequests := []struct {
@@ -581,6 +804,7 @@ func TestSQLTargetPreviewAndConfirmedSyncUseCanonicalSharedSink(t *testing.T) {
 		{"missing confirmation", "application/json", []byte(`{}`), http.StatusBadRequest},
 		{"wrong confirmation", "application/json", []byte(`{"confirm":"yes"}`), http.StatusBadRequest},
 		{"unknown field", "application/json", []byte(`{"confirm":"manual_sync","dsn":"forbidden"}`), http.StatusBadRequest},
+		{"malformed preview grant", "application/json", []byte(`{"confirm":"manual_sync","preview_grant":"not-base64url"}`), http.StatusBadRequest},
 		{"malformed reconciliation token", "application/json", []byte(`{"confirm":"manual_sync","reconciliation_token":"sha256:not-a-valid-plan"}`), http.StatusBadRequest},
 		{"uppercase reconciliation token", "application/json", []byte(`{"confirm":"manual_sync","reconciliation_token":"sha256:` + strings.Repeat("A", 64) + `"}`), http.StatusBadRequest},
 		{"padded reconciliation token", "application/json", []byte(`{"confirm":"manual_sync","reconciliation_token":" ` + confirmationToken + `"}`), http.StatusBadRequest},
@@ -627,17 +851,72 @@ func TestSQLTargetPreviewAndConfirmedSyncUseCanonicalSharedSink(t *testing.T) {
 		t.Fatalf("missing-token guard was unsafe or incomplete: %#v", missingTokenPayload)
 	}
 
-	confirmedBody := []byte(fmt.Sprintf(`{"confirm":"manual_sync","reconciliation_token":%q}`, confirmationToken))
+	refreshedPreview := serveSQLRequest(server, newAuthenticatedSQLRequest(credentials, http.MethodPost, "/api/sql-target/preview", nil))
+	if refreshedPreview.Code != http.StatusOK {
+		t.Fatalf("refreshed preview status=%d: %s", refreshedPreview.Code, refreshedPreview.Body)
+	}
+	var refreshedPayload struct {
+		Success    bool                   `json:"success"`
+		Diagnostic sqlOperationDiagnostic `json:"diagnostic"`
+	}
+	if err := json.NewDecoder(refreshedPreview.Body).Decode(&refreshedPayload); err != nil {
+		t.Fatalf("decode refreshed preview: %v", err)
+	}
+	refreshedGrant := refreshedPayload.Diagnostic.PreviewGrant
+	if !refreshedPayload.Success || !validSQLPreviewGrant(refreshedGrant) {
+		t.Fatalf("refreshed preview omitted grant: %#v", refreshedPayload)
+	}
+	grantWithoutPlanBody := []byte(fmt.Sprintf(
+		`{"confirm":"manual_sync","preview_grant":%q}`,
+		refreshedGrant,
+	))
+	grantWithoutPlanRequest := newAuthenticatedSQLRequest(credentials, http.MethodPost, "/api/sql-target/sync", grantWithoutPlanBody)
+	grantWithoutPlanRequest.Header.Set("Content-Type", "application/json")
+	grantWithoutPlan := serveSQLRequest(server, grantWithoutPlanRequest)
+	if grantWithoutPlan.Code != http.StatusConflict ||
+		!strings.Contains(grantWithoutPlan.Body.String(), string(recordsink.ReconciliationGuardPreviewRequired)) {
+		t.Fatalf("soft-delete grant without exact-plan token status=%d, want 409: %s", grantWithoutPlan.Code, grantWithoutPlan.Body)
+	}
+
+	finalPreview := serveSQLRequest(server, newAuthenticatedSQLRequest(credentials, http.MethodPost, "/api/sql-target/preview", nil))
+	if finalPreview.Code != http.StatusOK {
+		t.Fatalf("final preview status=%d: %s", finalPreview.Code, finalPreview.Body)
+	}
+	var finalPreviewPayload struct {
+		Success    bool                   `json:"success"`
+		Diagnostic sqlOperationDiagnostic `json:"diagnostic"`
+	}
+	if err := json.NewDecoder(finalPreview.Body).Decode(&finalPreviewPayload); err != nil {
+		t.Fatalf("decode final preview: %v", err)
+	}
+	finalGrant := finalPreviewPayload.Diagnostic.PreviewGrant
+	if !finalPreviewPayload.Success || !validSQLPreviewGrant(finalGrant) {
+		t.Fatalf("final preview omitted grant: %#v", finalPreviewPayload)
+	}
+
+	confirmedBody := []byte(fmt.Sprintf(
+		`{"confirm":"manual_sync","preview_grant":%q,"reconciliation_token":%q}`,
+		finalGrant,
+		confirmationToken,
+	))
 	confirmedRequest := newAuthenticatedSQLRequest(credentials, http.MethodPost, "/api/sql-target/sync", confirmedBody)
 	confirmedRequest.Header.Set("Content-Type", "application/json; charset=utf-8")
 	confirmed := serveSQLRequest(server, confirmedRequest)
 	if confirmed.Code != http.StatusOK {
 		t.Fatalf("confirmed sync status=%d: %s", confirmed.Code, confirmed.Body)
 	}
+	replayedRequest := newAuthenticatedSQLRequest(credentials, http.MethodPost, "/api/sql-target/sync", confirmedBody)
+	replayedRequest.Header.Set("Content-Type", "application/json")
+	replayed := serveSQLRequest(server, replayedRequest)
+	if replayed.Code != http.StatusConflict ||
+		!strings.Contains(replayed.Body.String(), string(recordsink.ReconciliationGuardPreviewRequired)) {
+		t.Fatalf("replayed grant status=%d, want generic preview-required 409: %s", replayed.Code, replayed.Body)
+	}
 
 	mu.Lock()
 	defer mu.Unlock()
-	if calls != 3 || len(options) != 3 || !options[0].DryRun || options[1].DryRun || options[2].DryRun {
+	if calls != 4 || len(options) != 4 ||
+		!options[0].DryRun || !options[1].DryRun || !options[2].DryRun || options[3].DryRun {
 		t.Fatalf("unexpected SQL sink calls/options: calls=%d options=%#v", calls, options)
 	}
 	for index, option := range options {
@@ -648,7 +927,7 @@ func TestSQLTargetPreviewAndConfirmedSyncUseCanonicalSharedSink(t *testing.T) {
 		}
 	}
 	if options[0].ReconciliationToken != "" || options[1].ReconciliationToken != "" ||
-		options[2].ReconciliationToken != confirmationToken {
+		options[2].ReconciliationToken != "" || options[3].ReconciliationToken != confirmationToken {
 		t.Fatalf("preview token was not passed only to the confirmed apply: %#v", options)
 	}
 	wantCodes := []string{"001", "002"}
@@ -751,6 +1030,305 @@ func TestSQLTargetBlocksBrowserHardDeleteAndIrrelevantTokens(t *testing.T) {
 	}
 	if calls != 0 {
 		t.Fatalf("irrelevant preview token reached the SQL sink %d times", calls)
+	}
+}
+
+func TestSQLTargetUpsertGrantIsOneTimeSessionConfigSourceAndExpiryBound(t *testing.T) {
+	server := newSQLOperationsTestServer(t)
+	now := time.Now().UTC().Truncate(time.Second)
+	server.sqlOperations.now = func() time.Time { return now }
+	firstSession := createSQLTestSession(t, server, false)
+	secondSession := createSQLTestSession(t, server, false)
+	if err := server.config.Update(func(cfg *appconfig.Config) {
+		cfg.Export.Reconciliation = string(recordsink.UpsertOnly)
+	}); err != nil {
+		t.Fatalf("set upsert-only mode: %v", err)
+	}
+
+	var sourceValue interface{} = "alpha"
+	server.sqlOperations.records = func(context.Context) (recordpipe.Result, error) {
+		return recordpipe.Result{
+			Rows:     []map[string]interface{}{{"Code": "001", "Name": sourceValue}},
+			KeyField: "Code",
+			Raw:      true,
+		}, nil
+	}
+	sinkCalls := 0
+	server.sqlOperations.sync = func(_ context.Context, options recordsink.SQLOptions, rows []map[string]interface{}) (recordsink.SQLResult, error) {
+		sinkCalls++
+		return recordsink.SQLResult{Inserted: len(rows), DryRun: options.DryRun}, nil
+	}
+
+	preview := func(t *testing.T) string {
+		t.Helper()
+		response := serveSQLRequest(server, newAuthenticatedSQLRequest(firstSession, http.MethodPost, "/api/sql-target/preview", nil))
+		if response.Code != http.StatusOK {
+			t.Fatalf("upsert preview status=%d: %s", response.Code, response.Body)
+		}
+		var payload struct {
+			Success    bool                   `json:"success"`
+			Diagnostic sqlOperationDiagnostic `json:"diagnostic"`
+		}
+		if err := json.NewDecoder(response.Body).Decode(&payload); err != nil {
+			t.Fatalf("decode upsert preview: %v", err)
+		}
+		if !payload.Success || !validSQLPreviewGrant(payload.Diagnostic.PreviewGrant) ||
+			payload.Diagnostic.PreviewGrantExpiresAt == nil {
+			t.Fatalf("upsert preview omitted grant: %#v", payload)
+		}
+		return payload.Diagnostic.PreviewGrant
+	}
+	apply := func(credentials sqlTestCredentials, grant string) *httptest.ResponseRecorder {
+		body := []byte(fmt.Sprintf(`{"confirm":"manual_sync","preview_grant":%q}`, grant))
+		request := newAuthenticatedSQLRequest(credentials, http.MethodPost, "/api/sql-target/sync", body)
+		request.Header.Set("Content-Type", "application/json")
+		return serveSQLRequest(server, request)
+	}
+	assertPreviewRequired := func(label string, response *httptest.ResponseRecorder) {
+		if response.Code != http.StatusConflict ||
+			!strings.Contains(response.Body.String(), string(recordsink.ReconciliationGuardPreviewRequired)) {
+			t.Fatalf("%s status=%d, want generic preview-required 409: %s", label, response.Code, response.Body)
+		}
+		if value, found := responseContainsAny(response, sqlTestDSN, "super-secret-password", sqlTestCAPath); found {
+			t.Fatalf("%s exposed protected value %q: %s", label, value, response.Body)
+		}
+	}
+
+	firstGrant := preview(t)
+	assertPreviewRequired("missing grant", apply(firstSession, ""))
+
+	configGrant := preview(t)
+	if err := server.config.Update(func(cfg *appconfig.Config) {
+		cfg.Export.MySQLDSN = "other_user:other-secret@tcp(second-db.internal:3306)/patris"
+	}); err != nil {
+		t.Fatalf("switch target DSN: %v", err)
+	}
+	assertPreviewRequired("target switch", apply(firstSession, configGrant))
+	if err := server.config.Update(func(cfg *appconfig.Config) {
+		cfg.Export.MySQLDSN = sqlTestDSN
+	}); err != nil {
+		t.Fatalf("restore target DSN: %v", err)
+	}
+
+	sourceGrant := preview(t)
+	sourceValue = "changed-after-preview"
+	assertPreviewRequired("source drift", apply(firstSession, sourceGrant))
+
+	sourceValue = int64(1)
+	typeGrant := preview(t)
+	sourceValue = float64(1)
+	assertPreviewRequired("source type drift", apply(firstSession, typeGrant))
+
+	sessionGrant := preview(t)
+	assertPreviewRequired("session switch", apply(secondSession, sessionGrant))
+
+	expiredGrant := preview(t)
+	now = now.Add(sqlPreviewGrantTTL + time.Second)
+	assertPreviewRequired("expired grant", apply(firstSession, expiredGrant))
+
+	validGrant := preview(t)
+	applied := apply(firstSession, validGrant)
+	if applied.Code != http.StatusOK {
+		t.Fatalf("fresh bound upsert grant status=%d: %s", applied.Code, applied.Body)
+	}
+	assertPreviewRequired("replayed grant", apply(firstSession, validGrant))
+
+	// Seven previews and one authorized apply reach the sink. Every rejected apply
+	// is blocked before the sink.
+	if sinkCalls != 8 {
+		t.Fatalf("sink calls=%d, want 8 preview/apply calls", sinkCalls)
+	}
+	if firstGrant == configGrant {
+		t.Fatal("independent previews reused an opaque grant")
+	}
+}
+
+func TestSQLTargetSlowSyncBodyDoesNotHoldOperationPermit(t *testing.T) {
+	server := newSQLOperationsTestServer(t)
+	credentials := createSQLTestSession(t, server, false)
+	probeEntered := make(chan struct{})
+	server.sqlOperations.probe = func(context.Context, recordsink.SQLOptions) (recordsink.SQLProbeResult, error) {
+		close(probeEntered)
+		return recordsink.SQLProbeResult{Connected: true, Driver: "mysql"}, nil
+	}
+
+	reader, writer := io.Pipe()
+	request := httptest.NewRequest(http.MethodPost, credentials.origin+"/api/sql-target/sync", reader)
+	request.Header.Set("Origin", credentials.origin)
+	request.Header.Set(sqlCSRFHeader, credentials.csrf)
+	request.Header.Set("Content-Type", "application/json")
+	request.AddCookie(credentials.cookie)
+	syncDone := make(chan *httptest.ResponseRecorder, 1)
+	go func() { syncDone <- serveSQLRequest(server, request) }()
+
+	select {
+	case response := <-syncDone:
+		t.Fatalf("partial sync body unexpectedly completed: status=%d body=%s", response.Code, response.Body)
+	case <-time.After(100 * time.Millisecond):
+	}
+	probeDone := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		probeDone <- serveSQLRequest(server, newAuthenticatedSQLRequest(credentials, http.MethodPost, "/api/sql-target/test", nil))
+	}()
+	select {
+	case <-probeEntered:
+	case <-time.After(3 * time.Second):
+		t.Fatal("slow sync body held the global SQL operation permit")
+	}
+	select {
+	case response := <-probeDone:
+		if response.Code != http.StatusOK {
+			t.Fatalf("probe failed beside slow sync body: status=%d body=%s", response.Code, response.Body)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("probe did not complete beside slow sync body")
+	}
+
+	if err := writer.Close(); err != nil {
+		t.Fatalf("close partial request body: %v", err)
+	}
+	select {
+	case response := <-syncDone:
+		if response.Code != http.StatusBadRequest {
+			t.Fatalf("partial sync body status=%d, want 400: %s", response.Code, response.Body)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("partial sync body did not finish after EOF")
+	}
+}
+
+func TestSQLSourcePreparationCancellationDoesNotWedgeOperations(t *testing.T) {
+	server := newSQLOperationsTestServer(t)
+	credentials := createSQLTestSession(t, server, false)
+	sourceEntered := make(chan struct{})
+	sourceExited := make(chan struct{})
+	probeEntered := make(chan struct{})
+	sinkCalls := 0
+	server.sqlOperations.records = func(ctx context.Context) (recordpipe.Result, error) {
+		close(sourceEntered)
+		<-ctx.Done()
+		close(sourceExited)
+		return recordpipe.Result{}, ctx.Err()
+	}
+	server.sqlOperations.probe = func(context.Context, recordsink.SQLOptions) (recordsink.SQLProbeResult, error) {
+		close(probeEntered)
+		return recordsink.SQLProbeResult{Connected: true, Driver: "mysql"}, nil
+	}
+	server.sqlOperations.sync = func(context.Context, recordsink.SQLOptions, []map[string]interface{}) (recordsink.SQLResult, error) {
+		sinkCalls++
+		return recordsink.SQLResult{}, nil
+	}
+
+	request := newAuthenticatedSQLRequest(credentials, http.MethodPost, "/api/sql-target/preview", nil)
+	requestContext, cancel := context.WithTimeout(request.Context(), 250*time.Millisecond)
+	defer cancel()
+	request = request.WithContext(requestContext)
+	previewDone := make(chan *httptest.ResponseRecorder, 1)
+	go func() { previewDone <- serveSQLRequest(server, request) }()
+	select {
+	case <-sourceEntered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("source preparation did not start")
+	}
+
+	probeDone := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		probeDone <- serveSQLRequest(server, newAuthenticatedSQLRequest(credentials, http.MethodPost, "/api/sql-target/test", nil))
+	}()
+	select {
+	case <-probeEntered:
+		t.Fatal("probe overlapped source preparation while the serialized permit was held")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	var preview *httptest.ResponseRecorder
+	select {
+	case preview = <-previewDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("cancelled source preparation did not return promptly")
+	}
+	select {
+	case <-sourceExited:
+	default:
+		t.Fatal("handler returned before the context-aware source exited")
+	}
+	select {
+	case <-probeEntered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("probe did not enter after the cancelled source released the operation permit")
+	}
+	select {
+	case probe := <-probeDone:
+		if probe.Code != http.StatusOK {
+			t.Fatalf("probe failed after source cancellation: status=%d body=%s", probe.Code, probe.Body)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("probe did not complete after source cancellation")
+	}
+	if preview.Code != http.StatusGatewayTimeout {
+		t.Fatalf("cancelled source status=%d, want 504: %s", preview.Code, preview.Body)
+	}
+	var failed struct {
+		Success    bool                   `json:"success"`
+		Diagnostic sqlOperationDiagnostic `json:"diagnostic"`
+	}
+	if err := json.NewDecoder(preview.Body).Decode(&failed); err != nil {
+		t.Fatalf("decode cancelled source response: %v", err)
+	}
+	if failed.Success || failed.Diagnostic.Failure == nil ||
+		failed.Diagnostic.Failure.Code != string(recordsink.SQLFailureTimeout) ||
+		failed.Diagnostic.Failure.Stage != "source" || sinkCalls != 0 {
+		t.Fatalf("cancelled source reached sink or returned unsafe diagnostic: %#v sinkCalls=%d", failed, sinkCalls)
+	}
+
+	server.sqlOperations.records = func(ctx context.Context) (recordpipe.Result, error) {
+		return server.RecordResultContext(ctx)
+	}
+	second := serveSQLRequest(server, newAuthenticatedSQLRequest(credentials, http.MethodPost, "/api/sql-target/preview", nil))
+	if second.Code != http.StatusOK || sinkCalls != 1 {
+		t.Fatalf("operation permit was not reusable: status=%d sinkCalls=%d body=%s", second.Code, sinkCalls, second.Body)
+	}
+
+	cancelled, cancelImmediately := context.WithCancel(context.Background())
+	cancelImmediately()
+	if _, err := server.RecordResultContext(cancelled); !errors.Is(err, context.Canceled) {
+		t.Fatalf("pre-cancelled RecordResultContext error=%v, want context.Canceled", err)
+	}
+}
+
+func TestSQLSourcePreparationRejectsLegacyUnboundedDataSource(t *testing.T) {
+	server := newSQLOperationsTestServer(t)
+	credentials := createSQLTestSession(t, server, false)
+	legacy := &legacySQLTestSource{}
+	server.dataSourceMu.Lock()
+	original := server.dataSource
+	server.dataSource = legacy
+	server.dataSourceMu.Unlock()
+	t.Cleanup(func() {
+		server.dataSourceMu.Lock()
+		server.dataSource = original
+		server.dataSourceMu.Unlock()
+	})
+	sinkCalls := 0
+	server.sqlOperations.sync = func(context.Context, recordsink.SQLOptions, []map[string]interface{}) (recordsink.SQLResult, error) {
+		sinkCalls++
+		return recordsink.SQLResult{}, nil
+	}
+
+	response := serveSQLRequest(server, newAuthenticatedSQLRequest(credentials, http.MethodPost, "/api/sql-target/preview", nil))
+	if response.Code != http.StatusServiceUnavailable {
+		t.Fatalf("legacy source status=%d, want 503: %s", response.Code, response.Body)
+	}
+	if legacy.rawCalls != 0 || sinkCalls != 0 {
+		t.Fatalf("bounded SQL request used legacy source calls=%d sink=%d", legacy.rawCalls, sinkCalls)
+	}
+	if strings.Contains(response.Body.String(), "bounded record reads") {
+		t.Fatalf("legacy source response exposed internal detail: %s", response.Body)
+	}
+
+	result, err := server.RecordResultContext(context.Background())
+	if err != nil || len(result.Rows) != 1 || legacy.rawCalls != 1 {
+		t.Fatalf("legacy Background compatibility failed: rows=%d calls=%d err=%v", len(result.Rows), legacy.rawCalls, err)
 	}
 }
 
