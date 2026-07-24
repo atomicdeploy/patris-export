@@ -262,8 +262,8 @@ func TransformContext(ctx context.Context, rows []map[string]interface{}, source
 	if err := ctx.Err(); err != nil {
 		return nil, nil, err
 	}
-	envelope := NewCatalogEnvelope(products, categories, excludedCodes, source, cfg.SourceID, generatedAt, quarantined...)
-	if err := ctx.Err(); err != nil {
+	envelope, err := newEnvelopeBaseContext(ctx, products, categories, excludedCodes, source, cfg.SourceID, generatedAt, quarantined...)
+	if err != nil {
 		return nil, nil, err
 	}
 	if !integrationActive {
@@ -283,9 +283,12 @@ func TransformContext(ctx context.Context, rows []map[string]interface{}, source
 		}
 		envelope.Warnings = append(envelope.Warnings, "ambiguous_catalog_record:"+code)
 	}
-	envelope.Warnings = normalizedWarnings(envelope.Warnings)
-	envelope.EventID = eventID(envelope)
-	if err := ctx.Err(); err != nil {
+	envelope.Warnings, err = normalizedWarningsContext(ctx, envelope.Warnings)
+	if err != nil {
+		return nil, nil, err
+	}
+	envelope.EventID, err = eventIDContext(ctx, envelope)
+	if err != nil {
 		return nil, nil, err
 	}
 	productRows, err := ProductsToRowsContext(ctx, products)
@@ -1536,8 +1539,19 @@ func formatOptionalTime(value time.Time) string {
 func floatPointer(value float64) *float64 { return &value }
 
 func normalizedWarnings(values []string) []string {
+	result, _ := normalizedWarningsContext(context.Background(), values)
+	return result
+}
+
+func normalizedWarningsContext(ctx context.Context, values []string) ([]string, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	set := map[string]struct{}{}
 	for _, value := range values {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		value = strings.TrimSpace(value)
 		if value != "" {
 			set[value] = struct{}{}
@@ -1545,10 +1559,15 @@ func normalizedWarnings(values []string) []string {
 	}
 	result := make([]string, 0, len(set))
 	for value := range set {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		result = append(result, value)
 	}
-	sort.Strings(result)
-	return result
+	if err := stableSortContext(ctx, result, func(left, right string) bool { return left < right }); err != nil {
+		return nil, err
+	}
+	return result, nil
 }
 
 func hasAny(values []string, expected ...string) bool {

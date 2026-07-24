@@ -1,6 +1,7 @@
 package canonical
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -125,32 +126,79 @@ func rejectUnknownJSONFields(raw map[string]json.RawMessage, kind string, allowe
 }
 
 func NewEnvelope(rows []Product, source, sourceID string, generatedAt time.Time, quarantinedCodes ...string) *Envelope {
-	return newEnvelope(rows, nil, nil, source, sourceID, generatedAt, quarantinedCodes...)
+	envelope, _ := newEnvelopeContext(context.Background(), rows, nil, nil, source, sourceID, generatedAt, quarantinedCodes...)
+	return envelope
 }
 
 func NewEnvelopeWithCategories(rows []Product, categories []Category, source, sourceID string, generatedAt time.Time, quarantinedCodes ...string) *Envelope {
-	return newEnvelope(rows, categories, nil, source, sourceID, generatedAt, quarantinedCodes...)
+	envelope, _ := newEnvelopeContext(context.Background(), rows, categories, nil, source, sourceID, generatedAt, quarantinedCodes...)
+	return envelope
 }
 
 func NewCatalogEnvelope(rows []Product, categories []Category, excludedCodes []string, source, sourceID string, generatedAt time.Time, quarantinedCodes ...string) *Envelope {
-	return newEnvelope(rows, categories, excludedCodes, source, sourceID, generatedAt, quarantinedCodes...)
+	envelope, _ := NewCatalogEnvelopeContext(context.Background(), rows, categories, excludedCodes, source, sourceID, generatedAt, quarantinedCodes...)
+	return envelope
 }
 
-func newEnvelope(rows []Product, categories []Category, excludedCodes []string, source, sourceID string, generatedAt time.Time, quarantinedCodes ...string) *Envelope {
+// NewCatalogEnvelopeContext builds a deterministic snapshot while allowing
+// request cancellation to interrupt cloning, sorting, revision hashing, and
+// event identity materialization.
+func NewCatalogEnvelopeContext(ctx context.Context, rows []Product, categories []Category, excludedCodes []string, source, sourceID string, generatedAt time.Time, quarantinedCodes ...string) (*Envelope, error) {
+	return newEnvelopeContext(ctx, rows, categories, excludedCodes, source, sourceID, generatedAt, quarantinedCodes...)
+}
+
+func newEnvelopeContext(ctx context.Context, rows []Product, categories []Category, excludedCodes []string, source, sourceID string, generatedAt time.Time, quarantinedCodes ...string) (*Envelope, error) {
+	envelope, err := newEnvelopeBaseContext(ctx, rows, categories, excludedCodes, source, sourceID, generatedAt, quarantinedCodes...)
+	if err != nil {
+		return nil, err
+	}
+	envelope.EventID, err = eventIDContext(ctx, envelope)
+	if err != nil {
+		return nil, err
+	}
+	return envelope, nil
+}
+
+func newEnvelopeBaseContext(ctx context.Context, rows []Product, categories []Category, excludedCodes []string, source, sourceID string, generatedAt time.Time, quarantinedCodes ...string) (*Envelope, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if generatedAt.IsZero() {
 		generatedAt = time.Now()
 	}
-	products := cloneProducts(rows)
-	sort.SliceStable(products, func(i, j int) bool {
-		return products[i].ProductCode < products[j].ProductCode
-	})
-	categories = cloneCategories(categories)
-	sort.SliceStable(categories, func(i, j int) bool {
-		return categories[i].CategoryCode < categories[j].CategoryCode
-	})
-	quarantinedCodes = normalizedWarnings(quarantinedCodes)
-	excludedCodes = normalizedWarnings(excludedCodes)
-	revision := sourceRevision(products, categories, excludedCodes, quarantinedCodes)
+	products, err := cloneProductsContext(ctx, rows)
+	if err != nil {
+		return nil, err
+	}
+	if err := stableSortContext(ctx, products, func(left, right Product) bool {
+		return left.ProductCode < right.ProductCode
+	}); err != nil {
+		return nil, err
+	}
+	categories, err = cloneCategoriesContext(ctx, categories)
+	if err != nil {
+		return nil, err
+	}
+	if err := stableSortContext(ctx, categories, func(left, right Category) bool {
+		return left.CategoryCode < right.CategoryCode
+	}); err != nil {
+		return nil, err
+	}
+	quarantinedCodes, err = normalizedWarningsContext(ctx, quarantinedCodes)
+	if err != nil {
+		return nil, err
+	}
+	excludedCodes, err = normalizedWarningsContext(ctx, excludedCodes)
+	if err != nil {
+		return nil, err
+	}
+	revision, err := sourceRevisionContext(ctx, products, categories, excludedCodes, quarantinedCodes)
+	if err != nil {
+		return nil, err
+	}
 	if strings.TrimSpace(sourceID) == "" {
 		sourceID = sourceBaseName(source)
 	}
@@ -168,10 +216,12 @@ func newEnvelope(rows []Product, categories []Category, excludedCodes []string, 
 		Warnings:         normalizedWarnings(nil),
 	}
 	for _, code := range quarantinedCodes {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		envelope.Warnings = append(envelope.Warnings, "duplicate_product_code:"+code)
 	}
-	envelope.EventID = eventID(envelope)
-	return envelope
+	return envelope, nil
 }
 
 func ChangeEnvelope(snapshot *Envelope, changes *recorddiff.ChangeSet) *Envelope {
@@ -238,54 +288,207 @@ func ChangeEnvelope(snapshot *Envelope, changes *recorddiff.ChangeSet) *Envelope
 }
 
 func sourceRevision(products []Product, categories []Category, excludedCodes, quarantinedCodes []string) string {
+	revision, _ := sourceRevisionContext(context.Background(), products, categories, excludedCodes, quarantinedCodes)
+	return revision
+}
+
+func sourceRevisionContext(ctx context.Context, products []Product, categories []Category, excludedCodes, quarantinedCodes []string) (string, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	material := make([]string, 0, len(products)+len(categories)+len(excludedCodes))
 	for _, product := range products {
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
 		material = append(material, product.ProductCode+"="+product.RecordHash)
 	}
 	for _, category := range categories {
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
 		material = append(material, "category:"+category.CategoryCode+"="+category.RecordHash)
 	}
 	for _, code := range excludedCodes {
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
 		material = append(material, "excluded="+code)
 	}
-	sort.Strings(material)
+	if err := stableSortContext(ctx, material, func(left, right string) bool { return left < right }); err != nil {
+		return "", err
+	}
 	for _, code := range quarantinedCodes {
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
 		material = append(material, "quarantined="+code)
 	}
-	return hashBytes([]byte(strings.Join(material, "\n")))
+	digest := sha256.New()
+	for index, value := range material {
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
+		if index > 0 {
+			_, _ = digest.Write([]byte{'\n'})
+		}
+		_, _ = digest.Write([]byte(value))
+	}
+	return "sha256:" + hex.EncodeToString(digest.Sum(nil)), nil
 }
 
 func eventID(envelope *Envelope) string {
-	type identity struct {
-		Schema           string      `json:"schema"`
-		EventType        string      `json:"event_type"`
-		LocalCurrency    string      `json:"local_currency,omitempty"`
-		FormulaID        string      `json:"formula_id,omitempty"`
-		Source           Source      `json:"source"`
-		GeneratedAt      string      `json:"generated_at"`
-		Products         []string    `json:"products"`
-		Categories       []string    `json:"categories"`
-		ExcludedCodes    []string    `json:"excluded_codes"`
-		DeletedCodes     []Tombstone `json:"deleted_codes,omitempty"`
-		QuarantinedCodes []string    `json:"quarantined_codes"`
+	value, _ := eventIDContext(context.Background(), envelope)
+	return value
+}
+
+func eventIDContext(ctx context.Context, envelope *Envelope) (string, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return "", err
 	}
 	hashes := make([]string, 0, len(envelope.Products))
 	for _, product := range envelope.Products {
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
 		hashes = append(hashes, product.ProductCode+"="+product.RecordHash)
 	}
-	sort.Strings(hashes)
+	if err := stableSortContext(ctx, hashes, func(left, right string) bool { return left < right }); err != nil {
+		return "", err
+	}
 	categoryHashes := make([]string, 0, len(envelope.Categories))
 	for _, category := range envelope.Categories {
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
 		categoryHashes = append(categoryHashes, category.CategoryCode+"="+category.RecordHash)
 	}
-	sort.Strings(categoryHashes)
-	material, _ := json.Marshal(identity{
-		Schema: envelope.Schema, EventType: envelope.EventType,
-		LocalCurrency: envelope.LocalCurrency, FormulaID: envelope.FormulaID,
-		Source: envelope.Source, GeneratedAt: envelope.GeneratedAt, Products: hashes, Categories: categoryHashes, ExcludedCodes: envelope.ExcludedCodes,
-		DeletedCodes: envelope.DeletedCodes, QuarantinedCodes: envelope.QuarantinedCodes,
-	})
-	return hashBytes(material)
+	if err := stableSortContext(ctx, categoryHashes, func(left, right string) bool { return left < right }); err != nil {
+		return "", err
+	}
+
+	digest := sha256.New()
+	write := func(value string) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		_, _ = digest.Write([]byte(value))
+		return nil
+	}
+	writeJSONString := func(value string) error {
+		encoded, err := json.Marshal(value)
+		if err != nil {
+			return err
+		}
+		return write(string(encoded))
+	}
+	writeStringField := func(prefix, value string) error {
+		if err := write(prefix); err != nil {
+			return err
+		}
+		return writeJSONString(value)
+	}
+	writeStringArray := func(prefix string, values []string) error {
+		if err := write(prefix); err != nil {
+			return err
+		}
+		if values == nil {
+			return write("null")
+		}
+		if err := write("["); err != nil {
+			return err
+		}
+		for index, value := range values {
+			if index > 0 {
+				if err := write(","); err != nil {
+					return err
+				}
+			}
+			if err := writeJSONString(value); err != nil {
+				return err
+			}
+		}
+		return write("]")
+	}
+
+	if err := writeStringField(`{"schema":`, envelope.Schema); err != nil {
+		return "", err
+	}
+	if err := writeStringField(`,"event_type":`, envelope.EventType); err != nil {
+		return "", err
+	}
+	if envelope.LocalCurrency != "" {
+		if err := writeStringField(`,"local_currency":`, envelope.LocalCurrency); err != nil {
+			return "", err
+		}
+	}
+	if envelope.FormulaID != "" {
+		if err := writeStringField(`,"formula_id":`, envelope.FormulaID); err != nil {
+			return "", err
+		}
+	}
+	if err := write(`,"source":{"id":`); err != nil {
+		return "", err
+	}
+	if err := writeJSONString(envelope.Source.ID); err != nil {
+		return "", err
+	}
+	if err := writeStringField(`,"dataset":`, envelope.Source.Dataset); err != nil {
+		return "", err
+	}
+	if err := writeStringField(`,"revision":`, envelope.Source.Revision); err != nil {
+		return "", err
+	}
+	if err := writeStringField(`},"generated_at":`, envelope.GeneratedAt); err != nil {
+		return "", err
+	}
+	if err := writeStringArray(`,"products":`, hashes); err != nil {
+		return "", err
+	}
+	if err := writeStringArray(`,"categories":`, categoryHashes); err != nil {
+		return "", err
+	}
+	if err := writeStringArray(`,"excluded_codes":`, envelope.ExcludedCodes); err != nil {
+		return "", err
+	}
+	if len(envelope.DeletedCodes) > 0 {
+		if err := write(`,"deleted_codes":[`); err != nil {
+			return "", err
+		}
+		for index, tombstone := range envelope.DeletedCodes {
+			if index > 0 {
+				if err := write(","); err != nil {
+					return "", err
+				}
+			}
+			if err := write(`{"product_code":`); err != nil {
+				return "", err
+			}
+			if err := writeJSONString(tombstone.ProductCode); err != nil {
+				return "", err
+			}
+			if tombstone.Deleted {
+				if err := write(`,"deleted":true}`); err != nil {
+					return "", err
+				}
+			} else if err := write(`,"deleted":false}`); err != nil {
+				return "", err
+			}
+		}
+		if err := write("]"); err != nil {
+			return "", err
+		}
+	}
+	if err := writeStringArray(`,"quarantined_codes":`, envelope.QuarantinedCodes); err != nil {
+		return "", err
+	}
+	if err := write("}"); err != nil {
+		return "", err
+	}
+	return "sha256:" + hex.EncodeToString(digest.Sum(nil)), nil
 }
 
 func hashBytes(material []byte) string {
@@ -320,47 +523,169 @@ func cloneEnvelope(value *Envelope) *Envelope {
 }
 
 func cloneCategories(values []Category) []Category {
+	result, _ := cloneCategoriesContext(context.Background(), values)
+	return result
+}
+
+func cloneCategoriesContext(ctx context.Context, values []Category) ([]Category, error) {
 	result := make([]Category, 0, len(values))
 	for _, value := range values {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		copy := value
 		copy.fieldPresence = make(map[string]fieldPresence, len(value.fieldPresence))
 		for key, state := range value.fieldPresence {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
 			copy.fieldPresence[key] = state
 		}
 		if value.Warnings != nil {
-			copy.Warnings = append(make([]string, 0, len(value.Warnings)), value.Warnings...)
+			copy.Warnings = make([]string, 0, len(value.Warnings))
+			for _, warning := range value.Warnings {
+				if err := ctx.Err(); err != nil {
+					return nil, err
+				}
+				copy.Warnings = append(copy.Warnings, warning)
+			}
 		}
 		result = append(result, copy)
 	}
-	return result
+	return result, nil
 }
 
 func cloneProducts(values []Product) []Product {
-	result := make([]Product, 0, len(values))
-	for _, value := range values {
-		result = append(result, cloneProduct(value))
-	}
+	result, _ := cloneProductsContext(context.Background(), values)
 	return result
 }
 
+func cloneProductsContext(ctx context.Context, values []Product) ([]Product, error) {
+	result := make([]Product, 0, len(values))
+	for _, value := range values {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		copy, err := cloneProductContext(ctx, value)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, copy)
+	}
+	return result, nil
+}
+
 func cloneProduct(value Product) Product {
+	copy, _ := cloneProductContext(context.Background(), value)
+	return copy
+}
+
+func cloneProductContext(ctx context.Context, value Product) (Product, error) {
 	copy := value
 	copy.WarehouseStock = make(map[string]float64, len(value.WarehouseStock))
 	for key, stock := range value.WarehouseStock {
+		if err := ctx.Err(); err != nil {
+			return Product{}, err
+		}
 		copy.WarehouseStock[key] = stock
 	}
 	copy.fieldPresence = make(map[string]fieldPresence, len(value.fieldPresence))
 	for key, state := range value.fieldPresence {
+		if err := ctx.Err(); err != nil {
+			return Product{}, err
+		}
 		copy.fieldPresence[key] = state
 	}
 	copy.warehouseNulls = make(map[string]bool, len(value.warehouseNulls))
 	for key, isNull := range value.warehouseNulls {
+		if err := ctx.Err(); err != nil {
+			return Product{}, err
+		}
 		copy.warehouseNulls[key] = isNull
 	}
 	if value.Warnings != nil {
-		copy.Warnings = append(make([]string, 0, len(value.Warnings)), value.Warnings...)
+		copy.Warnings = make([]string, 0, len(value.Warnings))
+		for _, warning := range value.Warnings {
+			if err := ctx.Err(); err != nil {
+				return Product{}, err
+			}
+			copy.Warnings = append(copy.Warnings, warning)
+		}
 	}
-	return copy
+	return copy, nil
+}
+
+// stableSortContext is an iterative stable merge sort with cancellation checks
+// inside both merge and copy passes. The standard sort helpers cannot abort an
+// in-progress O(N log N) catalog sort after a request is cancelled.
+func stableSortContext[T any](ctx context.Context, values []T, less func(left, right T) bool) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if len(values) < 2 {
+		return nil
+	}
+
+	buffer := make([]T, len(values))
+	source := values
+	target := buffer
+	for width := 1; width < len(values); {
+		for start := 0; start < len(values); start += 2 * width {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			middle := min(start+width, len(values))
+			end := min(start+2*width, len(values))
+			left, right, output := start, middle, start
+			for left < middle && right < end {
+				if err := ctx.Err(); err != nil {
+					return err
+				}
+				if less(source[right], source[left]) {
+					target[output] = source[right]
+					right++
+				} else {
+					target[output] = source[left]
+					left++
+				}
+				output++
+			}
+			for left < middle {
+				if err := ctx.Err(); err != nil {
+					return err
+				}
+				target[output] = source[left]
+				left++
+				output++
+			}
+			for right < end {
+				if err := ctx.Err(); err != nil {
+					return err
+				}
+				target[output] = source[right]
+				right++
+				output++
+			}
+		}
+		source, target = target, source
+		if width > len(values)/2 {
+			width = len(values)
+		} else {
+			width *= 2
+		}
+	}
+	if len(source) > 0 && &source[0] != &values[0] {
+		for index := range source {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			values[index] = source[index]
+		}
+	}
+	return ctx.Err()
 }
 
 func copyRows(rows []map[string]interface{}) []map[string]interface{} {
