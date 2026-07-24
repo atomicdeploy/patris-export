@@ -98,8 +98,9 @@ func TestSQLOptionsJSONCannotExposeProtectedConnectionMaterial(t *testing.T) {
 	const caPath = "C:/protected/private-ca.pem"
 	const serverName = "private-db.internal"
 	encoded, err := json.Marshal(SQLOptions{
-		Driver: "mysql",
-		DSN:    dsn,
+		Driver:              "mysql",
+		DSN:                 dsn,
+		ReconciliationToken: "sha256:private-plan-token",
 		MySQLTLS: MySQLTLSOptions{
 			CAFile:     caPath,
 			ServerName: serverName,
@@ -108,7 +109,7 @@ func TestSQLOptionsJSONCannotExposeProtectedConnectionMaterial(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, forbidden := range []string{dsn, caPath, serverName, "DSN", "MySQLTLS", "CAFile", "ServerName"} {
+	for _, forbidden := range []string{dsn, caPath, serverName, "sha256:private-plan-token", "DSN", "MySQLTLS", "CAFile", "ServerName", "ReconciliationToken"} {
 		if strings.Contains(string(encoded), forbidden) {
 			t.Fatalf("serialized SQL options exposed %q: %s", forbidden, encoded)
 		}

@@ -40,6 +40,7 @@ const (
 	SQLFailureTransient            SQLFailureCode = "transient_database_error"
 	SQLFailureUnavailable          SQLFailureCode = "database_unavailable"
 	SQLFailureSchema               SQLFailureCode = "schema_incompatible"
+	SQLFailureReconciliation       SQLFailureCode = "reconciliation_blocked"
 	SQLFailureUnknown              SQLFailureCode = "unknown_database_error"
 )
 
@@ -47,10 +48,11 @@ const (
 // available to errors.Is/errors.As for in-process control flow, but is never
 // part of JSON or Error output.
 type SQLFailure struct {
-	Code      SQLFailureCode  `json:"code"`
-	Stage     SQLFailureStage `json:"stage"`
-	Retryable bool            `json:"retryable"`
-	Message   string          `json:"message"`
+	Code      SQLFailureCode          `json:"code"`
+	Stage     SQLFailureStage         `json:"stage"`
+	Retryable bool                    `json:"retryable"`
+	Message   string                  `json:"message"`
+	Reason    ReconciliationGuardCode `json:"reason,omitempty"`
 
 	cause error
 }
@@ -59,7 +61,11 @@ func (failure *SQLFailure) Error() string {
 	if failure == nil {
 		return ""
 	}
-	return fmt.Sprintf("SQL %s failed: %s (code=%s, retryable=%t)", failure.Stage, failure.Message, failure.Code, failure.Retryable)
+	reason := ""
+	if failure.Reason != "" {
+		reason = fmt.Sprintf(", reason=%s", failure.Reason)
+	}
+	return fmt.Sprintf("SQL %s failed: %s (code=%s%s, retryable=%t)", failure.Stage, failure.Message, failure.Code, reason, failure.Retryable)
 }
 
 func (failure *SQLFailure) Unwrap() error {
@@ -82,13 +88,18 @@ func ClassifySQLError(stage SQLFailureStage, err error) *SQLFailure {
 
 	stage = normalizedSQLFailureStage(stage)
 	code := classifySQLFailureCode(stage, err)
-	return &SQLFailure{
+	failure := &SQLFailure{
 		Code:      code,
 		Stage:     stage,
 		Retryable: sqlFailureRetryable(code),
 		Message:   sqlFailureMessage(code),
 		cause:     err,
 	}
+	var guardError *ReconciliationGuardError
+	if errors.As(err, &guardError) {
+		failure.Reason = normalizedReconciliationGuardCode(guardError.Code)
+	}
+	return failure
 }
 
 func normalizedSQLFailureStage(stage SQLFailureStage) SQLFailureStage {
@@ -101,6 +112,10 @@ func normalizedSQLFailureStage(stage SQLFailureStage) SQLFailureStage {
 }
 
 func classifySQLFailureCode(stage SQLFailureStage, err error) SQLFailureCode {
+	var guardError *ReconciliationGuardError
+	if errors.As(err, &guardError) {
+		return SQLFailureReconciliation
+	}
 	switch {
 	case errors.Is(err, context.Canceled):
 		return SQLFailureCancelled
@@ -193,6 +208,8 @@ func sqlFailureMessage(code SQLFailureCode) string {
 		return "The SQL target is temporarily unavailable."
 	case SQLFailureSchema:
 		return "The SQL target schema is incompatible."
+	case SQLFailureReconciliation:
+		return "The SQL reconciliation safety guard blocked the operation."
 	default:
 		return "The SQL target operation failed."
 	}

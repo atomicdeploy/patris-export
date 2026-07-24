@@ -1020,7 +1020,7 @@ func normalize(cfg *Config) {
 	switch cfg.Export.Reconciliation {
 	case "", "upsert_only":
 		cfg.Export.Reconciliation = "upsert_only"
-	case "delete_missing":
+	case "soft_delete_missing", "delete_missing":
 	default:
 		// Unknown modes fail toward the non-destructive behavior. The sink also
 		// validates direct API use rather than silently deleting records.
