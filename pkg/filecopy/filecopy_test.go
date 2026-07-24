@@ -1,11 +1,14 @@
 package filecopy
 
 import (
+	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -340,5 +343,81 @@ func TestDownloadToTemp(t *testing.T) {
 	}
 	if string(got) != string(content) {
 		t.Fatalf("downloaded content mismatch: %q", got)
+	}
+}
+
+func TestDownloadToTempContextCancelsWithoutPartialFile(t *testing.T) {
+	tempRoot := t.TempDir()
+	SetTempDir(tempRoot)
+	defer SetTempDir("")
+
+	requestStarted := make(chan struct{})
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		if calls.Add(1) == 1 {
+			_, _ = response.Write([]byte("last-known-good"))
+			return
+		}
+		response.WriteHeader(http.StatusOK)
+		_, _ = response.Write([]byte("partial-replacement"))
+		if flusher, ok := response.(http.Flusher); ok {
+			flusher.Flush()
+		}
+		close(requestStarted)
+		<-request.Context().Done()
+	}))
+	defer server.Close()
+
+	stable, err := DownloadToTemp(server.URL + "/delayed.db")
+	if err != nil {
+		t.Fatalf("create last-known-good download: %v", err)
+	}
+	defer CleanupTemp(stable.TempPath)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		_, err := DownloadToTempContext(ctx, server.URL+"/delayed.db")
+		done <- err
+	}()
+	select {
+	case <-requestStarted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("delayed download did not start")
+	}
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("cancelled download error=%v, want context deadline", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("cancelled download did not return promptly")
+	}
+	content, err := os.ReadFile(stable.TempPath)
+	if err != nil {
+		t.Fatalf("read stable download after cancellation: %v", err)
+	}
+	if string(content) != "last-known-good" {
+		t.Fatalf("cancelled replacement changed stable download: %q", content)
+	}
+	entries, err := os.ReadDir(tempRoot)
+	if err != nil {
+		t.Fatalf("read temp root: %v", err)
+	}
+	if len(entries) != 1 || entries[0].Name() != filepath.Base(stable.TempPath) {
+		t.Fatalf("cancelled download left partial files: %#v", entries)
+	}
+}
+
+func TestCopyToTempContextRejectsPreCancelledRequest(t *testing.T) {
+	source := filepath.Join(t.TempDir(), "source.db")
+	if err := os.WriteFile(source, []byte("source"), 0o600); err != nil {
+		t.Fatalf("write source: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := CopyToTempContext(ctx, source); !errors.Is(err, context.Canceled) {
+		t.Fatalf("pre-cancelled copy error=%v, want context.Canceled", err)
 	}
 }

@@ -1,6 +1,7 @@
 package converter
 
 import (
+	"context"
 	"encoding/csv"
 	"encoding/json"
 	"fmt"
@@ -137,11 +138,31 @@ func (e *Exporter) ExportToCSVWriter(records []paradox.Record, fields []paradox.
 // and order. Dataset profiles use it before Code-keyed shaping so duplicate
 // identifiers remain observable and can be quarantined safely.
 func (e *Exporter) ConvertRecords(records []paradox.Record) []paradox.Record {
+	converted, _ := e.ConvertRecordsContext(context.Background(), records)
+	return converted
+}
+
+// ConvertRecordsContext converts records while cooperatively honoring caller
+// cancellation between records and fields. The background wrapper above keeps
+// the established exporter API unchanged for unbounded CLI/file workflows.
+func (e *Exporter) ConvertRecordsContext(ctx context.Context, records []paradox.Record) ([]paradox.Record, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	converted := make([]paradox.Record, len(records))
 
 	for i, record := range records {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		convertedRecord := make(paradox.Record)
 		for key, value := range record {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
 			// Sort fields are internal Paradox indexes. Discard them before
 			// even inspecting/converting values to avoid needless work.
 			if IsSortField(key) {
@@ -161,7 +182,7 @@ func (e *Exporter) ConvertRecords(records []paradox.Record) []paradox.Record {
 		converted[i] = convertedRecord
 	}
 
-	return converted
+	return converted, nil
 }
 
 // ExportRecordsToString exports records to a JSON string
@@ -232,9 +253,25 @@ func (e *Exporter) TransformRecordsMap(records []map[string]interface{}) map[str
 // - Combine ANBAR fields into an array (sorted by number)
 // This method is used by both the file exporter and the web server to ensure consistent output.
 func (e *Exporter) TransformRecords(records []paradox.Record) map[string]interface{} {
+	result, _ := e.TransformRecordsContext(context.Background(), records)
+	return result
+}
+
+// TransformRecordsContext shapes records while cooperatively honoring caller
+// cancellation between records, fields, and ANBAR materialization.
+func (e *Exporter) TransformRecordsContext(ctx context.Context, records []paradox.Record) (map[string]interface{}, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	result := make(map[string]interface{})
 
 	for _, record := range records {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		// Extract Code as the key
 		codeKey := ""
 		if code, ok := record["Code"]; ok {
@@ -250,6 +287,9 @@ func (e *Exporter) TransformRecords(records []paradox.Record) map[string]interfa
 		maxAnbarIndex := 0
 
 		for key, value := range record {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
 			// Skip Sort fields
 			if IsSortField(key) {
 				continue
@@ -283,6 +323,9 @@ func (e *Exporter) TransformRecords(records []paradox.Record) map[string]interfa
 			// Build array with correct ordering (1-indexed fields -> 0-indexed array)
 			anbarValues := make([]interface{}, maxAnbarIndex)
 			for i := 1; i <= maxAnbarIndex; i++ {
+				if err := ctx.Err(); err != nil {
+					return nil, err
+				}
 				if val, ok := anbarFields[i]; ok {
 					anbarValues[i-1] = val
 				} else {
@@ -295,7 +338,7 @@ func (e *Exporter) TransformRecords(records []paradox.Record) map[string]interfa
 		result[codeKey] = optimized
 	}
 
-	return result
+	return result, nil
 }
 
 func exportFields(fields []paradox.Field) []paradox.Field {

@@ -32,7 +32,7 @@ func TestMySQLConnectorConfigUsesVerifiedCustomCAAndBoundedTimeout(t *testing.T)
 			ServerName: "mysql.service.internal",
 		},
 	}
-	config, err := mysqlConnectorConfig(options)
+	config, err := mysqlConnectorConfig(context.Background(), options)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -51,7 +51,7 @@ func TestMySQLConnectorConfigUsesVerifiedCustomCAAndBoundedTimeout(t *testing.T)
 }
 
 func TestMySQLConnectorConfigRespectsExplicitDSNTimeoutWithoutCustomTLS(t *testing.T) {
-	config, err := mysqlConnectorConfig(SQLOptions{
+	config, err := mysqlConnectorConfig(context.Background(), SQLOptions{
 		DSN:            "user:password@tcp(localhost:3306)/shop?timeout=3s&tls=true",
 		ConnectTimeout: 20 * time.Second,
 	})
@@ -66,13 +66,75 @@ func TestMySQLConnectorConfigRespectsExplicitDSNTimeoutWithoutCustomTLS(t *testi
 	}
 }
 
+func TestMySQLConnectorConfigCapsEveryDriverDeadlineToContext(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	config, err := mysqlConnectorConfig(ctx, SQLOptions{
+		DSN: "user:password@tcp(localhost:3306)/shop?timeout=30s&readTimeout=40s&writeTimeout=50s",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, timeout := range map[string]time.Duration{
+		"connect": config.Timeout,
+		"read":    config.ReadTimeout,
+		"write":   config.WriteTimeout,
+	} {
+		if timeout <= 0 || timeout > 2*time.Second {
+			t.Fatalf("%s timeout=%s, want positive context-bounded value", name, timeout)
+		}
+	}
+
+	unset, err := mysqlConnectorConfig(ctx, SQLOptions{
+		DSN:            "user:password@tcp(localhost:3306)/shop",
+		ConnectTimeout: 30 * time.Second,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if unset.ReadTimeout <= 0 || unset.WriteTimeout <= 0 ||
+		unset.ReadTimeout > 2*time.Second || unset.WriteTimeout > 2*time.Second ||
+		unset.Timeout > 2*time.Second {
+		t.Fatalf("unset/long driver deadlines were not bounded: timeout=%s read=%s write=%s", unset.Timeout, unset.ReadTimeout, unset.WriteTimeout)
+	}
+
+	short, err := mysqlConnectorConfig(ctx, SQLOptions{
+		DSN: "user:password@tcp(localhost:3306)/shop?timeout=20ms&readTimeout=30ms&writeTimeout=40ms",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if short.Timeout != 20*time.Millisecond || short.ReadTimeout != 30*time.Millisecond || short.WriteTimeout != 40*time.Millisecond {
+		t.Fatalf("short explicit deadlines were lengthened: timeout=%s read=%s write=%s", short.Timeout, short.ReadTimeout, short.WriteTimeout)
+	}
+}
+
+func TestMySQLConnectorConfigPreservesUnboundedCLIIOTimings(t *testing.T) {
+	config, err := mysqlConnectorConfig(context.Background(), SQLOptions{
+		DSN:            "user:password@tcp(localhost:3306)/shop?timeout=7s&readTimeout=8s&writeTimeout=9s",
+		ConnectTimeout: 30 * time.Second,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.Timeout != 7*time.Second || config.ReadTimeout != 8*time.Second || config.WriteTimeout != 9*time.Second {
+		t.Fatalf("background caller deadlines changed: timeout=%s read=%s write=%s", config.Timeout, config.ReadTimeout, config.WriteTimeout)
+	}
+
+	expired, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := mysqlConnectorConfig(expired, SQLOptions{DSN: "user:password@tcp(localhost:3306)/shop"}); err == nil {
+		t.Fatal("expired connector context unexpectedly succeeded")
+	}
+}
+
 func TestCustomCAFailuresReturnOnlySafeTypedDiagnostics(t *testing.T) {
 	privatePath := filepath.Join(t.TempDir(), "private-customer-ca-name.pem")
 	if err := os.WriteFile(privatePath, []byte("not a certificate; private contents"), 0600); err != nil {
 		t.Fatal(err)
 	}
 	const dsn = "private_user:private_password@tcp(private-db.internal:3306)/private_schema"
-	db, err := openSQLTarget(SQLOptions{DSN: dsn, MySQLTLS: MySQLTLSOptions{CAFile: privatePath}})
+	db, err := openSQLTarget(context.Background(), SQLOptions{DSN: dsn, MySQLTLS: MySQLTLSOptions{CAFile: privatePath}})
 	if db != nil {
 		db.Close()
 		t.Fatal("invalid custom CA unexpectedly opened a target")

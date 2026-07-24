@@ -79,7 +79,7 @@ func ProbeSQLTarget(ctx context.Context, options SQLOptions) (SQLProbeResult, er
 
 	connectCtx, cancel := sqlConnectContext(ctx, options.ConnectTimeout)
 	defer cancel()
-	db, err := openSQLTarget(options)
+	db, err := openSQLTarget(connectCtx, options)
 	if err != nil {
 		result.ElapsedMS = time.Since(started).Milliseconds()
 		return result, err
@@ -138,7 +138,7 @@ func ProbeSQLDB(ctx context.Context, db *sql.DB, driverName string) (result SQLP
 	return result, nil
 }
 
-func openSQLTarget(options SQLOptions) (*sql.DB, error) {
+func openSQLTarget(ctx context.Context, options SQLOptions) (*sql.DB, error) {
 	driverName := normalizedSQLDriver(options.Driver)
 	if strings.TrimSpace(options.DSN) == "" {
 		return nil, ClassifySQLError(SQLStageConfiguration, errors.New("SQL DSN is required"))
@@ -151,7 +151,7 @@ func openSQLTarget(options SQLOptions) (*sql.DB, error) {
 		return db, nil
 	}
 
-	config, err := mysqlConnectorConfig(options)
+	config, err := mysqlConnectorConfig(ctx, options)
 	if err != nil {
 		return nil, err
 	}
@@ -162,7 +162,12 @@ func openSQLTarget(options SQLOptions) (*sql.DB, error) {
 	return sql.OpenDB(connector), nil
 }
 
-func mysqlConnectorConfig(options SQLOptions) (*mysql.Config, error) {
+func mysqlConnectorConfig(ctx context.Context, options SQLOptions) (*mysql.Config, error) {
+	if ctx != nil {
+		if err := ctx.Err(); err != nil {
+			return nil, ClassifySQLError(SQLStageConnect, err)
+		}
+	}
 	config, err := mysql.ParseDSN(options.DSN)
 	if err != nil {
 		return nil, ClassifySQLError(SQLStageConfiguration, err)
@@ -174,20 +179,46 @@ func mysqlConnectorConfig(options SQLOptions) (*mysql.Config, error) {
 	tlsOptions := options.MySQLTLS
 	tlsOptions.CAFile = strings.TrimSpace(tlsOptions.CAFile)
 	tlsOptions.ServerName = strings.TrimSpace(tlsOptions.ServerName)
-	if tlsOptions.CAFile == "" && tlsOptions.ServerName == "" {
-		return config, nil
+	if tlsOptions.CAFile != "" || tlsOptions.ServerName != "" {
+		tlsConfig, err := verifiedMySQLTLSConfig(tlsOptions)
+		if err != nil {
+			return nil, ClassifySQLError(SQLStageTLS, err)
+		}
+		// A protected CA/server-name setting always selects verified TLS and
+		// disables any plaintext fallback or insecure mode present in the DSN.
+		config.TLSConfig = ""
+		config.TLS = tlsConfig
+		config.AllowFallbackToPlaintext = false
 	}
 
-	tlsConfig, err := verifiedMySQLTLSConfig(tlsOptions)
-	if err != nil {
-		return nil, ClassifySQLError(SQLStageTLS, err)
+	if remaining, bounded := contextDeadlineRemaining(ctx); bounded {
+		if remaining <= 0 {
+			return nil, ClassifySQLError(SQLStageConnect, context.DeadlineExceeded)
+		}
+		config.Timeout = capSQLDriverTimeout(config.Timeout, remaining)
+		config.ReadTimeout = capSQLDriverTimeout(config.ReadTimeout, remaining)
+		config.WriteTimeout = capSQLDriverTimeout(config.WriteTimeout, remaining)
 	}
-	// A protected CA/server-name setting always selects verified TLS and
-	// disables any plaintext fallback or insecure mode present in the DSN.
-	config.TLSConfig = ""
-	config.TLS = tlsConfig
-	config.AllowFallbackToPlaintext = false
 	return config, nil
+}
+
+func contextDeadlineRemaining(ctx context.Context) (time.Duration, bool) {
+	if ctx == nil {
+		return 0, false
+	}
+	deadline, bounded := ctx.Deadline()
+	if !bounded {
+		return 0, false
+	}
+	remaining := time.Until(deadline)
+	return remaining, true
+}
+
+func capSQLDriverTimeout(configured, remaining time.Duration) time.Duration {
+	if configured <= 0 || configured > remaining {
+		return remaining
+	}
+	return configured
 }
 
 func verifiedMySQLTLSConfig(options MySQLTLSOptions) (*tls.Config, error) {

@@ -37,7 +37,6 @@ import (
 	"github.com/atomicdeploy/patris-export/pkg/version"
 	"github.com/atomicdeploy/patris-export/pkg/watcher"
 	"github.com/atomicdeploy/patris-export/web"
-	"github.com/fsnotify/fsnotify"
 	"github.com/gorilla/mux"
 	"github.com/gorilla/websocket"
 )
@@ -61,7 +60,7 @@ type Server struct {
 	lastModTimeMu        sync.RWMutex
 	useTempFile          bool
 	config               *appconfig.Manager
-	configWatcher        *fsnotify.Watcher
+	configWatcher        *appconfig.ConfigWatcher
 	version              version.Info
 	processMu            sync.Mutex
 	processStatusCache   map[string]interface{}
@@ -73,6 +72,7 @@ type Server struct {
 	catalogProvider      pricingcatalog.Provider
 	catalogProviderKey   string
 	catalogProviderMu    sync.Mutex
+	sqlOperations        *sqlOperationsState
 }
 
 type Options struct {
@@ -150,6 +150,7 @@ func NewServerWithOptions(dbPath string, charMap converter.CharMapping, options 
 		dataSource:       ds,
 		wsClients:        make(map[*websocket.Conn]*sync.Mutex),
 		eventSubscribers: make(map[chan map[string]interface{}]struct{}),
+		sqlOperations:    newSQLOperationsState(),
 		useTempFile:      copyBeforeRead,
 		config:           options.Config,
 		version:          options.Version,
@@ -224,6 +225,13 @@ func (s *Server) setupRoutes() {
 	s.router.HandleFunc("/api/update/executable", s.handleGetExecutable).Methods("GET", "HEAD")
 	s.router.HandleFunc("/api/processes/patris81", s.handleGetPatris81Processes).Methods("GET")
 	s.router.HandleFunc("/api/processes/file", s.handleGetFileProcesses).Methods("GET")
+	s.router.HandleFunc("/api/sql-target/session", s.handlePostSQLTargetSession).Methods("POST")
+	s.router.HandleFunc("/api/sql-target/session", s.handleDeleteSQLTargetSession).Methods("DELETE")
+	s.router.HandleFunc("/api/sql-target/status", s.handleGetSQLTargetStatus).Methods("GET")
+	s.router.HandleFunc("/api/sql-target/test", s.handlePostSQLTargetTest).Methods("POST")
+	s.router.HandleFunc("/api/sql-target/preview", s.handlePostSQLTargetPreview).Methods("POST")
+	s.router.HandleFunc("/api/sql-target/sync", s.handlePostSQLTargetSync).Methods("POST")
+	s.router.HandleFunc("/api/sql-target/last-result", s.handleGetSQLTargetLastResult).Methods("GET")
 	s.router.HandleFunc("/static/notification.ogg", s.handleNotificationAudio).Methods("GET", "HEAD")
 	s.router.HandleFunc("/static/patris-api-icon.png", s.handleAppIcon).Methods("GET", "HEAD")
 	s.router.HandleFunc("/favicon.ico", s.handleFavicon).Methods("GET", "HEAD")
@@ -266,6 +274,17 @@ func categoriesPayload(result recordpipe.Result) map[string]interface{} {
 }
 
 func (s *Server) RecordResult() (recordpipe.Result, error) {
+	return s.RecordResultContext(context.Background())
+}
+
+// RecordResultContext prepares the shared source projection with cooperative
+// cancellation. Context-aware data sources stop file copies, downloads, and
+// JSON reads promptly; native pxlib record extraction checks cancellation
+// immediately before and after its non-interruptible native call.
+func (s *Server) RecordResultContext(ctx context.Context) (recordpipe.Result, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	s.dataSourceMu.RLock()
 	ds := s.dataSource
 	dbPath := s.dbPath
@@ -273,11 +292,32 @@ func (s *Server) RecordResult() (recordpipe.Result, error) {
 	if ds == nil {
 		return recordpipe.Result{}, fmt.Errorf("data source is not initialized")
 	}
-	records, err := ds.GetRawRecords()
+	if err := ctx.Err(); err != nil {
+		return recordpipe.Result{}, err
+	}
+	var (
+		records []map[string]interface{}
+		err     error
+	)
+	if contextSource, ok := ds.(datasource.ContextDataSource); ok {
+		records, err = contextSource.GetRawRecordsContext(ctx)
+	} else {
+		if ctx.Done() != nil {
+			return recordpipe.Result{}, fmt.Errorf("data source does not support bounded record reads")
+		}
+		records, err = ds.GetRawRecords()
+	}
 	if err != nil {
 		return recordpipe.Result{}, err
 	}
-	return recordpipe.Build(records, dbPath, s.recordOptions()), nil
+	if err := ctx.Err(); err != nil {
+		return recordpipe.Result{}, err
+	}
+	result := recordpipe.BuildContext(ctx, records, dbPath, s.recordOptions())
+	if err := ctx.Err(); err != nil {
+		return recordpipe.Result{}, err
+	}
+	return result, nil
 }
 
 // Info returns database schema and metadata using the same shape served by

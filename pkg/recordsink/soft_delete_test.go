@@ -2,13 +2,21 @@ package recordsink
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"hash"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/atomicdeploy/patris-export/pkg/recordmap"
 )
 
 func TestSQLiteSoftDeleteRequiresExactPreviewAndFreshNoOpRetry(t *testing.T) {
@@ -573,6 +581,234 @@ func assertReconciliationGuard(t *testing.T, err error, expected ReconciliationG
 	if !errors.As(err, &guard) || guard.Code != expected {
 		t.Fatalf("reconciliation error = %#v, want guard %q", err, expected)
 	}
+}
+
+func TestSQLSourceFingerprintPreservesDatabaseValueTypes(t *testing.T) {
+	base := []map[string]interface{}{{"Code": "001", "value": int64(1)}}
+	baseFingerprint := SQLSourceFingerprint(base, "Code", []string{"protected"})
+	tests := []struct {
+		name  string
+		value interface{}
+	}{
+		{name: "float", value: float64(1)},
+		{name: "text", value: "1"},
+		{name: "bytes", value: []byte("1")},
+		{name: "time text", value: time.Unix(1, 0).UTC().Format(time.RFC3339Nano)},
+		{name: "timestamp", value: time.Unix(1, 0).UTC()},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			changed := []map[string]interface{}{{"Code": "001", "value": test.value}}
+			if got := SQLSourceFingerprint(changed, "Code", []string{"protected"}); got == baseFingerprint {
+				t.Fatalf("typed source change %T(%v) reused int64 fingerprint", test.value, test.value)
+			}
+		})
+	}
+	if got := SQLSourceFingerprint(base, "Code", []string{"other"}); got == baseFingerprint {
+		t.Fatal("protected-key change reused source fingerprint")
+	}
+}
+
+func TestSQLSourceFingerprintContextMatchesLegacyDigestBytes(t *testing.T) {
+	timestamp := time.Date(2026, time.July, 24, 12, 34, 56, 789, time.UTC)
+	rows := []map[string]interface{}{
+		{"Code": "B", "bytes": []byte{0, 0xff, 1}, "number": float64(1.25), "timestamp": timestamp},
+		{"Code": "A", "missing": nil, "number": int64(1), "text": strings.Repeat("x", sqlDigestChunkSize+17)},
+		{"Code": "A", "number": int64(2), "text": "stable duplicate"},
+	}
+	protected := []string{"Z", "A", "A", strings.Repeat("p", sqlDigestChunkSize+9)}
+
+	want := legacySQLSourceFingerprint(rows, "Code", protected)
+	got, err := SQLSourceFingerprintContext(context.Background(), rows, "Code", protected)
+	if err != nil {
+		t.Fatalf("context fingerprint: %v", err)
+	}
+	if got != want {
+		t.Fatalf("context fingerprint=%x, want legacy bytes %x", got, want)
+	}
+	if wrapper := SQLSourceFingerprint(rows, "Code", protected); wrapper != want {
+		t.Fatalf("background wrapper fingerprint=%x, want legacy bytes %x", wrapper, want)
+	}
+
+	sourceRows := []map[string]interface{}{
+		{"Code": "B", "price": int64(200)},
+		{"Code": "A", "price": []byte("100")},
+	}
+	sourceKeys := []string{"B", "A"}
+	keepKeys := []string{"protected", "A", "B"}
+	targetStates := []softDeleteTargetState{
+		{Key: "protected", Deleted: true},
+		{Key: "B", Deleted: false},
+		{Key: "A", Deleted: false},
+	}
+	wantToken := legacySoftDeleteConfirmationToken(
+		"Products",
+		"Code",
+		sourceRows,
+		sourceKeys,
+		keepKeys,
+		targetStates,
+	)
+	gotToken, err := softDeleteConfirmationTokenContext(
+		context.Background(),
+		"Products",
+		"Code",
+		sourceRows,
+		sourceKeys,
+		keepKeys,
+		targetStates,
+	)
+	if err != nil {
+		t.Fatalf("context confirmation token: %v", err)
+	}
+	if gotToken != wantToken {
+		t.Fatalf("context confirmation token=%q, want legacy bytes %q", gotToken, wantToken)
+	}
+	if wrapper := softDeleteConfirmationToken("Products", "Code", sourceRows, sourceKeys, keepKeys, targetStates); wrapper != wantToken {
+		t.Fatalf("background confirmation wrapper=%q, want legacy bytes %q", wrapper, wantToken)
+	}
+}
+
+type cancellingFingerprintValue struct {
+	cancel context.CancelFunc
+}
+
+func (value cancellingFingerprintValue) String() string {
+	value.cancel()
+	return "cancelled-during-value-materialization"
+}
+
+func TestSQLSourceFingerprintContextCancelsDuringTypedRowHash(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	rows := []map[string]interface{}{{
+		"Code":  "A",
+		"value": cancellingFingerprintValue{cancel: cancel},
+	}}
+	if _, err := SQLSourceFingerprintContext(ctx, rows, "Code", []string{"protected"}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("fingerprint error=%v, want context.Canceled", err)
+	}
+}
+
+func TestSnapshotKeysContextCancelsAfterKeyMaterialization(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	rows := []map[string]interface{}{{
+		"Code": cancellingFingerprintValue{cancel: cancel},
+	}}
+	if _, err := snapshotKeysContext(ctx, rows, "Code", nil); !errors.Is(err, context.Canceled) {
+		t.Fatalf("snapshot key error=%v, want context.Canceled", err)
+	}
+}
+
+type cancellingDigest struct {
+	hash.Hash
+	cancel   context.CancelFunc
+	cancelAt int
+	writes   int
+}
+
+func (digest *cancellingDigest) Write(value []byte) (int, error) {
+	written, err := digest.Hash.Write(value)
+	digest.writes++
+	if digest.writes == digest.cancelAt {
+		digest.cancel()
+	}
+	return written, err
+}
+
+func TestWriteDigestListContextCancelsDuringProtectedKeyHash(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	digest := &cancellingDigest{Hash: sha256.New(), cancel: cancel, cancelAt: 2}
+	err := writeDigestListContext(ctx, digest, []string{"protected-b", "protected-a"})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("protected-key digest error=%v, want context.Canceled", err)
+	}
+	if digest.writes != digest.cancelAt {
+		t.Fatalf("protected-key digest writes=%d, want prompt stop at %d", digest.writes, digest.cancelAt)
+	}
+}
+
+func legacySQLSourceFingerprint(rows []map[string]interface{}, keyField string, protectedKeys []string) [sha256.Size]byte {
+	digest := sha256.New()
+	legacyWriteDigestPart(digest, "patris-sql-source-v1")
+	legacyWriteDigestPart(digest, strings.TrimSpace(keyField))
+	legacyWriteSourceRowsDigest(digest, rows, keyField)
+	legacyWriteDigestList(digest, protectedKeys)
+	var fingerprint [sha256.Size]byte
+	copy(fingerprint[:], digest.Sum(nil))
+	return fingerprint
+}
+
+func legacySoftDeleteConfirmationToken(
+	table, keyField string,
+	sourceRows []map[string]interface{},
+	sourceKeys, keepKeys []string,
+	targetStates []softDeleteTargetState,
+) string {
+	digest := sha256.New()
+	legacyWriteDigestPart(digest, "patris-soft-delete-v2")
+	legacyWriteDigestPart(digest, strings.ToLower(strings.TrimSpace(table)))
+	legacyWriteDigestPart(digest, strings.ToLower(strings.TrimSpace(keyField)))
+	legacyWriteSourceRowsDigest(digest, sourceRows, keyField)
+	legacyWriteDigestList(digest, sourceKeys)
+	legacyWriteDigestList(digest, keepKeys)
+	ordered := append([]softDeleteTargetState(nil), targetStates...)
+	sort.Slice(ordered, func(left, right int) bool {
+		return ordered[left].Key < ordered[right].Key
+	})
+	legacyWriteDigestCount(digest, len(ordered))
+	for _, state := range ordered {
+		legacyWriteDigestPart(digest, state.Key)
+		if state.Deleted {
+			legacyWriteDigestPart(digest, "1")
+		} else {
+			legacyWriteDigestPart(digest, "0")
+		}
+	}
+	return SoftDeleteConfirmationTokenPrefix + hex.EncodeToString(digest.Sum(nil))
+}
+
+func legacyWriteSourceRowsDigest(digest hash.Hash, rows []map[string]interface{}, keyField string) {
+	fields := recordmap.Fields(rows, keyField)
+	legacyWriteDigestCount(digest, len(fields))
+	for _, field := range fields {
+		legacyWriteDigestPart(digest, field)
+	}
+	ordered := append([]map[string]interface{}(nil), rows...)
+	sort.SliceStable(ordered, func(left, right int) bool {
+		return databaseKey(ordered[left][keyField]) < databaseKey(ordered[right][keyField])
+	})
+	legacyWriteDigestCount(digest, len(ordered))
+	for _, row := range ordered {
+		for _, field := range fields {
+			value, exists := row[field]
+			if !exists {
+				value = nil
+			}
+			typeName, text := softDeleteDigestValue(value)
+			legacyWriteDigestPart(digest, typeName)
+			legacyWriteDigestPart(digest, text)
+		}
+	}
+}
+
+func legacyWriteDigestList(digest hash.Hash, values []string) {
+	ordered := append([]string(nil), values...)
+	sort.Strings(ordered)
+	legacyWriteDigestCount(digest, len(ordered))
+	for _, value := range ordered {
+		legacyWriteDigestPart(digest, value)
+	}
+}
+
+func legacyWriteDigestCount(digest hash.Hash, count int) {
+	var encoded [8]byte
+	binary.BigEndian.PutUint64(encoded[:], uint64(count))
+	_, _ = digest.Write(encoded[:])
+}
+
+func legacyWriteDigestPart(digest hash.Hash, value string) {
+	legacyWriteDigestCount(digest, len(value))
+	_, _ = digest.Write([]byte(value))
 }
 
 func sqliteColumnExists(t *testing.T, path, table, column string) bool {

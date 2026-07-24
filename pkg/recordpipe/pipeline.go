@@ -37,8 +37,17 @@ func Build(rawRows []map[string]interface{}, source string, options Options) Res
 }
 
 func BuildContext(ctx context.Context, rawRows []map[string]interface{}, source string, options Options) Result {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if ctx.Err() != nil {
+		return Result{}
+	}
 	if options.Raw {
-		rows := copyRowsWithoutSortFields(rawRows)
+		rows, err := copyRowsWithoutSortFieldsContext(ctx, rawRows)
+		if err != nil {
+			return Result{}
+		}
 		return Result{
 			Rows:     rows,
 			Payload:  rows,
@@ -47,17 +56,33 @@ func BuildContext(ctx context.Context, rawRows []map[string]interface{}, source 
 		}
 	}
 
-	records := mapsToParadox(rawRows)
+	records, err := mapsToParadoxContext(ctx, rawRows)
+	if err != nil {
+		return Result{}
+	}
 	exp := converter.NewExporter(converter.Patris2Fa)
 	if _, ok := canonical.ProfileFor(source, options.Canonical); ok {
-		rows := paradoxToRows(exp.ConvertRecords(records))
+		converted, err := exp.ConvertRecordsContext(ctx, records)
+		if err != nil {
+			return Result{}
+		}
+		rows, err := paradoxToRowsContext(ctx, converted)
+		if err != nil {
+			return Result{}
+		}
 		for index, row := range rows {
+			if ctx.Err() != nil {
+				return Result{}
+			}
 			warnings := naming.Merge(nil, append(naming.Warnings(rawRows[index]), naming.Warnings(row)...))
 			if len(warnings) > 0 {
 				row[naming.InternalWarningsField] = warnings
 			}
 		}
-		rows, contract := canonical.Transform(ctx, rows, source, options.Canonical, options.CatalogProvider, options.GeneratedAt)
+		rows, contract, err := canonical.TransformContext(ctx, rows, source, options.Canonical, options.CatalogProvider, options.GeneratedAt)
+		if err != nil {
+			return Result{}
+		}
 		return Result{
 			Rows:     rows,
 			Payload:  contract,
@@ -66,30 +91,57 @@ func BuildContext(ctx context.Context, rawRows []map[string]interface{}, source 
 			Contract: contract,
 		}
 	}
-	converted := exp.ConvertRecords(records)
+	converted, err := exp.ConvertRecordsContext(ctx, records)
+	if err != nil {
+		return Result{}
+	}
 	namingWarningsByCode := make(map[string][]string, len(converted))
 	for index, record := range converted {
+		if ctx.Err() != nil {
+			return Result{}
+		}
 		code := fmt.Sprint(record["Code"])
 		convertedRow := make(map[string]interface{}, len(record))
 		for field, value := range record {
+			if ctx.Err() != nil {
+				return Result{}
+			}
 			convertedRow[field] = value
 		}
 		namingWarningsByCode[code] = naming.Merge(namingWarningsByCode[code], append(naming.Warnings(rawRows[index]), naming.Warnings(convertedRow)...))
 	}
-	keyed := exp.TransformRecords(converted)
-	rows := rowsFromKeyed(keyed, "Code")
+	keyed, err := exp.TransformRecordsContext(ctx, converted)
+	if err != nil {
+		return Result{}
+	}
+	rows, err := rowsFromKeyedContext(ctx, keyed, "Code")
+	if err != nil {
+		return Result{}
+	}
 	namingWarnings := make([][]string, len(rows))
 	for index, row := range rows {
+		if ctx.Err() != nil {
+			return Result{}
+		}
 		namingWarnings[index] = naming.Merge(namingWarningsByCode[fmt.Sprint(row["Code"])], naming.Warnings(row))
 	}
-	rows = recordmap.Apply(rows, options.Mapping, source)
+	rows, err = recordmap.ApplyContext(ctx, rows, options.Mapping, source)
+	if err != nil {
+		return Result{}
+	}
 	for index, warnings := range namingWarnings {
+		if ctx.Err() != nil {
+			return Result{}
+		}
 		if len(warnings) > 0 {
 			rows[index]["warnings"] = naming.Merge(rows[index]["warnings"], warnings)
 		}
 	}
 	keyField := recordmap.KeyField(options.Mapping, source)
-	payload := recordmap.Keyed(rows, keyField, true)
+	payload, err := recordmap.KeyedContext(ctx, rows, keyField, true)
+	if err != nil {
+		return Result{}
+	}
 	return Result{
 		Rows:     rows,
 		Payload:  payload,
@@ -99,29 +151,51 @@ func BuildContext(ctx context.Context, rawRows []map[string]interface{}, source 
 }
 
 func copyRowsWithoutSortFields(records []map[string]interface{}) []map[string]interface{} {
+	rows, _ := copyRowsWithoutSortFieldsContext(context.Background(), records)
+	return rows
+}
+
+func copyRowsWithoutSortFieldsContext(ctx context.Context, records []map[string]interface{}) ([]map[string]interface{}, error) {
 	rows := make([]map[string]interface{}, 0, len(records))
 	for _, record := range records {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		row := make(map[string]interface{}, len(record))
 		for field, value := range record {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
 			if !converter.IsSortField(field) {
 				row[field] = value
 			}
 		}
 		rows = append(rows, row)
 	}
-	return rows
+	return rows, nil
 }
 
 func paradoxToRows(records []paradox.Record) []map[string]interface{} {
+	rows, _ := paradoxToRowsContext(context.Background(), records)
+	return rows
+}
+
+func paradoxToRowsContext(ctx context.Context, records []paradox.Record) ([]map[string]interface{}, error) {
 	rows := make([]map[string]interface{}, 0, len(records))
 	for _, record := range records {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		row := make(map[string]interface{}, len(record))
 		for key, value := range record {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
 			row[key] = value
 		}
 		rows = append(rows, row)
 	}
-	return rows
+	return rows, nil
 }
 
 func (result Result) SyncEnvelope(changes *recorddiff.ChangeSet) *canonical.Envelope {
@@ -184,23 +258,42 @@ func SourceTableName(source string) string {
 }
 
 func mapsToParadox(rows []map[string]interface{}) []paradox.Record {
+	records, _ := mapsToParadoxContext(context.Background(), rows)
+	return records
+}
+
+func mapsToParadoxContext(ctx context.Context, rows []map[string]interface{}) ([]paradox.Record, error) {
 	records := make([]paradox.Record, 0, len(rows))
 	for _, row := range rows {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		record := paradox.Record{}
 		for key, value := range row {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
 			record[key] = value
 		}
 		records = append(records, record)
 	}
-	return records
+	return records, nil
 }
 
 func rowsFromKeyed(keyed map[string]interface{}, keyField string) []map[string]interface{} {
+	rows, _ := rowsFromKeyedContext(context.Background(), keyed, keyField)
+	return rows
+}
+
+func rowsFromKeyedContext(ctx context.Context, keyed map[string]interface{}, keyField string) ([]map[string]interface{}, error) {
 	if keyField == "" {
 		keyField = "Code"
 	}
 	rows := make([]map[string]interface{}, 0, len(keyed))
 	for key, value := range keyed {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		record, ok := value.(map[string]interface{})
 		if !ok {
 			continue
@@ -208,11 +301,14 @@ func rowsFromKeyed(keyed map[string]interface{}, keyField string) []map[string]i
 		row := make(map[string]interface{}, len(record)+1)
 		row[keyField] = key
 		for field, fieldValue := range record {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
 			row[field] = fieldValue
 		}
 		rows = append(rows, row)
 	}
-	return rows
+	return rows, nil
 }
 
 func sanitizeIdentifier(value string) string {

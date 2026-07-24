@@ -1,8 +1,11 @@
 package datasource
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -23,6 +26,13 @@ type DataSource interface {
 	GetPath() string
 	// Close closes the data source
 	Close() error
+}
+
+// ContextDataSource cooperatively stops source preparation when a caller's
+// bounded operation is cancelled. DataSource remains backward compatible for
+// external implementations; the built-in sources implement both interfaces.
+type ContextDataSource interface {
+	GetRawRecordsContext(context.Context) ([]map[string]interface{}, error)
 }
 
 // ParadoxDataSource represents a Paradox database file
@@ -98,10 +108,23 @@ func (p *ParadoxDataSource) GetRecords() ([]map[string]interface{}, error) {
 // GetRawRecords implements DataSource for ParadoxDataSource without applying
 // encoding conversion, ANBAR compaction, Code-keying, or custom mapping.
 func (p *ParadoxDataSource) GetRawRecords() ([]map[string]interface{}, error) {
+	return p.GetRawRecordsContext(context.Background())
+}
+
+// GetRawRecordsContext implements cooperative cancellation for Paradox source
+// preparation. Individual native pxlib calls cannot be interrupted, but
+// cancellation is checked around each record/field call.
+func (p *ParadoxDataSource) GetRawRecordsContext(ctx context.Context) ([]map[string]interface{}, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	pathToOpen := p.path
 	cleanup := func() {}
 	if filecopy.IsURL(p.path) {
-		tempFileInfo, err := filecopy.DownloadToTemp(p.path)
+		tempFileInfo, err := filecopy.DownloadToTempContext(ctx, p.path)
 		if err != nil {
 			return nil, fmt.Errorf("failed to download database to temp: %w", err)
 		}
@@ -110,7 +133,7 @@ func (p *ParadoxDataSource) GetRawRecords() ([]map[string]interface{}, error) {
 			filecopy.CleanupTemp(tempFileInfo.TempPath)
 		}
 	} else if p.useTempFile {
-		tempFileInfo, err := filecopy.CopyToTemp(p.path)
+		tempFileInfo, err := filecopy.CopyToTempContext(ctx, p.path)
 		if err != nil {
 			return nil, fmt.Errorf("failed to copy database to temp: %w", err)
 		}
@@ -121,19 +144,27 @@ func (p *ParadoxDataSource) GetRawRecords() ([]map[string]interface{}, error) {
 	}
 	defer cleanup()
 
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	db, err := paradox.Open(pathToOpen)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open database: %w", err)
 	}
 	defer db.Close()
 
-	records, err := db.GetRecords()
+	records, err := db.GetRecordsContext(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read records: %w", err)
 	}
 
 	result := make([]map[string]interface{}, 0, len(records))
-	for _, record := range records {
+	for index, record := range records {
+		if index%128 == 0 {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+		}
 		row := make(map[string]interface{}, len(record))
 		for key, value := range record {
 			row[key] = value
@@ -141,6 +172,9 @@ func (p *ParadoxDataSource) GetRawRecords() ([]map[string]interface{}, error) {
 		result = append(result, row)
 	}
 
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	return result, nil
 }
 
@@ -161,10 +195,22 @@ func (j *JSONDataSource) GetRecords() ([]map[string]interface{}, error) {
 
 // GetRawRecords implements DataSource for JSONDataSource.
 func (j *JSONDataSource) GetRawRecords() ([]map[string]interface{}, error) {
+	return j.GetRawRecordsContext(context.Background())
+}
+
+// GetRawRecordsContext implements cooperative cancellation for JSON download,
+// file reading, parsing boundaries, and row materialization.
+func (j *JSONDataSource) GetRawRecordsContext(ctx context.Context) ([]map[string]interface{}, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	pathToRead := j.path
 	cleanup := func() {}
 	if filecopy.IsURL(j.path) {
-		tempFileInfo, err := filecopy.DownloadToTemp(j.path)
+		tempFileInfo, err := filecopy.DownloadToTempContext(ctx, j.path)
 		if err != nil {
 			return nil, fmt.Errorf("failed to download JSON to temp: %w", err)
 		}
@@ -175,16 +221,22 @@ func (j *JSONDataSource) GetRawRecords() ([]map[string]interface{}, error) {
 	}
 	defer cleanup()
 
-	data, err := os.ReadFile(pathToRead)
+	data, err := readFileContext(ctx, pathToRead)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read JSON file: %w", err)
 	}
 
 	var rows []map[string]interface{}
 	if err := json.Unmarshal(data, &rows); err == nil {
+		if contextErr := ctx.Err(); contextErr != nil {
+			return nil, contextErr
+		}
 		return rows, nil
 	}
 
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	var result map[string]interface{}
 	if err := json.Unmarshal(data, &result); err != nil {
 		return nil, fmt.Errorf("failed to parse JSON: %w", err)
@@ -193,7 +245,14 @@ func (j *JSONDataSource) GetRawRecords() ([]map[string]interface{}, error) {
 	// The JSON file should match the transformed format with Code as keys
 	// Extract records from the map
 	records := make([]map[string]interface{}, 0, len(result))
+	index := 0
 	for code, value := range result {
+		if index%128 == 0 {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+		}
+		index++
 		if recordMap, ok := value.(map[string]interface{}); ok {
 			row := make(map[string]interface{}, len(recordMap)+1)
 			if _, hasCode := recordMap["Code"]; !hasCode {
@@ -206,7 +265,41 @@ func (j *JSONDataSource) GetRawRecords() ([]map[string]interface{}, error) {
 		}
 	}
 
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	return records, nil
+}
+
+func readFileContext(ctx context.Context, path string) ([]byte, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+
+	var buffer bytes.Buffer
+	chunk := make([]byte, 64*1024)
+	for {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		read, readErr := file.Read(chunk)
+		if read > 0 {
+			if _, err := buffer.Write(chunk[:read]); err != nil {
+				return nil, err
+			}
+		}
+		if readErr != nil {
+			if readErr == io.EOF {
+				if err := ctx.Err(); err != nil {
+					return nil, err
+				}
+				return buffer.Bytes(), nil
+			}
+			return nil, readErr
+		}
+	}
 }
 
 // GetPath implements DataSource for JSONDataSource

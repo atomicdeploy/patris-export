@@ -1,6 +1,8 @@
 package converter
 
 import (
+	"context"
+	"errors"
 	"reflect"
 	"strings"
 	"testing"
@@ -261,5 +263,44 @@ func TestTransformRecordsSplitsMultilineDescriptions(t *testing.T) {
 	}
 	if want := []string{"one", "", "three"}; !reflect.DeepEqual(record["Sharh2"], want) {
 		t.Fatalf("Sharh2 = %#v, want %#v", record["Sharh2"], want)
+	}
+}
+
+func TestConvertRecordsContextStopsDuringConversion(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	calls := 0
+	exp := NewExporter(func(value string) string {
+		calls++
+		if calls == 5 {
+			cancel()
+		}
+		return value
+	})
+	records := make([]paradox.Record, 100)
+	for index := range records {
+		records[index] = paradox.Record{"Code": "value"}
+	}
+
+	converted, err := exp.ConvertRecordsContext(ctx, records)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("ConvertRecordsContext error=%v, want context.Canceled", err)
+	}
+	if converted != nil {
+		t.Fatalf("cancelled conversion returned partial records: %#v", converted)
+	}
+	if calls != 5 {
+		t.Fatalf("converter calls=%d, want prompt stop at cancellation", calls)
+	}
+}
+
+func TestTransformRecordsContextRejectsCancelledContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	transformed, err := NewExporter(nil).TransformRecordsContext(ctx, []paradox.Record{{"Code": "100"}})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("TransformRecordsContext error=%v, want context.Canceled", err)
+	}
+	if transformed != nil {
+		t.Fatalf("cancelled transform returned a partial payload: %#v", transformed)
 	}
 }
