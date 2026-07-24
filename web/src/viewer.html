@@ -103,6 +103,11 @@
                     <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 7v5h-5"/><path d="M4 17v-5h5"/><path d="M18 9a7 7 0 0 0-12-2l-2 5M6 15a7 7 0 0 0 12 2l2-5"/></svg>
                     <span data-table-i18n="refresh">Refresh now</span>
                 </button>
+                <button class="btn btn-secondary sql-target-button" id="sqlTargetBtn" type="button" title="Open SQL target operations" data-table-i18n-title="openSQLTarget">
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><ellipse cx="12" cy="5" rx="7" ry="3"/><path d="M5 5v7c0 1.7 3.1 3 7 3s7-1.3 7-3V5"/><path d="M5 12v7c0 1.7 3.1 3 7 3 1.3 0 2.5-.1 3.5-.4"/><path d="m17 17 2 2 3-4"/></svg>
+                    <span data-table-i18n="sqlTarget">SQL Target</span>
+                    <span class="sql-target-indicator neutral" id="sqlTargetIndicator" aria-hidden="true"></span>
+                </button>
                 <button class="btn btn-secondary event-log-button" id="eventLogBtn" title="Open event log" data-table-i18n-title="openEventLog">
                     <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 6h12M8 12h12M8 18h12"/><path d="M4 6h.01M4 12h.01M4 18h.01"/></svg>
                     <span data-table-i18n="logs">Logs</span> <span class="event-log-count" id="eventLogCount">0</span>
@@ -362,6 +367,194 @@
                 <div class="settings-body">
                     <div class="connection-details" id="connectionDetails"></div>
                     <div class="connection-log" id="connectionLog" aria-live="polite"></div>
+                </div>
+            </div>
+        </div>
+
+        <div class="settings-panel sql-target-modal" id="sqlTargetPanel" role="dialog" aria-modal="true" aria-labelledby="sqlTargetTitle" aria-describedby="sqlTargetDescription">
+            <div class="settings-content">
+                <div class="settings-header sql-target-header">
+                    <div class="sql-target-heading">
+                        <span class="sql-target-heading-icon" aria-hidden="true">
+                            <svg viewBox="0 0 24 24"><ellipse cx="12" cy="5" rx="7" ry="3"/><path d="M5 5v7c0 1.7 3.1 3 7 3s7-1.3 7-3V5"/><path d="M5 12v7c0 1.7 3.1 3 7 3 1.3 0 2.5-.1 3.5-.4"/><path d="m17 17 2 2 3-4"/></svg>
+                        </span>
+                        <div>
+                            <div class="sql-target-title-line">
+                                <h2 id="sqlTargetTitle" tabindex="-1" data-table-i18n="sqlTargetTitle">SQL Target Operations</h2>
+                                <span class="sql-target-session-chip neutral" id="sqlTargetSessionStatus">Locked</span>
+                            </div>
+                            <p class="settings-path" id="sqlTargetDescription" data-table-i18n="sqlTargetDescription">Test and run the protected MySQL or MariaDB export without revealing connection material.</p>
+                        </div>
+                    </div>
+                    <div class="dialog-actions">
+                        <button class="btn btn-secondary sql-target-lock-button" id="sqlTargetLock" type="button" hidden>
+                            <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="10" width="14" height="10" rx="2"/><path d="M8 10V7a4 4 0 0 1 7.5-2"/></svg>
+                            <span data-table-i18n="sqlTargetLock">Lock</span>
+                        </button>
+                        <button class="btn btn-icon dialog-menu-btn" type="button" title="More actions" data-dialog-menu="sqlTargetPanel" aria-label="More actions" data-table-i18n-title="moreActions" data-table-i18n-aria-label="moreActions"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/></svg></button>
+                        <button class="btn btn-icon dialog-close-btn" id="closeSQLTarget" type="button" title="Close" aria-label="Close" data-table-i18n-title="close" data-table-i18n-aria-label="close"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12"/><path d="M18 6L6 18"/></svg></button>
+                    </div>
+                </div>
+                <div class="settings-body sql-target-body">
+                    <div class="sql-target-notice" id="sqlTargetNotice" role="status" aria-live="polite" data-tone="neutral">Unlock an operator session to inspect this target.</div>
+
+                    <section class="sql-target-unlock" id="sqlTargetLocked" aria-labelledby="sqlTargetUnlockTitle">
+                        <div class="sql-target-unlock-copy">
+                            <span class="sql-target-lock-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><rect x="5" y="10" width="14" height="10" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3M12 14v2"/></svg></span>
+                            <div>
+                                <h3 id="sqlTargetUnlockTitle" data-table-i18n="sqlTargetUnlockTitle">Unlock operator session</h3>
+                                <p data-table-i18n="sqlTargetUnlockDescription">Direct loopback access may use HTTP. A configured operator credential is required even locally; remote access also requires HTTPS.</p>
+                            </div>
+                        </div>
+                        <form id="sqlTargetUnlockForm" class="sql-target-unlock-form">
+                            <label class="field-label" for="sqlTargetOperatorCredential">
+                                <span data-table-i18n="sqlTargetOperatorCredential">Operator credential (when configured)</span>
+                                <input class="text-input" id="sqlTargetOperatorCredential" type="password" autocomplete="off" maxlength="512" spellcheck="false" aria-describedby="sqlTargetCredentialHelp">
+                            </label>
+                            <p class="settings-help" id="sqlTargetCredentialHelp" data-table-i18n="sqlTargetCredentialHelp">Leave this empty only for direct loopback when the server has no configured operator credential. It is sent once, never displayed, and never stored by the browser.</p>
+                            <button class="btn btn-primary" id="sqlTargetUnlockButton" type="submit">
+                                <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="10" width="14" height="10" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></svg>
+                                <span data-table-i18n="sqlTargetUnlock">Unlock session</span>
+                            </button>
+                        </form>
+                    </section>
+
+                    <div id="sqlTargetUnlocked" hidden aria-busy="false">
+                        <section class="sql-target-section" aria-labelledby="sqlTargetOverviewTitle">
+                            <div class="sql-target-section-heading">
+                                <div>
+                                    <p class="sql-target-eyebrow" data-table-i18n="sqlTargetProtectedConfiguration">Protected configuration</p>
+                                    <h3 id="sqlTargetOverviewTitle" data-table-i18n="sqlTargetOverview">Target overview</h3>
+                                </div>
+                                <button class="btn btn-secondary" id="sqlTargetRefresh" type="button">
+                                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 7v5h-5"/><path d="M4 17v-5h5"/><path d="M18 9a7 7 0 0 0-12-2l-2 5M6 15a7 7 0 0 0 12 2l2-5"/></svg>
+                                    <span data-table-i18n="sqlTargetRefresh">Refresh status</span>
+                                </button>
+                            </div>
+                            <dl class="sql-target-status-grid">
+                                <div><dt data-table-i18n="sqlTargetConfiguredLabel">Configured</dt><dd id="sqlTargetConfiguredValue">No</dd></div>
+                                <div><dt data-table-i18n="sqlTargetDriver">Driver</dt><dd id="sqlTargetDriverValue">MYSQL</dd></div>
+                                <div><dt data-table-i18n="sqlTargetTable">Table mapping</dt><dd id="sqlTargetTableValue">No</dd></div>
+                                <div><dt data-table-i18n="sqlTargetReconciliation">Reconciliation</dt><dd id="sqlTargetReconciliationValue">Upsert only</dd></div>
+                                <div><dt data-table-i18n="sqlTargetBatchSize">Batch size</dt><dd id="sqlTargetBatchSizeValue">0</dd></div>
+                                <div><dt data-table-i18n="sqlTargetTimeout">Connection timeout</dt><dd id="sqlTargetTimeoutValue">0 ms</dd></div>
+                                <div><dt data-table-i18n="sqlTargetTLSSetup">Verified TLS setup</dt><dd id="sqlTargetTLSConfiguredValue">No</dd></div>
+                                <div><dt data-table-i18n="sqlTargetWorker">Worker</dt><dd id="sqlTargetBusyValue">Ready</dd></div>
+                            </dl>
+                        </section>
+
+                        <section class="sql-target-section" aria-labelledby="sqlTargetConnectionTitle">
+                            <div class="sql-target-section-heading">
+                                <div>
+                                    <p class="sql-target-eyebrow" data-table-i18n="sqlTargetNonMutating">Non-mutating diagnostic</p>
+                                    <h3 id="sqlTargetConnectionTitle" data-table-i18n="sqlTargetConnection">Connection assurance</h3>
+                                </div>
+                                <button class="btn btn-secondary" id="sqlTargetTest" type="button">
+                                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 3h6M10 3v5l-5 9a3 3 0 0 0 2.6 4h8.8a3 3 0 0 0 2.6-4l-5-9V3"/><path d="M8 14h8"/></svg>
+                                    <span data-table-i18n="sqlTargetTest">Test connection</span>
+                                </button>
+                            </div>
+                            <dl class="sql-target-connection-grid">
+                                <div><dt data-table-i18n="sqlTargetConnected">Connected</dt><dd id="sqlTargetConnectedValue">Unknown</dd></div>
+                                <div><dt data-table-i18n="sqlTargetVendor">Vendor</dt><dd id="sqlTargetVendorValue">—</dd></div>
+                                <div><dt data-table-i18n="sqlTargetTLS">Transport security</dt><dd id="sqlTargetTLSValue">Unknown</dd></div>
+                                <div><dt data-table-i18n="sqlTargetProbeElapsed">Probe elapsed</dt><dd id="sqlTargetProbeElapsedValue">—</dd></div>
+                            </dl>
+                        </section>
+
+                        <section class="sql-target-section sql-target-actions-section" aria-labelledby="sqlTargetActionsTitle">
+                            <div class="sql-target-section-heading">
+                                <div>
+                                    <p class="sql-target-eyebrow" data-table-i18n="sqlTargetBoundedOperations">Bounded operations</p>
+                                    <h3 id="sqlTargetActionsTitle" data-table-i18n="sqlTargetActions">Preview and synchronize</h3>
+                                </div>
+                            </div>
+                            <div class="sql-target-action-grid">
+                                <article class="sql-target-action-card">
+                                    <span class="sql-target-action-icon preview" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M3 12s3.5-6 9-6 9 6 9 6-3.5 6-9 6-9-6-9-6z"/><circle cx="12" cy="12" r="2.5"/></svg></span>
+                                    <div>
+                                        <h4 data-table-i18n="sqlTargetPreviewTitle">Dry-run preview</h4>
+                                        <p data-table-i18n="sqlTargetPreviewDescription">Calculate inserts, updates, unchanged rows, and reconciliation effects without changing the target, then issue a two-minute one-time apply grant.</p>
+                                    </div>
+                                    <button class="btn btn-secondary" id="sqlTargetPreview" type="button">
+                                        <span data-table-i18n="sqlTargetPreview">Run preview</span>
+                                    </button>
+                                </article>
+                                <article class="sql-target-action-card sync">
+                                    <span class="sql-target-action-icon sync" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M20 7v5h-5"/><path d="M4 17v-5h5"/><path d="M18 9a7 7 0 0 0-12-2l-2 5M6 15a7 7 0 0 0 12 2l2-5"/></svg></span>
+                                    <div>
+                                        <div class="sql-target-action-title-line">
+                                            <h4 data-table-i18n="sqlTargetSyncTitle">Confirmed manual sync</h4>
+                                            <span class="sql-target-operation-chip neutral" id="sqlTargetPreviewAuthorization">Fresh preview required</span>
+                                        </div>
+                                        <p data-table-i18n="sqlTargetSyncDescription">Apply the exact previewed canonical records once using the configured bounded transaction and reconciliation policy.</p>
+                                    </div>
+                                    <label class="checkbox-label sql-target-confirm">
+                                        <input id="sqlTargetSyncConfirm" type="checkbox">
+                                        <span data-table-i18n="sqlTargetSyncConfirm">I reviewed the preview and confirm this manual synchronization.</span>
+                                    </label>
+                                    <button class="btn btn-danger" id="sqlTargetSync" type="button" disabled>
+                                        <span data-table-i18n="sqlTargetSync">Synchronize now</span>
+                                    </button>
+                                </article>
+                            </div>
+                        </section>
+
+                        <section class="sql-target-section" aria-labelledby="sqlTargetLastResultTitle">
+                            <div class="sql-target-section-heading">
+                                <div>
+                                    <p class="sql-target-eyebrow" data-table-i18n="sqlTargetDiagnostics">Secret-safe diagnostics</p>
+                                    <h3 id="sqlTargetLastResultTitle" data-table-i18n="sqlTargetLastResult">Last operation</h3>
+                                </div>
+                            </div>
+                            <div class="sql-target-empty" id="sqlTargetLastEmpty" data-table-i18n="sqlTargetNoResult">No SQL target operation has been recorded in this server process.</div>
+                            <div class="sql-target-result" id="sqlTargetLastContent" hidden>
+                                <div class="sql-target-result-summary">
+                                    <div><span data-table-i18n="sqlTargetOperation">Operation</span><strong id="sqlTargetLastOperation">—</strong></div>
+                                    <div><span data-table-i18n="sqlTargetOperationStatus">Status</span><strong class="sql-target-operation-chip neutral" id="sqlTargetLastStatus">—</strong></div>
+                                    <div><span data-table-i18n="sqlTargetRecordCount">Records</span><strong id="sqlTargetLastRecords">—</strong></div>
+                                    <div><span data-table-i18n="sqlTargetElapsed">Elapsed</span><strong id="sqlTargetLastElapsed">—</strong></div>
+                                </div>
+                                <dl class="sql-target-count-grid">
+                                    <div><dt data-table-i18n="sqlTargetInserted">Inserted</dt><dd id="sqlTargetInserted">0</dd></div>
+                                    <div><dt data-table-i18n="sqlTargetUpdated">Updated</dt><dd id="sqlTargetUpdated">0</dd></div>
+                                    <div><dt data-table-i18n="sqlTargetUnchanged">Unchanged</dt><dd id="sqlTargetUnchanged">0</dd></div>
+                                    <div><dt data-table-i18n="sqlTargetDeleted">Deleted</dt><dd id="sqlTargetDeleted">0</dd></div>
+                                    <div><dt data-table-i18n="sqlTargetFailed">Failed</dt><dd id="sqlTargetFailed">0</dd></div>
+                                </dl>
+                                <div class="sql-target-evidence" id="sqlTargetReconciliationEvidence" hidden>
+                                    <div class="sql-target-evidence-heading">
+                                        <div>
+                                            <span class="sql-target-eyebrow" data-table-i18n="sqlTargetPlanEvidence">Reconciliation evidence</span>
+                                            <h4 data-table-i18n="sqlTargetPlanSafety">Soft-delete plan safety</h4>
+                                        </div>
+                                        <span class="sql-target-operation-chip neutral" id="sqlTargetEvidenceGuard">—</span>
+                                    </div>
+                                    <dl class="sql-target-evidence-grid">
+                                        <div><dt data-table-i18n="sqlTargetEvidenceSource">Source rows</dt><dd id="sqlTargetEvidenceSource">0</dd></div>
+                                        <div><dt data-table-i18n="sqlTargetEvidenceProtected">Protected rows</dt><dd id="sqlTargetEvidenceProtected">0</dd></div>
+                                        <div><dt data-table-i18n="sqlTargetEvidenceTarget">Target rows</dt><dd id="sqlTargetEvidenceTarget">0</dd></div>
+                                        <div><dt data-table-i18n="sqlTargetEvidenceMissing">Missing rows</dt><dd id="sqlTargetEvidenceMissing">0</dd></div>
+                                        <div><dt data-table-i18n="sqlTargetEvidenceWouldDelete">Would soft-delete</dt><dd id="sqlTargetEvidenceWouldDelete">0</dd></div>
+                                        <div><dt data-table-i18n="sqlTargetEvidenceAlreadyDeleted">Already soft-deleted</dt><dd id="sqlTargetEvidenceAlreadyDeleted">0</dd></div>
+                                        <div><dt data-table-i18n="sqlTargetEvidenceWouldRestore">Would restore</dt><dd id="sqlTargetEvidenceWouldRestore">0</dd></div>
+                                        <div><dt data-table-i18n="sqlTargetEvidencePartialRisk">Partial-source risk</dt><dd id="sqlTargetEvidencePartialRisk">No</dd></div>
+                                        <div><dt data-table-i18n="sqlTargetEvidenceApplyAllowed">Apply allowed</dt><dd id="sqlTargetEvidenceApplyAllowed">No</dd></div>
+                                        <div><dt data-table-i18n="sqlTargetEvidenceConfirmation">Exact preview token</dt><dd id="sqlTargetEvidenceConfirmation">No</dd></div>
+                                    </dl>
+                                </div>
+                                <div class="sql-target-failure" id="sqlTargetFailure" hidden>
+                                    <strong data-table-i18n="sqlTargetFailureTitle">Operation did not complete</strong>
+                                    <dl>
+                                        <div><dt data-table-i18n="sqlTargetFailureCode">Code</dt><dd id="sqlTargetFailureCode">—</dd></div>
+                                        <div><dt data-table-i18n="sqlTargetFailureStage">Stage</dt><dd id="sqlTargetFailureStage">—</dd></div>
+                                        <div><dt data-table-i18n="sqlTargetFailureReason">Reason</dt><dd id="sqlTargetFailureReason">—</dd></div>
+                                        <div><dt data-table-i18n="sqlTargetFailureRetryable">Retryable</dt><dd id="sqlTargetFailureRetryable">No</dd></div>
+                                    </dl>
+                                </div>
+                            </div>
+                        </section>
+                    </div>
                 </div>
             </div>
         </div>
