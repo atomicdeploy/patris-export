@@ -1,7 +1,9 @@
 package recordpipe
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"reflect"
@@ -17,6 +19,15 @@ import (
 	"github.com/atomicdeploy/patris-export/pkg/recorddiff"
 	"github.com/atomicdeploy/patris-export/pkg/recordmap"
 )
+
+type cancellingMappedValue struct {
+	cancel context.CancelFunc
+}
+
+func (value cancellingMappedValue) String() string {
+	value.cancel()
+	return "cancel-now"
+}
 
 func TestBuildRawSkipsTransformAndMapping(t *testing.T) {
 	rows := []map[string]interface{}{{"Code": "100", "Name": "Raw", "ANBAR1": 2, "Sort": "ignored", "SortCode": "ignored too"}}
@@ -46,6 +57,40 @@ func TestBuildRawSkipsTransformAndMapping(t *testing.T) {
 	}
 	if _, exists := result.Rows[0]["warnings"]; exists {
 		t.Fatal("raw mode must not add derived naming warnings")
+	}
+}
+
+func TestBuildContextStopsDuringNonCanonicalMapping(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	result := BuildContext(ctx, []map[string]interface{}{{
+		"Code":  "100",
+		"Name":  "Product",
+		"Value": cancellingMappedValue{cancel: cancel},
+	}}, "products.db", Options{
+		Mapping: recordmap.Config{
+			Enabled: true,
+			Values: map[string]recordmap.ValueMap{
+				"Value": {"cancel-now": "mapped"},
+			},
+		},
+	})
+	if !errors.Is(ctx.Err(), context.Canceled) {
+		t.Fatalf("context error=%v, want context.Canceled", ctx.Err())
+	}
+	if result.Rows != nil || result.Payload != nil || result.Contract != nil || result.KeyField != "" {
+		t.Fatalf("cancelled BuildContext returned partial output: %#v", result)
+	}
+}
+
+func TestBuildContextRejectsPreCancelledRawProjection(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	result := BuildContext(ctx, []map[string]interface{}{{"Code": "100"}}, "products.db", Options{Raw: true})
+	if !errors.Is(ctx.Err(), context.Canceled) {
+		t.Fatalf("context error=%v, want context.Canceled", ctx.Err())
+	}
+	if result.Rows != nil || result.Payload != nil {
+		t.Fatalf("pre-cancelled raw projection returned output: %#v", result)
 	}
 }
 

@@ -99,6 +99,21 @@ type Category struct {
 }
 
 func Transform(ctx context.Context, rows []map[string]interface{}, source string, cfg Config, provider pricingcatalog.Provider, generatedAt time.Time) ([]map[string]interface{}, *Envelope) {
+	products, envelope, _ := TransformContext(ctx, rows, source, cfg, provider, generatedAt)
+	return products, envelope
+}
+
+// TransformContext builds the canonical snapshot while cooperatively honoring
+// cancellation throughout classification, category construction, pricing
+// dispatch, hashing, and row materialization. Transform remains the compatible
+// wrapper for existing unbounded callers.
+func TransformContext(ctx context.Context, rows []map[string]interface{}, source string, cfg Config, provider pricingcatalog.Provider, generatedAt time.Time) ([]map[string]interface{}, *Envelope, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, nil, err
+	}
 	integrationActive := pricingcatalog.Configured(cfg.Pricing)
 	if provider == nil {
 		provider = pricingcatalog.NewProvider(cfg.Pricing)
@@ -106,28 +121,49 @@ func Transform(ctx context.Context, rows []map[string]interface{}, source string
 	products := make([]Product, 0, len(rows))
 	codeCounts := make(map[string]int, len(rows))
 	for _, row := range rows {
+		if err := ctx.Err(); err != nil {
+			return nil, nil, err
+		}
 		if code := codeString(firstValue(row, "product_code", "code", "Code")); code != "" {
 			codeCounts[code]++
 		}
 	}
 	duplicateCodes := make([]string, 0)
 	for code, count := range codeCounts {
+		if err := ctx.Err(); err != nil {
+			return nil, nil, err
+		}
 		if count > 1 {
 			duplicateCodes = append(duplicateCodes, code)
 		}
 	}
 	sort.Strings(duplicateCodes)
-	categoryCodes, excludedCodes, ambiguousCodes := classifyKalaRows(rows, codeCounts)
+	if err := ctx.Err(); err != nil {
+		return nil, nil, err
+	}
+	categoryCodes, excludedCodes, ambiguousCodes, err := classifyKalaRowsContext(ctx, rows, codeCounts)
+	if err != nil {
+		return nil, nil, err
+	}
 	quarantined := normalizedWarnings(append(append([]string{}, duplicateCodes...), ambiguousCodes...))
-	categories := parseKalaCategories(rows, codeCounts, categoryCodes)
+	categories, err := parseKalaCategoriesContext(ctx, rows, codeCounts, categoryCodes)
+	if err != nil {
+		return nil, nil, err
+	}
 	categoryByCode := make(map[string]Category, len(categories))
 	for _, category := range categories {
+		if err := ctx.Err(); err != nil {
+			return nil, nil, err
+		}
 		categoryByCode[category.CategoryCode] = category
 	}
 	quarantineSet := stringSet(quarantined)
 	excludedSet := stringSet(excludedCodes)
 	eligible := make([]int, 0, len(rows))
 	for index, row := range rows {
+		if err := ctx.Err(); err != nil {
+			return nil, nil, err
+		}
 		code := codeString(firstValue(row, "product_code", "code", "Code"))
 		if code != "" && codeCounts[code] == 1 && !categoryCodes[code] && !quarantineSet[code] && !excludedSet[code] {
 			eligible = append(eligible, index)
@@ -136,9 +172,15 @@ func Transform(ctx context.Context, rows []map[string]interface{}, source string
 	if prefetcher, ok := provider.(pricingcatalog.Prefetcher); ok && len(eligible) > 0 {
 		codes := make([]string, 0, len(eligible))
 		for _, index := range eligible {
+			if err := ctx.Err(); err != nil {
+				return nil, nil, err
+			}
 			codes = append(codes, codeString(firstValue(rows[index], "product_code", "code", "Code")))
 		}
 		provider = prefetcher.Prefetch(ctx, codes)
+		if err := ctx.Err(); err != nil {
+			return nil, nil, err
+		}
 	}
 	parsedProducts := make([]Product, len(rows))
 	workers := 1
@@ -151,7 +193,13 @@ func Transform(ctx context.Context, rows []map[string]interface{}, source string
 	}
 	if workers <= 1 {
 		for _, index := range eligible {
+			if err := ctx.Err(); err != nil {
+				return nil, nil, err
+			}
 			parsedProducts[index] = parseKalaProduct(ctx, rows[index], provider, integrationActive)
+			if err := ctx.Err(); err != nil {
+				return nil, nil, err
+			}
 		}
 	} else {
 		jobs := make(chan int)
@@ -160,74 +208,139 @@ func Transform(ctx context.Context, rows []map[string]interface{}, source string
 		for worker := 0; worker < workers; worker++ {
 			go func() {
 				defer wait.Done()
-				for index := range jobs {
-					parsedProducts[index] = parseKalaProduct(ctx, rows[index], provider, integrationActive)
+				for {
+					select {
+					case <-ctx.Done():
+						return
+					case index, ok := <-jobs:
+						if !ok {
+							return
+						}
+						product := parseKalaProduct(ctx, rows[index], provider, integrationActive)
+						if ctx.Err() != nil {
+							return
+						}
+						parsedProducts[index] = product
+					}
 				}
 			}()
 		}
+	dispatch:
 		for _, index := range eligible {
-			jobs <- index
+			select {
+			case <-ctx.Done():
+				break dispatch
+			case jobs <- index:
+			}
 		}
 		close(jobs)
 		wait.Wait()
+		if err := ctx.Err(); err != nil {
+			return nil, nil, err
+		}
 	}
 	for _, product := range parsedProducts {
+		if err := ctx.Err(); err != nil {
+			return nil, nil, err
+		}
 		if product.ProductCode == "" {
 			continue
 		}
 		if codeCounts[product.ProductCode] > 1 {
 			continue
 		}
-		product.CategoryCode = longestCategoryPrefix(product.ProductCode, categoryByCode)
+		product.CategoryCode, err = longestCategoryPrefixContext(ctx, product.ProductCode, categoryByCode)
+		if err != nil {
+			return nil, nil, err
+		}
 		product.RecordHash = recordHash(product)
 		products = append(products, product)
 	}
 	sort.SliceStable(products, func(i, j int) bool {
 		return products[i].ProductCode < products[j].ProductCode
 	})
+	if err := ctx.Err(); err != nil {
+		return nil, nil, err
+	}
 	envelope := NewCatalogEnvelope(products, categories, excludedCodes, source, cfg.SourceID, generatedAt, quarantined...)
+	if err := ctx.Err(); err != nil {
+		return nil, nil, err
+	}
 	if !integrationActive {
 		envelope.LocalCurrency = ""
 		envelope.FormulaID = ""
 	}
 	envelope.Warnings = nil
 	for _, code := range duplicateCodes {
+		if err := ctx.Err(); err != nil {
+			return nil, nil, err
+		}
 		envelope.Warnings = append(envelope.Warnings, "duplicate_product_code:"+code)
 	}
 	for _, code := range ambiguousCodes {
+		if err := ctx.Err(); err != nil {
+			return nil, nil, err
+		}
 		envelope.Warnings = append(envelope.Warnings, "ambiguous_catalog_record:"+code)
 	}
 	envelope.Warnings = normalizedWarnings(envelope.Warnings)
 	envelope.EventID = eventID(envelope)
-	return ProductsToRows(products), envelope
+	if err := ctx.Err(); err != nil {
+		return nil, nil, err
+	}
+	productRows, err := ProductsToRowsContext(ctx, products)
+	if err != nil {
+		return nil, nil, err
+	}
+	return productRows, envelope, nil
 }
 
 // classifyKalaRows applies the verified Patris hierarchy to the complete
 // snapshot. It deliberately fails closed for ambiguous numeric rows: category
 // headers and accounting/service entries must never become Woo products.
 func classifyKalaRows(rows []map[string]interface{}, codeCounts map[string]int) (map[string]bool, []string, []string) {
+	categories, excluded, quarantined, _ := classifyKalaRowsContext(context.Background(), rows, codeCounts)
+	return categories, excluded, quarantined
+}
+
+func classifyKalaRowsContext(ctx context.Context, rows []map[string]interface{}, codeCounts map[string]int) (map[string]bool, []string, []string, error) {
 	codes := make([]string, 0, len(codeCounts))
 	rowByCode := make(map[string]map[string]interface{}, len(rows))
 	for _, row := range rows {
+		if err := ctx.Err(); err != nil {
+			return nil, nil, nil, err
+		}
 		code := codeString(firstValue(row, "product_code", "code", "Code"))
 		if code != "" && codeCounts[code] == 1 {
 			rowByCode[code] = row
 		}
 	}
 	for code := range codeCounts {
+		if err := ctx.Err(); err != nil {
+			return nil, nil, nil, err
+		}
 		codes = append(codes, code)
 	}
 	sort.Strings(codes)
+	if err := ctx.Err(); err != nil {
+		return nil, nil, nil, err
+	}
 
 	categories := make(map[string]bool)
 	excluded := make(map[string]bool)
 	quarantined := make(map[string]bool)
 	hasDescendant := make(map[string]bool)
 	for _, code := range codes {
+		if err := ctx.Err(); err != nil {
+			return nil, nil, nil, err
+		}
 		if codeCounts[code] != 1 || len(code) != 6 || !asciiDigits(code) {
 			continue
 		}
 		for _, candidate := range codes {
+			if err := ctx.Err(); err != nil {
+				return nil, nil, nil, err
+			}
 			if codeCounts[candidate] == 1 && len(candidate) == 9 && strings.HasPrefix(candidate, code) {
 				hasDescendant[code] = true
 				break
@@ -236,6 +349,9 @@ func classifyKalaRows(rows []map[string]interface{}, codeCounts map[string]int) 
 	}
 
 	for _, code := range codes {
+		if err := ctx.Err(); err != nil {
+			return nil, nil, nil, err
+		}
 		if codeCounts[code] != 1 || !asciiDigits(code) {
 			continue
 		}
@@ -276,6 +392,9 @@ func classifyKalaRows(rows []map[string]interface{}, codeCounts map[string]int) 
 	// Do not require parents to be present here: filtered/partial extracts are a
 	// supported input, and their valid leaf products must remain exportable.
 	for _, code := range codes {
+		if err := ctx.Err(); err != nil {
+			return nil, nil, nil, err
+		}
 		if codeCounts[code] != 1 || !asciiDigits(code) || categories[code] || excluded[code] || quarantined[code] {
 			continue
 		}
@@ -284,7 +403,10 @@ func classifyKalaRows(rows []map[string]interface{}, codeCounts map[string]int) 
 		}
 	}
 
-	return categories, sortedSet(excluded), sortedSet(quarantined)
+	if err := ctx.Err(); err != nil {
+		return nil, nil, nil, err
+	}
+	return categories, sortedSet(excluded), sortedSet(quarantined), nil
 }
 
 func asciiDigits(value string) bool {
@@ -319,8 +441,16 @@ func sortedSet(values map[string]bool) []string {
 }
 
 func parseKalaCategories(rows []map[string]interface{}, codeCounts map[string]int, categoryCodes map[string]bool) []Category {
+	categories, _ := parseKalaCategoriesContext(context.Background(), rows, codeCounts, categoryCodes)
+	return categories
+}
+
+func parseKalaCategoriesContext(ctx context.Context, rows []map[string]interface{}, codeCounts map[string]int, categoryCodes map[string]bool) ([]Category, error) {
 	byCode := make(map[string]Category, len(categoryCodes))
 	for _, row := range rows {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		code := codeString(firstValue(row, "product_code", "code", "Code"))
 		if code == "" || codeCounts[code] != 1 || !categoryCodes[code] {
 			continue
@@ -337,6 +467,9 @@ func parseKalaCategories(rows []map[string]interface{}, codeCounts map[string]in
 
 	codes := make([]string, 0, len(byCode))
 	for code := range byCode {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		codes = append(codes, code)
 	}
 	sort.SliceStable(codes, func(i, j int) bool {
@@ -345,12 +478,25 @@ func parseKalaCategories(rows []map[string]interface{}, codeCounts map[string]in
 		}
 		return codes[i] < codes[j]
 	})
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 
 	for _, code := range codes {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		category := byCode[code]
-		category.ParentCode = longestCategoryPrefix(code, byCode)
+		parent, err := longestCategoryPrefixContext(ctx, code, byCode)
+		if err != nil {
+			return nil, err
+		}
+		category.ParentCode = parent
 		category.Depth = 1
 		for parent := category.ParentCode; parent != ""; {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
 			category.Depth++
 			ancestor, exists := byCode[parent]
 			if !exists || ancestor.ParentCode == parent {
@@ -364,17 +510,31 @@ func parseKalaCategories(rows []map[string]interface{}, codeCounts map[string]in
 
 	categories := make([]Category, 0, len(codes))
 	for _, code := range codes {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		categories = append(categories, byCode[code])
 	}
 	sort.SliceStable(categories, func(i, j int) bool {
 		return categories[i].CategoryCode < categories[j].CategoryCode
 	})
-	return categories
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return categories, nil
 }
 
 func longestCategoryPrefix(code string, categories map[string]Category) string {
+	parent, _ := longestCategoryPrefixContext(context.Background(), code, categories)
+	return parent
+}
+
+func longestCategoryPrefixContext(ctx context.Context, code string, categories map[string]Category) (string, error) {
 	parent := ""
 	for candidate := range categories {
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
 		if len(candidate) >= len(code) || len(candidate) <= len(parent) {
 			continue
 		}
@@ -382,7 +542,7 @@ func longestCategoryPrefix(code string, categories map[string]Category) string {
 			parent = candidate
 		}
 	}
-	return parent
+	return parent, nil
 }
 
 func categoryHasStrongProductSignals(row map[string]interface{}) bool {
@@ -436,6 +596,9 @@ func emptyCategoryHeader(code string, row map[string]interface{}) bool {
 }
 
 func parseKalaProduct(ctx context.Context, row map[string]interface{}, provider pricingcatalog.Provider, integrationActive bool) Product {
+	if ctx != nil && ctx.Err() != nil {
+		return Product{}
+	}
 	warnings := naming.Merge(row[naming.InternalWarningsField], naming.Warnings(row))
 	code := codeString(firstValue(row, "product_code", "code", "Code"))
 	foreignPrice := extractForeignPrice(row, &warnings)
@@ -443,6 +606,9 @@ func parseKalaProduct(ctx context.Context, row map[string]interface{}, provider 
 	resolution := pricingcatalog.Resolution{}
 	if integrationActive {
 		resolution = provider.Resolve(ctx, code)
+		if ctx != nil && ctx.Err() != nil {
+			return Product{}
+		}
 		warnings = append(warnings, resolution.Warnings...)
 	}
 	warehouseStock, warehouseNulls := warehouseStock(row)
@@ -702,11 +868,27 @@ func recordHash(product Product) string {
 }
 
 func ProductsToRows(products []Product) []map[string]interface{} {
+	rows, _ := ProductsToRowsContext(context.Background(), products)
+	return rows
+}
+
+// ProductsToRowsContext materializes canonical row maps with cooperative
+// cancellation between products.
+func ProductsToRowsContext(ctx context.Context, products []Product) ([]map[string]interface{}, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	rows := make([]map[string]interface{}, 0, len(products))
 	for _, product := range products {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		rows = append(rows, product.Map())
 	}
-	return rows
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return rows, nil
 }
 
 func (category Category) Map() map[string]interface{} {

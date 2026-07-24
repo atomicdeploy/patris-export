@@ -1,6 +1,7 @@
 package recordmap
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"math"
@@ -135,16 +136,35 @@ func Effective(cfg Config, source string) Config {
 }
 
 func Apply(records []map[string]interface{}, cfg Config, source string) []map[string]interface{} {
+	out, _ := ApplyContext(context.Background(), records, cfg, source)
+	return out
+}
+
+// ApplyContext applies mapping rules while checking cancellation between
+// records, fields, and defaults. Existing unbounded callers retain Apply.
+func ApplyContext(ctx context.Context, records []map[string]interface{}, cfg Config, source string) ([]map[string]interface{}, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	effective := Effective(cfg, source)
 	if !effective.Enabled {
-		return CopyRows(records)
+		return CopyRowsContext(ctx, records)
 	}
 	include := stringSet(effective.Include)
 	drop := stringSet(effective.Drop)
 	out := make([]map[string]interface{}, 0, len(records))
 	for _, record := range records {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		next := map[string]interface{}{}
 		for key, value := range record {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
 			if len(include) > 0 && !include[key] {
 				continue
 			}
@@ -152,8 +172,14 @@ func Apply(records []map[string]interface{}, cfg Config, source string) []map[st
 				continue
 			}
 			value = mapValue(value, effective.Values[key])
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
 			if rule, ok := effective.Numeric[key]; ok {
 				value = applyNumeric(value, rule)
+				if err := ctx.Err(); err != nil {
+					return nil, err
+				}
 			}
 			dest := key
 			if renamed := strings.TrimSpace(effective.Fields[key]); renamed != "" {
@@ -162,13 +188,19 @@ func Apply(records []map[string]interface{}, cfg Config, source string) []map[st
 			next[dest] = value
 		}
 		for key, value := range effective.Defaults {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
 			if _, exists := next[key]; !exists {
 				next[key] = value
 			}
 		}
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		out = append(out, next)
 	}
-	return out
+	return out, nil
 }
 
 func KeyField(cfg Config, source string) string {
@@ -180,17 +212,38 @@ func KeyField(cfg Config, source string) string {
 }
 
 func Keyed(records []map[string]interface{}, keyField string, omitKey bool) map[string]interface{} {
+	result, _ := KeyedContext(context.Background(), records, keyField, omitKey)
+	return result
+}
+
+// KeyedContext builds a keyed payload while honoring caller cancellation.
+func KeyedContext(ctx context.Context, records []map[string]interface{}, keyField string, omitKey bool) (map[string]interface{}, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if strings.TrimSpace(keyField) == "" {
 		keyField = "Code"
 	}
 	result := make(map[string]interface{}, len(records))
 	for index, record := range records {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		key := strings.TrimSpace(fmt.Sprintf("%v", record[keyField]))
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		if key == "" || key == "<nil>" {
 			key = fmt.Sprintf("row-%d", index+1)
 		}
 		value := map[string]interface{}{}
 		for field, fieldValue := range record {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
 			if omitKey && field == keyField {
 				continue
 			}
@@ -198,19 +251,37 @@ func Keyed(records []map[string]interface{}, keyField string, omitKey bool) map[
 		}
 		result[key] = value
 	}
-	return result
+	return result, nil
 }
 
 func CopyRows(records []map[string]interface{}) []map[string]interface{} {
+	out, _ := CopyRowsContext(context.Background(), records)
+	return out
+}
+
+// CopyRowsContext copies row maps while honoring caller cancellation.
+func CopyRowsContext(ctx context.Context, records []map[string]interface{}) ([]map[string]interface{}, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	out := make([]map[string]interface{}, 0, len(records))
 	for _, record := range records {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		next := make(map[string]interface{}, len(record))
 		for key, value := range record {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
 			next[key] = value
 		}
 		out = append(out, next)
 	}
-	return out
+	return out, nil
 }
 
 func Fields(records []map[string]interface{}, keyField string) []string {
