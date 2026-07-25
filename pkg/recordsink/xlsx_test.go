@@ -555,6 +555,13 @@ func TestDynamicCalculatorVBASourceValidatesContractsBeforeMutation(t *testing.T
 		"INDEX(Shipping,1,1)",
 		"INDEX(Profit,1,1)",
 		"INDEX(Yuan_Price,1,1)",
+		`Private Declare PtrSafe Function MessageBoxW Lib "user32"`,
+		"StrPtr(message)",
+		"StrPtr(title)",
+		"Private Sub ShowUnicodeMessage",
+		"ValidateUnicodeRuntime",
+		"MB_RIGHT",
+		"MB_RTLREADING",
 	} {
 		if !strings.Contains(source, required) {
 			t.Fatalf("VBA source is missing validation: %s", required)
@@ -571,6 +578,9 @@ func TestDynamicCalculatorVBASourceValidatesContractsBeforeMutation(t *testing.T
 		"credential",
 		"client_secret",
 		"api_key",
+		"MsgBox ",
+		"MsgBox(",
+		"VBA.MsgBox",
 	} {
 		if strings.Contains(strings.ToLower(source), strings.ToLower(forbidden)) {
 			t.Fatalf("VBA source contains forbidden legacy or credential path: %s", forbidden)

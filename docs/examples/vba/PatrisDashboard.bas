@@ -10,6 +10,22 @@ Private Const MAX_WOO_PAGES As Long = 20
 Private Const WOO_PAGE_SIZE As Long = 100
 Private Const HTTP_TIMEOUT_MS As Long = 60000
 Private Const DIGITALOGIC_HOST_PREFIX As String = "https://digitalogic.ir/"
+Private Const MB_RIGHT As Long = &H80000
+Private Const MB_RTLREADING As Long = &H100000
+
+#If VBA7 Then
+Private Declare PtrSafe Function MessageBoxW Lib "user32" ( _
+    ByVal windowHandle As LongPtr, _
+    ByVal messagePointer As LongPtr, _
+    ByVal titlePointer As LongPtr, _
+    ByVal messageType As Long) As Long
+#Else
+Private Declare Function MessageBoxW Lib "user32" ( _
+    ByVal windowHandle As Long, _
+    ByVal messagePointer As Long, _
+    ByVal titlePointer As Long, _
+    ByVal messageType As Long) As Long
+#End If
 
 Public Sub ValidateWorkbook()
     Dim products As Worksheet
@@ -20,6 +36,7 @@ Public Sub ValidateWorkbook()
     Dim profitTable As ListObject
     Dim columnIndex As Long
 
+    ValidateUnicodeRuntime
     Set products = PriceSheet()
     Set settings = ConfigSheet()
     Set table = products.ListObjects(PRODUCTS_TABLE)
@@ -83,12 +100,12 @@ Public Sub RefreshAllData(Optional ByVal silent As Boolean = False)
     settings.Range("B7").NumberFormat = "yyyy-mm-dd hh:mm"
 
     If Not silent Then
-        MsgBox CStr(patrisRows) & _
-               U("002006A906270644062706CC0020067E0627062A063106CC0633002006280647200C063106480632063106330627064606CC00200634062F002E") & _
-               vbCrLf & CStr(wooMatches) & _
-               U("0020067E06CC06480646062F0020062F064206CC064200200648064806A9062706450631063300200627064106320648062F064700200634062F002E"), _
-               vbInformation, _
-               U("0647064506AF06270645200C06330627063206CC0020064406CC0633062A0020064206CC0645062A")
+        ShowUnicodeMessage CStr(patrisRows) & _
+            U("002006A906270644062706CC0020067E0627062A063106CC0633002006280647200C063106480632063106330627064606CC00200634062F002E") & _
+            vbCrLf & CStr(wooMatches) & _
+            U("0020067E06CC06480646062F0020062F064206CC064200200648064806A9062706450631063300200627064106320648062F064700200634062F002E"), _
+            vbInformation, _
+            U("0647064506AF06270645200C06330627063206CC0020064406CC0633062A0020064206CC0645062A")
     End If
 
 CleanExit:
@@ -106,9 +123,9 @@ Failed:
     End If
     On Error GoTo 0
     If Not silent Then
-        MsgBox U("0647064506AF06270645200C06330627063206CC002006270646062C06270645002006460634062F003A") & _
-               vbCrLf & errorText, vbExclamation, _
-               U("0647064506AF06270645200C06330627063206CC0020064406CC0633062A0020064206CC0645062A")
+        ShowUnicodeMessage U("0647064506AF06270645200C06330627063206CC002006270646062C06270645002006460634062F003A") & _
+            vbCrLf & errorText, vbExclamation, _
+            U("0647064506AF06270645200C06330627063206CC0020064406CC0633062A0020064206CC0645062A")
     End If
     Resume CleanExit
 End Sub
@@ -522,6 +539,35 @@ End Function
 Private Function ConfigSheet() As Worksheet
     Set ConfigSheet = ThisWorkbook.Worksheets(2)
 End Function
+
+Private Sub ValidateUnicodeRuntime()
+    Dim sample As String
+
+    sample = U("06CC06A906AF")
+    If Len(sample) <> 3 Or _
+       AscW(Mid$(sample, 1, 1)) <> &H6CC Or _
+       AscW(Mid$(sample, 2, 1)) <> &H6A9 Or _
+       AscW(Mid$(sample, 3, 1)) <> &H6AF Then
+        Err.Raise vbObjectError + 159, "ValidateUnicodeRuntime", _
+                  "The VBA Unicode runtime is unavailable."
+    End If
+End Sub
+
+Private Sub ShowUnicodeMessage(ByVal message As String, _
+                               ByVal style As VbMsgBoxStyle, _
+                               ByVal title As String)
+    Dim ignoredResult As Long
+
+#If VBA7 Then
+    ignoredResult = MessageBoxW( _
+        CLngPtr(Application.hwnd), StrPtr(message), StrPtr(title), _
+        CLng(style) Or MB_RIGHT Or MB_RTLREADING)
+#Else
+    ignoredResult = MessageBoxW( _
+        Application.hwnd, StrPtr(message), StrPtr(title), _
+        CLng(style) Or MB_RIGHT Or MB_RTLREADING)
+#End If
+End Sub
 
 Private Function U(ByVal hexCodePoints As String) As String
     Dim position As Long
