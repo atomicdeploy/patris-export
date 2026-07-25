@@ -282,6 +282,20 @@ func (s *Server) RecordResult() (recordpipe.Result, error) {
 // JSON reads promptly; native pxlib record extraction checks cancellation
 // immediately before and after its non-interruptible native call.
 func (s *Server) RecordResultContext(ctx context.Context) (recordpipe.Result, error) {
+	return s.recordResultContext(ctx, s.recordOptions())
+}
+
+// canonicalRecordResultContext prepares the configured canonical projection
+// independently from the viewer/export raw-mode preference. Raw mode controls
+// observational source rows; it must not disable the dedicated integration
+// contract for a dataset with an enabled canonical profile.
+func (s *Server) canonicalRecordResultContext(ctx context.Context) (recordpipe.Result, error) {
+	options := s.recordOptions()
+	options.Raw = false
+	return s.recordResultContext(ctx, options)
+}
+
+func (s *Server) recordResultContext(ctx context.Context, options recordpipe.Options) (recordpipe.Result, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -313,7 +327,7 @@ func (s *Server) RecordResultContext(ctx context.Context) (recordpipe.Result, er
 	if err := ctx.Err(); err != nil {
 		return recordpipe.Result{}, err
 	}
-	result := recordpipe.BuildContext(ctx, records, dbPath, s.recordOptions())
+	result := recordpipe.BuildContext(ctx, records, dbPath, options)
 	if err := ctx.Err(); err != nil {
 		return recordpipe.Result{}, err
 	}
@@ -642,8 +656,8 @@ func (s *Server) handleGetCategories(w http.ResponseWriter, _ *http.Request) {
 
 // handleGetProductSyncContract exposes the living integration envelope
 // without changing the long-standing row collection returned by /api/records.
-func (s *Server) handleGetProductSyncContract(w http.ResponseWriter, _ *http.Request) {
-	result, err := s.RecordResult()
+func (s *Server) handleGetProductSyncContract(w http.ResponseWriter, r *http.Request) {
+	result, err := s.canonicalRecordResultContext(r.Context())
 	if err != nil {
 		http.Error(w, fmt.Sprintf("Failed to read records: %v", err), http.StatusInternalServerError)
 		return

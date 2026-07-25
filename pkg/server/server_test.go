@@ -867,6 +867,73 @@ func TestCanonicalKalaParityAcrossRESTCSVXLSXAndWebSocket(t *testing.T) {
 	assertJSONEquivalent(t, "REST and WebSocket contract", restProduct, contractProduct)
 }
 
+func TestCanonicalProductSyncRemainsAvailableWithRawViewerMode(t *testing.T) {
+	fixtureConfig := filepath.Join("..", "..", "testdata", "canonical-static-config.json")
+	configData, err := os.ReadFile(fixtureConfig)
+	if err != nil {
+		t.Fatalf("read canonical fixture config: %v", err)
+	}
+	configPath := filepath.Join(t.TempDir(), "raw-canonical-config.json")
+	if err := os.WriteFile(configPath, configData, 0600); err != nil {
+		t.Fatalf("copy canonical fixture config: %v", err)
+	}
+	manager, err := appconfig.Load(configPath)
+	if err != nil {
+		t.Fatalf("load copied canonical fixture config: %v", err)
+	}
+	if err := manager.Update(func(cfg *appconfig.Config) {
+		cfg.Database.Raw = true
+		cfg.Convert.Raw = true
+	}); err != nil {
+		t.Fatalf("enable raw viewer mode: %v", err)
+	}
+
+	dbPath := filepath.Join("..", "..", "testdata", "kala.db")
+	srv, err := NewServerWithOptions(dbPath, nil, Options{Config: manager}, false)
+	if err != nil {
+		t.Fatalf("create raw canonical server: %v", err)
+	}
+	defer srv.Close()
+
+	recordsRecorder := httptest.NewRecorder()
+	srv.router.ServeHTTP(recordsRecorder, httptest.NewRequest(http.MethodGet, "/api/records", nil))
+	if recordsRecorder.Code != http.StatusOK {
+		t.Fatalf("raw records status = %d: %s", recordsRecorder.Code, recordsRecorder.Body.String())
+	}
+	var rawRecords map[string]map[string]interface{}
+	if err := json.NewDecoder(recordsRecorder.Body).Decode(&rawRecords); err != nil {
+		t.Fatalf("decode raw viewer rows: %v", err)
+	}
+	rawProduct, ok := rawRecords["102001011"]
+	if !ok {
+		t.Fatalf("raw viewer did not preserve Code-keyed KALA row")
+	}
+	if _, exists := rawProduct["Sharh1"]; !exists {
+		t.Fatalf("raw viewer row no longer exposes diagnostic source fields: %#v", rawProduct)
+	}
+	if _, exists := rawProduct["product_code"]; exists {
+		t.Fatalf("raw viewer row was unexpectedly canonicalized: %#v", rawProduct)
+	}
+
+	contractRecorder := httptest.NewRecorder()
+	srv.router.ServeHTTP(contractRecorder, httptest.NewRequest(http.MethodGet, "/api/product-sync", nil))
+	if contractRecorder.Code != http.StatusOK {
+		t.Fatalf("product-sync status = %d: %s", contractRecorder.Code, contractRecorder.Body.String())
+	}
+	if contentType := contractRecorder.Header().Get("Content-Type"); !strings.HasPrefix(contentType, "application/vnd.patris.product-sync+json") {
+		t.Fatalf("unexpected product-sync content type %q", contentType)
+	}
+	var envelope canonical.Envelope
+	if err := json.NewDecoder(contractRecorder.Body).Decode(&envelope); err != nil {
+		t.Fatalf("decode canonical product-sync envelope: %v", err)
+	}
+	if envelope.Schema != canonical.ContractName || envelope.Source.Dataset != "kala.db" {
+		t.Fatalf("product-sync identity = %q/%q, want %q/kala.db", envelope.Schema, envelope.Source.Dataset, canonical.ContractName)
+	}
+	product := canonicalTypedProductByCode(t, envelope.Products, "102001011")
+	assertCanonicalFixtureValues(t, "raw-mode product-sync", product)
+}
+
 func assertJSONEquivalent(t *testing.T, source string, left, right interface{}) {
 	t.Helper()
 	leftJSON, err := json.Marshal(left)
