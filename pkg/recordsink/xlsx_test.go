@@ -393,7 +393,7 @@ func TestDynamicCalculatorTemplateHasNeutralMetadataAndNoExternalConnections(t *
 	}
 }
 
-func TestDynamicCalculatorTemplateStartsWithoutPersistentCatalogData(t *testing.T) {
+func TestDynamicCalculatorTemplatePreservesPersianPriceListContract(t *testing.T) {
 	path := filepath.Join("..", "..", "docs", "examples", "Patris-Digitalogic-Price-Calculator.xltm")
 	book, err := excelize.OpenFile(path)
 	if err != nil {
@@ -401,63 +401,179 @@ func TestDynamicCalculatorTemplateStartsWithoutPersistentCatalogData(t *testing.
 	}
 	defer book.Close()
 
-	for column := 1; column <= 25; column++ {
-		cell, err := excelize.CoordinatesToCellName(column, 2)
-		if err != nil {
-			t.Fatal(err)
+	wantSheets := []string{"لیست قیمت", "تنظیمات"}
+	if got := book.GetSheetList(); strings.Join(got, "|") != strings.Join(wantSheets, "|") {
+		t.Fatalf("template sheet order = %v, want %v", got, wantSheets)
+	}
+
+	const priceSheet = "لیست قیمت"
+	wantHeaders := []string{
+		"فی فروش",
+		"گرم",
+		"سایر",
+		"فی فروش2",
+		"نرخ ارزی",
+		"همه انبارها",
+		"کد کالا",
+		"نام کالا",
+	}
+	gotHeaders := make([]string, 0, len(wantHeaders))
+	for column := 2; column <= 9; column++ {
+		cell, cellErr := excelize.CoordinatesToCellName(column, 5)
+		if cellErr != nil {
+			t.Fatal(cellErr)
 		}
-		value, err := book.GetCellValue("Products", cell, excelize.Options{RawCellValue: true})
-		if err != nil {
-			t.Fatal(err)
+		value, valueErr := book.GetCellValue(priceSheet, cell, excelize.Options{RawCellValue: true})
+		if valueErr != nil {
+			t.Fatal(valueErr)
 		}
-		if value != "" {
-			t.Fatalf("template persisted product data at Products!%s: %q", cell, value)
+		gotHeaders = append(gotHeaders, value)
+	}
+	if strings.Join(gotHeaders, "|") != strings.Join(wantHeaders, "|") {
+		t.Fatalf("Products headers = %v, want %v", gotHeaders, wantHeaders)
+	}
+
+	tables, err := book.GetTables(priceSheet)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tablesByName := make(map[string]excelize.Table, len(tables))
+	for _, table := range tables {
+		tablesByName[table.Name] = table
+	}
+	for _, name := range []string{"Products", "Yuan_Price", "Shipping", "Profit"} {
+		if _, ok := tablesByName[name]; !ok {
+			t.Fatalf("template table %q is missing; tables = %+v", name, tables)
 		}
 	}
-	for _, cell := range []string{"B16", "B17", "B18"} {
-		value, err := book.GetCellValue("Settings", cell, excelize.Options{RawCellValue: true})
-		if err != nil {
-			t.Fatal(err)
+
+	productsRange := strings.ReplaceAll(tablesByName["Products"].Range, "$", "")
+	if !strings.HasPrefix(productsRange, "B5:I") {
+		t.Fatalf("Products range = %q, want B5:I...", productsRange)
+	}
+	rangeParts := strings.Split(productsRange, ":")
+	if len(rangeParts) != 2 {
+		t.Fatalf("Products range = %q, want a single rectangular range", productsRange)
+	}
+	_, lastRow, err := excelize.CellNameToCoordinates(rangeParts[1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	for row := 6; row <= lastRow; row++ {
+		for column := 2; column <= 9; column++ {
+			cell, cellErr := excelize.CoordinatesToCellName(column, row)
+			if cellErr != nil {
+				t.Fatal(cellErr)
+			}
+			value, valueErr := book.GetCellValue(priceSheet, cell, excelize.Options{RawCellValue: true})
+			if valueErr != nil {
+				t.Fatal(valueErr)
+			}
+			formula, formulaErr := book.GetCellFormula(priceSheet, cell)
+			if formulaErr != nil {
+				t.Fatal(formulaErr)
+			}
+			if value != "" || formula != "" {
+				t.Fatalf("template persisted product data at %s!%s: value=%q formula=%q", priceSheet, cell, value, formula)
+			}
 		}
-		if value != "" {
-			t.Fatalf("template persisted live configuration at Settings!%s: %q", cell, value)
+	}
+
+	for name, wantRange := range map[string]string{
+		"Yuan_Price": "M6:M7",
+		"Shipping":   "O6:O7",
+		"Profit":     "O9:O10",
+	} {
+		if got := strings.ReplaceAll(tablesByName[name].Range, "$", ""); got != wantRange {
+			t.Errorf("%s range = %q, want %q", name, got, wantRange)
 		}
+	}
+	for cell, want := range map[string]string{
+		"M7":  "29500",
+		"O7":  "120",
+		"O10": "0.3",
+	} {
+		got, valueErr := book.GetCellValue(priceSheet, cell, excelize.Options{RawCellValue: true})
+		if valueErr != nil {
+			t.Fatal(valueErr)
+		}
+		if got != want {
+			t.Errorf("%s!%s = %q, want %q", priceSheet, cell, got, want)
+		}
+	}
+
+	wooEndpoint, err := book.GetCellValue("تنظیمات", "B4", excelize.Options{RawCellValue: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(wooEndpoint, "https://digitalogic.ir/wp-json/wc/store/v1/products") {
+		t.Fatalf("public Woo Store endpoint = %q", wooEndpoint)
 	}
 }
 
-func TestDashboardVBASourceValidatesContractsBeforeMutation(t *testing.T) {
+func TestDynamicCalculatorVBASourceValidatesContractsBeforeMutation(t *testing.T) {
 	path := filepath.Join("..", "..", "docs", "examples", "vba", "PatrisDashboard.bas")
 	content, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	source := string(content)
-	deletePosition := strings.Index(source, "table.DataBodyRange.Delete")
-	for _, requiredBeforeDelete := range []string{
-		`CStr(JsonRuntime.JsonText(root, "schema")) <> "patris.product-sync"`,
-		"If Len(codeValue) = 0 Then",
-		"If headersSeen.Exists(codeValue) Then",
-	} {
-		position := strings.Index(source, requiredBeforeDelete)
-		if position < 0 || deletePosition < 0 || position > deletePosition {
-			t.Fatalf("VBA safeguard %q is missing or runs after table deletion", requiredBeforeDelete)
+	for offset, value := range content {
+		if value > 0x7f {
+			t.Fatalf("VBA source is not ASCII-safe: byte 0x%02x at offset %d", value, offset)
 		}
 	}
+	source := string(content)
+
+	replacePosition := strings.Index(source, "ReplaceProductTableData table, output, dataRows")
+	for _, requiredBeforeReplace := range []string{
+		`CStr(JsonRuntime.JsonText(root, "schema")) <> "patris.product-sync"`,
+		"If Len(codeValue) = 0 Then",
+		"If codesSeen.Exists(codeValue) Then",
+	} {
+		position := strings.Index(source, requiredBeforeReplace)
+		if position < 0 || replacePosition < 0 || position > replacePosition {
+			t.Fatalf("VBA safeguard %q is missing or runs after product replacement", requiredBeforeReplace)
+		}
+	}
+
 	for _, required := range []string{
+		`Set PriceSheet = ThisWorkbook.Worksheets(1)`,
+		`Set ConfigSheet = ThisWorkbook.Worksheets(2)`,
 		`Private Const DIGITALOGIC_HOST_PREFIX As String = "https://digitalogic.ir/"`,
-		"Digitalogic credentials may only be sent to https://digitalogic.ir/.",
-		"Digitalogic catalog response is missing its rows array.",
-		"Digitalogic returned duplicate exact Patris Code ",
-		`TextToDisplay:="WooID " & wooId`,
-		`If matchedPatris Then`,
-		`"WooCommerce only"`,
-		`=IF(COUNT(RC[-3])=1,RC[-3],IF(COUNT(RC[-8])=1,RC[-8],`,
-		`IF(COUNT(RC[-6])=1,RC[-6],"""")))`,
-		`Environ$(keyName)`,
-		`Environ$(secretName)`,
+		"wooBySku.CompareMode = vbBinaryCompare",
+		"ambiguousSkus.CompareMode = vbBinaryCompare",
+		"If wooBySku.Exists(codeValue) Then",
+		"For rowIndex = 1 To table.DataBodyRange.Rows.Count",
+		"RefreshWooCatalog = ApplyWooLinks(wooBySku)",
+		`nameValue = nameValue & " " & U("2014") &`,
+		`" WooID " & wooId`,
+		"products.Hyperlinks.Add",
+		"TextToDisplay:=nameValue",
+		"table.ListColumns(1).DataBodyRange.FormulaR1C1 = formulaText",
+		"RC[1]",
+		"RC[4]",
+		"INDEX(Shipping,1,1)",
+		"INDEX(Profit,1,1)",
+		"INDEX(Yuan_Price,1,1)",
 	} {
 		if !strings.Contains(source, required) {
 			t.Fatalf("VBA source is missing validation: %s", required)
+		}
+	}
+	for _, forbidden := range []string{
+		`Worksheets("`,
+		"vbTextCompare",
+		"table.ListRows.Add",
+		"WooCommerce only",
+		"Environ$(",
+		"Authorization",
+		"Bearer ",
+		"credential",
+		"client_secret",
+		"api_key",
+	} {
+		if strings.Contains(strings.ToLower(source), strings.ToLower(forbidden)) {
+			t.Fatalf("VBA source contains forbidden legacy or credential path: %s", forbidden)
 		}
 	}
 

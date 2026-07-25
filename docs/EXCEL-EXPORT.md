@@ -78,54 +78,55 @@ one response.
 ## Dynamic macro template
 
 `docs/examples/Patris-Digitalogic-Price-Calculator.xltm` is the canonical
-calculator template. It intentionally contains no product rows, cached REST
-responses, live exchange/freight/profit values, or credentials. Opening the
-`.xltm` creates a separate macro-enabled workbook instance, so a user's later
-Save As operation does not overwrite the empty template.
+calculator template. It preserves the original right-to-left Persian calculator
+instead of introducing a second dashboard schema. The visible `Products` table
+starts at `B5` and has exactly the original columns in their original order:
+
+```text
+فی فروش | گرم | سایر | فی فروش2 | نرخ ارزی | همه انبارها | کد کالا | نام کالا
+```
+
+The template stores no product rows or cached REST responses. Opening the
+`.xltm` creates a separate macro-enabled workbook instance, so a later **Save
+As** operation saves a working copy and does not overwrite the canonical empty
+template.
 
 Refresh-on-open and **Sync now** fetch:
 
 ```text
 http://127.0.0.1:18080/api/product-sync
-https://digitalogic.ir/wp-json/digitalogic/v1/google-sheets/catalog
+https://digitalogic.ir/wp-json/wc/store/v1/products
 ```
 
 The Patris source is the canonical `patris.product-sync` JSON envelope. The
-Digitalogic source is the same protected, paginated catalog projection consumed
-by the existing Google Apps Script. Excel and Google Sheets therefore stay
-aligned by reading the same living contract; neither workbook writes through
-the other.
+public WooCommerce Store API only supplies the public product ID and permalink.
+No workbook credential is required or stored. The join key is exact,
+case-sensitive Patris `product_code` to WooCommerce `sku`; product names are
+never identity fallbacks and WooCommerce-only rows are never added. A matching
+name cell ends with `WooID <id>` and links to the public product page.
 
-The merge key is exact, case-sensitive Patris `product_code` to Digitalogic
-`patris_code`. SKU and product name are never identity fallbacks. Matched rows
-display `WooID <id>` as hyperlink text targeting the projected product
-`permalink`. WooCommerce rows without a Patris record remain visible with their
-`woo:<id>` sync key and warning state.
+The three familiar calculator inputs remain in their original cells and table
+names:
 
-The Settings sheet displays three live summaries outside the table:
+- `Yuan_Price` / `بهای یوآن` at `M6:M7` (initial value `29500`);
+- `Shipping` / `نرخ حمل` at `O6:O7` (initial value `120` CNY/kg);
+- `Profit` / `درصد سود` at `O9:O10` (initial value `30%`).
 
-- `بهای یوآن` from `irt_per_cny`;
-- `نرخ حمل CNY` from CNY-denominated `shipping_price_per_kg`;
-- `درصد سود` from `markup_percent`.
+They are user configuration, not product data, so a refresh never clears or
+silently overwrites them with an incomplete remote assignment. Column `B`
+calculates the same original price:
 
-One consistent value is shown numerically; multiple live values display a
-`Mixed (n)` warning instead of silently choosing one. The product calculation
-uses each row's canonical inputs, not these display summaries. Missing, null, or
-invalid inputs stay blank and their source warning remains in **Sync Status**.
-The Excel formula uses `COUNT` and an exact currency guard, so it does not emit
-`#N/A`.
+```text
+((weight_grams * shipping_cny_per_kg / 1000) + foreign_price_cny)
+  * (1 + profit_fraction)
+  * irt_per_cny
+```
 
-The Digitalogic route remains protected. The template reads the names
-`DIGITALOGIC_CONSUMER_KEY` and `DIGITALOGIC_CONSUMER_SECRET` from Settings, then
-loads their values from the Excel process environment. It never stores those
-values in cells or VBA. The Authorization header is permitted only for
-`https://digitalogic.ir/`, and the WooCommerce key must have Read permission
-only.
-
-Refreshes preserve the optional manual price override, review status, and notes
-only while the exact, case-sensitive Code still exists; source-derived values
-always refresh. The displayed effective price uses a numeric manual override and
-otherwise falls back to the canonical final price.
+The guarded formula returns a blank when weight or foreign price is absent,
+instead of emitting `#N/A` or `#VALUE!`. The `تنظیمات` sheet remains available
+for the two source URLs, refresh status, last-success timestamp, auto-refresh
+choice, and read-only mirrors of the three calculator inputs. All visible labels
+and messages are Persian.
 
 Enable macros only after reviewing:
 

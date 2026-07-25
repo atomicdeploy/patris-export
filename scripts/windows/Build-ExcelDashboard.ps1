@@ -41,7 +41,7 @@ function ConvertTo-OleColor([string]$Hex) {
 function Set-SectionStyle($Range, [string]$Fill, [string]$FontColor = 'FFFFFF', [int]$FontSize = 11) {
     $Range.Interior.Color = ConvertTo-OleColor $Fill
     $Range.Font.Color = ConvertTo-OleColor $FontColor
-    $Range.Font.Name = 'Aptos'
+    $Range.Font.Name = 'Yekan Bakh FaNum'
     $Range.Font.Size = $FontSize
     $Range.Font.Bold = $true
     $Range.VerticalAlignment = -4108
@@ -49,14 +49,15 @@ function Set-SectionStyle($Range, [string]$Fill, [string]$FontColor = 'FFFFFF', 
 
 function Add-ActionButton($Sheet, [string]$Text, [string]$Macro, $Anchor, [double]$Width = 112, [double]$Height = 30) {
     $shape = $Sheet.Shapes.AddShape(5, $Anchor.Left, $Anchor.Top, $Width, $Height)
-    $shape.Fill.ForeColor.RGB = ConvertTo-OleColor '0F766E'
-    $shape.Line.ForeColor.RGB = ConvertTo-OleColor '0B5F59'
+    $shape.Fill.ForeColor.RGB = ConvertTo-OleColor '1C61E7'
+    $shape.Line.ForeColor.RGB = ConvertTo-OleColor '174FC0'
     $shape.TextFrame2.TextRange.Text = $Text
-    $shape.TextFrame2.TextRange.Font.Name = 'Aptos'
-    $shape.TextFrame2.TextRange.Font.Size = 10
+    $shape.TextFrame2.TextRange.Font.Name = 'Yekan Bakh FaNum'
+    $shape.TextFrame2.TextRange.Font.Size = 11
     $shape.TextFrame2.TextRange.Font.Bold = $true
     $shape.TextFrame2.TextRange.Font.Fill.ForeColor.RGB = ConvertTo-OleColor 'FFFFFF'
     $shape.TextFrame2.VerticalAnchor = 3
+    $shape.TextFrame2.TextRange.ParagraphFormat.Alignment = 2
     $shape.OnAction = $Macro
     return $shape
 }
@@ -205,289 +206,214 @@ try {
         $workbook.Worksheets.Item($workbook.Worksheets.Count).Delete()
     }
 
-    $instructions = $workbook.Worksheets.Item(1)
-    $instructions.Name = 'Instructions'
-    $settings = $workbook.Worksheets.Add()
-    $settings.Name = 'Settings'
-    $products = $workbook.Worksheets.Add()
-    $products.Name = 'Products'
-    $dashboard = $workbook.Worksheets.Add()
-    $dashboard.Name = 'Dashboard'
+    # The canonical workbook intentionally keeps the familiar Persian price-list
+    # layout. Product rows are empty in the template and are created only by Sync.
+    $priceList = $workbook.Worksheets.Item(1)
+    $priceList.Name = 'لیست قیمت'
+    $settings = $workbook.Worksheets.Add([Type]::Missing, $priceList)
+    $settings.Name = 'تنظیمات'
 
-    foreach ($sheet in @($dashboard, $products, $settings, $instructions)) {
-        $sheet.Cells.Font.Name = 'Aptos'
-        $sheet.Cells.Font.Size = 10
+    foreach ($sheet in @($priceList, $settings)) {
+        $sheet.Cells.Font.Name = 'Yekan Bakh FaNum'
+        $sheet.Cells.Font.Size = 11
+        $sheet.Cells.Font.Color = ConvertTo-OleColor '282828'
+        $sheet.Cells.ReadingOrder = -5004
         $sheet.Activate()
-        $excel.ActiveWindow.DisplayGridlines = $false
+        $excel.ActiveWindow.DisplayRightToLeft = $true
     }
 
-    # Products: an intentionally empty runtime table. Opening the .xltm creates
-    # a new workbook instance; the checked-in template never contains catalog
-    # rows or live configuration values.
+    # Main sheet: the original eight visible columns, in the original order.
+    $priceList.Activate()
+    $excel.ActiveWindow.DisplayGridlines = $true
+    $priceList.Range('B3').Value2 = 'لیست کالاها'
+    $priceList.Range('B3').Font.Size = 16
+    $priceList.Range('B3').Font.Bold = $true
+    $priceList.Range('B3').Font.Color = ConvertTo-OleColor '242424'
+
     $headers = @(
-        'Code', 'Name', 'Part Number', 'Category', 'Warehouse 1', 'Warehouse 2',
-        'Total Stock', 'Foreign Price (CNY)', 'Weight (g)', 'Shipping Method',
-        'Shipping Price/kg', 'Shipping Currency', 'Profit Margin (%)', 'IRT per CNY',
-        'Final Price (IRT)', 'WooCommerce', 'Woo Price (IRT)', 'Woo Stock', 'Sync Status',
-        'Manual Price Override (IRT)', 'Review Status', 'Notes', 'Effective Price (IRT)',
-        'Source', 'Search Index'
+        'فی فروش',
+        'گرم',
+        'سایر',
+        'فی فروش2',
+        'نرخ ارزی',
+        'همه انبارها',
+        'کد کالا',
+        'نام کالا'
     )
     for ($column = 0; $column -lt $headers.Count; $column++) {
-        $products.Cells.Item(1, $column + 1).Value2 = $headers[$column]
+        $priceList.Cells.Item(5, $column + 2).Value2 = $headers[$column]
     }
-    $productTable = $products.ListObjects.Add(1, $products.Range('A1:Y2'), $null, 1)
-    $productTable.Name = 'tblProducts'
+    $productTable = $priceList.ListObjects.Add(1, $priceList.Range('B5:I6'), $null, 1)
+    $productTable.Name = 'Products'
     $productTable.TableStyle = 'TableStyleMedium2'
     [void]$productTable.DataBodyRange.Delete()
-    $widths = @(
-        15, 31, 19, 23, 13, 13, 13, 20, 13, 18, 18, 16, 18, 15, 20,
-        16, 18, 14, 31, 24, 16, 28, 21, 19, 18
-    )
-    for ($column = 0; $column -lt $widths.Count; $column++) {
-        $products.Columns.Item($column + 1).ColumnWidth = $widths[$column]
+    $priceList.Range('B5:I5').Interior.Color = ConvertTo-OleColor '1C61E7'
+    $priceList.Range('B5:I5').Font.Color = ConvertTo-OleColor 'FFFFFF'
+    $priceList.Range('B5:I5').Font.Bold = $true
+    $priceList.Range('B5:I5').HorizontalAlignment = -4108
+    $priceList.Range('B5:I5').VerticalAlignment = -4108
+    $priceList.Range('B5:I5').Borders.Color = ConvertTo-OleColor '174FC0'
+    $priceList.Range('B5:I5').Borders.Weight = 2
+    $priceList.Rows.Item(5).RowHeight = 31
+
+    $priceList.Columns('B').ColumnWidth = 18
+    $priceList.Columns('C').ColumnWidth = 13.57
+    $priceList.Columns('D').ColumnWidth = 19.14
+    $priceList.Columns('E').ColumnWidth = 17.43
+    $priceList.Columns('F').ColumnWidth = 14.57
+    $priceList.Columns('G').ColumnWidth = 17.71
+    $priceList.Columns('H').ColumnWidth = 17.43
+    $priceList.Columns('I').ColumnWidth = 59.86
+    $priceList.Columns('J').ColumnWidth = 2.29
+    $priceList.Columns('K').ColumnWidth = 1.71
+    $priceList.Columns('L').ColumnWidth = 2.43
+    $priceList.Columns('M').ColumnWidth = 12.71
+    $priceList.Columns('N').ColumnWidth = 2.86
+    $priceList.Columns('O').ColumnWidth = 12.71
+    $priceList.Columns('B').NumberFormat = '#,##0'
+    $priceList.Columns('C').NumberFormat = '#,##0.##'
+    $priceList.Columns('E').NumberFormat = '#,##0'
+    $priceList.Columns('F').NumberFormat = '#,##0.####'
+    $priceList.Columns('G').NumberFormat = '#,##0.##'
+    $priceList.Columns('B').Font.Bold = $true
+    $priceList.Columns('B:H').HorizontalAlignment = -4152
+    $priceList.Columns('I').HorizontalAlignment = -4131
+
+    # Keep the three original configuration tables and their familiar cells.
+    $priceList.Range('M6').Value2 = 'بهای یوآن'
+    $priceList.Range('M7').Value2 = 29500
+    $yuanTable = $priceList.ListObjects.Add(1, $priceList.Range('M6:M7'), $null, 1)
+    $yuanTable.Name = 'Yuan_Price'
+    $yuanTable.TableStyle = 'TableStyleMedium2'
+
+    $priceList.Range('O6').Value2 = 'نرخ حمل'
+    $priceList.Range('O7').Value2 = 120
+    $shippingTable = $priceList.ListObjects.Add(1, $priceList.Range('O6:O7'), $null, 1)
+    $shippingTable.Name = 'Shipping'
+    $shippingTable.TableStyle = 'TableStyleMedium2'
+
+    $priceList.Range('O9').Value2 = 'درصد سود'
+    $priceList.Range('O10').Value2 = 0.3
+    $profitTable = $priceList.ListObjects.Add(1, $priceList.Range('O9:O10'), $null, 1)
+    $profitTable.Name = 'Profit'
+    $profitTable.TableStyle = 'TableStyleMedium2'
+
+    foreach ($configHeader in @($priceList.Range('M6'), $priceList.Range('O6'), $priceList.Range('O9'))) {
+        $configHeader.Interior.Color = ConvertTo-OleColor '1C61E7'
+        $configHeader.Font.Color = ConvertTo-OleColor 'FFFFFF'
+        $configHeader.Font.Bold = $true
+        $configHeader.HorizontalAlignment = -4108
     }
-    $products.Columns.Item(25).Hidden = $true
-    $products.Rows.Item(1).RowHeight = 30
-    $products.Range('AA1').Value2 = 'Yellow cells are manual. They survive refresh only when the exact, case-sensitive Code still exists.'
-    $products.Range('AA1').WrapText = $true
-    $products.Columns.Item(27).ColumnWidth = 30
-    $products.Range('AA1').Font.Color = ConvertTo-OleColor '64748B'
-    $products.Range('AA1').Interior.Color = ConvertTo-OleColor 'F1F5F9'
-    $products.Activate()
-    $excel.ActiveWindow.SplitRow = 1
+    foreach ($configValue in @($priceList.Range('M7'), $priceList.Range('O7'), $priceList.Range('O10'))) {
+        $configValue.Interior.Color = ConvertTo-OleColor 'DDE8FC'
+        $configValue.Font.Color = ConvertTo-OleColor '242424'
+        $configValue.Font.Bold = $true
+        $configValue.HorizontalAlignment = -4108
+        $configValue.Borders.Color = ConvertTo-OleColor 'B9CCF4'
+    }
+    $priceList.Range('M7').NumberFormat = '#,##0'
+    $priceList.Range('O7').NumberFormat = '#,##0.##'
+    $priceList.Range('O10').NumberFormat = '0%'
+
+    [void](Add-ActionButton $priceList 'همگام‌سازی اکنون' 'PatrisDashboard.RefreshAllData' $priceList.Range('M3') $priceList.Range('M3:O4').Width $priceList.Range('M3:O4').Height)
+    $priceList.Range('M12:O12').Merge()
+    $priceList.Range('M12').Value2 = 'وضعیت همگام‌سازی'
+    Set-SectionStyle $priceList.Range('M12:O12') 'F6F6F6' '242424' 10
+    $priceList.Range('M13:O14').Merge()
+    $priceList.Range('M13').Formula = "='تنظیمات'!B6"
+    $priceList.Range('M13:O14').WrapText = $true
+    $priceList.Range('M13:O14').HorizontalAlignment = -4108
+    $priceList.Range('M13:O14').VerticalAlignment = -4108
+    $priceList.Range('M13:O14').Interior.Color = ConvertTo-OleColor 'DDE8FC'
+    $priceList.Range('M13:O14').Borders.Color = ConvertTo-OleColor 'B9CCF4'
+    $priceList.Range('M16:O16').Merge()
+    $priceList.Range('M16').Value2 = 'آخرین به‌روزرسانی'
+    Set-SectionStyle $priceList.Range('M16:O16') 'F6F6F6' '242424' 10
+    $priceList.Range('M17:O17').Merge()
+    $priceList.Range('M17').Formula = "=IF('تنظیمات'!B7="""","""",'تنظیمات'!B7)"
+    $priceList.Range('M17:O17').NumberFormat = 'yyyy/mm/dd hh:mm'
+    $priceList.Range('M17:O17').HorizontalAlignment = -4108
+    $priceList.Range('M17:O17').Interior.Color = ConvertTo-OleColor 'DDE8FC'
+    $priceList.Range('M17:O17').Borders.Color = ConvertTo-OleColor 'B9CCF4'
+    $priceList.Range('B5:I1000').Borders.Color = ConvertTo-OleColor 'D9D9D9'
+
+    $excel.ActiveWindow.SplitRow = 5
     $excel.ActiveWindow.FreezePanes = $true
+    $excel.ActiveWindow.Zoom = 90
 
-    # Dashboard: compact KPI cards, search surface, chart, and logo slot.
-    $dashboard.Columns('A:M').ColumnWidth = 12
-    $dashboard.Rows('1:30').RowHeight = 22
-    $dashboard.Range('A1:I2').Merge()
-    $dashboard.Range('A1').Value2 = 'DIGITALOGIC  |  PRODUCT PRICING DASHBOARD'
-    Set-SectionStyle $dashboard.Range('A1:I2') '0F172A' 'FFFFFF' 20
-    $dashboard.Range('A1').HorizontalAlignment = -4131
-    $dashboard.Range('A3:I3').Merge()
-    $dashboard.Range('A3').Value2 = 'Patris Export + Digitalogic WordPress  |  فهرست زنده محصولات و قیمت‌گذاری'
-    $dashboard.Range('A3').Font.Color = ConvertTo-OleColor '475569'
-    $dashboard.Range('A3').Font.Size = 10
-
-    $logoSlot = $dashboard.Shapes.AddShape(5, $dashboard.Range('J1').Left, $dashboard.Range('J1').Top, $dashboard.Range('J1:M3').Width, $dashboard.Range('J1:M3').Height)
-    $logoSlot.Name = 'LogoPlaceholder'
-    $logoSlot.Fill.ForeColor.RGB = ConvertTo-OleColor 'F8FAFC'
-    $logoSlot.Line.ForeColor.RGB = ConvertTo-OleColor 'CBD5E1'
-    $logoSlot.Line.DashStyle = 4
-    $logoSlot.TextFrame2.TextRange.Text = 'YOUR LOGO'
-    $logoSlot.TextFrame2.TextRange.Font.Name = 'Aptos'
-    $logoSlot.TextFrame2.TextRange.Font.Size = 11
-    $logoSlot.TextFrame2.TextRange.Font.Bold = $true
-    $logoSlot.TextFrame2.TextRange.Font.Fill.ForeColor.RGB = ConvertTo-OleColor '64748B'
-    $logoSlot.TextFrame2.VerticalAnchor = 3
-
-    $cards = @(
-        @{ LabelRange = 'A5:C5'; ValueRange = 'A6:C7'; Label = 'TOTAL PRODUCTS'; Formula = '=COUNTA(tblProducts[Code])'; Format = '#,##0' },
-        @{ LabelRange = 'D5:F5'; ValueRange = 'D6:F7'; Label = 'TOTAL STOCK'; Formula = '=SUM(tblProducts[Total Stock])'; Format = '#,##0' },
-        @{ LabelRange = 'G5:I5'; ValueRange = 'G6:I7'; Label = 'AVG. EFFECTIVE PRICE'; Formula = '=IF(COUNT(tblProducts[Effective Price (IRT)])=0,"",AVERAGE(tblProducts[Effective Price (IRT)]))'; Format = '#,##0 "IRT"' },
-        @{ LabelRange = 'J5:M5'; ValueRange = 'J6:M7'; Label = 'LAST REFRESH'; Formula = '=IF(Settings!B5="","",Settings!B5)'; Format = 'yyyy-mm-dd hh:mm' }
-    )
-    foreach ($card in $cards) {
-        $labelRange = $dashboard.Range($card.LabelRange)
-        $valueRange = $dashboard.Range($card.ValueRange)
-        $labelRange.Merge()
-        $valueRange.Merge()
-        $labelRange.Value2 = $card.Label
-        $labelRange.Interior.Color = ConvertTo-OleColor 'E2E8F0'
-        $labelRange.Font.Color = ConvertTo-OleColor '475569'
-        $labelRange.Font.Size = 9
-        $labelRange.Font.Bold = $true
-        $labelRange.HorizontalAlignment = -4108
-        $valueRange.Interior.Color = ConvertTo-OleColor 'F8FAFC'
-        $valueRange.Borders.Color = ConvertTo-OleColor 'CBD5E1'
-        $valueRange.Borders.Weight = 2
-        $valueRange.HorizontalAlignment = -4108
-        $valueRange.VerticalAlignment = -4108
-        $valueRange.Formula = $card.Formula
-        $valueRange.NumberFormat = $card.Format
-        $valueRange.Font.Size = 16
-        $valueRange.Font.Bold = $true
-        $valueRange.Font.Color = ConvertTo-OleColor '0F172A'
-    }
-
-    $dashboard.Range('A9:M9').Merge()
-    $dashboard.Range('A9').Value2 = 'SEARCH AND ACTIONS'
-    Set-SectionStyle $dashboard.Range('A9:M9') 'E2E8F0' '334155' 10
-    $dashboard.Range('A10').Value2 = 'Search:'
-    $dashboard.Range('B10:F10').Merge()
-    $dashboard.Range('B10:F10').Interior.Color = ConvertTo-OleColor 'FFFFFF'
-    $dashboard.Range('B10:F10').Borders.Color = ConvertTo-OleColor '94A3B8'
-    $dashboard.Range('B11:F11').Merge()
-    $dashboard.Range('B11').Font.Color = ConvertTo-OleColor '64748B'
-    [void](Add-ActionButton $dashboard 'Search products' 'PatrisDashboard.SearchProducts' $dashboard.Range('G10') 92 28)
-    [void](Add-ActionButton $dashboard 'Reset' 'PatrisDashboard.ResetSearch' $dashboard.Range('I10') 54 28)
-    [void](Add-ActionButton $dashboard 'Sync now' 'PatrisDashboard.RefreshAllData' $dashboard.Range('J10') 74 28)
-    [void](Add-ActionButton $dashboard 'Choose logo' 'PatrisDashboard.ChooseCompanyLogo' $dashboard.Range('L10') 70 28)
-
-    $chartObject = $dashboard.ChartObjects().Add($dashboard.Range('A13').Left, $dashboard.Range('A13').Top, $dashboard.Range('A13:H29').Width, $dashboard.Range('A13:H29').Height)
-    $chartObject.Name = 'PriceChart'
-    $chartObject.Chart.ChartType = 57
-    $priceSeries = $chartObject.Chart.SeriesCollection().NewSeries()
-    $priceSeries.Name = "='Products'!`$W`$1"
-    $priceSeries.XValues = "='Products'!`$B`$2"
-    $priceSeries.Values = "='Products'!`$W`$2"
-    $chartObject.Chart.HasTitle = $true
-    $chartObject.Chart.ChartTitle.Text = 'Effective price snapshot (first 10 products)'
-    $chartObject.Chart.HasLegend = $false
-    $chartObject.Chart.Axes(2).TickLabels.NumberFormat = '#,##0'
-    $chartObject.Chart.ChartArea.Format.Line.ForeColor.RGB = ConvertTo-OleColor 'CBD5E1'
-    $emptyChartMessage = $dashboard.Shapes.AddShape(
-        1,
-        $chartObject.Left + 2,
-        $chartObject.Top + 2,
-        $chartObject.Width - 4,
-        $chartObject.Height - 4
-    )
-    $emptyChartMessage.Name = 'EmptyChartMessage'
-    $emptyChartMessage.Fill.ForeColor.RGB = ConvertTo-OleColor 'F8FAFC'
-    $emptyChartMessage.Line.ForeColor.RGB = ConvertTo-OleColor 'CBD5E1'
-    $emptyChartMessage.TextFrame2.TextRange.Text = "No catalog rows are stored in this template.`nUse Sync now to load live prices."
-    $emptyChartMessage.TextFrame2.TextRange.Font.Name = 'Aptos'
-    $emptyChartMessage.TextFrame2.TextRange.Font.Size = 12
-    $emptyChartMessage.TextFrame2.TextRange.Font.Bold = $true
-    $emptyChartMessage.TextFrame2.TextRange.Font.Fill.ForeColor.RGB = ConvertTo-OleColor '475569'
-    $emptyChartMessage.TextFrame2.TextRange.ParagraphFormat.Alignment = 2
-    $emptyChartMessage.TextFrame2.VerticalAnchor = 3
-
-    $dashboard.Range('I13:M13').Merge()
-    $dashboard.Range('I13').Value2 = 'HOW TO USE'
-    Set-SectionStyle $dashboard.Range('I13:M13') '0F766E' 'FFFFFF' 11
-    $dashboard.Range('I14:M25').Merge()
-    $dashboard.Range('I14').Value2 = "1. This is an empty macro template.`n`n2. Opening it creates a new workbook and syncs live rows.`n`n3. Sync now joins exact Patris Code only.`n`n4. WooID text links to the matching product page.`n`n5. Missing inputs stay blank with warnings—never #N/A."
-    $dashboard.Range('I14').WrapText = $true
-    $dashboard.Range('I14').VerticalAlignment = -4160
-    $dashboard.Range('I14').Interior.Color = ConvertTo-OleColor 'F0FDFA'
-    $dashboard.Range('I14').Font.Color = ConvertTo-OleColor '134E4A'
-    $dashboard.Range('I27:M29').Merge()
-    $dashboard.Range('I27').Value2 = 'No credentials or catalog rows are stored in the template. Woo read-only credentials come from Windows environment variables.'
-    $dashboard.Range('I27').WrapText = $true
-    $dashboard.Range('I27').Font.Color = ConvertTo-OleColor '9A3412'
-    $dashboard.Range('I27').Interior.Color = ConvertTo-OleColor 'FFF7ED'
-
-    # Settings and endpoint policy.
-    $settings.Columns('A').ColumnWidth = 25
+    # Settings stays because it is useful, but every visible label is Persian.
+    $settings.Activate()
+    $excel.ActiveWindow.DisplayGridlines = $false
+    $settings.Columns('A').ColumnWidth = 28
     $settings.Columns('B:F').ColumnWidth = 18
-    $settings.Range('A1:F1').Merge()
-    $settings.Range('A1').Value2 = 'CONNECTION AND CALCULATION SETTINGS'
-    Set-SectionStyle $settings.Range('A1:F1') '0F172A' 'FFFFFF' 16
-    $settings.Range('A2').Value2 = 'Patris product-sync endpoint'
-    $settings.Range('B2:F2').Merge()
-    $settings.Range('B2').Value2 = 'http://127.0.0.1:18080/api/product-sync'
-    $settings.Range('A3').Value2 = 'Digitalogic catalog endpoint'
+    $settings.Range('A1:F2').Merge()
+    $settings.Range('A1').Value2 = 'تنظیمات همگام‌سازی و محاسبه قیمت'
+    Set-SectionStyle $settings.Range('A1:F2') '1C61E7' 'FFFFFF' 17
+    $settings.Range('A1:F2').HorizontalAlignment = -4108
+
+    $settings.Range('A3').Value2 = 'نشانی سرویس پاتریس'
     $settings.Range('B3:F3').Merge()
-    $settings.Range('B3').Value2 = 'https://digitalogic.ir/wp-json/digitalogic/v1/google-sheets/catalog'
-    $settings.Range('A4').Value2 = 'Price output mode'
-    $settings.Range('B4').Value2 = 'formula'
-    $settings.Range('A5').Value2 = 'Last successful refresh'
-    $settings.Range('B5').ClearContents()
-    $settings.Range('B5').NumberFormat = 'yyyy-mm-dd hh:mm'
-    $settings.Range('A6').Value2 = 'HTTP timeout (seconds)'
-    $settings.Range('B6').Value2 = 10
-    $settings.Range('A7').Value2 = 'Workbook language'
-    $settings.Range('B7').Value2 = 'en'
-    $settings.Range('A8').Value2 = 'Digitalogic status'
-    $settings.Range('B8:F8').Merge()
-    $settings.Range('B8').Value2 = 'Not refreshed yet.'
-    $settings.Range('A9').Value2 = 'Read key environment name'
-    $settings.Range('B9:F9').Merge()
-    $settings.Range('B9').Value2 = 'DIGITALOGIC_CONSUMER_KEY'
-    $settings.Range('A10').Value2 = 'Read secret environment name'
+    $settings.Range('B3').Value2 = 'http://127.0.0.1:18080/api/product-sync'
+    $settings.Range('A4').Value2 = 'نشانی عمومی ووکامرس'
+    $settings.Range('B4:F4').Merge()
+    $settings.Range('B4').Value2 = 'https://digitalogic.ir/wp-json/wc/store/v1/products'
+    $settings.Range('A5').Value2 = 'همگام‌سازی خودکار هنگام بازشدن'
+    $settings.Range('B5').Value2 = 'بله'
+    $settings.Range('B5').Validation.Delete()
+    $settings.Range('B5').Validation.Add(3, 1, 1, 'بله,خیر')
+    $settings.Range('A6').Value2 = 'وضعیت'
+    $settings.Range('B6:F6').Merge()
+    $settings.Range('B6').Value2 = 'هنوز همگام‌سازی نشده است.'
+    $settings.Range('A7').Value2 = 'آخرین به‌روزرسانی موفق'
+    $settings.Range('B7:F7').Merge()
+    $settings.Range('B7:F7').ClearContents()
+    $settings.Range('B7:F7').NumberFormat = 'yyyy/mm/dd hh:mm'
+    $settings.Range('A3:A7').Font.Bold = $true
+    $settings.Range('A3:F7').Borders.Color = ConvertTo-OleColor 'D9D9D9'
+    $settings.Range('B3:F7').Interior.Color = ConvertTo-OleColor 'F6F6F6'
+    $settings.Range('B3:F4').ReadingOrder = -5003
+
+    $settings.Range('A9:F9').Merge()
+    $settings.Range('A9').Value2 = 'مقادیر محاسبه قیمت'
+    Set-SectionStyle $settings.Range('A9:F9') 'DDE8FC' '242424' 12
+    $settings.Range('A10').Value2 = 'بهای یوآن'
     $settings.Range('B10:F10').Merge()
-    $settings.Range('B10').Value2 = 'DIGITALOGIC_CONSUMER_SECRET'
-    $settings.Range('A11').Value2 = 'Sync automatically on open'
-    $settings.Range('B11').Value2 = 'yes'
-    $settings.Range('B11').Validation.Delete()
-    $settings.Range('B11').Validation.Add(3, 1, 1, 'yes,no')
-    $settings.Range('A2:A11').Font.Bold = $true
-    $settings.Range('A2:F11').Borders.Color = ConvertTo-OleColor 'CBD5E1'
-    $settings.Range('B2:F11').Interior.Color = ConvertTo-OleColor 'F8FAFC'
-    $settings.Range('B4').Validation.Delete()
-    $settings.Range('B4').Validation.Add(3, 1, 1, 'formula,precalculated')
-    $settings.Range('A13:F13').Merge()
-    $settings.Range('A13').Value2 = 'LIVE CONFIGURATION — refreshed from the current product contract'
-    Set-SectionStyle $settings.Range('A13:F13') '0F766E' 'FFFFFF' 11
-    $settings.Range('A16').Value2 = 'بهای یوآن (IRT/CNY)'
-    $settings.Range('A17').Value2 = 'نرخ حمل CNY'
-    $settings.Range('A18').Value2 = 'درصد سود'
-    $settings.Range('B16:F16').Merge()
-    $settings.Range('B17:F17').Merge()
-    $settings.Range('B18:F18').Merge()
-    $settings.Range('A16:A18').Font.Bold = $true
-    $settings.Range('A16:F18').Borders.Color = ConvertTo-OleColor 'CBD5E1'
-    $settings.Range('B16:F18').Interior.Color = ConvertTo-OleColor 'F0FDFA'
-    $settings.Range('A16:F18').ReadingOrder = -5004
-    $settings.Range('A20:F25').Merge()
-    $settings.Range('A20').Value2 = "Security note`nThe template contains no product rows and no credential values. It reads the two credential environment-variable names above, then sends Basic authentication only to https://digitalogic.ir/. Keep the WooCommerce key Read-only."
-    $settings.Range('A20').WrapText = $true
-    $settings.Range('A20').VerticalAlignment = -4160
-    $settings.Range('A20').Interior.Color = ConvertTo-OleColor 'FEF2F2'
-    $settings.Range('A20').Font.Color = ConvertTo-OleColor '991B1B'
+    $settings.Range('B10').Formula = "='لیست قیمت'!M7"
+    $settings.Range('A11').Value2 = 'نرخ حمل CNY'
+    $settings.Range('B11:F11').Merge()
+    $settings.Range('B11').Formula = "='لیست قیمت'!O7"
+    $settings.Range('A12').Value2 = 'درصد سود'
+    $settings.Range('B12:F12').Merge()
+    $settings.Range('B12').Formula = "='لیست قیمت'!O10"
+    $settings.Range('B10:F11').NumberFormat = '#,##0'
+    $settings.Range('B12:F12').NumberFormat = '0%'
+    $settings.Range('A10:A12').Font.Bold = $true
+    $settings.Range('A10:F12').Borders.Color = ConvertTo-OleColor 'B9CCF4'
+    $settings.Range('B10:F12').Interior.Color = ConvertTo-OleColor 'F6F6F6'
+    $settings.Range('B10:F12').ReadingOrder = -5003
+    $settings.Range('B10:F12').HorizontalAlignment = -4108
 
-    # Instructions and audit sheet.
-    $instructions.Columns('A').ColumnWidth = 4
-    $instructions.Columns('B').ColumnWidth = 24
-    $instructions.Columns('C:H').ColumnWidth = 16
-    $instructions.Range('A1:H2').Merge()
-    $instructions.Range('A1').Value2 = 'PATRIS / DIGITALOGIC EXCEL DASHBOARD — QUICK START'
-    Set-SectionStyle $instructions.Range('A1:H2') '0F172A' 'FFFFFF' 17
-    $instructionRows = @(
-        @('1', 'Open the template', 'Double-click the .xltm. Excel creates a new macro-enabled workbook instance; the canonical template remains empty.'),
-        @('2', 'Enable reviewed macros', 'Trust only this reviewed file. Refresh-on-open calls the local Patris service and the protected Digitalogic catalog.'),
-        @('3', 'Keep credentials outside', 'Set the Read-only WooCommerce key and secret in the two Windows environment variables named on Settings.'),
-        @('4', 'Sync live data', 'Use Sync now. Patris and WooCommerce rows join only on exact, case-sensitive Patris Code—never SKU or name.'),
-        @('5', 'Review warnings', 'Missing or invalid source inputs stay blank and appear in Sync Status; formulas never emit #N/A.'),
-        @('6', 'Open Woo pages', 'When a matching WooCommerce page exists, the WooCommerce cell displays WooID <id> as a clickable link.'),
-        @('7', 'Save a working copy', 'Use Save As for the refreshed workbook. Do not overwrite the canonical .xltm template.'),
-        @('8', 'Manual fields', 'Yellow override/status/notes cells survive a refresh only while the exact Code remains present.')
-    )
-    $instructionRow = 4
-    foreach ($item in $instructionRows) {
-        $instructions.Cells.Item($instructionRow, 1).Value2 = $item[0]
-        $instructions.Cells.Item($instructionRow, 2).Value2 = $item[1]
-        $instructions.Range("C${instructionRow}:H${instructionRow}").Merge()
-        $instructions.Cells.Item($instructionRow, 3).Value2 = $item[2]
-        $instructions.Range("A${instructionRow}:H${instructionRow}").Borders.Color = ConvertTo-OleColor 'E2E8F0'
-        $instructions.Cells.Item($instructionRow, 1).Interior.Color = ConvertTo-OleColor '0F766E'
-        $instructions.Cells.Item($instructionRow, 1).Font.Color = ConvertTo-OleColor 'FFFFFF'
-        $instructions.Cells.Item($instructionRow, 1).Font.Bold = $true
-        $instructions.Cells.Item($instructionRow, 2).Font.Bold = $true
-        $instructions.Range("C${instructionRow}:H${instructionRow}").WrapText = $true
-        $instructions.Rows.Item($instructionRow).RowHeight = 50
-        $instructionRow++
-    }
-    $instructions.Range('A14:H16').Merge()
-    $instructions.Range('A14').Value2 = 'راهنما: ابتدا کد ماکروها و نشانی سرویس‌ها را بررسی کنید؛ سپس فایل را فقط از مسیر مورد اعتماد اجرا کنید.'
-    $instructions.Range('A14').HorizontalAlignment = -4152
-    $instructions.Range('A14').ReadingOrder = -5004
-    $instructions.Range('A14').WrapText = $true
-    $instructions.Range('A14').Interior.Color = ConvertTo-OleColor 'F0FDFA'
-    $instructions.Range('A14').Font.Name = 'Segoe UI'
+    $settings.Range('A14:F17').Merge()
+    $settings.Range('A14').Value2 = "این سه مقدار همان تنظیمات فایل قبلی هستند و از صفحه «لیست قیمت» ویرایش می‌شوند.`nردیف‌های کالا در قالب ذخیره نمی‌شوند؛ دکمه همگام‌سازی آن‌ها را از پاتریس می‌گیرد و لینک ووکامرس را با شناسه WooID اضافه می‌کند.`nاگر وزن یا نرخ ارزی موجود نباشد، قیمت نهایی خالی می‌ماند و هیچ خطای #N/A نمایش داده نمی‌شود."
+    $settings.Range('A14:F17').WrapText = $true
+    $settings.Range('A14:F17').VerticalAlignment = -4160
+    $settings.Range('A14:F17').Interior.Color = ConvertTo-OleColor 'F6F6F6'
+    $settings.Range('A14:F17').Font.Color = ConvertTo-OleColor '282828'
+    $settings.Range('A14:F17').Borders.Color = ConvertTo-OleColor 'D9D9D9'
+    $settings.Rows('14:17').RowHeight = 28
 
-    # Print areas are also the visual-QA surfaces emitted as PDFs below.
-    $dashboard.PageSetup.PrintArea = '$A$1:$M$30'
-    $dashboard.PageSetup.Orientation = 2
-    $dashboard.PageSetup.Zoom = $false
-    $dashboard.PageSetup.FitToPagesWide = 1
-    $dashboard.PageSetup.FitToPagesTall = 1
-    $products.PageSetup.PrintArea = '$A$1:$Y$2'
-    $products.PageSetup.Orientation = 2
-    $products.PageSetup.Zoom = $false
-    $products.PageSetup.FitToPagesWide = 1
-    $products.PageSetup.FitToPagesTall = 1
-    $settings.PageSetup.PrintArea = '$A$1:$F$25'
+    $priceList.PageSetup.PrintArea = '$B$3:$O$30'
+    $priceList.PageSetup.Orientation = 2
+    $priceList.PageSetup.Zoom = $false
+    $priceList.PageSetup.FitToPagesWide = 1
+    $priceList.PageSetup.FitToPagesTall = 1
+    $settings.PageSetup.PrintArea = '$A$1:$F$17'
     $settings.PageSetup.Zoom = $false
     $settings.PageSetup.FitToPagesWide = 1
     $settings.PageSetup.FitToPagesTall = 1
-    $instructions.PageSetup.PrintArea = '$A$1:$H$16'
-    $instructions.PageSetup.Zoom = $false
-    $instructions.PageSetup.FitToPagesWide = 1
-    $instructions.PageSetup.FitToPagesTall = 1
-    $dashboard.Activate()
+    $priceList.Activate()
+    $excel.ActiveWindow.DisplayGridlines = $true
+    $excel.ActiveWindow.DisplayRightToLeft = $true
     $excel.ActiveWindow.Zoom = 90
 
     # Import the auditable checked-in parser/runtime, dashboard module, and open event.
@@ -498,9 +424,10 @@ try {
     $thisWorkbookCode = Get-Content -Raw -Encoding UTF8 $thisWorkbookPath
     $thisWorkbookComponent.CodeModule.AddFromString($thisWorkbookCode)
 
-    # Run a non-networking macro to force VBA parsing and update formulas/chart.
+    # Run a non-networking macro to force VBA parsing and validate the expected
+    # sheet, table, and configuration contracts before packaging.
     try {
-        $excel.Run("'$($workbook.Name)'!PatrisDashboard.RefreshDashboard")
+        $excel.Run("'$($workbook.Name)'!PatrisDashboard.ValidateWorkbook")
     }
     catch {
         # Preserve the failed package at the requested diagnostic path so the
@@ -514,10 +441,8 @@ try {
     $workbook.SaveAs($OutputPath, 53)
     $workbook.Save()
 
-    $dashboard.ExportAsFixedFormat(0, (Join-Path $PreviewDirectory 'dashboard.pdf'))
-    $products.ExportAsFixedFormat(0, (Join-Path $PreviewDirectory 'products.pdf'))
+    $priceList.ExportAsFixedFormat(0, (Join-Path $PreviewDirectory 'price-list.pdf'))
     $settings.ExportAsFixedFormat(0, (Join-Path $PreviewDirectory 'settings.pdf'))
-    $instructions.ExportAsFixedFormat(0, (Join-Path $PreviewDirectory 'instructions.pdf'))
 
     $excelVersion = [string]$excel.Version
     $vbaComponents = [int]$workbook.VBProject.VBComponents.Count
