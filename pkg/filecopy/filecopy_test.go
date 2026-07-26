@@ -410,6 +410,68 @@ func TestDownloadToTempContextCancelsWithoutPartialFile(t *testing.T) {
 	}
 }
 
+func TestPublishTempFileFallsBackWhenStableSnapshotIsLocked(t *testing.T) {
+	tempRoot := t.TempDir()
+	SetTempDir(tempRoot)
+	defer SetTempDir("")
+
+	source := filepath.Join(t.TempDir(), "locked-source.db")
+	if err := os.WriteFile(source, []byte("last-known-good"), 0o600); err != nil {
+		t.Fatalf("write source: %v", err)
+	}
+	stable, err := CopyToTemp(source)
+	if err != nil {
+		t.Fatalf("create stable temp copy: %v", err)
+	}
+	defer CleanupTemp(stable.TempPath)
+
+	if err := os.WriteFile(source, []byte("fresh-copy"), 0o600); err != nil {
+		t.Fatalf("update source: %v", err)
+	}
+	lockedStablePath := stable.TempPath
+	lockedErr := errors.New("Access is denied")
+	originalReplace := replaceFileAtomicFunc
+	originalRecoverable := isRecoverablePublishConflictFunc
+	replaceFileAtomicFunc = func(source, destination string) error {
+		if destination == lockedStablePath {
+			return lockedErr
+		}
+		return originalReplace(source, destination)
+	}
+	isRecoverablePublishConflictFunc = func(err error) bool {
+		return errors.Is(err, lockedErr)
+	}
+	defer func() {
+		replaceFileAtomicFunc = originalReplace
+		isRecoverablePublishConflictFunc = originalRecoverable
+	}()
+
+	fresh, err := CopyToTemp(source)
+	if err != nil {
+		t.Fatalf("copy with locked stable snapshot: %v", err)
+	}
+	defer CleanupTemp(fresh.TempPath)
+
+	if fresh.TempPath == lockedStablePath {
+		t.Fatalf("expected fallback temp path when stable snapshot is locked")
+	}
+	if got, err := os.ReadFile(lockedStablePath); err != nil || string(got) != "last-known-good" {
+		t.Fatalf("locked stable snapshot changed or became unreadable: %q err=%v", got, err)
+	}
+	if got, err := os.ReadFile(fresh.TempPath); err != nil || string(got) != "fresh-copy" {
+		t.Fatalf("fallback snapshot content = %q err=%v", got, err)
+	}
+	entries, err := os.ReadDir(tempRoot)
+	if err != nil {
+		t.Fatalf("read temp root: %v", err)
+	}
+	for _, entry := range entries {
+		if strings.Contains(entry.Name(), ".partial-") {
+			t.Fatalf("staging file was not removed after fallback publish: %s", entry.Name())
+		}
+	}
+}
+
 func TestCopyToTempContextRejectsPreCancelledRequest(t *testing.T) {
 	source := filepath.Join(t.TempDir(), "source.db")
 	if err := os.WriteFile(source, []byte("source"), 0o600); err != nil {

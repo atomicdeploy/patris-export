@@ -2273,7 +2273,7 @@ function showInAppToast(title, message, options = {}) {
             message: displayMessage,
             messageKey: options.messageKey,
             messageValues: options.messageValues,
-            level: options.error || options.nativeError ? 'warning' : (options.level || 'info'),
+            level: options.error ? 'error' : (options.nativeError ? 'warning' : (options.level || 'info')),
             type: options.eventType || options.source || 'toast',
             source: options.source || 'web-ui',
             timestamp: options.timestamp,
@@ -2292,6 +2292,8 @@ function showInAppToast(title, message, options = {}) {
     const toast = document.createElement('div');
     toast.className = 'app-toast';
     if (options.error) {
+        toast.classList.add('error');
+    } else if (options.nativeError) {
         toast.classList.add('warning');
     }
 
@@ -3350,12 +3352,32 @@ function restoreTableHeaderFocus(thead, target) {
 }
 
 // Render table header with filters
+function visibleGridFields() {
+    const visibleFields = state.fields.filter(field => !state.hiddenColumns.has(field));
+    const warehouseFields = visibleFields.filter(field => isWarehouseColumnField(field));
+    if (warehouseFields.length <= 1) return visibleFields;
+
+    const orderedFields = [];
+    let warehousesInserted = false;
+    visibleFields.forEach(field => {
+        if (isWarehouseColumnField(field)) {
+            if (!warehousesInserted) {
+                orderedFields.push(...warehouseFields);
+                warehousesInserted = true;
+            }
+            return;
+        }
+        orderedFields.push(field);
+    });
+    return orderedFields;
+}
+
 function renderTableHeader() {
     const thead = document.getElementById('tableHead');
     const focusTarget = captureTableHeaderFocus(thead);
     thead.innerHTML = '';
 
-    const visibleFields = state.fields.filter(field => !state.hiddenColumns.has(field));
+    const visibleFields = visibleGridFields();
     renderColumnLayout(visibleFields);
     const visibleWarehouseFields = visibleFields.filter(field => isWarehouseColumnField(field));
     const hasWarehouseFields = visibleWarehouseFields.length > 0;
@@ -3505,7 +3527,7 @@ function columnWidth(field) {
     return clampColumnWidth(state.settings.columnWidths?.[canonicalColumnKey(field)], defaultColumnWidth(field));
 }
 
-function updateTablePixelWidth(visibleFields = state.fields.filter(field => !state.hiddenColumns.has(field))) {
+function updateTablePixelWidth(visibleFields = visibleGridFields()) {
     const table = document.getElementById('dataTable');
     if (!table) return;
     const width = SELECTION_COLUMN_WIDTH + ACTIONS_COLUMN_WIDTH
@@ -4458,7 +4480,7 @@ function renderTable(changedIndices = new Set(), options = {}) {
     emptyState.style.display = 'none';
     const recordsToShow = tableRecordsToShow();
     const allSelectionKeys = recordsToShow.map(recordSelectionKey);
-    const visibleFields = state.fields.filter(field => !state.hiddenColumns.has(field));
+    const visibleFields = visibleGridFields();
     const frozenField = state.settings.freezeFirstColumn ? visibleFields[0] : '';
     state.tableRecordKeys = allSelectionKeys;
     state.rovingRowKey = resolvedRovingKey(options.focusKey || focusedRowKey || state.rovingRowKey, allSelectionKeys);
@@ -4540,12 +4562,7 @@ function renderTable(changedIndices = new Set(), options = {}) {
         row.appendChild(createRowSelectionCell(record, selectionKey, row));
 
         // Add data cells
-        state.fields.forEach(field => {
-            // Skip hidden columns
-            if (state.hiddenColumns.has(field)) {
-                return;
-            }
-
+        visibleFields.forEach(field => {
             const td = document.createElement('td');
 
             const value = getFieldValue(record, field);
@@ -5958,6 +5975,40 @@ async function fetchFileInfo() {
     }
 }
 
+function clearTableErrorState() {
+    const emptyState = document.getElementById('emptyState');
+    if (!emptyState) return;
+    emptyState.classList.remove('error-state');
+    emptyState.removeAttribute('role');
+    emptyState.removeAttribute('aria-live');
+    emptyState.innerHTML = `
+        <div class="empty-icon">⌕</div>
+        <div>${t('noRecords')}</div>
+    `;
+}
+
+function showTableErrorState(title, detail, options = {}) {
+    const emptyState = document.getElementById('emptyState');
+    const tbody = document.getElementById('tableBody');
+    const table = document.getElementById('dataTable');
+    if (!emptyState) return;
+    if (tbody) tbody.innerHTML = '';
+    table?.classList.remove('virtualized-grid');
+    table?.setAttribute('aria-busy', 'false');
+    emptyState.classList.add('error-state');
+    emptyState.setAttribute('role', 'alert');
+    emptyState.setAttribute('aria-live', 'assertive');
+    emptyState.innerHTML = `
+        <div class="empty-icon error-icon" aria-hidden="true">❌</div>
+        <div class="error-copy">
+            <strong>${escapeHtml(title)}</strong>
+            <span>${escapeHtml(detail || '')}</span>
+            ${options.action ? `<em>${escapeHtml(options.action)}</em>` : ''}
+        </div>
+    `;
+    emptyState.style.display = 'flex';
+}
+
 // Fetch initial data
 async function fetchInitialData() {
     try {
@@ -5987,6 +6038,7 @@ async function fetchInitialData() {
         state.fields = [];
         state.fieldTypes = {};
         state.fieldStats = {};
+        clearTableErrorState();
         
         if (state.records.length > 0) {
             extractFields();
@@ -6000,8 +6052,19 @@ async function fetchInitialData() {
         updateCounts();
         setLoadingState(false);
     } catch (error) {
-        console.error('Failed to fetch initial data:', error);
+        console.error('❌ Failed to fetch initial data:', error);
         setLoadingState(false);
+        const detail = error instanceof Error ? error.message : String(error);
+        showTableErrorState(t('recordsLoadFailed'), detail, {
+            action: t('recordsLoadFailedAction')
+        });
+        showInAppToast(t('recordsLoadFailed'), detail, {
+            titleKey: 'recordsLoadFailed',
+            message: detail,
+            error: true,
+            source: 'records_load',
+            eventType: 'records_load_failed'
+        });
     }
 }
 

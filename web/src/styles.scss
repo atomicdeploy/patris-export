@@ -1123,10 +1123,22 @@ body.is-loading .data-table {
     justify-content: center;
     height: 100%;
     gap: 1rem;
+    padding: 2rem;
+    text-align: center;
     color: $text-light-secondary;
     
     .dark-mode & {
         color: $text-dark-secondary;
+    }
+
+    &.error-state {
+        color: $danger-color;
+        background: linear-gradient(180deg, rgba($danger-color, 0.08), rgba($danger-color, 0.03));
+
+        .dark-mode & {
+            color: #fca5a5;
+            background: linear-gradient(180deg, rgba($danger-color, 0.14), rgba($danger-color, 0.05));
+        }
     }
 }
 
@@ -1145,6 +1157,55 @@ body.is-loading .data-table {
         stroke-width: 1.4;
         stroke-linecap: round;
         stroke-linejoin: round;
+    }
+
+    &.error-icon {
+        width: 4.5rem;
+        height: 4.5rem;
+        font-size: 3rem;
+        font-weight: 900;
+        line-height: 1;
+        color: $danger-color;
+        border: 1px solid rgba($danger-color, 0.28);
+        border-radius: 8px;
+        background: rgba($danger-color, 0.1);
+        box-shadow: 0 16px 45px rgba($danger-color, 0.14);
+    }
+}
+
+.error-copy {
+    display: grid;
+    gap: 0.45rem;
+    max-width: min(720px, calc(100vw - 3rem));
+
+    strong {
+        color: $danger-color;
+        font-size: 1.2rem;
+        font-weight: 850;
+
+        .dark-mode & {
+            color: #fecaca;
+        }
+    }
+
+    p {
+        margin: 0;
+        color: $text-light;
+        font-family: var(--font-mono);
+        font-weight: 700;
+        overflow-wrap: anywhere;
+
+        .dark-mode & {
+            color: $text-dark;
+        }
+    }
+
+    small {
+        color: $text-light-secondary;
+
+        .dark-mode & {
+            color: $text-dark-secondary;
+        }
     }
 }
 
@@ -4213,6 +4274,33 @@ textarea:focus-visible {
 
     &.warning {
         border-color: rgba(245, 158, 11, 0.55);
+    }
+
+    &.error {
+        border-color: rgba($danger-color, 0.58);
+        background: linear-gradient(180deg, rgba($danger-color, 0.08), $bg-light 42%);
+
+        .app-toast-title {
+            color: $danger-color;
+            font-weight: 850;
+        }
+
+        .app-toast-message {
+            color: $text-light;
+            font-weight: 700;
+        }
+
+        .dark-mode & {
+            background: linear-gradient(180deg, rgba($danger-color, 0.14), $bg-dark 44%);
+
+            .app-toast-title {
+                color: #fecaca;
+            }
+
+            .app-toast-message {
+                color: $text-dark;
+            }
+        }
     }
 
     &.closing {
