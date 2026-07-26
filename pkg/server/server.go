@@ -74,6 +74,9 @@ type Server struct {
 	catalogProviderKey   string
 	catalogProviderMu    sync.Mutex
 	sqlOperations        *sqlOperationsState
+	backgroundCtx        context.Context
+	backgroundCancel     context.CancelFunc
+	backgroundWG         sync.WaitGroup
 }
 
 type Options struct {
@@ -144,6 +147,7 @@ func NewServerWithOptions(dbPath string, charMap converter.CharMapping, options 
 		return nil, fmt.Errorf("failed to create data source: %w", err)
 	}
 
+	backgroundCtx, backgroundCancel := context.WithCancel(context.Background())
 	s := &Server{
 		router:           mux.NewRouter(),
 		dbPath:           dbPath,
@@ -152,6 +156,8 @@ func NewServerWithOptions(dbPath string, charMap converter.CharMapping, options 
 		wsClients:        make(map[*websocket.Conn]*sync.Mutex),
 		eventSubscribers: make(map[chan map[string]interface{}]struct{}),
 		sqlOperations:    newSQLOperationsState(),
+		backgroundCtx:    backgroundCtx,
+		backgroundCancel: backgroundCancel,
 		useTempFile:      copyBeforeRead,
 		config:           options.Config,
 		version:          options.Version,
@@ -191,6 +197,8 @@ func NewServerWithOptions(dbPath string, charMap converter.CharMapping, options 
 			s.broadcastConfig(cfg)
 		})
 		if err != nil {
+			backgroundCancel()
+			_ = ds.Close()
 			return nil, fmt.Errorf("failed to watch config: %w", err)
 		}
 		s.configWatcher = w
@@ -1504,9 +1512,12 @@ func (s *Server) broadcastUpdate() {
 	go s.broadcastProcessInfo()
 }
 
-func (s *Server) dispatchInitialUpdate() {
-	result, err := s.RecordResult()
+func (s *Server) dispatchInitialUpdate(ctx context.Context) {
+	result, err := s.RecordResultContext(ctx)
 	if err != nil {
+		if errors.Is(err, context.Canceled) {
+			return
+		}
 		log.Printf("Failed to prepare initial send update payload: %v", err)
 		return
 	}
@@ -1520,6 +1531,14 @@ func (s *Server) dispatchInitialUpdate() {
 		Contract:         result.SyncEnvelope(nil),
 		SnapshotContract: result.SyncEnvelope(nil),
 	})
+}
+
+func (s *Server) dispatchInitialUpdateAsync() {
+	s.backgroundWG.Add(1)
+	go func() {
+		defer s.backgroundWG.Done()
+		s.dispatchInitialUpdate(s.backgroundCtx)
+	}()
 }
 
 func (s *Server) dispatchUpdateEvent(event updateout.Event) {
@@ -2318,7 +2337,7 @@ func (s *Server) StartWatching(debounceDuration time.Duration) error {
 			return fmt.Errorf("failed to poll URL: %w", err)
 		}
 		log.Printf("👀 Polling remote source: %s (interval: %v)", dbPath, pollInterval)
-		s.dispatchInitialUpdate()
+		s.dispatchInitialUpdateAsync()
 		return nil
 	}
 
@@ -2338,13 +2357,17 @@ func (s *Server) StartWatching(debounceDuration time.Duration) error {
 	}
 	log.Printf("👀 Watching %s file: %s", fileType, filepath.Base(dbPath))
 
-	s.dispatchInitialUpdate()
+	s.dispatchInitialUpdateAsync()
 	return nil
 }
 
 // Close cleans up server resources
 func (s *Server) Close() error {
 	var firstErr error
+	if s.backgroundCancel != nil {
+		s.backgroundCancel()
+	}
+	s.backgroundWG.Wait()
 	if s.configWatcher != nil {
 		if err := s.configWatcher.Close(); err != nil && firstErr == nil {
 			firstErr = err
