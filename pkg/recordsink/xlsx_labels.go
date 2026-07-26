@@ -15,7 +15,7 @@ type xlsxLocalizedLabel struct {
 // schema. Machine keys remain in the JSON/CSV/API contract; Excel receives
 // readable headings without changing or duplicating the transformed values.
 var xlsxColumnLabels = map[string]xlsxLocalizedLabel{
-	"product_code":                   {English: "Code", Persian: "کد"},
+	"product_code":                   {English: "Product Code", Persian: "کد کالا"},
 	"name":                           {English: "Name", Persian: "نام"},
 	"category_code":                  {English: "Category Code", Persian: "کد دسته‌بندی"},
 	"part_number":                    {English: "Part Number", Persian: "پارت نامبر"},
@@ -43,6 +43,15 @@ var xlsxColumnLabels = map[string]xlsxLocalizedLabel{
 	"source_updated_at":              {English: "Source Updated", Persian: "آخرین به‌روزرسانی منبع"},
 	"warnings":                       {English: "Warnings", Persian: "هشدارها"},
 	"record_hash":                    {English: "Record Hash", Persian: "هش رکورد"},
+}
+
+var defaultXLSXProductCodeLabels = map[string]struct{}{
+	"code":         {},
+	"product code": {},
+	"patris code":  {},
+	"کد":           {},
+	"کد کالا":      {},
+	"کد پاتریس":    {},
 }
 
 func xlsxHeaderLabel(field, warehouseID, language string, configured map[string]string) string {
@@ -91,6 +100,9 @@ func configuredXLSXLabel(field, language string, configured map[string]string) s
 		if value == "" || strings.EqualFold(value, field) {
 			return ""
 		}
+		if field == "product_code" && isDefaultXLSXProductCodeLabel(value) {
+			return ""
+		}
 		// Default English UI labels must not override the built-in Persian
 		// workbook vocabulary when xlsx_language=fa/auto+fa.
 		if language == "fa" {
@@ -104,6 +116,30 @@ func configuredXLSXLabel(field, language string, configured map[string]string) s
 		return value
 	}
 	return ""
+}
+
+func isDefaultXLSXProductCodeLabel(value string) bool {
+	normalized := strings.NewReplacer(
+		"ي", "ی",
+		"ى", "ی",
+		"ك", "ک",
+		"\u200c", " ",
+		"\u200d", " ",
+		"\u200e", "",
+		"\u200f", "",
+		"\u202a", "",
+		"\u202b", "",
+		"\u202c", "",
+		"\u202d", "",
+		"\u202e", "",
+		"\u2066", "",
+		"\u2067", "",
+		"\u2068", "",
+		"\u2069", "",
+	).Replace(value)
+	normalized = strings.ToLower(strings.Join(strings.Fields(normalized), " "))
+	_, exists := defaultXLSXProductCodeLabels[normalized]
+	return exists
 }
 
 // configuredXLSXAliasValue gives the canonical machine key deterministic

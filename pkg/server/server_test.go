@@ -802,14 +802,14 @@ func TestCanonicalKalaParityAcrossRESTCSVXLSXAndWebSocket(t *testing.T) {
 	for index, header := range formulaRows[0] {
 		formulaColumns[header] = index + 1
 	}
-	for _, required := range []string{"کد", "قیمت ارزی", "وزن (گرم)", "هزینه حمل/کیلوگرم", "ارز هزینه حمل", "حاشیه سود (%)", "نرخ ریال به یوان", "قیمت نهایی (ریال)"} {
+	for _, required := range []string{"کد کالا", "قیمت ارزی", "وزن (گرم)", "هزینه حمل/کیلوگرم", "ارز هزینه حمل", "حاشیه سود (%)", "نرخ ریال به یوان", "قیمت نهایی (ریال)"} {
 		if formulaColumns[required] == 0 {
 			t.Fatalf("formula XLSX missing Persian header %q: %v", required, formulaRows[0])
 		}
 	}
 	formulaRow := 0
 	for index, row := range formulaRows[1:] {
-		codeColumn := formulaColumns["کد"] - 1
+		codeColumn := formulaColumns["کد کالا"] - 1
 		if len(row) > codeColumn && row[codeColumn] == "102001011" {
 			formulaRow = index + 2
 			break
@@ -1039,13 +1039,13 @@ func assertHumanXLSXCanonicalFixture(t *testing.T, rows [][]string) {
 	for index, field := range rows[0] {
 		columns[field] = index
 	}
-	for _, required := range []string{"Code", "Foreign Price", "Weight (g)", "Total Stock", "Final Price (IRT)", "Record Hash"} {
+	for _, required := range []string{"Product Code", "Foreign Price", "Weight (g)", "Total Stock", "Final Price (IRT)", "Record Hash"} {
 		if _, exists := columns[required]; !exists {
 			t.Fatalf("XLSX missing human-readable column %s: %v", required, rows[0])
 		}
 	}
 	for _, row := range rows[1:] {
-		if len(row) <= columns["Code"] || row[columns["Code"]] != "102001011" {
+		if len(row) <= columns["Product Code"] || row[columns["Product Code"]] != "102001011" {
 			continue
 		}
 		for field, expected := range map[string]string{"Foreign Price": "2.75", "Weight (g)": "1.84", "Total Stock": "20", "Final Price (IRT)": "111999"} {

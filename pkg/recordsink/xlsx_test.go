@@ -58,17 +58,17 @@ func TestCanonicalXLSXRoundTripPreservesTypesLayoutAndMetadata(t *testing.T) {
 	if err != nil || len(recordRows) != 2 {
 		t.Fatalf("records rows = %#v, err=%v", recordRows, err)
 	}
-	wantHeaders := []string{"Code", "Name", "Foreign Price", "Weight (g)", "Shipping Price/kg", "Shipping Currency", "Profit Margin (%)", "IRT per CNY", "Final Price (IRT)", "Warnings"}
+	wantHeaders := []string{"Product Code", "Name", "Foreign Price", "Weight (g)", "Shipping Price/kg", "Shipping Currency", "Profit Margin (%)", "IRT per CNY", "Final Price (IRT)", "Warnings"}
 	if strings.Join(recordRows[0], "|") != strings.Join(wantHeaders, "|") {
 		t.Fatalf("canonical column order = %v, want %v", recordRows[0], wantHeaders)
 	}
 	columns := headerColumns(recordRows[0])
-	assertXLSXCell(t, book, "Records", cellAt(columns, "Code", 2), "00113007045", excelize.CellTypeSharedString)
+	assertXLSXCell(t, book, "Records", cellAt(columns, "Product Code", 2), "00113007045", excelize.CellTypeSharedString)
 	assertXLSXCell(t, book, "Records", cellAt(columns, "Name", 2), "ماژول آزمون", excelize.CellTypeSharedString)
 	assertXLSXCell(t, book, "Records", cellAt(columns, "Foreign Price", 2), "24.5", excelize.CellTypeNumber)
 	assertXLSXCell(t, book, "Records", cellAt(columns, "Final Price (IRT)", 2), "2009410", excelize.CellTypeNumber)
 
-	codeStyle := styleForCell(t, book, "Records", cellAt(columns, "Code", 2))
+	codeStyle := styleForCell(t, book, "Records", cellAt(columns, "Product Code", 2))
 	if codeStyle.CustomNumFmt == nil || *codeStyle.CustomNumFmt != "@" {
 		t.Fatalf("Code style = %+v, want text format", codeStyle)
 	}
@@ -175,14 +175,14 @@ func TestFormulaXLSXLocalizesHeadersSplitsWarehousesAndCalculates(t *testing.T) 
 		t.Fatalf("records rows = %#v, err=%v", recordRows, err)
 	}
 	wantHeaders := []string{
-		"کد", "نام", "موجودی انبار ۲", "موجودی انبار ۱۰", "قیمت ارزی", "وزن (گرم)",
+		"کد کالا", "نام", "موجودی انبار ۲", "موجودی انبار ۱۰", "قیمت ارزی", "وزن (گرم)",
 		"هزینه حمل/کیلوگرم", "ارز هزینه حمل", "حاشیه سود (%)", "نرخ ریال به یوان", "قیمت نهایی (ریال)",
 	}
 	if strings.Join(recordRows[0], "|") != strings.Join(wantHeaders, "|") {
 		t.Fatalf("localized columns = %v, want %v", recordRows[0], wantHeaders)
 	}
 	columns := headerColumns(recordRows[0])
-	assertXLSXCell(t, book, "Records", cellAt(columns, "کد", 2), "001", excelize.CellTypeSharedString)
+	assertXLSXCell(t, book, "Records", cellAt(columns, "کد کالا", 2), "001", excelize.CellTypeSharedString)
 	assertXLSXCell(t, book, "Records", cellAt(columns, "موجودی انبار ۲", 2), "1", excelize.CellTypeNumber)
 	assertXLSXCell(t, book, "Records", cellAt(columns, "موجودی انبار ۱۰", 2), "3", excelize.CellTypeNumber)
 
@@ -334,6 +334,29 @@ func TestConfiguredXLSXLabelUsesDeterministicCanonicalAliasPrecedence(t *testing
 	configured[" product_code "] = "Trimmed Canonical Code"
 	if got := configuredXLSXLabel("product_code", "en", configured); got != "Trimmed Canonical Code" {
 		t.Fatalf("trimmed canonical label = %q", got)
+	}
+}
+
+func TestConfiguredXLSXProductCodeLabelsMigrateToNeutralLocalizedOutput(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		language   string
+		configured map[string]string
+		want       string
+	}{
+		{name: "English deprecated brand", language: "en", configured: map[string]string{"product_code": "Patris Code"}, want: "Product Code"},
+		{name: "Persian deprecated brand", language: "fa", configured: map[string]string{"Code": "کد پاتریس"}, want: "کد کالا"},
+		{name: "English Persian brand", language: "en", configured: map[string]string{"Code": "کد‌پاتریس"}, want: "Product Code"},
+		{name: "Persian English brand", language: "fa", configured: map[string]string{"product_code": "  PATRIS   CODE  "}, want: "کد کالا"},
+		{name: "English legacy default", language: "en", configured: map[string]string{"Code": "Code"}, want: "Product Code"},
+		{name: "Persian legacy default", language: "fa", configured: map[string]string{"product_code": "کد"}, want: "کد کالا"},
+		{name: "Custom label remains authoritative", language: "en", configured: map[string]string{"Code": "Customer SKU"}, want: "Customer SKU"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := xlsxHeaderLabel("product_code", "", test.language, test.configured); got != test.want {
+				t.Fatalf("xlsxHeaderLabel() = %q, want %q", got, test.want)
+			}
+		})
 	}
 }
 

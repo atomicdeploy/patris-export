@@ -4,7 +4,7 @@ export const COLUMN_RESIZE_STEP = 12;
 export const WAREHOUSE_FIELD_PREFIX = 'warehouse_stock::';
 
 const COLUMN_LABELS = Object.freeze({
-    product_code: Object.freeze({ en: 'Code', fa: 'کد' }),
+    product_code: Object.freeze({ en: 'Product Code', fa: 'کد کالا' }),
     category_code: Object.freeze({ en: 'Category Code', fa: 'کد دسته‌بندی' }),
     name: Object.freeze({ en: 'Name', fa: 'نام' }),
     part_number: Object.freeze({ en: 'Part Number', fa: 'پارت نامبر' }),
@@ -49,6 +49,15 @@ const COLUMN_LABELS = Object.freeze({
 
 const LEGACY_DEFAULT_COLUMN_LABELS = new Set([
     'anbar', 'code', 'name', 'stock', 'warehouse', 'warehouse stock'
+]);
+
+const PRODUCT_CODE_DEFAULT_LABELS = new Set([
+    'code',
+    'product code',
+    'patris code',
+    'کد',
+    'کد کالا',
+    'کد پاتریس'
 ]);
 
 export const ROW_ICON_NAMES = [
@@ -1612,9 +1621,23 @@ export function localizedColumnLabel(field, language = 'en', configuredLabel = '
     const humanized = humanizeColumnKey(source);
     const configuredIsGenerated = configured.localeCompare(source, undefined, { sensitivity: 'base' }) === 0
         || configured.localeCompare(humanized, undefined, { sensitivity: 'base' }) === 0;
-    if (configured && !configuredIsGenerated && !LEGACY_DEFAULT_COLUMN_LABELS.has(configured.toLowerCase())) return configured;
+    const configuredIsDefault = LEGACY_DEFAULT_COLUMN_LABELS.has(configured.toLowerCase())
+        || (canonical === 'product_code' && PRODUCT_CODE_DEFAULT_LABELS.has(normalizedPresentationLabel(configured)));
+    if (configured && !configuredIsGenerated && !configuredIsDefault) return configured;
     if (COLUMN_LABELS[canonical]) return COLUMN_LABELS[canonical][locale];
     return humanized;
+}
+
+function normalizedPresentationLabel(value) {
+    return String(value || '')
+        .normalize('NFKC')
+        .replace(/[يى]/g, 'ی')
+        .replace(/ك/g, 'ک')
+        .replace(/[\u200c\u200d]/g, ' ')
+        .replace(/[\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, '')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .toLocaleLowerCase('en-US');
 }
 
 function humanizeColumnKey(field) {

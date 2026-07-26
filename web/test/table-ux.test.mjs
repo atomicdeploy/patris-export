@@ -290,12 +290,19 @@ test('shared grid schema expands canonical and legacy warehouse stock into indep
 });
 
 test('known column keys use human localized labels and custom labels remain authoritative', () => {
+    assert.equal(localizedColumnLabel('product_code', 'en'), 'Product Code');
+    assert.equal(localizedColumnLabel('product_code', 'fa'), 'کد کالا');
     assert.equal(localizedColumnLabel('part_number', 'en'), 'Part Number');
     assert.equal(localizedColumnLabel('part_number', 'fa'), 'پارت نامبر');
     assert.equal(localizedColumnLabel('final_price', 'fa'), 'قیمت نهایی (تومان)');
     assert.equal(localizedColumnLabel('some_machine_key', 'en'), 'Some Machine Key');
     assert.equal(localizedColumnLabel('name', 'fa', 'Marketing title'), 'Marketing title');
-    assert.equal(localizedColumnLabel('Code', 'fa', 'Code'), 'کد');
+    assert.equal(localizedColumnLabel('Code', 'fa', 'Code'), 'کد کالا');
+    assert.equal(localizedColumnLabel('Code', 'en', 'Patris Code'), 'Product Code');
+    assert.equal(localizedColumnLabel('product_code', 'fa', 'Patris Code'), 'کد کالا');
+    assert.equal(localizedColumnLabel('Code', 'en', 'کد پاتریس'), 'Product Code');
+    assert.equal(localizedColumnLabel('product_code', 'fa', 'کد‌پاتریس'), 'کد کالا');
+    assert.equal(localizedColumnLabel('product_code', 'en', 'Customer SKU'), 'Customer SKU');
     assert.equal(localizedColumnLabel('FOROSH', 'en', 'FOROSH'), 'Sale Price');
     assert.equal(localizedColumnLabel('FOROSH', 'fa', 'FOROSH'), 'قیمت فروش');
     assert.equal(localizedColumnLabel('Sefaresh', 'fa', 'Sefaresh'), 'حد سفارش');
