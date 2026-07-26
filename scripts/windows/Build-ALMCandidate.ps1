@@ -252,6 +252,8 @@ function Assert-InstalledPayload {
         "libwinpthread-1.dll",
         "README.md",
         "INSTALL.md",
+        "Install-PatrisExportScheduledTask.ps1",
+        "Run-PatrisExportScheduledTask.ps1",
         "BUILD-MANIFEST.txt",
         "BUILD-VARIANT.json",
         "LICENSE.txt",
@@ -305,6 +307,8 @@ try {
         "NOTICE" = Join-Path $repoRoot "NOTICE"
         "LICENSING.md" = Join-Path $repoRoot "docs\LICENSING.md"
         "CHANGELOG.md" = Join-Path $repoRoot "CHANGELOG.md"
+        "Install-PatrisExportScheduledTask.ps1" = Join-Path $repoRoot "scripts\windows\Install-PatrisExportScheduledTask.ps1"
+        "Run-PatrisExportScheduledTask.ps1" = Join-Path $repoRoot "scripts\windows\Run-PatrisExportScheduledTask.ps1"
     }
     foreach ($destination in $payloadSources.Keys) {
         $source = $payloadSources[$destination]

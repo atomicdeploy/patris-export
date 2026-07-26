@@ -117,6 +117,8 @@ $requiredPayload = @(
     "libwinpthread-1.dll",
     "README.md",
     "INSTALL.md",
+    "Install-PatrisExportScheduledTask.ps1",
+    "Run-PatrisExportScheduledTask.ps1",
     "BUILD-MANIFEST.txt"
 )
 foreach ($file in $requiredPayload) {

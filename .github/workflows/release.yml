@@ -201,7 +201,9 @@ jobs:
               "LICENSE",
               "NOTICE",
               "BUILD-MANIFEST.txt",
-              "BUILD-VARIANT.json"
+              "BUILD-VARIANT.json",
+              "Install-PatrisExportScheduledTask.ps1",
+              "Run-PatrisExportScheduledTask.ps1"
           )) {
               if (-not (Test-Path (Join-Path $appRoot $required))) {
                   throw "Packaged Windows download is missing $required."
@@ -334,6 +336,8 @@ jobs:
                   "libwinpthread-1.dll",
                   "README.md",
                   "INSTALL.md",
+                  "Install-PatrisExportScheduledTask.ps1",
+                  "Run-PatrisExportScheduledTask.ps1",
                   "BUILD-MANIFEST.txt",
                   "BUILD-VARIANT.json",
                   "LICENSE.txt",

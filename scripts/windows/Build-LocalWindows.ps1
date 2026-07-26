@@ -314,6 +314,8 @@ try {
         "NOTICE" = Join-Path $repoRoot "NOTICE"
         "LICENSING.md" = Join-Path $repoRoot "docs\LICENSING.md"
         "CHANGELOG.md" = Join-Path $repoRoot "CHANGELOG.md"
+        "Install-PatrisExportScheduledTask.ps1" = Join-Path $repoRoot "scripts\windows\Install-PatrisExportScheduledTask.ps1"
+        "Run-PatrisExportScheduledTask.ps1" = Join-Path $repoRoot "scripts\windows\Run-PatrisExportScheduledTask.ps1"
     }
     foreach ($destinationName in $documentation.Keys) {
         Copy-Item -LiteralPath $documentation[$destinationName] -Destination (Join-Path $resolvedStageRoot $destinationName) -Force
@@ -345,6 +347,8 @@ try {
         "NOTICE",
         "LICENSING.md",
         "CHANGELOG.md",
+        "Install-PatrisExportScheduledTask.ps1",
+        "Run-PatrisExportScheduledTask.ps1",
         "BUILD-MANIFEST.txt"
     )
     if ($PxlibBackend -ne "cgo-static") {
