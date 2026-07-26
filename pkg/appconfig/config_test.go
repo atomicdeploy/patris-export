@@ -391,6 +391,7 @@ func TestApplyEnvConfiguresDigitalogicWithoutStoringCredentials(t *testing.T) {
 	t.Setenv("PATRIS_EXPORT_PRICING_MAX_STALE", "30m")
 	t.Setenv("PATRIS_EXPORT_PRICING_TIMEOUT", "20s")
 	t.Setenv("PATRIS_EXPORT_PRICING_BATCH_SIZE", "250")
+	t.Setenv("PATRIS_EXPORT_PRICING_BATCH_CONCURRENCY", "3")
 	t.Setenv("DIGITALOGIC_KEY", "must-not-be-copied")
 	t.Setenv("DIGITALOGIC_SECRET", "must-not-be-copied")
 	t.Setenv("DIGITALOGIC_PRICING_READ_TOKEN", "must-not-be-copied-bearer")
@@ -401,7 +402,7 @@ func TestApplyEnvConfiguresDigitalogicWithoutStoringCredentials(t *testing.T) {
 	if cfg.Canonical.Pricing.Mode != "digitalogic" || digitalogic.BaseURL != "https://digitalogic.example/wp-json/digitalogic" {
 		t.Fatalf("Digitalogic pricing provider was not selected: %+v", cfg.Canonical.Pricing)
 	}
-	if digitalogic.UsernameEnv != "DIGITALOGIC_KEY" || digitalogic.PasswordEnv != "DIGITALOGIC_SECRET" || digitalogic.BearerTokenEnv != "DIGITALOGIC_PRICING_READ_TOKEN" || digitalogic.FreshFor != "2m" || digitalogic.MaxStale != "30m" || digitalogic.Timeout != "20s" || digitalogic.BatchSize != 250 {
+	if digitalogic.UsernameEnv != "DIGITALOGIC_KEY" || digitalogic.PasswordEnv != "DIGITALOGIC_SECRET" || digitalogic.BearerTokenEnv != "DIGITALOGIC_PRICING_READ_TOKEN" || digitalogic.FreshFor != "2m" || digitalogic.MaxStale != "30m" || digitalogic.Timeout != "20s" || digitalogic.BatchSize != 250 || digitalogic.BatchConcurrency != 3 {
 		t.Fatalf("Digitalogic provider environment references were not normalized: %+v", digitalogic)
 	}
 	encoded, err := json.Marshal(cfg)
@@ -417,15 +418,27 @@ func TestApplyEnvBoundsDigitalogicPricingBatchSizeAndTimeout(t *testing.T) {
 	t.Setenv("PATRIS_EXPORT_DIGITALOGIC_URL", "https://digitalogic.example/wp-json/digitalogic/")
 	t.Setenv("PATRIS_EXPORT_PRICING_TIMEOUT", "not-a-duration")
 	t.Setenv("PATRIS_EXPORT_PRICING_BATCH_SIZE", "501")
+	t.Setenv("PATRIS_EXPORT_PRICING_BATCH_CONCURRENCY", "99")
 
 	cfg := Default()
 	ApplyEnv(&cfg)
 	digitalogic := cfg.Canonical.Pricing.Digitalogic
-	if digitalogic.Timeout != "15s" {
+	if digitalogic.Timeout != "1m0s" {
 		t.Fatalf("invalid timeout did not normalize to the safe default: %+v", digitalogic)
 	}
 	if digitalogic.BatchSize != 500 {
 		t.Fatalf("batch size was not bounded to the remote contract maximum: %+v", digitalogic)
+	}
+	if digitalogic.BatchConcurrency != 4 {
+		t.Fatalf("batch concurrency was not bounded to the safe maximum: %+v", digitalogic)
+	}
+
+	t.Setenv("PATRIS_EXPORT_PRICING_TIMEOUT", "24h")
+	cfg = Default()
+	ApplyEnv(&cfg)
+	digitalogic = cfg.Canonical.Pricing.Digitalogic
+	if digitalogic.Timeout != "1m20s" {
+		t.Fatalf("large timeout was not bounded to the hard maximum: %+v", digitalogic)
 	}
 }
 

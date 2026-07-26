@@ -116,6 +116,12 @@ type batchAssignmentResult struct {
 	allowSingle bool
 }
 
+type batchAssignmentFetch struct {
+	page      batchAssignmentPage
+	err       error
+	completed bool
+}
+
 type remoteStatusError struct {
 	status int
 }
@@ -136,6 +142,7 @@ var (
 	errCredentialUnavailable = errors.New("configured credential is unavailable")
 	errRequestTooLarge       = errors.New("request exceeds configured limit")
 	errResponseTooLarge      = errors.New("response exceeds configured limit")
+	errBatchPrefetchStopped  = errors.New("pricing assignment batch prefetch stopped before completion")
 )
 
 func (d *batchDecimal) UnmarshalJSON(data []byte) error {
@@ -306,36 +313,30 @@ func (p *httpProvider) Prefetch(ctx context.Context, codes []string) Provider {
 
 	pendingOutcomes := make(map[string]prefetchOutcome, len(pending))
 	var expectedDefault *batchDefaultMarkup
-	var batchErr error
-	for offset := 0; offset < len(pending); offset += p.config.BatchSize {
-		end := offset + p.config.BatchSize
-		if end > len(pending) {
-			end = len(pending)
-		}
-		chunk := pending[offset:end]
-		page, err := p.fetchAssignmentBatch(ctx, chunk)
-		if err != nil {
-			batchErr = err
-			break
-		}
-		if expectedDefault == nil {
-			copy := cloneBatchDefaultMarkup(page.defaultMarkup)
-			expectedDefault = &copy
-		} else if !equalBatchDefaultMarkup(*expectedDefault, page.defaultMarkup) {
-			batchErr = &contractError{reason: "default-markup contract changed between batch chunks"}
-			break
-		}
-		for _, result := range page.results {
-			if result.snapshot != nil {
-				snapshot := cloneAssignmentSnapshot(*result.snapshot)
-				snapshot.fetchedAt = now
-				pendingOutcomes[result.code] = prefetchOutcome{snapshot: &snapshot}
-				continue
+	pages, batchErr := p.fetchAssignmentPages(ctx, pending)
+	if batchErr == nil {
+		// Pages may complete out of order, but contract agreement and result
+		// materialization always follow original request-page order.
+		for _, page := range pages {
+			if expectedDefault == nil {
+				copy := cloneBatchDefaultMarkup(page.defaultMarkup)
+				expectedDefault = &copy
+			} else if !equalBatchDefaultMarkup(*expectedDefault, page.defaultMarkup) {
+				batchErr = &contractError{reason: "default-markup contract changed between batch chunks"}
+				break
 			}
-			diagnostic := prefetchDiagnostic{
-				warnings: normalizedStrings(result.warnings), fetchedAt: now, allowSingle: result.allowSingle,
+			for _, result := range page.results {
+				if result.snapshot != nil {
+					snapshot := cloneAssignmentSnapshot(*result.snapshot)
+					snapshot.fetchedAt = now
+					pendingOutcomes[result.code] = prefetchOutcome{snapshot: &snapshot}
+					continue
+				}
+				diagnostic := prefetchDiagnostic{
+					warnings: normalizedStrings(result.warnings), fetchedAt: now, allowSingle: result.allowSingle,
+				}
+				pendingOutcomes[result.code] = prefetchOutcome{diagnostic: &diagnostic}
 			}
-			pendingOutcomes[result.code] = prefetchOutcome{diagnostic: &diagnostic}
 		}
 	}
 
@@ -359,6 +360,100 @@ func (p *httpProvider) Prefetch(ctx context.Context, codes []string) Provider {
 		return p
 	}
 	return &prefetchedProvider{parent: p, run: &prefetchRun{outcomes: outcomes}}
+}
+
+// fetchAssignmentPages bounds concurrent page requests independently from
+// per-product materialization workers. A terminal page failure cancels sibling
+// requests, while the caller's context remains the authoritative cancellation
+// signal returned to the canonical transform.
+func (p *httpProvider) fetchAssignmentPages(ctx context.Context, codes []string) ([]batchAssignmentPage, error) {
+	if len(codes) == 0 {
+		return nil, nil
+	}
+	pageCount := (len(codes) + p.config.BatchSize - 1) / p.config.BatchSize
+	fetches := make([]batchAssignmentFetch, pageCount)
+	if pageCount == 1 {
+		page, err := p.fetchAssignmentBatch(ctx, codes)
+		if err != nil {
+			return nil, err
+		}
+		return []batchAssignmentPage{page}, nil
+	}
+
+	workers := p.config.BatchConcurrency
+	if workers > pageCount {
+		workers = pageCount
+	}
+	if workers < 1 {
+		workers = 1
+	}
+
+	batchCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	jobs := make(chan int, pageCount)
+	for index := 0; index < pageCount; index++ {
+		jobs <- index
+	}
+	close(jobs)
+
+	var wait sync.WaitGroup
+	var failureOnce sync.Once
+	var firstFailure error
+	wait.Add(workers)
+	for worker := 0; worker < workers; worker++ {
+		go func() {
+			defer wait.Done()
+			for {
+				select {
+				case <-batchCtx.Done():
+					return
+				case index, ok := <-jobs:
+					if !ok {
+						return
+					}
+					offset := index * p.config.BatchSize
+					end := offset + p.config.BatchSize
+					if end > len(codes) {
+						end = len(codes)
+					}
+					page, err := p.fetchAssignmentBatch(batchCtx, codes[offset:end])
+					fetches[index] = batchAssignmentFetch{page: page, err: err, completed: true}
+					if err != nil {
+						failureOnce.Do(func() {
+							firstFailure = err
+							cancel()
+						})
+					}
+				}
+			}
+		}()
+	}
+	wait.Wait()
+
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	// Prefer the lowest request-page terminal error when multiple pages finish
+	// together. Sibling context-cancellation errors never mask that cause.
+	for _, fetch := range fetches {
+		if fetch.completed && fetch.err != nil &&
+			!errors.Is(fetch.err, context.Canceled) &&
+			!errors.Is(fetch.err, context.DeadlineExceeded) {
+			return nil, fetch.err
+		}
+	}
+	if firstFailure != nil {
+		return nil, firstFailure
+	}
+
+	pages := make([]batchAssignmentPage, pageCount)
+	for index, fetch := range fetches {
+		if !fetch.completed {
+			return nil, errBatchPrefetchStopped
+		}
+		pages[index] = fetch.page
+	}
+	return pages, nil
 }
 
 func (p *httpProvider) Resolve(ctx context.Context, code string) Resolution {
