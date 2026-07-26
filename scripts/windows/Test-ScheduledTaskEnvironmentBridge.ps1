@@ -154,6 +154,11 @@ public static class EnvironmentProbe
         -DeploymentDirectory $missingPayloadRoot `
         -TaskName ("PatrisExportMissing-" + [guid]::NewGuid().ToString("N")) `
         -TaskPath "\"
+    & $removalHelper `
+        -Action Stop `
+        -DeploymentDirectory $missingPayloadRoot `
+        -TaskName ("PatrisExportMissing-" + [guid]::NewGuid().ToString("N")) `
+        -TaskPath "\"
 
     @'
 using System.Threading;

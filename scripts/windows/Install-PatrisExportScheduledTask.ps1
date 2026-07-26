@@ -449,8 +449,12 @@ function Stop-PatrisTaskAndDeploymentProcess {
         Wait-PatrisTaskStopped -Task $Task
     }
     $afterStop = @(Get-PatrisTrackedDeploymentProcess)
+    $identityCandidates = @($beforeStop + $afterStop)
+    if ($identityCandidates.Count -eq 0) {
+        return @()
+    }
     $managedProcesses = @(
-        Merge-PatrisProcessIdentity -Identity @($beforeStop + $afterStop)
+        Merge-PatrisProcessIdentity -Identity $identityCandidates
     )
     Stop-PatrisDeploymentProcess -Identity $managedProcesses
     return $managedProcesses

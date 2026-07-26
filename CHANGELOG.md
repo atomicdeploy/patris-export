@@ -73,6 +73,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Fixed
 
+- Scheduled-task stop and replacement now treat an empty verified process set
+  as a successful no-op instead of failing after the task has stopped.
 - Scheduled-task stop, restart, upgrade, uninstall, and replacement now
   terminate only the exact deployment's Patris child process, preventing an
   orphan from retaining the API port after the PowerShell parent exits.
