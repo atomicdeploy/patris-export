@@ -35,6 +35,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - The standalone home and character-map routes now share the viewer's complete
   English/Persian translation runtime, embedded Vazirmatn font, persisted
   language preference, RTL/LTR layout, and localized accessible controls.
+- An authenticated recent-sales endpoint now projects a separately configured
+  supported source into a deterministic, paged product-level aggregate while
+  excluding customer, order, payment, and delivery details; its source/auth
+  profile stays server-side across browser config reads and writes.
 
 ### Changed
 

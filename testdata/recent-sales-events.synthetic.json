@@ -1,0 +1,20 @@
+[
+  {
+    "sale_event_id": "synthetic-sale-001",
+    "product_code": "113006048",
+    "quantity": 2,
+    "sold_at": "2026-07-20T08:00:00Z"
+  },
+  {
+    "sale_event_id": "synthetic-sale-002",
+    "product_code": "113006048",
+    "quantity": 1,
+    "sold_at": "2026-07-21T09:30:00Z"
+  },
+  {
+    "sale_event_id": "synthetic-sale-003",
+    "product_code": "113006049",
+    "quantity": 4,
+    "sold_at": "2026-07-22T11:15:00Z"
+  }
+]
