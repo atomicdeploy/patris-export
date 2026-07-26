@@ -61,7 +61,7 @@ switch ($Action) {
             -RestartCount 999 `
             -RestartInterval (New-TimeSpan -Minutes 1) `
             -StartWhenAvailable
-        $principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel LeastPrivilege
+        $principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Limited
         $task = New-ScheduledTask -Action $taskAction -Trigger $trigger -Settings $settings -Principal $principal
         Register-ScheduledTask -TaskName $TaskName -TaskPath $TaskPath -InputObject $task -Force | Out-Null
         Write-Host "Installed scheduled task: $TaskPath$TaskName"
