@@ -5,7 +5,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 
-const EXPECTED_HEADERS = Object.freeze([
+const STANDARD_HEADERS = Object.freeze([
   'فی فروش',
   'گرم',
   'سایر',
@@ -16,18 +16,50 @@ const EXPECTED_HEADERS = Object.freeze([
   'نام کالا',
 ]);
 
-const EXPECTED_CONFIG = Object.freeze({
-  yuan: 29500,
-  shipping: 120,
-  profit: 0.3,
-});
+const ADVANCED_HEADERS = Object.freeze([
+  'قیمت نهایی محاسبه‌شده (تومان)',
+  'وزن کالا (گرم)',
+  'وزن و محل کالا',
+  'فی فروش منبع',
+  'قیمت ارزی',
+  'موجودی کل انبارها',
+  'کد کالا',
+  'نام کالا',
+  'شناسه و لینک ووکامرس',
+  'قیمت قابل‌مشاهده مشتری (تومان)',
+  'اختلاف با قیمت مشتری',
+  'وضعیت همگام‌سازی قیمت',
+  'ارز کالا',
+  'درصد سود',
+  'نرخ حمل هر کیلو',
+  'تاریخ نرخ ارز',
+]);
+
+const SYNC_DATA_HEADERS = Object.freeze([
+  'کد کالا',
+  'ارز کالا',
+  'نرخ حمل هر کیلو',
+  'ارز حمل',
+  'درصد سود',
+  'بهای یوآن',
+  'بهای دلار',
+  'تاریخ نرخ',
+  'شناسه ووکامرس',
+  'قیمت مشتری ووکامرس',
+  'آخرین تغییر ووکامرس',
+  'بازبینی رکورد',
+  'نشانی محصول',
+  'سود مرجع',
+  'قیمت نهایی مرجع',
+  'قیمت فروش ویژه',
+]);
 
 const repoRoot = path.resolve(__dirname, '..', '..');
 const defaultCandidate = path.join(
   repoRoot,
   'docs',
   'examples',
-  'Digitalogic-Price-Calculator.xltm',
+  'لیست قیمت دیجیتالاجیک - استاندارد.xltm',
 );
 const defaultReference = path.join(
   os.homedir(),
@@ -36,7 +68,7 @@ const defaultReference = path.join(
   'Archive',
   'Price Calculator',
   '2026-07-25',
-  'Copy of price calculator(AutoRecovered) (version 1) (version 1) - in-memory snapshot.xlsb',
+  'ماشین حساب قیمت - مرجع ایستا - 1405-05-03.xlsb',
 );
 
 function usage() {
@@ -123,34 +155,24 @@ function sameArray(left, right) {
   return left.length === right.length && left.every((value, index) => value === right[index]);
 }
 
-function near(left, right, tolerance = 1e-9) {
-  return typeof left === 'number'
-    && Number.isFinite(left)
-    && Math.abs(left - right) <= tolerance;
-}
-
 function normalizeFormula(formula) {
   return String(formula || '').replace(/\s+/gu, '').toUpperCase();
 }
 
-function structurallyMatchesOriginalPriceFormula(formula) {
+function structurallyMatchesDynamicPriceFormula(formula) {
   const normalized = normalizeFormula(formula);
-  const originalStructuredReferences = [
-    '[@گرم]',
-    'SHIPPING[نرخحمل]',
-    '[@[نرخارزی]]',
-    'PROFIT[درصدسود]',
-    'YUAN_PRICE[بهاییوآن]',
-  ];
-  const asciiSafeR1C1References = [
+  const requiredTokens = [
+    'ROUND(',
     'RC[1]',
-    'INDEX(SHIPPING,1,1)',
     'RC[4]',
-    'INDEX(PROFIT,1,1)',
-    'INDEX(YUAN_PRICE,1,1)',
+    'VLOOKUP(RC[6],SYNCDATA,2,FALSE)',
+    'VLOOKUP(RC[6],SYNCDATA,3,FALSE)',
+    'VLOOKUP(RC[6],SYNCDATA,4,FALSE)',
+    'VLOOKUP(RC[6],SYNCDATA,5,FALSE)',
+    'VLOOKUP(RC[6],SYNCDATA,6,FALSE)',
+    'VLOOKUP(RC[6],SYNCDATA,7,FALSE)',
   ];
-  return [originalStructuredReferences, asciiSafeR1C1References]
-    .some((tokens) => tokens.every((token) => normalized.includes(token)));
+  return requiredTokens.every((token) => normalized.includes(token));
 }
 
 function buildFailures(report, options) {
@@ -160,44 +182,71 @@ function buildFailures(report, options) {
   };
 
   failUnless(
-    sameArray(report.reference.headers, EXPECTED_HEADERS),
+    sameArray(report.reference.headers, STANDARD_HEADERS),
     `archived headers changed: ${JSON.stringify(report.reference.headers)}`,
   );
+  const isStandard = sameArray(report.candidate.headers, STANDARD_HEADERS);
+  const isAdvanced = sameArray(report.candidate.headers, ADVANCED_HEADERS);
+  report.candidate.edition = isStandard ? 'Standard' : isAdvanced ? 'Advanced' : 'Unknown';
   failUnless(
-    sameArray(report.candidate.headers, EXPECTED_HEADERS),
-    `candidate headers must be the exact eight Persian headers in the original order: ${JSON.stringify(report.candidate.headers)}`,
+    isStandard || isAdvanced,
+    `candidate headers must exactly match the Standard or Advanced Persian contract: ${JSON.stringify(report.candidate.headers)}`,
   );
   failUnless(
-    sameArray(report.candidate.headers, report.reference.headers),
-    'candidate header order differs from the archived workbook',
+    sameArray(report.syncData.headers, SYNC_DATA_HEADERS),
+    `SyncData headers changed: ${JSON.stringify(report.syncData.headers)}`,
   );
   failUnless(
-    near(report.reference.config.yuan, EXPECTED_CONFIG.yuan)
-      && near(report.reference.config.shipping, EXPECTED_CONFIG.shipping)
-      && near(report.reference.config.profit, EXPECTED_CONFIG.profit),
-    `archived configuration differs from 29500/120/0.3: ${JSON.stringify(report.reference.config)}`,
+    report.syncData.sheetVisibility === 2,
+    `SyncData must remain xlSheetVeryHidden (2); got ${report.syncData.sheetVisibility}`,
   );
+  const expectedTableAddress = isStandard
+    ? /^B5:I\d+$/u
+    : isAdvanced
+      ? /^B5:Q\d+$/u
+      : /(?!)/u;
   failUnless(
-    /^B5:I\d+$/u.test(report.candidate.tableAddress),
-    `Products must start at B5 and end in column I; got ${report.candidate.tableAddress}`,
+    expectedTableAddress.test(report.candidate.tableAddress),
+    `${report.candidate.edition} Products table has an unexpected address: ${report.candidate.tableAddress}`,
   );
   failUnless(report.candidate.rowsWithCode > 0, 'Sync produced no product rows');
   failUnless(
     report.candidate.duplicateCodes === 0,
     `candidate contains ${report.candidate.duplicateCodes} duplicate product codes`,
   );
-
   failUnless(
-    near(report.candidate.config.yuan, EXPECTED_CONFIG.yuan),
-    `Yuan_Price must be ${EXPECTED_CONFIG.yuan}; got ${report.candidate.config.yuan}`,
+    typeof report.candidate.config.yuan === 'number'
+      && Number.isFinite(report.candidate.config.yuan)
+      && report.candidate.config.yuan > 0,
+    `live Yuan_Price must be a positive number; got ${report.candidate.config.yuan}`,
   );
   failUnless(
-    near(report.candidate.config.shipping, EXPECTED_CONFIG.shipping),
-    `Shipping must be ${EXPECTED_CONFIG.shipping}; got ${report.candidate.config.shipping}`,
+    typeof report.candidate.config.shipping === 'number'
+      && Number.isFinite(report.candidate.config.shipping)
+      && report.candidate.config.shipping >= 0,
+    `live Shipping must be a non-negative number; got ${report.candidate.config.shipping}`,
   );
   failUnless(
-    near(report.candidate.config.profit, EXPECTED_CONFIG.profit),
-    `Profit must be ${EXPECTED_CONFIG.profit}; got ${report.candidate.config.profit}`,
+    typeof report.candidate.config.profit === 'number'
+      && Number.isFinite(report.candidate.config.profit)
+      && report.candidate.config.profit >= 0,
+    `live Profit must be a non-negative decimal; got ${report.candidate.config.profit}`,
+  );
+  failUnless(
+    report.syncData.rowsWithCode === report.candidate.rowsWithCode,
+    `SyncData row count differs from Products (${report.syncData.rowsWithCode}/${report.candidate.rowsWithCode})`,
+  );
+  failUnless(
+    report.syncData.duplicateCodes === 0,
+    `SyncData contains ${report.syncData.duplicateCodes} duplicate product codes`,
+  );
+  failUnless(
+    report.syncData.missingProductCodes === 0,
+    `${report.syncData.missingProductCodes} Products rows have no matching SyncData row`,
+  );
+  failUnless(
+    report.syncData.extraCodes === 0,
+    `${report.syncData.extraCodes} SyncData rows have no matching Products row`,
   );
 
   failUnless(report.candidate.numericWeightRows > 0, 'no numeric weight values were loaded in column C');
@@ -209,17 +258,17 @@ function buildFailures(report, options) {
   );
 
   const structuralFormulaRows = report.candidate.formulaSignatures
-    .filter(({ formula }) => structurallyMatchesOriginalPriceFormula(formula))
+    .filter(({ formula }) => structurallyMatchesDynamicPriceFormula(formula))
     .reduce((total, { count }) => total + count, 0);
   report.candidate.structuralFormulaRows = structuralFormulaRows;
   failUnless(
     structuralFormulaRows === report.candidate.rowsWithCode,
-    `column B does not consistently use the original weight + shipping + foreign-price + profit + yuan calculation (${structuralFormulaRows}/${report.candidate.rowsWithCode})`,
+    `column B does not consistently use the dynamic per-row SyncData price calculation (${structuralFormulaRows}/${report.candidate.rowsWithCode})`,
   );
 
   failUnless(
     report.candidate.completeInputRows > 0,
-    'no rows contain both numeric weight and foreign-price inputs',
+    'no rows have enough per-row SyncData inputs for an independent price calculation',
   );
   failUnless(
     report.candidate.missingPriceForCompleteRows === 0,
@@ -227,7 +276,7 @@ function buildFailures(report, options) {
   );
   failUnless(
     report.candidate.priceMismatchRows === 0,
-    `${report.candidate.priceMismatchRows} final prices differ from ((weight*120/1000)+foreign_price)*(1+0.3)*29500`,
+    `${report.candidate.priceMismatchRows} final prices differ from the independently rounded per-row SyncData calculation`,
   );
   failUnless(
     report.errors.naCount === 0,
@@ -273,13 +322,17 @@ function printHumanReport(report) {
   const status = report.passed ? 'PASS' : 'FAIL';
   console.log(`${status}: ${report.candidate.path}`);
   console.log(`  Sync: ${report.sync.requested ? 'requested' : 'skipped'}${report.sync.ran ? ', completed' : ''}`);
+  console.log(`  Edition: ${report.candidate.edition}`);
   console.log(`  Headers: ${report.candidate.headers.join(' | ')}`);
   console.log(`  Product rows: ${report.candidate.rowsWithCode}`);
   console.log(
-    `  Config: yuan=${report.candidate.config.yuan}, shipping=${report.candidate.config.shipping}, profit=${report.candidate.config.profit}`,
+    `  Live config: yuan=${report.candidate.config.yuan}, shipping=${report.candidate.config.shipping}, profit=${report.candidate.config.profit}`,
   );
   console.log(
-    `  Inputs/prices: weight=${report.candidate.numericWeightRows}, rate=${report.candidate.numericRateRows}, final=${report.candidate.numericPriceRows}, complete=${report.candidate.completeInputRows}`,
+    `  SyncData: rows=${report.syncData.rowsWithCode}, hidden=${report.syncData.sheetVisibility === 2}, missing=${report.syncData.missingProductCodes}, extra=${report.syncData.extraCodes}`,
+  );
+  console.log(
+    `  Inputs/prices: weight=${report.candidate.numericWeightRows}, rate=${report.candidate.numericRateRows}, final=${report.candidate.numericPriceRows}, independently comparable=${report.candidate.completeInputRows}, incomplete SyncData=${report.candidate.unverifiableForeignPriceRows}`,
   );
   console.log(
     `  Formula: present=${report.candidate.priceFormulaRows}, structural=${report.candidate.structuralFormulaRows}, mismatches=${report.candidate.priceMismatchRows}`,
@@ -383,6 +436,19 @@ function Table-Scalar([object]$book, [string]$name) {
     }
 }
 
+function Sheet-Scalar([object]$book, [int]$sheetIndex, [string]$address) {
+    $sheet = $null
+    $cell = $null
+    try {
+        $sheet = $book.Worksheets.Item($sheetIndex)
+        $cell = $sheet.Range($address)
+        return $cell.Value2
+    } finally {
+        Release-ComObject $cell
+        Release-ComObject $sheet
+    }
+}
+
 function Read-Products([object]$book) {
     $table = Find-Table $book 'Products'
     $headerRange = $null
@@ -461,6 +527,86 @@ function Read-Products([object]$book) {
     }
 }
 
+function Read-SyncData([object]$book) {
+    $table = Find-Table $book 'SyncData'
+    $headerRange = $null
+    $dataRange = $null
+    $sheet = $null
+    try {
+        $sheet = $table.Parent
+        $headerRange = $table.HeaderRowRange
+        $headerColumns = $headerRange.Columns.Count
+        $headerValues = $headerRange.Value2
+        $headers = @()
+        for ($column = 1; $column -le $headerColumns; $column++) {
+            $headers += [Convert]::ToString(
+                (Matrix-Value $headerValues 1 $headerColumns 1 $column),
+                $invariant
+            )
+        }
+
+        $rows = @()
+        $dataRange = $table.DataBodyRange
+        if ($null -ne $dataRange) {
+            $rowCount = $dataRange.Rows.Count
+            $columnCount = $dataRange.Columns.Count
+            $values = $dataRange.Value2
+            for ($row = 1; $row -le $rowCount; $row++) {
+                $code = Normalized-Code (
+                    Matrix-Value $values $rowCount $columnCount $row 1
+                )
+                if ($code.Length -gt 0) {
+                    $rows += [pscustomobject]@{
+                        Code = $code
+                        Currency = [Convert]::ToString(
+                            (Matrix-Value $values $rowCount $columnCount $row 2),
+                            $invariant
+                        ).Trim()
+                        Shipping = Matrix-Value $values $rowCount $columnCount $row 3
+                        ShippingCurrency = [Convert]::ToString(
+                            (Matrix-Value $values $rowCount $columnCount $row 4),
+                            $invariant
+                        ).Trim()
+                        ProfitPercent = Matrix-Value $values $rowCount $columnCount $row 5
+                        CNYRate = Matrix-Value $values $rowCount $columnCount $row 6
+                        USDRate = Matrix-Value $values $rowCount $columnCount $row 7
+                    }
+                }
+            }
+        }
+
+        return [pscustomobject]@{
+            Headers = $headers
+            Rows = @($rows)
+            SheetVisibility = [int]$sheet.Visible
+        }
+    } finally {
+        Release-ComObject $sheet
+        Release-ComObject $dataRange
+        Release-ComObject $headerRange
+        Release-ComObject $table
+    }
+}
+
+function Currency-Factor-Or-Null([object]$currencyValue, [object]$syncRow) {
+    $currency = [Convert]::ToString($currencyValue, $invariant).Trim().ToUpperInvariant()
+    switch ($currency) {
+        'CNY' {
+            $rate = Numeric-Or-Null $syncRow.CNYRate
+            if ($null -ne $rate -and $rate -gt 0) { return $rate }
+            return $null
+        }
+        'USD' {
+            $rate = Numeric-Or-Null $syncRow.USDRate
+            if ($null -ne $rate -and $rate -gt 0) { return $rate }
+            return $null
+        }
+        'IRR' { return 0.1 }
+        'IRT' { return 1.0 }
+        default { return $null }
+    }
+}
+
 function Workbook-Errors([object]$book) {
     $naCount = 0
     $valueCount = 0
@@ -477,10 +623,11 @@ function Workbook-Errors([object]$book) {
                 for ($column = 1; $column -le $columns; $column++) {
                     $value = Matrix-Value $values $rows $columns $row $column
                     $label = $null
-                    if ($value -eq -2146826246) {
+                    $isExcelErrorCode = $value -is [int] -or $value -is [long]
+                    if ($isExcelErrorCode -and [long]$value -eq -2146826246) {
                         $naCount += 1
                         $label = '#N/A'
-                    } elseif ($value -eq -2146826273) {
+                    } elseif ($isExcelErrorCode -and [long]$value -eq -2146826273) {
                         $valueCount += 1
                         $label = '#VALUE!'
                     }
@@ -553,8 +700,17 @@ try {
         $syncRan = $true
     }
     $excel.CalculateFullRebuild()
+    $candidateSyncStatus = [Convert]::ToString(
+        (Sheet-Scalar $candidateBook 2 'B6'),
+        $invariant
+    )
+    $candidatePricingStatus = [Convert]::ToString(
+        (Sheet-Scalar $candidateBook 2 'B23'),
+        $invariant
+    )
 
     $candidateProducts = Read-Products $candidateBook
+    $candidateSyncData = Read-SyncData $candidateBook
     $candidateConfig = [pscustomobject]@{
         yuan = Numeric-Or-Null (Table-Scalar $candidateBook 'Yuan_Price')
         shipping = Numeric-Or-Null (Table-Scalar $candidateBook 'Shipping')
@@ -571,11 +727,28 @@ try {
         profit = Numeric-Or-Null (Table-Scalar $referenceBook 'Profit')
     }
 
+    $candidateDictionary = Row-Dictionary $candidateProducts.Rows
+    $syncDictionary = Row-Dictionary $candidateSyncData.Rows
+    $referenceDictionary = Row-Dictionary $referenceProducts.Rows
+    $missingProductCodes = 0
+    $extraSyncCodes = 0
+    foreach ($candidateCode in $candidateDictionary.Values.Keys) {
+        if (-not $syncDictionary.Values.ContainsKey($candidateCode)) {
+            $missingProductCodes += 1
+        }
+    }
+    foreach ($syncCode in $syncDictionary.Values.Keys) {
+        if (-not $candidateDictionary.Values.ContainsKey($syncCode)) {
+            $extraSyncCodes += 1
+        }
+    }
+
     $numericWeightRows = 0
     $numericRateRows = 0
     $numericPriceRows = 0
     $priceFormulaRows = 0
     $completeInputRows = 0
+    $unverifiableForeignPriceRows = 0
     $missingPriceForCompleteRows = 0
     $priceMismatchRows = 0
     $priceMismatchSamples = @()
@@ -589,31 +762,56 @@ try {
         if ($null -ne $price) { $numericPriceRows += 1 }
         if ([string]$row.Formula -like '=*') { $priceFormulaRows += 1 }
 
-        if ($null -ne $weight -and $null -ne $rate) {
-            $completeInputRows += 1
-            if ($null -eq $price) {
-                $missingPriceForCompleteRows += 1
-                if ($priceMismatchSamples.Count -lt 20) {
-                    $priceMismatchSamples += "$($row.Code): expected numeric price, got blank/error"
-                }
-            } elseif ($null -ne $candidateConfig.yuan -and
-                      $null -ne $candidateConfig.shipping -and
-                      $null -ne $candidateConfig.profit) {
-                $expected = (($weight * $candidateConfig.shipping / 1000.0) + $rate) *
-                    (1.0 + $candidateConfig.profit) * $candidateConfig.yuan
-                $tolerance = [Math]::Max(0.01, [Math]::Abs($expected) * 0.0000000001)
-                if ([Math]::Abs($price - $expected) -gt $tolerance) {
-                    $priceMismatchRows += 1
-                    if ($priceMismatchSamples.Count -lt 20) {
-                        $priceMismatchSamples += "$($row.Code): got=$price expected=$expected"
-                    }
-                }
+        if ($null -eq $rate -or -not $syncDictionary.Values.ContainsKey($row.Code)) {
+            continue
+        }
+
+        $syncRow = $syncDictionary.Values[$row.Code]
+        $productFactor = Currency-Factor-Or-Null $syncRow.Currency $syncRow
+        $shipping = Numeric-Or-Null $syncRow.Shipping
+        $profitPercent = Numeric-Or-Null $syncRow.ProfitPercent
+        if ($null -eq $profitPercent) { $profitPercent = 0.0 }
+        $shippingReady = $true
+        $shippingComponent = 0.0
+        if ($null -ne $weight -and $null -ne $shipping) {
+            $shippingFactor = Currency-Factor-Or-Null $syncRow.ShippingCurrency $syncRow
+            if ($null -eq $shippingFactor) {
+                $shippingReady = $false
+            } else {
+                $shippingComponent = ($weight / 1000.0) * $shipping * $shippingFactor
+            }
+        }
+
+        if ($null -eq $productFactor -or -not $shippingReady) {
+            $unverifiableForeignPriceRows += 1
+            continue
+        }
+
+        $completeInputRows += 1
+        $expectedUnrounded = (($rate * $productFactor) + $shippingComponent) *
+            (1.0 + ($profitPercent / 100.0))
+        $expected = [Math]::Round(
+            $expectedUnrounded,
+            0,
+            [System.MidpointRounding]::AwayFromZero
+        )
+        if ($null -eq $price) {
+            $missingPriceForCompleteRows += 1
+            if ($priceMismatchSamples.Count -lt 20) {
+                $priceMismatchSamples += "$($row.Code): expected=$expected, got blank/error"
+            }
+        } elseif ([Math]::Abs($price - $expected) -gt 0.01) {
+            $priceMismatchRows += 1
+            if ($priceMismatchSamples.Count -lt 20) {
+                $priceMismatchSamples += (
+                    "$($row.Code): got=$price expected=$expected " +
+                    "currency=$($syncRow.Currency) shipping_currency=$($syncRow.ShippingCurrency) " +
+                    "profit_percent=$profitPercent"
+                )
             }
         }
     }
 
-    $candidateDictionary = Row-Dictionary $candidateProducts.Rows
-    $referenceDictionary = Row-Dictionary $referenceProducts.Rows
     $overlapRows = 0
     $weightComparable = 0
     $weightMatches = 0
@@ -680,6 +878,8 @@ try {
         candidate = [pscustomobject]@{
             path = $candidatePath
             workbookName = [string]$candidateBook.Name
+            syncStatus = $candidateSyncStatus
+            pricingStatus = $candidatePricingStatus
             tableAddress = $candidateProducts.TableAddress
             headers = $candidateProducts.Headers
             rowsWithCode = @($candidateProducts.Rows).Count
@@ -690,10 +890,19 @@ try {
             numericPriceRows = $numericPriceRows
             priceFormulaRows = $priceFormulaRows
             completeInputRows = $completeInputRows
+            unverifiableForeignPriceRows = $unverifiableForeignPriceRows
             missingPriceForCompleteRows = $missingPriceForCompleteRows
             priceMismatchRows = $priceMismatchRows
             priceMismatchSamples = $priceMismatchSamples
             formulaSignatures = $candidateProducts.FormulaSignatures
+        }
+        syncData = [pscustomobject]@{
+            headers = $candidateSyncData.Headers
+            sheetVisibility = $candidateSyncData.SheetVisibility
+            rowsWithCode = @($candidateSyncData.Rows).Count
+            duplicateCodes = $syncDictionary.Duplicates
+            missingProductCodes = $missingProductCodes
+            extraCodes = $extraSyncCodes
         }
         reference = [pscustomobject]@{
             path = $referencePath

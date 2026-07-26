@@ -84,66 +84,87 @@ The Web UI download action sends its active language and the configured export
 mode/zebra preference to this route. Query values override the config for that
 one response.
 
-## Dynamic macro template
+## Dynamic macro templates
 
-`docs/examples/Digitalogic-Price-Calculator.xltm` is the canonical
-calculator template. It preserves the original right-to-left Persian calculator
-instead of introducing a second dashboard schema. The visible `Products` table
-starts at `B5` and has exactly the original columns in their original order:
+Two canonical right-to-left Persian templates are built from the same VBA
+source:
+
+- `docs/examples/لیست قیمت دیجیتالاجیک - استاندارد.xltm`
+- `docs/examples/لیست قیمت دیجیتالاجیک - پیشرفته.xltm`
+
+The Standard edition keeps the original eight visible columns, in the original
+order:
 
 ```text
 فی فروش | گرم | سایر | فی فروش2 | نرخ ارزی | همه انبارها | کد کالا | نام کالا
 ```
 
-The template stores no product rows or cached REST responses. Opening the
-`.xltm` creates a separate macro-enabled workbook instance, so a later **Save
-As** operation saves a working copy and does not overwrite the canonical empty
-template.
+The Advanced edition keeps the same eight product facts and adds only four
+normally visible operational columns: the linked WooCommerce ID, the
+customer-visible WooCommerce price, its difference from the calculated price,
+and the synchronization status. Its currency, profit, freight, and rate-date
+audit columns are present but hidden by default. Technical join data is stored
+only in the `xlSheetVeryHidden` sheet `داده‌های همگام‌سازی`.
 
-Refresh-on-open and **Sync now** fetch:
+Both templates are empty at rest: they contain no product rows, prices, cached
+responses, or credential material. Opening an `.xltm` creates a separate
+macro-enabled workbook instance, so **Save As** writes a working copy instead
+of overwriting the canonical empty template.
 
-```text
-http://127.0.0.1:18080/api/product-sync
-https://digitalogic.ir/wp-json/wc/store/v1/products
-```
-
-The local product service returns the canonical `patris.product-sync` JSON
-envelope. The public WooCommerce Store API only supplies the public product ID
-and permalink. No workbook credential is required or stored. The join key is
-exact, case-sensitive `product_code` to WooCommerce `sku`; product names are
-never identity fallbacks and WooCommerce-only rows are never added. A matching
-name cell ends with `WooID <id>` and links to the public product page.
-
-The `تنظیمات` sheet also exposes explicit **دریافت وضعیت قیمت**,
-**پیش‌نمایش تغییرات**, and **اعمال تغییرات** actions. They call only the local
-loopback companion and never store a remote credential. The companion injects
-the protected source-scoped credential and canonical source identity, preserves
-the Digitalogic revision/idempotency/preview/confirmation contract, and
-regenerates and verifies product sync after apply. See
-[Excel pricing-settings companion](EXCEL-PRICING-SYNC.md).
-
-The three familiar calculator inputs remain in their original cells and table
-names:
-
-- `Yuan_Price` / `بهای یوآن` at `M6:M7` (initial value `29500`);
-- `Shipping` / `نرخ حمل` at `O6:O7` (initial value `120` CNY/kg);
-- `Profit` / `درصد سود` at `O9:O10` (initial value `30%`).
-
-They are user configuration, not product data, so a refresh never clears or
-silently overwrites them with an incomplete remote assignment. Column `B`
-calculates the same original price:
+Refresh-on-open and **همگام‌سازی اکنون** use only the local Patris companion:
 
 ```text
-((weight_grams * shipping_cny_per_kg / 1000) + foreign_price_cny)
-  * (1 + profit_fraction)
-  * irt_per_cny
+GET  http://127.0.0.1:18080/api/product-sync
+POST http://127.0.0.1:18080/api/excel/pricing-sync/state
+POST http://127.0.0.1:18080/api/excel/pricing-sync/preview
+POST http://127.0.0.1:18080/api/excel/pricing-sync/apply
 ```
 
-The guarded formula returns a blank when weight or foreign price is absent,
-instead of emitting `#N/A` or `#VALUE!`. The `تنظیمات` sheet remains available
-for the two source URLs, refresh status, last-success timestamp, auto-refresh
-choice, and read-only mirrors of the three calculator inputs. All visible labels
-and messages are Persian.
+The workbook never receives a WordPress, WooCommerce, or local product-sync
+secret. Before each pricing operation it opens a short-lived loopback companion
+session and sends the companion client header plus CSRF token; the local service
+injects the protected server-side credential and the exact current source ID,
+dataset, and revision. The join key is the case-sensitive `product_code`
+contract field, displayed to users as `کد کالا`; names are never identity
+fallbacks and WooCommerce-only rows are never invented. Where a public page
+exists, `WooID <id>` is the hyperlink text.
+
+The three familiar calculator cards and table names remain:
+
+- `Yuan_Price` / `بهای یوآن`;
+- `Shipping` / `نرخ حمل CNY`;
+- `Profit` / `درصد سود`.
+
+They are blank in the template and filled dynamically. The Settings sheet shows
+the live site values separately from the workbook proposal. A proposal can be
+previewed and applied only with a current state revision, idempotency key,
+server-bound preview digest, and an explicit Unicode confirmation. A rate older
+than seven days or a currency/profit difference above seven percent is reported
+in Persian and is never silently selected.
+
+The calculated price converts goods and freight independently through their
+declared currencies, applies the per-product or global percentage profit, and
+rounds once to whole toman:
+
+```text
+ROUND(
+  (foreign_price * goods_currency_to_irt
+   + weight_grams / 1000 * freight_per_kg * freight_currency_to_irt)
+  * (1 + profit_percent / 100),
+  0
+)
+```
+
+Missing weight makes only the freight component zero. Missing price, profit,
+required exchange rate, or an unsupported/absent currency fails closed to a
+blank result. `IFERROR` guards lookup failures, so the workbooks do not expose
+`#N/A` or `#VALUE!`.
+
+After an approved settings apply, the companion invalidates its pricing cache,
+regenerates the full canonical Patris contract, sends it through the existing
+WooCommerce product-sync receiver, and verifies a fresh state readback before
+Excel reports success. The Advanced edition still shows deliberate
+WooCommerce sale prices separately from the calculated canonical price.
 
 Enable macros only after reviewing:
 
@@ -155,11 +176,12 @@ Enable macros only after reviewing:
 The Windows builder removes local absolute paths, neutralizes Office author
 metadata to `AtomicDeploy`, removes volatile core-property timestamps,
 normalizes ZIP timestamps, and rejects external links/connections or private
-workstation metadata before publishing the template and checksum.
+workstation metadata. Checksums are written to one repository manifest, never
+as Desktop sidecars.
 
 The package is reopened by the Go/Excelize regression suite for macro-package
 and metadata checks. Its VBA is also imported, compiled, calculated, and
 integration-tested with native Excel 16. LibreOffice compatibility is not
 claimed without a LibreOffice runtime in the validation environment.
 
-![Digitalogic price calculator template](examples/Digitalogic-Price-Calculator-preview.png)
+![نسخه پیشرفته لیست قیمت دیجیتالاجیک](examples/لیست%20قیمت%20دیجیتالاجیک%20-%20پیشرفته%20-%20پیش‌نمایش.png)
