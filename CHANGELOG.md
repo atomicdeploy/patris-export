@@ -9,6 +9,14 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Added
 
+### Changed
+
+### Fixed
+
+## [1.3.0] - 2026-07-26
+
+### Added
+
 - Pull requests now prove SQL sink parity and transactional rollback against
   disposable MySQL 8.4, MariaDB 11.4, and SQLite targets while preserving
   leading-zero keys, additive schemas, user-owned columns, and guarded
