@@ -42,6 +42,9 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Changed
 
+- Digitalogic assignment prefetch now uses a configurable, bounded worker pool
+  with deterministic page-order validation; its 60-second default HTTP timeout
+  is bounded to 80 seconds so canonical requests retain an 85-second ceiling.
 - Canonical JSON, CSV, HTTP, spreadsheet, SQL, and outbound-update rows now share a sparse field boundary: never-received values are omitted while explicitly received nulls remain null.
 - Product-sync is now one living standard with strict current-field decoding; obsolete aliases and compatibility branches are rejected.
 - Shipping integration uses the paired `shipping_price_per_kg` and `shipping_price_per_kg_currency` fields; users must select uppercase `CNY` or `IRR` for every configured method.
@@ -54,6 +57,9 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Fixed
 
+- A terminal Digitalogic assignment-page failure now cancels in-flight sibling
+  requests, commits no partial assignments, and emits only typed secret-safe
+  diagnostics.
 - Browser configuration responses, initial WebSocket snapshots, and config
   update events no longer expose the MySQL DSN or protected TLS paths/names;
   browser saves preserve the server-side values and ignore client-supplied

@@ -12,19 +12,23 @@ import (
 )
 
 const (
-	ModeNone           = "none"
-	ModeStatic         = "static"
-	ModeDigitalogic    = "digitalogic"
-	CurrencyCNY        = "CNY"
-	CurrencyIRR        = "IRR"
-	defaultFreshFor    = 5 * time.Minute
-	defaultMaxStale    = time.Hour
-	defaultTimeout     = 15 * time.Second
-	defaultMaxEntries  = 2048
-	defaultMaxBytes    = int64(2 << 20)
-	defaultConcurrency = 8
-	defaultBatchSize   = 500
-	maximumBatchSize   = 500
+	ModeNone            = "none"
+	ModeStatic          = "static"
+	ModeDigitalogic     = "digitalogic"
+	CurrencyCNY         = "CNY"
+	CurrencyIRR         = "IRR"
+	defaultFreshFor     = 5 * time.Minute
+	defaultMaxStale     = time.Hour
+	defaultTimeout      = 60 * time.Second
+	minimumTimeout      = 100 * time.Millisecond
+	maximumTimeout      = 80 * time.Second
+	defaultMaxEntries   = 2048
+	defaultMaxBytes     = int64(2 << 20)
+	defaultConcurrency  = 8
+	defaultBatchSize    = 500
+	maximumBatchSize    = 500
+	defaultBatchWorkers = 2
+	maximumBatchWorkers = 4
 )
 
 // Config selects a replaceable pricing-catalog provider. Static is suitable
@@ -52,6 +56,7 @@ type DigitalogicConfig struct {
 	AssignmentPath      string `json:"assignment_path,omitempty" yaml:"assignment_path,omitempty" toml:"assignment_path,omitempty"`
 	BatchAssignmentPath string `json:"batch_assignment_path,omitempty" yaml:"batch_assignment_path,omitempty" toml:"batch_assignment_path,omitempty"`
 	BatchSize           int    `json:"batch_size,omitempty" yaml:"batch_size,omitempty" toml:"batch_size,omitempty"`
+	BatchConcurrency    int    `json:"batch_concurrency,omitempty" yaml:"batch_concurrency,omitempty" toml:"batch_concurrency,omitempty"`
 	UsernameEnv         string `json:"username_env,omitempty" yaml:"username_env,omitempty" toml:"username_env,omitempty"`
 	PasswordEnv         string `json:"password_env,omitempty" yaml:"password_env,omitempty" toml:"password_env,omitempty"`
 	BearerTokenEnv      string `json:"bearer_token_env,omitempty" yaml:"bearer_token_env,omitempty" toml:"bearer_token_env,omitempty"`
@@ -159,15 +164,26 @@ func Normalize(cfg Config) Config {
 	if d.BatchSize > maximumBatchSize {
 		d.BatchSize = maximumBatchSize
 	}
+	if d.BatchConcurrency <= 0 {
+		d.BatchConcurrency = defaultBatchWorkers
+	}
+	if d.BatchConcurrency > maximumBatchWorkers {
+		d.BatchConcurrency = maximumBatchWorkers
+	}
 	if parseDuration(d.FreshFor, 0) <= 0 {
 		d.FreshFor = defaultFreshFor.String()
 	}
 	if parseDuration(d.MaxStale, 0) <= 0 {
 		d.MaxStale = defaultMaxStale.String()
 	}
-	if parseDuration(d.Timeout, 0) <= 0 {
-		d.Timeout = defaultTimeout.String()
+	timeout := parseDuration(d.Timeout, defaultTimeout)
+	if timeout < minimumTimeout {
+		timeout = minimumTimeout
 	}
+	if timeout > maximumTimeout {
+		timeout = maximumTimeout
+	}
+	d.Timeout = timeout.String()
 	if d.MaxEntries <= 0 {
 		d.MaxEntries = defaultMaxEntries
 	}

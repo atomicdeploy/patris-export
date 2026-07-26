@@ -823,6 +823,11 @@ func ApplyEnv(cfg *Config) {
 			cfg.Canonical.Pricing.Digitalogic.BatchSize = batch
 		}
 	}
+	if value := os.Getenv("PATRIS_EXPORT_PRICING_BATCH_CONCURRENCY"); strings.TrimSpace(value) != "" {
+		if workers, err := strconv.Atoi(strings.TrimSpace(value)); err == nil {
+			cfg.Canonical.Pricing.Digitalogic.BatchConcurrency = workers
+		}
+	}
 	if value := os.Getenv("PATRIS_EXPORT_RECENT_SALES_ENABLED"); strings.TrimSpace(value) != "" {
 		cfg.RecentSales.Enabled = parseBool(value, cfg.RecentSales.Enabled)
 	}

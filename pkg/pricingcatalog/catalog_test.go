@@ -9,6 +9,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -708,14 +709,14 @@ func TestHTTPProviderRejectsInvalidBatchDecimalsAndMissingDefaultRevision(t *tes
 }
 
 func TestHTTPProviderCommitsChunksAtomicallyAfterDefaultRevisionAgreement(t *testing.T) {
-	var batchRequests, singleRequests int
+	var batchRequests, singleRequests atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {
 		case "/integration/catalog":
 			fmt.Fprint(w, `{"data":{"schema":"digitalogic.integration-catalog","revision":"r1","currency":{"local":"IRT","cny_to_local":1,"cny_to_irt":1},"pricing":{"formula_id":"landed_price"},"shipping_methods":[{"id":"air","price_per_kg":1,"currency":"CNY"}]}}`)
 		case "/integration/pricing-assignments/batch":
-			batchRequests++
+			batchRequests.Add(1)
 			var request struct {
 				Codes []string `json:"codes"`
 			}
@@ -741,7 +742,7 @@ func TestHTTPProviderCommitsChunksAtomicallyAfterDefaultRevisionAgreement(t *tes
 				}},
 			}})
 		default:
-			singleRequests++
+			singleRequests.Add(1)
 		}
 	}))
 	defer server.Close()
@@ -760,8 +761,8 @@ func TestHTTPProviderCommitsChunksAtomicallyAfterDefaultRevisionAgreement(t *tes
 			t.Fatalf("mixed default revisions did not fail atomically for %s: %+v", code, resolved)
 		}
 	}
-	if batchRequests != 2 || singleRequests != 0 {
-		t.Fatalf("mixed revision handling made unsafe requests: batch=%d single=%d", batchRequests, singleRequests)
+	if batchRequests.Load() != 2 || singleRequests.Load() != 0 {
+		t.Fatalf("mixed revision handling made unsafe requests: batch=%d single=%d", batchRequests.Load(), singleRequests.Load())
 	}
 }
 
@@ -1234,8 +1235,32 @@ func TestHTTPProviderConfiguredTimeoutAllowsSlowBatch(t *testing.T) {
 
 func TestDigitalogicProviderDefaultsLeaveProductionBatchHeadroom(t *testing.T) {
 	digitalogic := Normalize(Config{Mode: ModeDigitalogic}).Digitalogic
-	if digitalogic.Timeout != "15s" || digitalogic.BatchSize != 500 {
+	if digitalogic.Timeout != "1m0s" || digitalogic.BatchSize != 500 || digitalogic.BatchConcurrency != 2 {
 		t.Fatalf("unexpected production batch defaults: %+v", digitalogic)
+	}
+}
+
+func TestDigitalogicProviderBoundsTimeoutAndBatchConcurrency(t *testing.T) {
+	tests := []struct {
+		name        string
+		timeout     string
+		concurrency int
+		wantTimeout string
+		wantWorkers int
+	}{
+		{name: "invalid values use defaults", timeout: "not-a-duration", concurrency: 0, wantTimeout: "1m0s", wantWorkers: 2},
+		{name: "small positive timeout uses minimum", timeout: "1ms", concurrency: 1, wantTimeout: "100ms", wantWorkers: 1},
+		{name: "large values use hard caps", timeout: "24h", concurrency: 99, wantTimeout: "1m20s", wantWorkers: 4},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			digitalogic := Normalize(Config{Mode: ModeDigitalogic, Digitalogic: DigitalogicConfig{
+				Timeout: test.timeout, BatchConcurrency: test.concurrency,
+			}}).Digitalogic
+			if digitalogic.Timeout != test.wantTimeout || digitalogic.BatchConcurrency != test.wantWorkers {
+				t.Fatalf("normalized Digitalogic bounds = %+v, want timeout=%s workers=%d", digitalogic, test.wantTimeout, test.wantWorkers)
+			}
+		})
 	}
 }
 

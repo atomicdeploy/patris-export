@@ -111,16 +111,23 @@ Digitalogic mode reads, but does not mutate:
   result.
 
 Canonical transform collects unique, non-quarantined Codes before its normal
-per-record resolution, prefetches them in bounded request-order chunks, and
-stores results in the existing bounded assignment LRU. A transform-scoped
-result barrier also retains only that run's unique Codes and releases each
-outcome as the row resolves, so a deliberately small `max_entries` cannot evict
-current-run successes or diagnostics and recreate single-Code N+1 requests. It
-does not create a second pricing client or transformation path. With the
-default `batch_size: 500` and `max_entries: 2048`, a cold 1,002-Code catalog
-performs exactly three batch POSTs plus one catalog GET, and performs zero
-single-Code requests. Duplicate source Codes remain quarantined before
-prefetch.
+per-record resolution, divides them into deterministic request-order pages,
+and prefetches those pages with a bounded worker pool. The default
+`batch_concurrency: 2` permits two batch requests at once and the hard maximum
+is four. Results may arrive out of order, but they are validated and merged in
+their original page order before entering the existing bounded assignment LRU.
+A terminal page failure cancels its in-flight siblings and fails the entire
+prefetch closed without exposing remote response bodies.
+
+A transform-scoped result barrier also retains only that run's unique Codes
+and releases each outcome as the row resolves, so a deliberately small
+`max_entries` cannot evict current-run successes or diagnostics and recreate
+single-Code N+1 requests. It does not create a second pricing client or
+transformation path. With the default `batch_size: 500`,
+`batch_concurrency: 2`, and `max_entries: 2048`, a cold 1,002-Code catalog
+performs exactly three batch POSTs plus one catalog GET, performs at most two
+batch POSTs concurrently, and performs zero single-Code requests. Duplicate
+source Codes remain quarantined before prefetch.
 
 All chunks are staged before one atomic cache commit. Every chunk must carry
 the same non-empty default-markup revision and the same schema, configured
@@ -152,9 +159,10 @@ stored in the Patris config:
         "bearer_token_env": "DIGITALOGIC_PRICING_READ_TOKEN",
         "batch_assignment_path": "integration/pricing-assignments/batch",
         "batch_size": 500,
+        "batch_concurrency": 2,
         "fresh_for": "5m",
         "max_stale": "1h",
-        "timeout": "15s",
+        "timeout": "60s",
         "max_entries": 2048,
         "max_concurrency": 8,
         "max_response_bytes": 2097152
@@ -166,16 +174,28 @@ stored in the Patris config:
 
 ```powershell
 $env:DIGITALOGIC_PRICING_READ_TOKEN = "..."
-$env:PATRIS_EXPORT_PRICING_TIMEOUT = "15s"
+$env:PATRIS_EXPORT_PRICING_TIMEOUT = "60s"
 $env:PATRIS_EXPORT_PRICING_BATCH_SIZE = "500"
+$env:PATRIS_EXPORT_PRICING_BATCH_CONCURRENCY = "2"
 patris-export serve C:\Patris\data4\kala.db
 ```
 
-`PATRIS_EXPORT_PRICING_TIMEOUT` and `PATRIS_EXPORT_PRICING_BATCH_SIZE` override
-the same normalized Digitalogic provider used by file configuration. Batch
-size is capped at the endpoint maximum of 500. The 15-second timeout
-default leaves headroom for a production 500-Code response without changing
-the bounded request count or enabling single-Code fallback.
+`PATRIS_EXPORT_PRICING_TIMEOUT`, `PATRIS_EXPORT_PRICING_BATCH_SIZE`, and
+`PATRIS_EXPORT_PRICING_BATCH_CONCURRENCY` override the same normalized
+Digitalogic provider used by file configuration. Batch size is capped at the
+endpoint maximum of 500 and concurrency is capped at four. The HTTP timeout
+defaults to 60 seconds and is normalized to the inclusive range from 100
+milliseconds through 80 seconds. Canonical HTTP routes add at most five
+seconds of cooperative-cancellation grace to a normalized Digitalogic timeout,
+so the configured pricing phase retains an 85-second hard request ceiling.
+For a 939-Code projection, the default settings issue two 500-or-smaller pages
+concurrently instead of waiting for them sequentially.
+
+Transport completion is separate from catalog completeness. Digitalogic must
+still assign a shipping method to the intended product rows and configure a
+global or product-specific percentage markup before those rows can expose a
+final price. Missing assignments remain explicit fail-closed warnings; Patris
+does not invent shipping or markup defaults.
 
 Only HTTPS is accepted remotely; plain HTTP is limited to loopback. Provider
 paths must stay relative and on the configured origin, redirects are refused,
