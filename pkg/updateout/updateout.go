@@ -37,7 +37,13 @@ type Config struct {
 	Command              []string          `json:"command,omitempty" yaml:"command,omitempty" toml:"command,omitempty"`
 }
 
-const productSyncSecretHeader = "X-Patris-Product-Sync-Secret"
+// ProductSyncSecretHeader is the single reserved machine-credential header
+// shared by canonical product delivery and tightly scoped companion clients.
+// Secret values always come from ProductSyncSecretEnv and never from config
+// header maps.
+const ProductSyncSecretHeader = "X-Patris-Product-Sync-Secret"
+
+const productSyncSecretHeader = ProductSyncSecretHeader
 
 // Receiver-reported product counts use a stable, architecture-independent
 // bound. A receiver may enforce a lower storage bound, but a
@@ -326,7 +332,7 @@ func applyHeaders(req *http.Request, cfg Config, event Event, contract *canonica
 		req.Header.Set("X-Patris-Event-ID", contract.EventID)
 	}
 	if secret != "" {
-		req.Header.Set(productSyncSecretHeader, secret)
+		req.Header.Set(ProductSyncSecretHeader, secret)
 	}
 }
 
@@ -392,6 +398,17 @@ func resolveProductSyncSecret(cfg Config) (string, error) {
 		return "", fmt.Errorf("product-sync secret environment variable %q is missing or empty", cfg.ProductSyncSecretEnv)
 	}
 	return secret, nil
+}
+
+// ResolveProductSyncSecret reads the protected product-sync credential named
+// by cfg without placing its value in persisted configuration. Callers must
+// keep returned values out of logs, errors, response bodies, and workbooks.
+func ResolveProductSyncSecret(cfg Config) (string, error) {
+	cfg = Normalize(cfg)
+	if !validEnvName(cfg.ProductSyncSecretEnv) {
+		return "", fmt.Errorf("product_sync_secret_env must be a portable environment-variable name")
+	}
+	return resolveProductSyncSecret(cfg)
 }
 
 type receiverResponseData struct {

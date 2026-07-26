@@ -76,6 +76,7 @@ type Server struct {
 	catalogProviderKey   string
 	catalogProviderMu    sync.Mutex
 	sqlOperations        *sqlOperationsState
+	excelPricing         *excelPricingState
 	backgroundCtx        context.Context
 	backgroundCancel     context.CancelFunc
 	backgroundWG         sync.WaitGroup
@@ -158,6 +159,7 @@ func NewServerWithOptions(dbPath string, charMap converter.CharMapping, options 
 		wsClients:        make(map[*websocket.Conn]*sync.Mutex),
 		eventSubscribers: make(map[chan map[string]interface{}]struct{}),
 		sqlOperations:    newSQLOperationsState(),
+		excelPricing:     newExcelPricingState(),
 		backgroundCtx:    backgroundCtx,
 		backgroundCancel: backgroundCancel,
 		useTempFile:      copyBeforeRead,
@@ -187,6 +189,7 @@ func NewServerWithOptions(dbPath string, charMap converter.CharMapping, options 
 	if s.version.Version == "" {
 		s.version = version.Current()
 	}
+	s.excelPricing.canonical = s.canonicalRecordResultContext
 
 	// Set up routes
 	s.setupRoutes()
@@ -221,6 +224,10 @@ func (s *Server) setupRoutes() {
 	s.router.HandleFunc("/api/categories", s.handleGetCategories).Methods("GET")
 	s.router.HandleFunc("/api/product-sync", s.handleGetProductSyncContract).Methods("GET")
 	s.router.HandleFunc("/api/recent-sales", s.handleGetRecentSales).Methods("GET")
+	s.router.HandleFunc("/api/excel/pricing-sync/session", s.handlePostExcelPricingSession).Methods("POST")
+	s.router.HandleFunc("/api/excel/pricing-sync/state", s.handlePostExcelPricingState).Methods("POST")
+	s.router.HandleFunc("/api/excel/pricing-sync/preview", s.handlePostExcelPricingPreview).Methods("POST")
+	s.router.HandleFunc("/api/excel/pricing-sync/apply", s.handlePostExcelPricingApply).Methods("POST")
 	s.router.HandleFunc("/api/info", s.handleGetInfo).Methods("GET")
 	s.router.HandleFunc("/api/app", s.handleGetApp).Methods("GET")
 	s.router.HandleFunc("/api/charmap", s.handleGetCharmap).Methods("GET")

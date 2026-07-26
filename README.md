@@ -616,6 +616,14 @@ code, sold quantity, sale frequency, last-sold time, and stable
 source/window/page metadata. It explicitly refuses `kala.db` and the primary
 product database. See [Recent-sales aggregate API](docs/RECENT-SALES-API.md).
 
+The canonical macro workbook uses the loopback-only `POST
+/api/excel/pricing-sync/{session,state,preview,apply}` companion to read,
+preview, and explicitly apply global pricing settings without storing the
+remote credential. Patris injects the protected product-sync credential and
+exact canonical source identity, then regenerates, delivers, and verifies the
+canonical product contract after apply. See [Excel pricing-settings
+companion](docs/EXCEL-PRICING-SYNC.md).
+
 `POST /api/refresh` forces the same source snapshot refresh used by the Web UI,
 WebSocket, IPC, and embedded-library `refresh` command. This gives desktop and
 remote clients one consistent manual-refresh operation.

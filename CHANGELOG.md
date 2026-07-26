@@ -42,6 +42,11 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - The Windows scheduled-task helper can import explicitly named current
   user/machine environment values at process launch without storing credential
   values in task XML, arguments, configuration, logs, or release artifacts.
+- The canonical Excel template now reads, previews, and explicitly applies
+  global pricing settings through a loopback-only, CSRF-guarded companion that
+  injects the protected source-scoped credential, preserves optimistic
+  revisions and idempotency, and regenerates/delivers canonical products after
+  apply without placing a credential in VBA or workbook cells.
 
 ### Changed
 

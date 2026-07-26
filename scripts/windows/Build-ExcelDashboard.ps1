@@ -376,38 +376,68 @@ try {
     $settings.Range('A9:F9').Merge()
     $settings.Range('A9').Value2 = 'مقادیر محاسبه قیمت'
     Set-SectionStyle $settings.Range('A9:F9') 'DDE8FC' '242424' 12
-    $settings.Range('A10').Value2 = 'بهای یوآن'
+    $settings.Range('A10').Value2 = 'نرخ دلار (تومان)'
     $settings.Range('B10:F10').Merge()
-    $settings.Range('B10').Formula = "='لیست قیمت'!M7"
-    $settings.Range('A11').Value2 = 'نرخ حمل CNY'
+    $settings.Range('B10').Value2 = 170000
+    $settings.Range('A11').Value2 = 'بهای یوآن (تومان)'
     $settings.Range('B11:F11').Merge()
-    $settings.Range('B11').Formula = "='لیست قیمت'!O7"
-    $settings.Range('A12').Value2 = 'درصد سود'
+    $settings.Range('B11').Formula = "='لیست قیمت'!M7"
+    $settings.Range('A12').Value2 = 'تاریخ مؤثر'
     $settings.Range('B12:F12').Merge()
-    $settings.Range('B12').Formula = "='لیست قیمت'!O10"
+    $settings.Range('B12:F12').ClearContents()
+    $settings.Range('A13').Value2 = 'درصد سود پیش‌فرض'
+    $settings.Range('B13:F13').Merge()
+    $settings.Range('B13').Formula = "='لیست قیمت'!O10"
+    $settings.Range('A14').Value2 = 'نرخ حمل CNY'
+    $settings.Range('B14:F14').Merge()
+    $settings.Range('B14').Formula = "='لیست قیمت'!O7"
     $settings.Range('B10:F11').NumberFormat = '#,##0'
-    $settings.Range('B12:F12').NumberFormat = '0%'
-    $settings.Range('A10:A12').Font.Bold = $true
-    $settings.Range('A10:F12').Borders.Color = ConvertTo-OleColor 'B9CCF4'
-    $settings.Range('B10:F12').Interior.Color = ConvertTo-OleColor 'F6F6F6'
-    $settings.Range('B10:F12').ReadingOrder = -5003
-    $settings.Range('B10:F12').HorizontalAlignment = -4108
+    $settings.Range('B12:F12').NumberFormat = 'yyyy-mm-dd'
+    $settings.Range('B13:F13').NumberFormat = '0%'
+    $settings.Range('B14:F14').NumberFormat = '#,##0.##'
+    $settings.Range('A10:A14').Font.Bold = $true
+    $settings.Range('A10:F14').Borders.Color = ConvertTo-OleColor 'B9CCF4'
+    $settings.Range('B10:F14').Interior.Color = ConvertTo-OleColor 'F6F6F6'
+    $settings.Range('B10:F14').ReadingOrder = -5003
+    $settings.Range('B10:F14').HorizontalAlignment = -4108
+    $settings.Range('B10:F10').Interior.Color = ConvertTo-OleColor 'FFF4D6'
+    $settings.Range('B12:F12').Interior.Color = ConvertTo-OleColor 'FFF4D6'
 
-    $settings.Range('A14:F17').Merge()
-    $settings.Range('A14').Value2 = "این سه مقدار همان تنظیمات فایل قبلی هستند و از صفحه «لیست قیمت» ویرایش می‌شوند.`nردیف‌های کالا در قالب ذخیره نمی‌شوند؛ دکمه همگام‌سازی آن‌ها را از سرویس محصولات می‌گیرد و لینک ووکامرس را با شناسه WooID اضافه می‌کند.`nاگر وزن یا نرخ ارزی موجود نباشد، قیمت نهایی خالی می‌ماند و هیچ خطای #N/A نمایش داده نمی‌شود."
-    $settings.Range('A14:F17').WrapText = $true
-    $settings.Range('A14:F17').VerticalAlignment = -4160
-    $settings.Range('A14:F17').Interior.Color = ConvertTo-OleColor 'F6F6F6'
-    $settings.Range('A14:F17').Font.Color = ConvertTo-OleColor '282828'
-    $settings.Range('A14:F17').Borders.Color = ConvertTo-OleColor 'D9D9D9'
-    $settings.Rows('14:17').RowHeight = 28
+    $settings.Range('A16:F16').Merge()
+    $settings.Range('A16').Value2 = 'وضعیت تنظیمات قیمت'
+    Set-SectionStyle $settings.Range('A16:F16') 'DDE8FC' '242424' 12
+    $settings.Range('A17').Value2 = 'وضعیت'
+    $settings.Range('B17:F17').Merge()
+    $settings.Range('B17').Value2 = 'هنوز وضعیت قیمت دریافت نشده است.'
+    $settings.Range('A18').Value2 = 'آخرین دریافت'
+    $settings.Range('B18:F18').Merge()
+    $settings.Range('B18:F18').ClearContents()
+    $settings.Range('B18:F18').NumberFormat = 'yyyy/mm/dd hh:mm'
+    $settings.Range('A17:A18').Font.Bold = $true
+    $settings.Range('A17:F18').Borders.Color = ConvertTo-OleColor 'D9D9D9'
+    $settings.Range('B17:F18').Interior.Color = ConvertTo-OleColor 'F6F6F6'
+
+    [void](Add-ActionButton $settings 'دریافت وضعیت قیمت' 'ProductCatalogSync.RefreshPricingState' $settings.Range('A20') $settings.Range('A20:B21').Width $settings.Range('A20:B21').Height)
+    [void](Add-ActionButton $settings 'پیش‌نمایش تغییرات' 'ProductCatalogSync.PreviewPricingSettings' $settings.Range('C20') $settings.Range('C20:D21').Width $settings.Range('C20:D21').Height)
+    [void](Add-ActionButton $settings 'اعمال تغییرات' 'ProductCatalogSync.ApplyPricingSettings' $settings.Range('E20') $settings.Range('E20:F21').Width $settings.Range('E20:F21').Height)
+
+    $settings.Range('A23:F27').Merge()
+    $settings.Range('A23').Value2 = "فایل اکسل هیچ رمز یا اعتبارنامه‌ای نگه نمی‌دارد و فقط با سرویس محلی روی همین رایانه ارتباط دارد.`nابتدا وضعیت را دریافت کنید، مقادیر زرد را بررسی یا ویرایش کنید و سپس پیش‌نمایش را بگیرید. اعمال تغییرات فقط پس از تأیید صریح شما انجام می‌شود.`nبهای یوآن و درصد سود همان ورودی‌های آشنای صفحه «لیست قیمت» هستند؛ نرخ حمل فقط در محاسبه محلی استفاده می‌شود."
+    $settings.Range('A23:F27').WrapText = $true
+    $settings.Range('A23:F27').VerticalAlignment = -4160
+    $settings.Range('A23:F27').Interior.Color = ConvertTo-OleColor 'F6F6F6'
+    $settings.Range('A23:F27').Font.Color = ConvertTo-OleColor '282828'
+    $settings.Range('A23:F27').Borders.Color = ConvertTo-OleColor 'D9D9D9'
+    $settings.Rows('23:27').RowHeight = 25
+    $settings.Columns('H').Hidden = $true
+    $settings.Range('H1:H4').ClearContents()
 
     $priceList.PageSetup.PrintArea = '$B$3:$O$30'
     $priceList.PageSetup.Orientation = 2
     $priceList.PageSetup.Zoom = $false
     $priceList.PageSetup.FitToPagesWide = 1
     $priceList.PageSetup.FitToPagesTall = 1
-    $settings.PageSetup.PrintArea = '$A$1:$F$17'
+    $settings.PageSetup.PrintArea = '$A$1:$F$27'
     $settings.PageSetup.Zoom = $false
     $settings.PageSetup.FitToPagesWide = 1
     $settings.PageSetup.FitToPagesTall = 1

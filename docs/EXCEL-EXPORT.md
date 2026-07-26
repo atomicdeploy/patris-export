@@ -114,6 +114,14 @@ exact, case-sensitive `product_code` to WooCommerce `sku`; product names are
 never identity fallbacks and WooCommerce-only rows are never added. A matching
 name cell ends with `WooID <id>` and links to the public product page.
 
+The `تنظیمات` sheet also exposes explicit **دریافت وضعیت قیمت**,
+**پیش‌نمایش تغییرات**, and **اعمال تغییرات** actions. They call only the local
+loopback companion and never store a remote credential. The companion injects
+the protected source-scoped credential and canonical source identity, preserves
+the Digitalogic revision/idempotency/preview/confirmation contract, and
+regenerates and verifies product sync after apply. See
+[Excel pricing-settings companion](EXCEL-PRICING-SYNC.md).
+
 The three familiar calculator inputs remain in their original cells and table
 names:
 

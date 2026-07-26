@@ -534,12 +534,28 @@ func TestDynamicCalculatorTemplatePreservesPersianPriceListContract(t *testing.T
 		}
 	}
 
-	wooEndpoint, err := book.GetCellValue("تنظیمات", "B4", excelize.Options{RawCellValue: true})
+	wooEndpoint, err := book.GetCellValue(wantSheets[1], "B4", excelize.Options{RawCellValue: true})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !strings.HasPrefix(wooEndpoint, "https://digitalogic.ir/wp-json/wc/store/v1/products") {
 		t.Fatalf("public Woo Store endpoint = %q", wooEndpoint)
+	}
+	for cell, want := range map[string]string{
+		"B10": "170000",
+		"B12": "",
+		"H1":  "",
+		"H2":  "",
+		"H3":  "",
+		"H4":  "",
+	} {
+		got, valueErr := book.GetCellValue(wantSheets[1], cell, excelize.Options{RawCellValue: true})
+		if valueErr != nil {
+			t.Fatal(valueErr)
+		}
+		if got != want {
+			t.Errorf("settings %s = %q, want %q", cell, got, want)
+		}
 	}
 }
 
@@ -592,8 +608,19 @@ func TestDynamicCalculatorVBASourceValidatesContractsBeforeMutation(t *testing.T
 		"StrPtr(title)",
 		"Private Sub ShowUnicodeMessage",
 		"ValidateUnicodeRuntime",
+		"ValidateProductServiceUrlRuntime",
+		`"http://localhost:x@attacker.example/api/product-sync"`,
+		`"http://127.0.0.1@attacker.example/api/product-sync"`,
 		"MB_RIGHT",
 		"MB_RTLREADING",
+		`Private Const PRICING_CLIENT_HEADER As String = "X-Patris-Excel-Client"`,
+		`Private Const PRICING_CSRF_HEADER As String = "X-Patris-Excel-CSRF-Token"`,
+		`"/api/excel/pricing-sync"`,
+		`http.setRequestHeader "Idempotency-Key", idempotencyKey`,
+		`http.setRequestHeader "If-Match", Chr$(34) & stateRevision & Chr$(34)`,
+		`"""confirmation"":""APPLY""}"`,
+		"ClearPricingPreview",
+		"Private Function ShowUnicodeConfirm",
 	} {
 		if !strings.Contains(source, required) {
 			t.Fatalf("VBA source is missing validation: %s", required)
@@ -610,6 +637,9 @@ func TestDynamicCalculatorVBASourceValidatesContractsBeforeMutation(t *testing.T
 		"credential",
 		"client_secret",
 		"api_key",
+		"X-Patris-Product-Sync-Secret",
+		"PATRIS_PRODUCT_SYNC_SECRET",
+		"/wp-json/digitalogic/excel/pricing-sync",
 		"MsgBox ",
 		"MsgBox(",
 		"VBA.MsgBox",
