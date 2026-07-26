@@ -934,6 +934,25 @@ func TestCanonicalProductSyncRemainsAvailableWithRawViewerMode(t *testing.T) {
 	assertCanonicalFixtureValues(t, "raw-mode product-sync", product)
 }
 
+func TestCanonicalRequestTimeoutBoundsDigitalogicPricing(t *testing.T) {
+	cfg := appconfig.Default()
+	cfg.Canonical.Pricing.Mode = "digitalogic"
+	cfg.Canonical.Pricing.Digitalogic.Timeout = "25ms"
+	if got := canonicalRequestTimeout(cfg); got != time.Second {
+		t.Fatalf("short Digitalogic timeout bound = %s, want 1s", got)
+	}
+
+	cfg.Canonical.Pricing.Digitalogic.Timeout = "15s"
+	if got := canonicalRequestTimeout(cfg); got != 20*time.Second {
+		t.Fatalf("Digitalogic timeout with grace = %s, want 20s", got)
+	}
+
+	cfg.Canonical.Pricing.Digitalogic.Timeout = "10m"
+	if got := canonicalRequestTimeout(cfg); got != 2*time.Minute {
+		t.Fatalf("large Digitalogic timeout cap = %s, want 2m", got)
+	}
+}
+
 func assertJSONEquivalent(t *testing.T, source string, left, right interface{}) {
 	t.Helper()
 	leftJSON, err := json.Marshal(left)

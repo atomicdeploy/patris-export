@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/subtle"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"hash/crc32"
 	"io"
@@ -638,9 +639,16 @@ func (s *Server) handleGetRecords(w http.ResponseWriter, r *http.Request) {
 // handleGetCategories exposes structural catalog rows independently from the
 // product collection. Generic/noncanonical datasets return 404 rather than an
 // empty shape that could be mistaken for a canonical catalog.
-func (s *Server) handleGetCategories(w http.ResponseWriter, _ *http.Request) {
-	result, err := s.RecordResult()
+func (s *Server) handleGetCategories(w http.ResponseWriter, r *http.Request) {
+	timeout := canonicalRequestTimeout(s.Config())
+	ctx, cancel := context.WithTimeout(r.Context(), timeout)
+	defer cancel()
+	result, err := s.canonicalRecordResultContext(ctx)
 	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+			http.Error(w, fmt.Sprintf("Canonical categories timed out after %s", timeout), http.StatusServiceUnavailable)
+			return
+		}
 		http.Error(w, fmt.Sprintf("Failed to read records: %v", err), http.StatusInternalServerError)
 		return
 	}
@@ -657,8 +665,15 @@ func (s *Server) handleGetCategories(w http.ResponseWriter, _ *http.Request) {
 // handleGetProductSyncContract exposes the living integration envelope
 // without changing the long-standing row collection returned by /api/records.
 func (s *Server) handleGetProductSyncContract(w http.ResponseWriter, r *http.Request) {
-	result, err := s.canonicalRecordResultContext(r.Context())
+	timeout := canonicalRequestTimeout(s.Config())
+	ctx, cancel := context.WithTimeout(r.Context(), timeout)
+	defer cancel()
+	result, err := s.canonicalRecordResultContext(ctx)
 	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+			http.Error(w, fmt.Sprintf("Canonical product-sync timed out after %s", timeout), http.StatusServiceUnavailable)
+			return
+		}
 		http.Error(w, fmt.Sprintf("Failed to read records: %v", err), http.StatusInternalServerError)
 		return
 	}
@@ -670,6 +685,26 @@ func (s *Server) handleGetProductSyncContract(w http.ResponseWriter, r *http.Req
 	if err := json.NewEncoder(w).Encode(result.Contract); err != nil {
 		http.Error(w, fmt.Sprintf("Failed to encode product-sync contract: %v", err), http.StatusInternalServerError)
 	}
+}
+
+func canonicalRequestTimeout(cfg appconfig.Config) time.Duration {
+	timeout := 30 * time.Second
+	if strings.EqualFold(strings.TrimSpace(cfg.Canonical.Pricing.Mode), "digitalogic") {
+		if configured, err := time.ParseDuration(strings.TrimSpace(cfg.Canonical.Pricing.Digitalogic.Timeout)); err == nil && configured > 0 {
+			grace := configured
+			if grace > 5*time.Second {
+				grace = 5 * time.Second
+			}
+			timeout = configured + grace
+		}
+	}
+	if timeout < time.Second {
+		return time.Second
+	}
+	if timeout > 2*time.Minute {
+		return 2 * time.Minute
+	}
+	return timeout
 }
 
 func requestedRecordsFormat(r *http.Request) string {

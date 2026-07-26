@@ -28,12 +28,14 @@ const (
 )
 
 var (
-	httpClient               = &http.Client{Timeout: 2 * time.Minute}
-	tempDirOverride          string
-	tempStrategy                   = TempStrategyAuto
-	tempMemoryLimitBytes     int64 = DefaultMemoryTempLimitBytes
-	tempDirMu                sync.RWMutex
-	memoryTempFreeSpaceSlack int64 = 8 * 1024 * 1024
+	httpClient                       = &http.Client{Timeout: 2 * time.Minute}
+	tempDirOverride                  string
+	tempStrategy                           = TempStrategyAuto
+	tempMemoryLimitBytes             int64 = DefaultMemoryTempLimitBytes
+	tempDirMu                        sync.RWMutex
+	memoryTempFreeSpaceSlack         int64 = 8 * 1024 * 1024
+	replaceFileAtomicFunc                  = replaceFileAtomic
+	isRecoverablePublishConflictFunc       = isRecoverablePublishConflict
 )
 
 // SetTempDir configures the base temp directory used by copy/download helpers.
@@ -82,6 +84,31 @@ func tempRootForSize(sizeHint int64) string {
 
 func tempRoot() string {
 	return tempRootForSize(-1)
+}
+
+func publishTempFile(stagingPath, stablePath string) (string, error) {
+	if err := replaceFileAtomicFunc(stagingPath, stablePath); err != nil {
+		if !isRecoverablePublishConflictFunc(err) {
+			return "", err
+		}
+		fallbackPath := uniquePublishedTempPath(stablePath)
+		if fallbackErr := replaceFileAtomicFunc(stagingPath, fallbackPath); fallbackErr != nil {
+			return "", fmt.Errorf("%w; fallback publish to %s failed: %v", err, fallbackPath, fallbackErr)
+		}
+		return fallbackPath, nil
+	}
+	return stablePath, nil
+}
+
+func uniquePublishedTempPath(stablePath string) string {
+	base := strings.TrimSuffix(stablePath, string(filepath.Separator))
+	for attempt := 0; attempt < 100; attempt++ {
+		candidate := fmt.Sprintf("%s.%d.%d.%02d", base, os.Getpid(), time.Now().UnixNano(), attempt)
+		if _, err := os.Stat(candidate); os.IsNotExist(err) {
+			return candidate
+		}
+	}
+	return fmt.Sprintf("%s.%d.%d", base, os.Getpid(), time.Now().UnixNano())
 }
 
 func systemTempRoot() string {
@@ -278,14 +305,15 @@ func CopyToTempContext(ctx context.Context, sourcePath string) (*FileInfo, error
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	if err := replaceFileAtomic(stagingPath, tempPath); err != nil {
+	publishedPath, err := publishTempFile(stagingPath, tempPath)
+	if err != nil {
 		return nil, fmt.Errorf("failed to publish temp file: %w", err)
 	}
 	committed = true
 
 	return &FileInfo{
 		SourcePath: sourcePath,
-		TempPath:   tempPath,
+		TempPath:   publishedPath,
 		Hash:       fmt.Sprintf("%08x", hash.Sum32()),
 		Size:       sourceInfo.Size(),
 		ModTime:    modTime,
@@ -411,14 +439,15 @@ func DownloadToTempContext(ctx context.Context, sourceURL string) (*FileInfo, er
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	if err := replaceFileAtomic(stagingPath, tempPath); err != nil {
+	publishedPath, err := publishTempFile(stagingPath, tempPath)
+	if err != nil {
 		return nil, fmt.Errorf("failed to publish downloaded file: %w", err)
 	}
 	committed = true
 
 	return &FileInfo{
 		SourcePath: sourceURL,
-		TempPath:   tempPath,
+		TempPath:   publishedPath,
 		Hash:       fmt.Sprintf("%08x", hash.Sum32()),
 		Size:       written,
 		ModTime:    modTime,

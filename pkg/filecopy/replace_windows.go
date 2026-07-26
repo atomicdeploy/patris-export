@@ -19,3 +19,7 @@ func replaceFileAtomic(source, destination string) error {
 		windows.MOVEFILE_REPLACE_EXISTING|windows.MOVEFILE_WRITE_THROUGH,
 	)
 }
+
+func isRecoverablePublishConflict(err error) bool {
+	return err == windows.ERROR_ACCESS_DENIED || err == windows.ERROR_SHARING_VIOLATION
+}
