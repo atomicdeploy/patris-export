@@ -375,8 +375,8 @@ func TestResolveXLSXLanguage(t *testing.T) {
 	}
 }
 
-func TestDashboardExamplePackageHasNeutralMetadataAndNoExternalConnections(t *testing.T) {
-	path := filepath.Join("..", "..", "docs", "examples", "Patris-Digitalogic-Dashboard.xlsm")
+func TestDynamicCalculatorTemplateHasNeutralMetadataAndNoExternalConnections(t *testing.T) {
+	path := filepath.Join("..", "..", "docs", "examples", "Digitalogic-Price-Calculator.xltm")
 	archive, err := zip.OpenReader(path)
 	if err != nil {
 		t.Fatal(err)
@@ -403,6 +403,15 @@ func TestDashboardExamplePackageHasNeutralMetadataAndNoExternalConnections(t *te
 				t.Fatalf("dashboard package entry %q leaked %q", entry.Name, forbidden)
 			}
 		}
+		if entry.Name == "xl/sharedStrings.xml" ||
+			strings.HasPrefix(entry.Name, "xl/worksheets/") ||
+			strings.HasPrefix(entry.Name, "xl/drawings/") {
+			for _, forbidden := range []string{"patris", "پاتریس"} {
+				if strings.Contains(lower, forbidden) {
+					t.Fatalf("customer-visible workbook entry %q leaked upstream branding %q", entry.Name, forbidden)
+				}
+			}
+		}
 		if entry.Name == "docProps/core.xml" {
 			coreProperties = string(content)
 		}
@@ -416,34 +425,208 @@ func TestDashboardExamplePackageHasNeutralMetadataAndNoExternalConnections(t *te
 	}
 }
 
-func TestDashboardVBASourceValidatesCodesAndDigitalogicJSONBeforeMutation(t *testing.T) {
-	path := filepath.Join("..", "..", "docs", "examples", "vba", "PatrisDashboard.bas")
+func TestDynamicCalculatorTemplatePreservesPersianPriceListContract(t *testing.T) {
+	path := filepath.Join("..", "..", "docs", "examples", "Digitalogic-Price-Calculator.xltm")
+	book, err := excelize.OpenFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer book.Close()
+
+	wantSheets := []string{"لیست قیمت", "تنظیمات"}
+	if got := book.GetSheetList(); strings.Join(got, "|") != strings.Join(wantSheets, "|") {
+		t.Fatalf("template sheet order = %v, want %v", got, wantSheets)
+	}
+
+	const priceSheet = "لیست قیمت"
+	wantHeaders := []string{
+		"فی فروش",
+		"گرم",
+		"سایر",
+		"فی فروش2",
+		"نرخ ارزی",
+		"همه انبارها",
+		"کد کالا",
+		"نام کالا",
+	}
+	gotHeaders := make([]string, 0, len(wantHeaders))
+	for column := 2; column <= 9; column++ {
+		cell, cellErr := excelize.CoordinatesToCellName(column, 5)
+		if cellErr != nil {
+			t.Fatal(cellErr)
+		}
+		value, valueErr := book.GetCellValue(priceSheet, cell, excelize.Options{RawCellValue: true})
+		if valueErr != nil {
+			t.Fatal(valueErr)
+		}
+		gotHeaders = append(gotHeaders, value)
+	}
+	if strings.Join(gotHeaders, "|") != strings.Join(wantHeaders, "|") {
+		t.Fatalf("Products headers = %v, want %v", gotHeaders, wantHeaders)
+	}
+
+	tables, err := book.GetTables(priceSheet)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tablesByName := make(map[string]excelize.Table, len(tables))
+	for _, table := range tables {
+		tablesByName[table.Name] = table
+	}
+	for _, name := range []string{"Products", "Yuan_Price", "Shipping", "Profit"} {
+		if _, ok := tablesByName[name]; !ok {
+			t.Fatalf("template table %q is missing; tables = %+v", name, tables)
+		}
+	}
+
+	productsRange := strings.ReplaceAll(tablesByName["Products"].Range, "$", "")
+	if !strings.HasPrefix(productsRange, "B5:I") {
+		t.Fatalf("Products range = %q, want B5:I...", productsRange)
+	}
+	rangeParts := strings.Split(productsRange, ":")
+	if len(rangeParts) != 2 {
+		t.Fatalf("Products range = %q, want a single rectangular range", productsRange)
+	}
+	_, lastRow, err := excelize.CellNameToCoordinates(rangeParts[1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	for row := 6; row <= lastRow; row++ {
+		for column := 2; column <= 9; column++ {
+			cell, cellErr := excelize.CoordinatesToCellName(column, row)
+			if cellErr != nil {
+				t.Fatal(cellErr)
+			}
+			value, valueErr := book.GetCellValue(priceSheet, cell, excelize.Options{RawCellValue: true})
+			if valueErr != nil {
+				t.Fatal(valueErr)
+			}
+			formula, formulaErr := book.GetCellFormula(priceSheet, cell)
+			if formulaErr != nil {
+				t.Fatal(formulaErr)
+			}
+			if value != "" || formula != "" {
+				t.Fatalf("template persisted product data at %s!%s: value=%q formula=%q", priceSheet, cell, value, formula)
+			}
+		}
+	}
+
+	for name, wantRange := range map[string]string{
+		"Yuan_Price": "M6:M7",
+		"Shipping":   "O6:O7",
+		"Profit":     "O9:O10",
+	} {
+		if got := strings.ReplaceAll(tablesByName[name].Range, "$", ""); got != wantRange {
+			t.Errorf("%s range = %q, want %q", name, got, wantRange)
+		}
+	}
+	for cell, want := range map[string]string{
+		"M7":  "29500",
+		"O7":  "120",
+		"O10": "0.3",
+	} {
+		got, valueErr := book.GetCellValue(priceSheet, cell, excelize.Options{RawCellValue: true})
+		if valueErr != nil {
+			t.Fatal(valueErr)
+		}
+		if got != want {
+			t.Errorf("%s!%s = %q, want %q", priceSheet, cell, got, want)
+		}
+	}
+
+	wooEndpoint, err := book.GetCellValue("تنظیمات", "B4", excelize.Options{RawCellValue: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(wooEndpoint, "https://digitalogic.ir/wp-json/wc/store/v1/products") {
+		t.Fatalf("public Woo Store endpoint = %q", wooEndpoint)
+	}
+}
+
+func TestDynamicCalculatorVBASourceValidatesContractsBeforeMutation(t *testing.T) {
+	path := filepath.Join("..", "..", "docs", "examples", "vba", "ProductCatalogSync.bas")
 	content, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	source := string(content)
-	deletePosition := strings.Index(source, "table.DataBodyRange.Delete")
-	for _, requiredBeforeDelete := range []string{
-		"If Not HasAnyHeader(headers, \"product_code\", \"Code\", \"code\")",
-		"If Len(codeValue) = 0 Then",
-		"If seenCodes.Exists(codeValue) Then",
-	} {
-		position := strings.Index(source, requiredBeforeDelete)
-		if position < 0 || deletePosition < 0 || position > deletePosition {
-			t.Fatalf("VBA safeguard %q is missing or runs after table deletion", requiredBeforeDelete)
+	for offset, value := range content {
+		if value > 0x7f {
+			t.Fatalf("VBA source is not ASCII-safe: byte 0x%02x at offset %d", value, offset)
 		}
 	}
+	source := string(content)
+
+	replacePosition := strings.Index(source, "ReplaceProductTableData table, output, dataRows")
+	for _, requiredBeforeReplace := range []string{
+		`CStr(JsonRuntime.JsonText(root, "schema")) <> "patris.product-sync"`,
+		"If Len(codeValue) = 0 Then",
+		"If codesSeen.Exists(codeValue) Then",
+	} {
+		position := strings.Index(source, requiredBeforeReplace)
+		if position < 0 || replacePosition < 0 || position > replacePosition {
+			t.Fatalf("VBA safeguard %q is missing or runs after product replacement", requiredBeforeReplace)
+		}
+	}
+
 	for _, required := range []string{
-		"The Digitalogic endpoint returned an empty response.",
-		"The Digitalogic endpoint did not return a JSON object or array.",
-		"If Not IsValidJsonResponse(responseText) Or _",
-		`Left$(responseText, 1) <> "{"`,
-		"Private Function ParseJsonObject",
-		"Private Function ParseJsonArray",
+		`Set PriceSheet = ThisWorkbook.Worksheets(1)`,
+		`Set ConfigSheet = ThisWorkbook.Worksheets(2)`,
+		`Private Const DIGITALOGIC_HOST_PREFIX As String = "https://digitalogic.ir/"`,
+		"wooBySku.CompareMode = vbBinaryCompare",
+		"ambiguousSkus.CompareMode = vbBinaryCompare",
+		"If wooBySku.Exists(codeValue) Then",
+		"For rowIndex = 1 To table.DataBodyRange.Rows.Count",
+		"RefreshWooCatalog = ApplyWooLinks(wooBySku)",
+		`nameValue = nameValue & " " & U("2014") &`,
+		`" WooID " & wooId`,
+		"products.Hyperlinks.Add",
+		"TextToDisplay:=nameValue",
+		"table.ListColumns(1).DataBodyRange.FormulaR1C1 = formulaText",
+		"RC[1]",
+		"RC[4]",
+		"INDEX(Shipping,1,1)",
+		"INDEX(Profit,1,1)",
+		"INDEX(Yuan_Price,1,1)",
+		`Private Declare PtrSafe Function MessageBoxW Lib "user32"`,
+		"StrPtr(message)",
+		"StrPtr(title)",
+		"Private Sub ShowUnicodeMessage",
+		"ValidateUnicodeRuntime",
+		"MB_RIGHT",
+		"MB_RTLREADING",
 	} {
 		if !strings.Contains(source, required) {
 			t.Fatalf("VBA source is missing validation: %s", required)
+		}
+	}
+	for _, forbidden := range []string{
+		`Worksheets("`,
+		"vbTextCompare",
+		"table.ListRows.Add",
+		"WooCommerce only",
+		"Environ$(",
+		"Authorization",
+		"Bearer ",
+		"credential",
+		"client_secret",
+		"api_key",
+		"MsgBox ",
+		"MsgBox(",
+		"VBA.MsgBox",
+	} {
+		if strings.Contains(strings.ToLower(source), strings.ToLower(forbidden)) {
+			t.Fatalf("VBA source contains forbidden legacy or credential path: %s", forbidden)
+		}
+	}
+
+	jsonPath := filepath.Join("..", "..", "docs", "examples", "vba", "JsonRuntime.bas")
+	jsonContent, err := os.ReadFile(jsonPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, required := range []string{"Private Function ParseObject", "Private Function ParseArray", "Duplicate JSON object member"} {
+		if !strings.Contains(string(jsonContent), required) {
+			t.Fatalf("JSON runtime is missing validation: %s", required)
 		}
 	}
 }
