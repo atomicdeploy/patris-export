@@ -9,9 +9,22 @@ Private Const PRODUCT_COLUMN_COUNT As Long = 8
 Private Const MAX_WOO_PAGES As Long = 20
 Private Const WOO_PAGE_SIZE As Long = 100
 Private Const HTTP_TIMEOUT_MS As Long = 60000
+Private Const PRICING_HTTP_TIMEOUT_MS As Long = 240000
+Private Const MAX_PRICING_RESPONSE_CHARS As Long = 4194304
+Private Const PRICING_CLIENT_HEADER As String = "X-Patris-Excel-Client"
+Private Const PRICING_CLIENT_ID As String = "digitalogic-price-calculator/v1"
+Private Const PRICING_CSRF_HEADER As String = "X-Patris-Excel-CSRF-Token"
+Private Const PRICING_REQUEST_SCHEMA As String = "patris.excel-pricing-companion-request/v1"
+Private Const PRICING_SESSION_SCHEMA As String = "patris.excel-pricing-companion-session/v1"
+Private Const PRICING_STATE_SCHEMA As String = "digitalogic.excel-pricing-sync-state/v1"
+Private Const PRICING_PREVIEW_SCHEMA As String = "digitalogic.excel-pricing-sync-preview/v1"
+Private Const PRICING_APPLY_SCHEMA As String = "digitalogic.excel-pricing-sync-apply/v1"
 Private Const DIGITALOGIC_HOST_PREFIX As String = "https://digitalogic.ir/"
 Private Const MB_RIGHT As Long = &H80000
 Private Const MB_RTLREADING As Long = &H100000
+Private Const MB_YESNO As Long = &H4
+Private Const MB_ICONQUESTION As Long = &H20
+Private Const IDYES As Long = 6
 
 #If VBA7 Then
 Private Declare PtrSafe Function MessageBoxW Lib "user32" ( _
@@ -37,6 +50,7 @@ Public Sub ValidateWorkbook()
     Dim columnIndex As Long
 
     ValidateUnicodeRuntime
+    ValidateProductServiceUrlRuntime
     Set products = PriceSheet()
     Set settings = ConfigSheet()
     Set table = products.ListObjects(PRODUCTS_TABLE)
@@ -139,7 +153,389 @@ Public Sub RefreshOnOpen()
         settings.Range("B5").Value2))
     If autoRefresh = U("062806440647") Then
         RefreshAllData True
+        RefreshPricingState True
     End If
+End Sub
+
+Public Sub RefreshPricingState(Optional ByVal silent As Boolean = False)
+    Dim root As JsonValue
+    Dim currency As JsonValue
+    Dim markup As JsonValue
+    Dim settings As Worksheet
+    Dim dollarValue As Variant
+    Dim yuanValue As Variant
+    Dim profitValue As Variant
+    Dim effectiveDate As String
+    Dim stateRevision As String
+    Dim errorText As String
+
+    On Error GoTo Failed
+    Set settings = ConfigSheet()
+    Set root = PricingOperation( _
+        "state", _
+        "{""schema"":""" & PRICING_REQUEST_SCHEMA & _
+        """,""schema_version"":1,""operation"":""state""," & _
+        """page"":1,""limit"":100,""locale"":""fa""}" _
+    )
+    RequirePricingSchema root, PRICING_STATE_SCHEMA
+    stateRevision = Trim$(CStr(JsonRuntime.JsonText(root, "state_revision")))
+    If Not IsRevision(stateRevision) Then
+        Err.Raise vbObjectError + 170, "RefreshPricingState", _
+                  U("067E06270633062E002006330631064806CC06330020062A0646063806CC06450627062A0020064206CC0645062A002006450639062A062806310020064606CC0633062A002E")
+    End If
+
+    Set currency = JsonRuntime.JsonMember(root, "currency")
+    Set markup = JsonRuntime.JsonMember(root, "default_markup")
+    If currency Is Nothing Or markup Is Nothing Then
+        Err.Raise vbObjectError + 171, "RefreshPricingState", _
+                  U("067E06270633062E002006330631064806CC06330020062A0646063806CC06450627062A0020064206CC0645062A002006450639062A062806310020064606CC0633062A002E")
+    End If
+
+    dollarValue = PositiveNumericOrBlank( _
+        JsonRuntime.JsonText(currency, "dollar_price"))
+    yuanValue = PositiveNumericOrBlank( _
+        JsonRuntime.JsonText(currency, "yuan_price"))
+    effectiveDate = Trim$(CStr( _
+        BlankIfNull(JsonRuntime.JsonText(currency, "effective_date"))))
+    profitValue = NumericOrBlank( _
+        JsonRuntime.JsonText(markup, "profit_percent"))
+    If IsEmpty(dollarValue) Or IsEmpty(yuanValue) Or _
+       Len(effectiveDate) <> 10 Or IsEmpty(profitValue) Or _
+       CDbl(profitValue) < 0 Or CDbl(profitValue) > 1000 Then
+        Err.Raise vbObjectError + 172, "RefreshPricingState", _
+                  U("064506420627062F06CC06310020062A0646063806CC06450627062A0020064206CC0645062A002006A9062706450644002006CC0627002006450639062A062806310020064606CC0633062A002E")
+    End If
+
+    settings.Range("B10").Value2 = CDbl(dollarValue)
+    PriceSheet().Range("M7").Value2 = CDbl(yuanValue)
+    settings.Range("B12").Value2 = effectiveDate
+    PriceSheet().Range("O10").Value2 = CDbl(profitValue) / 100#
+    settings.Range("H1").Value2 = stateRevision
+    ClearPricingPreview
+    settings.Range("B17").Value2 = _
+        U("06480636063906CC062A0020064206CC0645062A200C064706270020062F063106CC06270641062A00200634062F002E")
+    settings.Range("B18").Value2 = Now
+    settings.Range("B18").NumberFormat = "yyyy-mm-dd hh:mm"
+    Application.CalculateFull
+
+    If Not silent Then
+        ShowUnicodeMessage _
+            U("06480636063906CC062A0020064206CC0645062A200C064706270020062F063106CC06270641062A00200634062F002E"), _
+            vbInformation, _
+            U("062706390645062706440020062A0646063806CC06450627062A0020064206CC0645062A")
+    End If
+    Exit Sub
+
+Failed:
+    errorText = SafeStatusError(Err.Description)
+    On Error Resume Next
+    ConfigSheet().Range("B17").Value2 = _
+        U("06480636063906CC062A0020064206CC0645062A0020062F063106CC06270641062A002006460634062F003A0020") & errorText
+    On Error GoTo 0
+    If Not silent Then
+        ShowUnicodeMessage _
+            U("06480636063906CC062A0020064206CC0645062A0020062F063106CC06270641062A002006460634062F003A0020") & errorText, _
+            vbExclamation, _
+            U("062706390645062706440020062A0646063806CC06450627062A0020064206CC0645062A")
+    End If
+End Sub
+
+Public Sub PreviewPricingSettings()
+    Dim settings As Worksheet
+    Dim stateRevision As String
+    Dim idempotencyKey As String
+    Dim settingsJson As String
+    Dim fingerprint As String
+    Dim body As String
+    Dim root As JsonValue
+    Dim warnings As JsonValue
+    Dim warningCount As Long
+    Dim previewDigest As String
+    Dim errorText As String
+
+    On Error GoTo Failed
+    Set settings = ConfigSheet()
+    stateRevision = Trim$(CStr(settings.Range("H1").Value2))
+    If Not IsRevision(stateRevision) Then
+        Err.Raise vbObjectError + 173, "PreviewPricingSettings", _
+                  U("06270628062A062F0627002006480636063906CC062A0020064206CC0645062A200C064706270020063106270020062F063106CC06270641062A002006A9064606CC062F002E")
+    End If
+    settingsJson = CurrentPricingSettingsJSON(fingerprint)
+    idempotencyKey = NewPricingIdempotencyKey("preview")
+    body = "{""schema"":""" & PRICING_REQUEST_SCHEMA & _
+        """,""schema_version"":1,""operation"":""preview""," & _
+        """idempotency_key"":""" & idempotencyKey & """," & _
+        """expected_state_revision"":""" & stateRevision & """," & _
+        """settings"":" & settingsJson & ",""product_changes"":[]}"
+
+    Set root = PricingOperation( _
+        "preview", body, idempotencyKey, stateRevision)
+    RequirePricingSchema root, PRICING_PREVIEW_SCHEMA
+    previewDigest = Trim$(CStr( _
+        JsonRuntime.JsonText(root, "preview_digest")))
+    If Not IsRevision(previewDigest) Then
+        Err.Raise vbObjectError + 174, "PreviewPricingSettings", _
+                  U("067E06270633062E002006330631064806CC06330020062A0646063806CC06450627062A0020064206CC0645062A002006450639062A062806310020064606CC0633062A002E")
+    End If
+    Set warnings = JsonRuntime.JsonMember(root, "warnings")
+    If Not warnings Is Nothing Then
+        warningCount = JsonRuntime.JsonArrayCount(warnings)
+    End If
+    settings.Range("H2").Value2 = previewDigest
+    settings.Range("H3").Value2 = fingerprint
+    settings.Range("H4").Value2 = stateRevision
+    settings.Range("B17").Value2 = _
+        U("067E06CC0634200C06460645062706CC06340020062206450627062F0647002006270633062A002E002006470634062F0627063106470627003A0020") & _
+        CStr(warningCount)
+    ShowUnicodeMessage CStr(settings.Range("B17").Value2), _
+        vbInformation, _
+        U("062706390645062706440020062A0646063806CC06450627062A0020064206CC0645062A")
+    Exit Sub
+
+Failed:
+    ClearPricingPreview
+    errorText = SafeStatusError(Err.Description)
+    ConfigSheet().Range("B17").Value2 = _
+        U("067E06CC0634200C06460645062706CC0634002006270646062C06270645002006460634062F003A0020") & errorText
+    ShowUnicodeMessage CStr(ConfigSheet().Range("B17").Value2), _
+        vbExclamation, _
+        U("062706390645062706440020062A0646063806CC06450627062A0020064206CC0645062A")
+End Sub
+
+Public Sub ApplyPricingSettings()
+    Dim settings As Worksheet
+    Dim stateRevision As String
+    Dim previewDigest As String
+    Dim expectedFingerprint As String
+    Dim fingerprint As String
+    Dim settingsJson As String
+    Dim idempotencyKey As String
+    Dim body As String
+    Dim root As JsonValue
+    Dim errorText As String
+
+    On Error GoTo Failed
+    Set settings = ConfigSheet()
+    previewDigest = Trim$(CStr(settings.Range("H2").Value2))
+    expectedFingerprint = CStr(settings.Range("H3").Value2)
+    stateRevision = Trim$(CStr(settings.Range("H4").Value2))
+    If Not IsRevision(previewDigest) Or Not IsRevision(stateRevision) Then
+        Err.Raise vbObjectError + 175, "ApplyPricingSettings", _
+                  U("06270628062A062F06270020067E06CC0634200C06460645062706CC06340020062A063A06CC06CC06310627062A00200631062700200627062C06310627002006A9064606CC062F002E")
+    End If
+    settingsJson = CurrentPricingSettingsJSON(fingerprint)
+    If fingerprint <> expectedFingerprint Or _
+       Trim$(CStr(settings.Range("H1").Value2)) <> stateRevision Then
+        Err.Raise vbObjectError + 176, "ApplyPricingSettings", _
+                  U("064506420627062F06CC06310020067E06330020062706320020067E06CC0634200C06460645062706CC06340020062A063A06CC06CC0631002006A90631062F0647200C06270646062F061B0020062F064806280627063106470020067E06CC0634200C06460645062706CC06340020062806AF06CC063106CC062F002E")
+    End If
+    If Not ShowUnicodeConfirm( _
+        U("062A063A06CC06CC06310627062A0020064206CC0645062A002006270639064506270644002006340648062F061F"), _
+        U("062706390645062706440020062A0646063806CC06450627062A0020064206CC0645062A")) Then
+        Exit Sub
+    End If
+
+    idempotencyKey = NewPricingIdempotencyKey("apply")
+    body = "{""schema"":""" & PRICING_REQUEST_SCHEMA & _
+        """,""schema_version"":1,""operation"":""apply""," & _
+        """idempotency_key"":""" & idempotencyKey & """," & _
+        """expected_state_revision"":""" & stateRevision & """," & _
+        """settings"":" & settingsJson & ",""product_changes"":[]," & _
+        """preview_digest"":""" & previewDigest & """," & _
+        """confirmation"":""APPLY""}"
+    Set root = PricingOperation( _
+        "apply", body, idempotencyKey, stateRevision)
+    RequirePricingSchema root, PRICING_APPLY_SCHEMA
+    ClearPricingPreview
+    settings.Range("B17").Value2 = _
+        U("062A0646063806CC06450627062A0020064206CC0645062A0020062806270020064506480641064206CC062A00200627063906450627064400200634062F002E")
+    RefreshPricingState True
+    RefreshAllData True
+    ShowUnicodeMessage _
+        U("062A0646063806CC06450627062A0020064206CC0645062A0020062806270020064506480641064206CC062A00200627063906450627064400200634062F002E"), _
+        vbInformation, _
+        U("062706390645062706440020062A0646063806CC06450627062A0020064206CC0645062A")
+    Exit Sub
+
+Failed:
+    errorText = SafeStatusError(Err.Description)
+    ConfigSheet().Range("B17").Value2 = _
+        U("062706390645062706440020062A063A06CC06CC06310627062A002006270646062C06270645002006460634062F003A0020") & errorText
+    ShowUnicodeMessage CStr(ConfigSheet().Range("B17").Value2), _
+        vbExclamation, _
+        U("062706390645062706440020062A0646063806CC06450627062A0020064206CC0645062A")
+End Sub
+
+Private Function PricingOperation(ByVal operation As String, _
+                                  ByVal requestBody As String, _
+                                  Optional ByVal idempotencyKey As String = "", _
+                                  Optional ByVal stateRevision As String = "") As JsonValue
+    Dim baseUrl As String
+    Dim sessionText As String
+    Dim responseText As String
+    Dim sessionRoot As JsonValue
+    Dim csrfToken As String
+
+    baseUrl = PricingBaseURL()
+    sessionText = HttpPostJSON( _
+        baseUrl & "/session", "{}", "", "", "")
+    Set sessionRoot = JsonRuntime.ParseJson(sessionText)
+    If sessionRoot.Kind <> "object" Or _
+       CStr(JsonRuntime.JsonText(sessionRoot, "schema")) <> _
+           PRICING_SESSION_SCHEMA Then
+        Err.Raise vbObjectError + 177, "PricingOperation", _
+                  U("067E06270633062E002006330631064806CC06330020062A0646063806CC06450627062A0020064206CC0645062A002006450639062A062806310020064606CC0633062A002E")
+    End If
+    csrfToken = Trim$(CStr( _
+        JsonRuntime.JsonText(sessionRoot, "csrf_token")))
+    If Len(csrfToken) <> 43 Then
+        Err.Raise vbObjectError + 178, "PricingOperation", _
+                  U("067E06270633062E002006330631064806CC06330020062A0646063806CC06450627062A0020064206CC0645062A002006450639062A062806310020064606CC0633062A002E")
+    End If
+    responseText = HttpPostJSON( _
+        baseUrl & "/" & operation, requestBody, csrfToken, _
+        idempotencyKey, stateRevision)
+    Set PricingOperation = JsonRuntime.ParseJson(responseText)
+End Function
+
+Private Function HttpPostJSON(ByVal endpoint As String, _
+                              ByVal requestBody As String, _
+                              ByVal csrfToken As String, _
+                              ByVal idempotencyKey As String, _
+                              ByVal stateRevision As String) As String
+    Dim http As Object
+
+    Set http = CreateObject("MSXML2.ServerXMLHTTP.6.0")
+    http.setTimeouts _
+        PRICING_HTTP_TIMEOUT_MS, PRICING_HTTP_TIMEOUT_MS, _
+        PRICING_HTTP_TIMEOUT_MS, PRICING_HTTP_TIMEOUT_MS
+    http.Open "POST", endpoint, False
+    http.setRequestHeader "Accept", "application/json"
+    http.setRequestHeader "Content-Type", "application/json"
+    http.setRequestHeader PRICING_CLIENT_HEADER, PRICING_CLIENT_ID
+    If Len(csrfToken) > 0 Then
+        http.setRequestHeader PRICING_CSRF_HEADER, csrfToken
+    End If
+    If Len(idempotencyKey) > 0 Then
+        http.setRequestHeader "Idempotency-Key", idempotencyKey
+        http.setRequestHeader "If-Match", Chr$(34) & stateRevision & Chr$(34)
+    End If
+    http.Send requestBody
+    If http.Status < 200 Or http.Status >= 300 Then
+        Err.Raise vbObjectError + 179, "HttpPostJSON", _
+                  U("062F0631062E064806270633062A0020062A0646063806CC06450627062A0020064206CC0645062A0020064606270645064806410642002006280648062F002E")
+    End If
+    If Len(CStr(http.responseText)) > MAX_PRICING_RESPONSE_CHARS Then
+        Err.Raise vbObjectError + 180, "HttpPostJSON", _
+                  U("062F0631062E064806270633062A0020062A0646063806CC06450627062A0020064206CC0645062A0020064606270645064806410642002006280648062F002E")
+    End If
+    HttpPostJSON = CStr(http.responseText)
+End Function
+
+Private Function PricingBaseURL() As String
+    Dim productUrl As String
+    Dim lowerUrl As String
+    Dim suffix As String
+
+    productUrl = Trim$(CStr(ConfigSheet().Range("B3").Value2))
+    lowerUrl = LCase$(productUrl)
+    suffix = "/api/product-sync"
+    If Not IsAllowedProductServiceUrl(productUrl) Or _
+       Right$(lowerUrl, Len(suffix)) <> suffix Then
+        Err.Raise vbObjectError + 181, "PricingBaseURL", _
+                  U("064606340627064606CC002006330631064806CC063300200645062D064406CC002006450639062A062806310020064606CC0633062A002E")
+    End If
+    PricingBaseURL = Left$(productUrl, Len(productUrl) - Len(suffix)) & _
+        "/api/excel/pricing-sync"
+End Function
+
+Private Function CurrentPricingSettingsJSON( _
+    ByRef fingerprint As String) As String
+    Dim dollarText As String
+    Dim yuanText As String
+    Dim dateText As String
+    Dim profitText As String
+    Dim dollarValue As Double
+    Dim yuanValue As Double
+    Dim profitValue As Double
+
+    If Not IsNumeric(ConfigSheet().Range("B10").Value2) Or _
+       Not IsNumeric(PriceSheet().Range("M7").Value2) Or _
+       Not IsNumeric(PriceSheet().Range("O10").Value2) Then
+        Err.Raise vbObjectError + 182, "CurrentPricingSettingsJSON", _
+                  U("064506420627062F06CC06310020062A0646063806CC06450627062A0020064206CC0645062A002006A9062706450644002006CC0627002006450639062A062806310020064606CC0633062A002E")
+    End If
+    dollarValue = CDbl(ConfigSheet().Range("B10").Value2)
+    yuanValue = CDbl(PriceSheet().Range("M7").Value2)
+    profitValue = CDbl(PriceSheet().Range("O10").Value2) * 100#
+    dollarText = FormatNumericForText(dollarValue)
+    yuanText = FormatNumericForText(yuanValue)
+    dateText = PricingDateText(ConfigSheet().Range("B12").Value2)
+    profitText = FormatNumericForText(profitValue)
+    If dollarValue <= 0 Or yuanValue <= 0 Or _
+       Len(dateText) <> 10 Or profitValue < 0 Or _
+       profitValue > 1000 Then
+        Err.Raise vbObjectError + 183, "CurrentPricingSettingsJSON", _
+                  U("064506420627062F06CC06310020062A0646063806CC06450627062A0020064206CC0645062A002006A9062706450644002006CC0627002006450639062A062806310020064606CC0633062A002E")
+    End If
+    fingerprint = dollarText & "|" & yuanText & "|" & _
+        dateText & "|" & profitText
+    CurrentPricingSettingsJSON = _
+        "{""dollar_price"":" & dollarText & _
+        ",""yuan_price"":" & yuanText & _
+        ",""effective_date"":""" & dateText & _
+        """,""default_profit_percent"":""" & profitText & """}"
+End Function
+
+Private Function PricingDateText(ByVal value As Variant) As String
+    Dim text As String
+
+    If IsDate(value) Then
+        PricingDateText = Format$(CDate(value), "yyyy-mm-dd")
+        Exit Function
+    End If
+    text = Trim$(CStr(value))
+    If Len(text) = 10 And Mid$(text, 5, 1) = "-" And _
+       Mid$(text, 8, 1) = "-" Then
+        PricingDateText = text
+    End If
+End Function
+
+Private Function NewPricingIdempotencyKey(ByVal operation As String) As String
+    Randomize
+    NewPricingIdempotencyKey = "excel-" & operation & "-" & _
+        Format$(Now, "yyyymmddhhnnss") & "-" & _
+        Format$(CLng(Rnd() * 999999#), "000000")
+End Function
+
+Private Sub RequirePricingSchema(ByVal root As JsonValue, _
+                                 ByVal expectedSchema As String)
+    If root Is Nothing Then
+        Err.Raise vbObjectError + 184, "RequirePricingSchema", _
+                  U("067E06270633062E002006330631064806CC06330020062A0646063806CC06450627062A0020064206CC0645062A002006450639062A062806310020064606CC0633062A002E")
+    End If
+    If root.Kind <> "object" Or _
+       CStr(JsonRuntime.JsonText(root, "schema")) <> expectedSchema Then
+        Err.Raise vbObjectError + 184, "RequirePricingSchema", _
+                  U("067E06270633062E002006330631064806CC06330020062A0646063806CC06450627062A0020064206CC0645062A002006450639062A062806310020064606CC0633062A002E")
+    End If
+End Sub
+
+Private Function IsRevision(ByVal value As String) As Boolean
+    Dim position As Long
+    Dim character As String
+
+    If Len(value) <> 71 Or Left$(value, 7) <> "sha256:" Then Exit Function
+    For position = 8 To 71
+        character = Mid$(value, position, 1)
+        If InStr(1, "0123456789abcdef", character, _
+                 vbBinaryCompare) = 0 Then Exit Function
+    Next position
+    IsRevision = True
+End Function
+
+Private Sub ClearPricingPreview()
+    ConfigSheet().Range("H2:H4").ClearContents
 End Sub
 
 Public Function RefreshProductContract() As Long
@@ -478,14 +874,84 @@ End Function
 
 Private Function IsAllowedProductServiceUrl(ByVal address As String) As Boolean
     Dim lowerAddress As String
+    Dim authority As String
+    Dim host As String
+    Dim portText As String
+    Dim pathPosition As Long
+    Dim colonPosition As Long
 
     lowerAddress = LCase$(Trim$(address))
-    IsAllowedProductServiceUrl = _
-        Left$(lowerAddress, Len("http://127.0.0.1/")) = "http://127.0.0.1/" Or _
-        Left$(lowerAddress, Len("http://127.0.0.1:")) = "http://127.0.0.1:" Or _
-        Left$(lowerAddress, Len("http://localhost/")) = "http://localhost/" Or _
-        Left$(lowerAddress, Len("http://localhost:")) = "http://localhost:"
+    If Left$(lowerAddress, Len("http://")) <> "http://" Then Exit Function
+    If InStr(1, lowerAddress, "\", vbBinaryCompare) > 0 Or _
+       InStr(1, lowerAddress, "@", vbBinaryCompare) > 0 Or _
+       InStr(1, lowerAddress, "?", vbBinaryCompare) > 0 Or _
+       InStr(1, lowerAddress, "#", vbBinaryCompare) > 0 Or _
+       InStr(1, lowerAddress, "%", vbBinaryCompare) > 0 Then Exit Function
+
+    pathPosition = InStr(Len("http://") + 1, lowerAddress, "/", _
+                         vbBinaryCompare)
+    If pathPosition = 0 Then Exit Function
+    authority = Mid$(lowerAddress, Len("http://") + 1, _
+                     pathPosition - Len("http://") - 1)
+    If Len(authority) = 0 Then Exit Function
+
+    colonPosition = InStr(1, authority, ":", vbBinaryCompare)
+    If colonPosition > 0 Then
+        If InStr(colonPosition + 1, authority, ":", _
+                 vbBinaryCompare) > 0 Then Exit Function
+        host = Left$(authority, colonPosition - 1)
+        portText = Mid$(authority, colonPosition + 1)
+        If Not IsStrictTcpPort(portText) Then Exit Function
+    Else
+        host = authority
+    End If
+    If host <> "127.0.0.1" And host <> "localhost" Then Exit Function
+    IsAllowedProductServiceUrl = True
 End Function
+
+Private Function IsStrictTcpPort(ByVal value As String) As Boolean
+    Dim position As Long
+    Dim character As String
+    Dim portNumber As Long
+
+    If Len(value) < 1 Or Len(value) > 5 Then Exit Function
+    For position = 1 To Len(value)
+        character = Mid$(value, position, 1)
+        If character < "0" Or character > "9" Then Exit Function
+    Next position
+    portNumber = CLng(value)
+    IsStrictTcpPort = (portNumber >= 1 And portNumber <= 65535)
+End Function
+
+Private Sub ValidateProductServiceUrlRuntime()
+    Dim candidate As Variant
+
+    For Each candidate In Array( _
+        "http://127.0.0.1/api/product-sync", _
+        "http://127.0.0.1:18080/api/product-sync", _
+        "http://localhost/api/product-sync", _
+        "http://localhost:18080/api/product-sync")
+        If Not IsAllowedProductServiceUrl(CStr(candidate)) Then
+            Err.Raise vbObjectError + 185, _
+                      "ValidateProductServiceUrlRuntime", _
+                      "A valid loopback product-service URL was rejected."
+        End If
+    Next candidate
+    For Each candidate In Array( _
+        "http://localhost:x@attacker.example/api/product-sync", _
+        "http://127.0.0.1@attacker.example/api/product-sync", _
+        "http://localhost:0/api/product-sync", _
+        "http://localhost:65536/api/product-sync", _
+        "http://localhost:18080/api/product-sync?target=remote", _
+        "http://localhost:18080\@attacker.example/api/product-sync", _
+        "https://localhost:18080/api/product-sync")
+        If IsAllowedProductServiceUrl(CStr(candidate)) Then
+            Err.Raise vbObjectError + 186, _
+                      "ValidateProductServiceUrlRuntime", _
+                      "A non-loopback product-service URL was accepted."
+        End If
+    Next candidate
+End Sub
 
 Private Function IsAllowedDigitalogicUrl(ByVal address As String) As Boolean
     IsAllowedDigitalogicUrl = _
@@ -568,6 +1034,22 @@ Private Sub ShowUnicodeMessage(ByVal message As String, _
         CLng(style) Or MB_RIGHT Or MB_RTLREADING)
 #End If
 End Sub
+
+Private Function ShowUnicodeConfirm(ByVal message As String, _
+                                    ByVal title As String) As Boolean
+    Dim result As Long
+
+#If VBA7 Then
+    result = MessageBoxW( _
+        CLngPtr(Application.hwnd), StrPtr(message), StrPtr(title), _
+        MB_YESNO Or MB_ICONQUESTION Or MB_RIGHT Or MB_RTLREADING)
+#Else
+    result = MessageBoxW( _
+        Application.hwnd, StrPtr(message), StrPtr(title), _
+        MB_YESNO Or MB_ICONQUESTION Or MB_RIGHT Or MB_RTLREADING)
+#End If
+    ShowUnicodeConfirm = (result = IDYES)
+End Function
 
 Private Function U(ByVal hexCodePoints As String) As String
     Dim position As Long

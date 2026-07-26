@@ -578,6 +578,24 @@ func TestDispatchRequiresConfiguredProductSyncSecretEnvironmentValue(t *testing.
 	}
 }
 
+func TestResolveProductSyncSecretUsesOnlyNamedEnvironmentValue(t *testing.T) {
+	t.Setenv("PATRIS_PRODUCT_SYNC_RESOLVE_TEST", "protected-companion-secret")
+	secret, err := ResolveProductSyncSecret(Config{
+		ProductSyncSecretEnv: "PATRIS_PRODUCT_SYNC_RESOLVE_TEST",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if secret != "protected-companion-secret" {
+		t.Fatalf("resolved secret = %q", secret)
+	}
+	for _, invalid := range []string{"", "NOT-PORTABLE", "1STARTS_WITH_DIGIT"} {
+		if _, err := ResolveProductSyncSecret(Config{ProductSyncSecretEnv: invalid}); err == nil {
+			t.Errorf("invalid environment name %q was accepted", invalid)
+		}
+	}
+}
+
 func TestDispatchRejectsProductSyncDestinationQueryAuthentication(t *testing.T) {
 	t.Setenv("PATRIS_PRODUCT_SYNC_TEST_SECRET", "header-only")
 	contract := canonical.NewEnvelope(nil, "kala.db", "patris-office", time.Unix(1, 0))
