@@ -13,6 +13,15 @@ English workbooks remain left-to-right unless RTL is explicitly requested.
 `column_labels` can still override individual headings. Machine keys in the
 JSON, CSV, SQL, and API contracts are unchanged.
 
+The public product identity heading is `Product Code` in English and `کد کالا`
+in Persian. The Web table and its browser-generated CSV use the same localized
+heading. Existing presentation settings containing the old defaults `Code` or
+`کد`, or the deprecated branded labels `Patris Code` or `کد پاتریس`, are
+rendered with the neutral localized heading. Other custom labels remain
+authoritative. This is presentation-only: the canonical `product_code` key,
+the legacy `Code` input alias, and machine-oriented HTTP/API CSV headers remain
+compatible.
+
 Structured `warehouse_stock` is expanded into deterministic numeric columns,
 for example `Warehouse Stock 2` and `Warehouse Stock 10` (or their Persian
 equivalents), rather than being serialized into one object cell.
