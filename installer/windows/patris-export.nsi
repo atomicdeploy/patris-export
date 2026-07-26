@@ -186,12 +186,15 @@ FunctionEnd
 
 Section "!Patris Export application" SEC_CORE
   SectionIn RO
+  InitPluginsDir
+  SetOutPath "$PLUGINSDIR\PatrisExportUpgrade"
+  File /oname=Install-PatrisExportScheduledTask.ps1 "${PAYLOAD_DIR}\Install-PatrisExportScheduledTask.ps1"
   SetOutPath "$INSTDIR"
   SetOverwrite on
 
   StrCpy $PatrisTaskWasRunning "0"
   ${If} ${FileExists} "$INSTDIR\Install-PatrisExportScheduledTask.ps1"
-    nsExec::ExecToStack '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$INSTDIR\Install-PatrisExportScheduledTask.ps1" -Action PrepareUpgrade -DeploymentDirectory "$INSTDIR" -RequireOwnedAction'
+    nsExec::ExecToStack '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$PLUGINSDIR\PatrisExportUpgrade\Install-PatrisExportScheduledTask.ps1" -Action PrepareUpgrade -DeploymentDirectory "$INSTDIR" -RequireOwnedAction'
     Pop $0
     Pop $1
     ${If} $0 == 10
