@@ -65,6 +65,9 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Fixed
 
+- Scheduled-task stop, restart, upgrade, uninstall, and replacement now
+  terminate only the exact deployment's Patris child process, preventing an
+  orphan from retaining the API port after the PowerShell parent exits.
 - A terminal Digitalogic assignment-page failure now cancels in-flight sibling
   requests, commits no partial assignments, and emits only typed secret-safe
   diagnostics.

@@ -368,6 +368,14 @@ jobs:
           New-Item -ItemType Directory -Force $configRoot | Out-Null
           Set-Content -LiteralPath $sentinel -Value "preserve-me"
           Invoke-Installer
+          $installedHelper = Join-Path $installRoot "Install-PatrisExportScheduledTask.ps1"
+          Set-Content -LiteralPath $installedHelper -Value @'
+          throw "The legacy installed task helper must not bootstrap its own upgrade."
+          '@
+          Invoke-Installer
+          if (Select-String -LiteralPath $installedHelper -SimpleMatch "must not bootstrap" -Quiet) {
+              throw "The installer did not replace the simulated legacy task helper."
+          }
           $uninstall = Start-Process -FilePath (Join-Path $installRoot "Uninstall.exe") `
             -ArgumentList @('/S', '/CurrentUser') -Wait -PassThru
           if ($uninstall.ExitCode -ne 0) {

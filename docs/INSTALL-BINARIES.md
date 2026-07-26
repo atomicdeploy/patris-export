@@ -59,6 +59,13 @@ deployment. Repository operators retain the existing
 location with `-DeploymentDirectory`.
 Re-run the install action when task arguments or imported variable names
 change; rotating the value itself requires only a task restart.
+The launcher records only its process identity (PID, creation time, and exact
+executable path) under the current user's local application-data directory.
+The helper uses that non-secret record to stop, restart, upgrade, or uninstall
+only the scheduled server child; an unrelated viewer or CLI process from the
+same executable remains untouched. Launch reservations and an exclusive
+deployment lock prevent Task Scheduler retries from creating untracked
+duplicate children.
 The assisted uninstaller stops and removes the default task only when its
 action points to that installation. Remove a custom `-TaskName` or `-TaskPath`
 with the same helper before uninstalling.
