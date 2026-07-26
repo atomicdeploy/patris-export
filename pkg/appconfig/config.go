@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/atomicdeploy/patris-export/pkg/canonical"
+	"github.com/atomicdeploy/patris-export/pkg/recentsales"
 	"github.com/atomicdeploy/patris-export/pkg/recordmap"
 	"github.com/atomicdeploy/patris-export/pkg/updateout"
 	"github.com/fsnotify/fsnotify"
@@ -39,6 +40,7 @@ type Config struct {
 	Convert       ConvertConfig          `json:"convert" yaml:"convert" toml:"convert"`
 	Transform     recordmap.Config       `json:"transform" yaml:"transform" toml:"transform"`
 	Canonical     canonical.Config       `json:"canonical" yaml:"canonical" toml:"canonical"`
+	RecentSales   recentsales.Config     `json:"recent_sales" yaml:"recent_sales" toml:"recent_sales"`
 	Export        ExportConfig           `json:"export" yaml:"export" toml:"export"`
 	SendUpdates   updateout.Config       `json:"send_updates" yaml:"send_updates" toml:"send_updates"`
 	Edge          EdgeConfig             `json:"edge" yaml:"edge" toml:"edge"`
@@ -207,7 +209,8 @@ func Default() Config {
 			XLSXMode:            "precalculated",
 			XLSXZebraRows:       true,
 		},
-		Canonical: canonical.DefaultConfig(),
+		Canonical:   canonical.DefaultConfig(),
+		RecentSales: recentsales.DefaultConfig(),
 		SendUpdates: updateout.Config{
 			Method:        "POST",
 			Format:        "json",
@@ -820,6 +823,48 @@ func ApplyEnv(cfg *Config) {
 			cfg.Canonical.Pricing.Digitalogic.BatchSize = batch
 		}
 	}
+	if value := os.Getenv("PATRIS_EXPORT_RECENT_SALES_ENABLED"); strings.TrimSpace(value) != "" {
+		cfg.RecentSales.Enabled = parseBool(value, cfg.RecentSales.Enabled)
+	}
+	if value := os.Getenv("PATRIS_EXPORT_RECENT_SALES_SOURCE"); strings.TrimSpace(value) != "" {
+		cfg.RecentSales.Source = strings.TrimSpace(value)
+	}
+	if value := os.Getenv("PATRIS_EXPORT_RECENT_SALES_SOURCE_ID"); strings.TrimSpace(value) != "" {
+		cfg.RecentSales.SourceID = strings.TrimSpace(value)
+	}
+	if value := os.Getenv("PATRIS_EXPORT_RECENT_SALES_TOKEN_ENV"); strings.TrimSpace(value) != "" {
+		cfg.RecentSales.TokenEnv = strings.TrimSpace(value)
+	}
+	if value := os.Getenv("PATRIS_EXPORT_RECENT_SALES_PRODUCT_CODE_FIELD"); strings.TrimSpace(value) != "" {
+		cfg.RecentSales.ProductCodeField = strings.TrimSpace(value)
+	}
+	if value := os.Getenv("PATRIS_EXPORT_RECENT_SALES_QUANTITY_FIELD"); strings.TrimSpace(value) != "" {
+		cfg.RecentSales.QuantityField = strings.TrimSpace(value)
+	}
+	if value := os.Getenv("PATRIS_EXPORT_RECENT_SALES_SOLD_AT_FIELD"); strings.TrimSpace(value) != "" {
+		cfg.RecentSales.SoldAtField = strings.TrimSpace(value)
+	}
+	if value := os.Getenv("PATRIS_EXPORT_RECENT_SALES_EVENT_ID_FIELD"); strings.TrimSpace(value) != "" {
+		cfg.RecentSales.EventIDField = strings.TrimSpace(value)
+	}
+	if value := os.Getenv("PATRIS_EXPORT_RECENT_SALES_MAX_WINDOW"); strings.TrimSpace(value) != "" {
+		cfg.RecentSales.MaxWindow = strings.TrimSpace(value)
+	}
+	if value := os.Getenv("PATRIS_EXPORT_RECENT_SALES_MAX_PAGE_SIZE"); strings.TrimSpace(value) != "" {
+		if maxPageSize, err := strconv.Atoi(strings.TrimSpace(value)); err == nil {
+			cfg.RecentSales.MaxPageSize = maxPageSize
+		}
+	}
+	if value := os.Getenv("PATRIS_EXPORT_RECENT_SALES_MAX_SOURCE_ROWS"); strings.TrimSpace(value) != "" {
+		if maxRows, err := strconv.Atoi(strings.TrimSpace(value)); err == nil {
+			cfg.RecentSales.MaxSourceRows = maxRows
+		}
+	}
+	if value := os.Getenv("PATRIS_EXPORT_RECENT_SALES_MAX_SOURCE_MB"); strings.TrimSpace(value) != "" {
+		if maxMB, err := strconv.ParseInt(strings.TrimSpace(value), 10, 64); err == nil {
+			cfg.RecentSales.MaxSourceMB = maxMB
+		}
+	}
 	for _, key := range []string{"PATRIS_EXPORT_TEMP_DIR", "PATRIS_EXPORT_TMPDIR"} {
 		if value := os.Getenv(key); strings.TrimSpace(value) != "" {
 			cfg.Runtime.TempDir = strings.TrimSpace(value)
@@ -1067,6 +1112,7 @@ func normalize(cfg *Config) {
 		cfg.Export.Reconciliation = "upsert_only"
 	}
 	cfg.Canonical = canonical.NormalizeConfig(cfg.Canonical)
+	cfg.RecentSales = recentsales.NormalizeConfig(cfg.RecentSales)
 	cfg.SendUpdates = updateout.Normalize(cfg.SendUpdates)
 	cfg.Edge.TargetURL = strings.TrimRight(strings.TrimSpace(cfg.Edge.TargetURL), "/")
 	cfg.Edge.Token = strings.TrimSpace(cfg.Edge.Token)

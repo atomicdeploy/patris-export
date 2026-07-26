@@ -3,6 +3,7 @@ package server
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
@@ -29,6 +30,7 @@ import (
 	"github.com/atomicdeploy/patris-export/pkg/paradox"
 	"github.com/atomicdeploy/patris-export/pkg/pricingcatalog"
 	"github.com/atomicdeploy/patris-export/pkg/processmon"
+	"github.com/atomicdeploy/patris-export/pkg/recentsales"
 	"github.com/atomicdeploy/patris-export/pkg/recorddiff"
 	"github.com/atomicdeploy/patris-export/pkg/recordmap"
 	"github.com/atomicdeploy/patris-export/pkg/recordpipe"
@@ -218,6 +220,7 @@ func (s *Server) setupRoutes() {
 	s.router.HandleFunc("/api/records.{format:json|csv|xlsx}", s.handleGetRecords).Methods("GET")
 	s.router.HandleFunc("/api/categories", s.handleGetCategories).Methods("GET")
 	s.router.HandleFunc("/api/product-sync", s.handleGetProductSyncContract).Methods("GET")
+	s.router.HandleFunc("/api/recent-sales", s.handleGetRecentSales).Methods("GET")
 	s.router.HandleFunc("/api/info", s.handleGetInfo).Methods("GET")
 	s.router.HandleFunc("/api/app", s.handleGetApp).Methods("GET")
 	s.router.HandleFunc("/api/charmap", s.handleGetCharmap).Methods("GET")
@@ -389,6 +392,7 @@ func browserConfig(cfg appconfig.Config) appconfig.Config {
 	cfg.Export.MySQLDSN = ""
 	cfg.Export.MySQLTLSCAFile = ""
 	cfg.Export.MySQLTLSServerName = ""
+	cfg.RecentSales = recentsales.Config{}
 	return cfg
 }
 
@@ -715,6 +719,62 @@ func canonicalRequestTimeout(cfg appconfig.Config) time.Duration {
 	return timeout
 }
 
+// handleGetRecentSales exposes only a privacy-safe product-level aggregate.
+// It authenticates before reading the separately configured source and never
+// serializes or returns source rows.
+func (s *Server) handleGetRecentSales(w http.ResponseWriter, r *http.Request) {
+	cfg := recentsales.DefaultConfig()
+	if s.config != nil {
+		cfg = s.config.Get().RecentSales
+	}
+	cfg = recentsales.NormalizeConfig(cfg)
+	if !cfg.Enabled {
+		writeRecentSalesError(w, http.StatusNotFound, "not_available", "Recent-sales aggregates are not available.")
+		return
+	}
+	token := strings.TrimSpace(os.Getenv(cfg.TokenEnv))
+	if len(token) < 16 {
+		writeRecentSalesError(w, http.StatusServiceUnavailable, "not_configured", "Recent-sales authentication is not configured.")
+		return
+	}
+	if !bearerTokenAuthorized(r, token) {
+		w.Header().Set("WWW-Authenticate", `Bearer realm="patris-export-recent-sales"`)
+		writeRecentSalesError(w, http.StatusUnauthorized, "unauthorized", "A valid bearer token is required.")
+		return
+	}
+	query, err := recentsales.ParseQuery(r.URL.Query(), cfg)
+	if err != nil {
+		writeRecentSalesError(w, http.StatusBadRequest, "invalid_query", err.Error())
+		return
+	}
+	envelope, err := recentsales.Load(r.Context(), cfg, query, s.currentDBPath())
+	if err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			writeRecentSalesError(w, http.StatusRequestTimeout, "request_cancelled", "The recent-sales request was cancelled.")
+			return
+		}
+		writeRecentSalesError(w, http.StatusServiceUnavailable, "source_unavailable", "The recent-sales aggregate source is unavailable.")
+		return
+	}
+	w.Header().Set("Cache-Control", "private, no-store")
+	w.Header().Set("Content-Type", recentsales.MediaType)
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	if err := json.NewEncoder(w).Encode(envelope); err != nil {
+		http.Error(w, "Failed to encode recent-sales aggregate.", http.StatusInternalServerError)
+	}
+}
+
+func writeRecentSalesError(w http.ResponseWriter, status int, code, message string) {
+	w.Header().Set("Cache-Control", "private, no-store")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	writeJSONStatus(w, status, map[string]interface{}{
+		"error": map[string]string{
+			"code":    code,
+			"message": message,
+		},
+	})
+}
+
 func requestedRecordsFormat(r *http.Request) string {
 	if routeFormat, ok := mux.Vars(r)["format"]; ok {
 		return strings.ToLower(strings.TrimSpace(routeFormat))
@@ -975,10 +1035,12 @@ func (s *Server) handlePutConfig(w http.ResponseWriter, r *http.Request) {
 	// The browser is not a connection-management surface. Preserve protected
 	// server-side connection material even if an old cache or crafted request
 	// includes replacement values.
-	protectedExport := s.config.Get().Export
+	protectedConfig := s.config.Get()
+	protectedExport := protectedConfig.Export
 	cfg.Export.MySQLDSN = protectedExport.MySQLDSN
 	cfg.Export.MySQLTLSCAFile = protectedExport.MySQLTLSCAFile
 	cfg.Export.MySQLTLSServerName = protectedExport.MySQLTLSServerName
+	cfg.RecentSales = protectedConfig.RecentSales
 	cfg, err := s.ReplaceConfig(cfg)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("Failed to save config: %v", err), http.StatusInternalServerError)
@@ -1880,12 +1942,27 @@ func (s *Server) edgeUploadAuthorized(r *http.Request) bool {
 	}
 	got := strings.TrimSpace(r.Header.Get("X-Patris-Edge-Token"))
 	if got == "" {
-		auth := strings.TrimSpace(r.Header.Get("Authorization"))
-		if strings.HasPrefix(strings.ToLower(auth), "bearer ") {
-			got = strings.TrimSpace(auth[len("Bearer "):])
-		}
+		return bearerTokenAuthorized(r, token)
 	}
-	return subtle.ConstantTimeCompare([]byte(got), []byte(token)) == 1
+	return secureTokenEqual(got, token)
+}
+
+func bearerTokenAuthorized(r *http.Request, token string) bool {
+	values := r.Header.Values("Authorization")
+	if len(values) != 1 {
+		return false
+	}
+	parts := strings.Fields(strings.TrimSpace(values[0]))
+	if len(parts) != 2 || !strings.EqualFold(parts[0], "Bearer") {
+		return false
+	}
+	return secureTokenEqual(parts[1], token)
+}
+
+func secureTokenEqual(got, want string) bool {
+	gotHash := sha256.Sum256([]byte(got))
+	wantHash := sha256.Sum256([]byte(want))
+	return subtle.ConstantTimeCompare(gotHash[:], wantHash[:]) == 1
 }
 
 func firstNonEmpty(values ...string) string {

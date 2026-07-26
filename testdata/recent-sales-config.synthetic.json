@@ -1,0 +1,16 @@
+{
+  "recent_sales": {
+    "enabled": true,
+    "source": "testdata/recent-sales-events.synthetic.json",
+    "source_id": "synthetic-sales",
+    "token_env": "PATRIS_EXPORT_RECENT_SALES_TOKEN",
+    "product_code_field": "product_code",
+    "quantity_field": "quantity",
+    "sold_at_field": "sold_at",
+    "event_id_field": "sale_event_id",
+    "max_window": "2160h",
+    "max_page_size": 100,
+    "max_source_rows": 1000,
+    "max_source_mb": 1
+  }
+}

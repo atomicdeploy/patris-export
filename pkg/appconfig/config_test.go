@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/atomicdeploy/patris-export/pkg/pricingcatalog"
+	"github.com/atomicdeploy/patris-export/pkg/recentsales"
 )
 
 func TestLoadFilesLayersJSONYAMLTOML(t *testing.T) {
@@ -425,6 +426,52 @@ func TestApplyEnvBoundsDigitalogicPricingBatchSizeAndTimeout(t *testing.T) {
 	}
 	if digitalogic.BatchSize != 500 {
 		t.Fatalf("batch size was not bounded to the remote contract maximum: %+v", digitalogic)
+	}
+}
+
+func TestRecentSalesConfigUsesEnvironmentReferencesWithoutPersistingSecrets(t *testing.T) {
+	t.Setenv("PATRIS_EXPORT_RECENT_SALES_ENABLED", "true")
+	t.Setenv("PATRIS_EXPORT_RECENT_SALES_SOURCE", " C:/safe/sales-events.json ")
+	t.Setenv("PATRIS_EXPORT_RECENT_SALES_SOURCE_ID", " office-sales ")
+	t.Setenv("PATRIS_EXPORT_RECENT_SALES_TOKEN_ENV", "OFFICE_RECENT_SALES_TOKEN")
+	t.Setenv("PATRIS_EXPORT_RECENT_SALES_PRODUCT_CODE_FIELD", "Code")
+	t.Setenv("PATRIS_EXPORT_RECENT_SALES_QUANTITY_FIELD", "Tedad")
+	t.Setenv("PATRIS_EXPORT_RECENT_SALES_SOLD_AT_FIELD", "SoldAt")
+	t.Setenv("PATRIS_EXPORT_RECENT_SALES_EVENT_ID_FIELD", "LineID")
+	t.Setenv("PATRIS_EXPORT_RECENT_SALES_MAX_WINDOW", "10000h")
+	t.Setenv("PATRIS_EXPORT_RECENT_SALES_MAX_PAGE_SIZE", "900")
+	t.Setenv("PATRIS_EXPORT_RECENT_SALES_MAX_SOURCE_ROWS", "2000000")
+	t.Setenv("PATRIS_EXPORT_RECENT_SALES_MAX_SOURCE_MB", "2000")
+	t.Setenv("OFFICE_RECENT_SALES_TOKEN", "must-never-enter-config")
+
+	cfg := Default()
+	ApplyEnv(&cfg)
+	recent := cfg.RecentSales
+	if !recent.Enabled || recent.Source != "C:/safe/sales-events.json" || recent.SourceID != "office-sales" ||
+		recent.TokenEnv != "OFFICE_RECENT_SALES_TOKEN" || recent.ProductCodeField != "Code" ||
+		recent.QuantityField != "Tedad" || recent.SoldAtField != "SoldAt" || recent.EventIDField != "LineID" {
+		t.Fatalf("recent-sales environment references were not applied: %+v", recent)
+	}
+	if recent.MaxWindow != (365*24*time.Hour).String() || recent.MaxPageSize != 500 ||
+		recent.MaxSourceRows != 1_000_000 || recent.MaxSourceMB != 1024 {
+		t.Fatalf("recent-sales safety limits were not bounded: %+v", recent)
+	}
+	encoded, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), "must-never-enter-config") {
+		t.Fatalf("recent-sales credential value entered config: %s", encoded)
+	}
+}
+
+func TestRecentSalesDefaultsFailClosed(t *testing.T) {
+	cfg := Default()
+	if cfg.RecentSales.Enabled || cfg.RecentSales.Source != "" ||
+		cfg.RecentSales.TokenEnv != recentsales.DefaultTokenEnv ||
+		cfg.RecentSales.MaxPageSize != 500 || cfg.RecentSales.MaxSourceRows != 1_000_000 ||
+		cfg.RecentSales.MaxSourceMB != 256 {
+		t.Fatalf("unsafe recent-sales defaults: %+v", cfg.RecentSales)
 	}
 }
 

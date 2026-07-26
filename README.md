@@ -608,6 +608,14 @@ same table controls through its Products/Categories switch. Products include
 their explicit `category_code`; reserved accounting and service rows appear in
 `excluded_codes` and are never exposed as products.
 
+`GET /api/recent-sales` is a separate authenticated, read-only product-level
+aggregate feed. It requires explicit RFC3339 `from` and `to` bounds, bounded
+paging, a dedicated bearer credential stored only in an environment variable,
+and a separately configured supported sales source. It returns only product
+code, sold quantity, sale frequency, last-sold time, and stable
+source/window/page metadata. It explicitly refuses `kala.db` and the primary
+product database. See [Recent-sales aggregate API](docs/RECENT-SALES-API.md).
+
 `POST /api/refresh` forces the same source snapshot refresh used by the Web UI,
 WebSocket, IPC, and embedded-library `refresh` command. This gives desktop and
 remote clients one consistent manual-refresh operation.
