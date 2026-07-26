@@ -1,8 +1,9 @@
 # Excel pricing-settings companion
 
-Patris Export is the credential boundary between the canonical
-`Digitalogic-Price-Calculator.xltm` workbook and Digitalogic's guarded
-pricing-settings API. The workbook never contains a WordPress, WooCommerce, or
+Patris Export is the credential boundary between the canonical Persian
+`لیست قیمت دیجیتالاجیک - استاندارد.xltm` and
+`لیست قیمت دیجیتالاجیک - پیشرفته.xltm` workbooks and Digitalogic's guarded
+pricing-settings API. The workbooks never contain a WordPress, WooCommerce, or
 product-sync credential.
 
 ## Local loopback contract

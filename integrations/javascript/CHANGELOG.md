@@ -7,6 +7,14 @@ documented in this file.
 
 ### Added
 
+### Changed
+
+### Fixed
+
+## [1.3.0] - 2026-07-26
+
+### Added
+
 - Added a directly usable Electron privileged-host adapter plus Tauri and
   WebView2 renderer adapters and native host-routing references, all using one
   typed result/error contract, exact origin and method allowlists,
