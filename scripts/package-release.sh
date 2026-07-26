@@ -77,6 +77,8 @@ install -m 0755 "$windows_source/patris-export-windows-amd64.exe" "$windows_stag
 for file in patris-export.dll patris-export.h libpxlib.dll libgcc_s_seh-1.dll libstdc++-6.dll libwinpthread-1.dll; do
     install -m 0644 "$windows_source/$file" "$windows_stage/$file"
 done
+install -m 0644 "$root/scripts/windows/Install-PatrisExportScheduledTask.ps1" "$windows_stage/Install-PatrisExportScheduledTask.ps1"
+install -m 0644 "$root/scripts/windows/Run-PatrisExportScheduledTask.ps1" "$windows_stage/Run-PatrisExportScheduledTask.ps1"
 
 required_linux=(
     patris-export-linux-amd64

@@ -32,6 +32,41 @@ The bundle also contains `patris-export.dll` and `patris-export.h` for
 embedding. Existing configuration remains external to the install directory
 and is not overwritten by extracting a newer release.
 
+### Task Scheduler and environment-backed credentials
+
+Windows Task Scheduler does not refresh an already-created task process from
+the current user's environment after a credential is added or rotated. Use the
+bundled installer helper to name each environment variable that Patris must
+re-read at launch:
+
+```powershell
+.\Install-PatrisExportScheduledTask.ps1 `
+  -Action Install `
+  -DbPath C:\Patris\data4\kala.db `
+  -Address 127.0.0.1:18080 `
+  -ImportEnvironmentVariable DIGITALOGIC_PRICING_INPUT_TOKEN `
+  -ExtraArgs @("--raw=false", "--watch=false") `
+  -Start
+```
+
+The task stores only the validated variable name. Its launcher reads the
+current user-scoped value, falls back to the machine scope, imports it into the
+child process, and fails closed if no non-empty value exists. The value is
+never written to the task XML, command line, Patris config, or launcher output.
+The helper uses the co-located `patris-export.exe` in a ZIP or installer
+deployment. Repository operators retain the existing
+`%USERPROFILE%\Desktop\AtomicDeploy\deploy` fallback and can select another
+location with `-DeploymentDirectory`.
+Re-run the install action when task arguments or imported variable names
+change; rotating the value itself requires only a task restart.
+The assisted uninstaller stops and removes the default task only when its
+action points to that installation. Remove a custom `-TaskName` or `-TaskPath`
+with the same helper before uninstalling.
+Assisted upgrades stop an owned running default task before replacing locked
+files and restart it after the new payload and registration metadata are in
+place. An unrecognized task or process aborts the operation without deleting a
+partial installation.
+
 ## Linux amd64
 
 1. Download `patris-export-vX.Y.Z-linux-amd64.tar.gz`.

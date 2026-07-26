@@ -61,6 +61,10 @@ jobs:
       shell: cmd
       run: build.cmd --target windows-native --ci --no-assets
 
+    - name: Test scheduled-task environment bridge
+      shell: cmd
+      run: powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File .\scripts\windows\Test-ScheduledTaskEnvironmentBridge.ps1
+
     - name: Audit and test optional pxlib backends
       shell: pwsh
       run: |

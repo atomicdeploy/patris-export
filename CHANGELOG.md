@@ -39,6 +39,9 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   supported source into a deterministic, paged product-level aggregate while
   excluding customer, order, payment, and delivery details; its source/auth
   profile stays server-side across browser config reads and writes.
+- The Windows scheduled-task helper can import explicitly named current
+  user/machine environment values at process launch without storing credential
+  values in task XML, arguments, configuration, logs, or release artifacts.
 
 ### Changed
 

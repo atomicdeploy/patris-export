@@ -120,6 +120,7 @@ LangString CleanupWarning 1065 "این گزینه را فقط هنگام حذف 
 Var CleanupCheckbox
 Var RemoveUserData
 Var InitialInstallDirectory
+Var PatrisTaskWasRunning
 
 Function PatrisSetInstallDirectory
   ReadRegStr $0 SHCTX "${PRODUCT_REG_KEY}" "InstallLocation"
@@ -188,6 +189,19 @@ Section "!Patris Export application" SEC_CORE
   SetOutPath "$INSTDIR"
   SetOverwrite on
 
+  StrCpy $PatrisTaskWasRunning "0"
+  ${If} ${FileExists} "$INSTDIR\Install-PatrisExportScheduledTask.ps1"
+    nsExec::ExecToStack '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$INSTDIR\Install-PatrisExportScheduledTask.ps1" -Action PrepareUpgrade -DeploymentDirectory "$INSTDIR" -RequireOwnedAction'
+    Pop $0
+    Pop $1
+    ${If} $0 == 10
+      StrCpy $PatrisTaskWasRunning "1"
+    ${ElseIf} $0 != 0
+      DetailPrint "Unable to prepare the owned Patris Export task for upgrade: exit $0"
+      Abort "Patris Export is still running. Stop its scheduled task and retry the upgrade."
+    ${EndIf}
+  ${EndIf}
+
   ; Remove optional files from an older installation. Selected sections below
   ; recreate them, while deselecting a component removes its previous copy.
   Delete "$INSTDIR\patris-export.dll"
@@ -201,6 +215,8 @@ Section "!Patris Export application" SEC_CORE
   File /oname=libwinpthread-1.dll "${PAYLOAD_DIR}\libwinpthread-1.dll"
   File /oname=README.md "${PAYLOAD_DIR}\README.md"
   File /oname=INSTALL.md "${PAYLOAD_DIR}\INSTALL.md"
+  File /oname=Install-PatrisExportScheduledTask.ps1 "${PAYLOAD_DIR}\Install-PatrisExportScheduledTask.ps1"
+  File /oname=Run-PatrisExportScheduledTask.ps1 "${PAYLOAD_DIR}\Run-PatrisExportScheduledTask.ps1"
   File /oname=BUILD-MANIFEST.txt "${PAYLOAD_DIR}\BUILD-MANIFEST.txt"
   !if /FileExists "${PAYLOAD_DIR}\BUILD-VARIANT.json"
     File /oname=BUILD-VARIANT.json "${PAYLOAD_DIR}\BUILD-VARIANT.json"
@@ -244,6 +260,16 @@ Section "!Patris Export application" SEC_CORE
   WriteRegDWORD SHCTX "${PRODUCT_UNINSTALL_KEY}" "NoRepair" 1
   ${GetSize} "$INSTDIR" "/S=0K" $0 $1 $2
   WriteRegDWORD SHCTX "${PRODUCT_UNINSTALL_KEY}" "EstimatedSize" $0
+
+  ${If} $PatrisTaskWasRunning == "1"
+    nsExec::ExecToStack '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$INSTDIR\Install-PatrisExportScheduledTask.ps1" -Action Start -DeploymentDirectory "$INSTDIR"'
+    Pop $0
+    Pop $1
+    ${If} $0 != 0
+      DetailPrint "Unable to restart the owned Patris Export task after upgrade: exit $0"
+      Abort "Patris Export was upgraded but its scheduled task could not restart."
+    ${EndIf}
+  ${EndIf}
 SectionEnd
 
 Section "Developer integration SDK (DLL and C header)" SEC_SDK
@@ -264,6 +290,20 @@ SectionEnd
 
 Section "Uninstall"
   SetRegView 64
+
+  ; Stop and remove only the default task when it points back to this exact
+  ; installation. Abort on failure so a locked executable is never silently
+  ; left behind after its registry/docs/helpers have been removed.
+  ${If} ${FileExists} "$INSTDIR\Install-PatrisExportScheduledTask.ps1"
+    nsExec::ExecToStack '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$INSTDIR\Install-PatrisExportScheduledTask.ps1" -Action Remove -DeploymentDirectory "$INSTDIR" -RequireOwnedAction'
+    Pop $0
+    Pop $1
+    ${If} $0 != 0
+      DetailPrint "Unable to stop/remove the owned Patris Export task: exit $0"
+      Abort "Patris Export is still running. Stop its scheduled task and retry uninstall."
+    ${EndIf}
+  ${EndIf}
+
   Delete "$DESKTOP\Patris Export.lnk"
   Delete "$SMPROGRAMS\Patris Export\Patris Export.lnk"
   Delete "$SMPROGRAMS\Patris Export\Configuration Guide.lnk"
@@ -285,6 +325,8 @@ Section "Uninstall"
   Delete "$INSTDIR\libwinpthread-1.dll"
   Delete "$INSTDIR\README.md"
   Delete "$INSTDIR\INSTALL.md"
+  Delete "$INSTDIR\Install-PatrisExportScheduledTask.ps1"
+  Delete "$INSTDIR\Run-PatrisExportScheduledTask.ps1"
   Delete "$INSTDIR\BUILD-MANIFEST.txt"
   Delete "$INSTDIR\BUILD-VARIANT.json"
   Delete "$INSTDIR\LICENSE.txt"
