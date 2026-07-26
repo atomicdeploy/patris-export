@@ -77,7 +77,7 @@ one response.
 
 ## Dynamic macro template
 
-`docs/examples/Patris-Digitalogic-Price-Calculator.xltm` is the canonical
+`docs/examples/Digitalogic-Price-Calculator.xltm` is the canonical
 calculator template. It preserves the original right-to-left Persian calculator
 instead of introducing a second dashboard schema. The visible `Products` table
 starts at `B5` and has exactly the original columns in their original order:
@@ -98,10 +98,10 @@ http://127.0.0.1:18080/api/product-sync
 https://digitalogic.ir/wp-json/wc/store/v1/products
 ```
 
-The Patris source is the canonical `patris.product-sync` JSON envelope. The
-public WooCommerce Store API only supplies the public product ID and permalink.
-No workbook credential is required or stored. The join key is exact,
-case-sensitive Patris `product_code` to WooCommerce `sku`; product names are
+The local product service returns the canonical `patris.product-sync` JSON
+envelope. The public WooCommerce Store API only supplies the public product ID
+and permalink. No workbook credential is required or stored. The join key is
+exact, case-sensitive `product_code` to WooCommerce `sku`; product names are
 never identity fallbacks and WooCommerce-only rows are never added. A matching
 name cell ends with `WooID <id>` and links to the public product page.
 
@@ -132,7 +132,7 @@ Enable macros only after reviewing:
 
 - `docs/examples/vba/JsonValue.cls`;
 - `docs/examples/vba/JsonRuntime.bas`;
-- `docs/examples/vba/PatrisDashboard.bas`;
+- `docs/examples/vba/ProductCatalogSync.bas`;
 - `docs/examples/vba/ThisWorkbook.cls`.
 
 The Windows builder removes local absolute paths, neutralizes Office author
@@ -145,4 +145,4 @@ and metadata checks. Its VBA is also imported, compiled, calculated, and
 integration-tested with native Excel 16. LibreOffice compatibility is not
 claimed without a LibreOffice runtime in the validation environment.
 
-![Patris and Digitalogic price calculator template](examples/Patris-Digitalogic-Price-Calculator-preview.png)
+![Digitalogic price calculator template](examples/Digitalogic-Price-Calculator-preview.png)

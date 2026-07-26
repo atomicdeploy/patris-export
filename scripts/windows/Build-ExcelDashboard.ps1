@@ -8,10 +8,10 @@ param(
 $ErrorActionPreference = 'Stop'
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 if ([string]::IsNullOrWhiteSpace($OutputPath)) {
-    $OutputPath = Join-Path $repoRoot 'docs\examples\Patris-Digitalogic-Price-Calculator.xltm'
+    $OutputPath = Join-Path $repoRoot 'docs\examples\Digitalogic-Price-Calculator.xltm'
 }
 if ([string]::IsNullOrWhiteSpace($DistributionCopyPath)) {
-    $DistributionCopyPath = Join-Path $repoRoot 'outputs\patris-excel-15\Patris-Digitalogic-Price-Calculator.xltm'
+    $DistributionCopyPath = Join-Path $repoRoot 'outputs\patris-excel-15\Digitalogic-Price-Calculator.xltm'
 }
 if ([string]::IsNullOrWhiteSpace($PreviewDirectory)) {
     $PreviewDirectory = Join-Path $repoRoot 'outputs\patris-excel-15\preview'
@@ -19,7 +19,7 @@ if ([string]::IsNullOrWhiteSpace($PreviewDirectory)) {
 $OutputPath = [IO.Path]::GetFullPath($OutputPath)
 $DistributionCopyPath = [IO.Path]::GetFullPath($DistributionCopyPath)
 $PreviewDirectory = [IO.Path]::GetFullPath($PreviewDirectory)
-$vbaModulePath = Join-Path $repoRoot 'docs\examples\vba\PatrisDashboard.bas'
+$vbaModulePath = Join-Path $repoRoot 'docs\examples\vba\ProductCatalogSync.bas'
 $jsonRuntimePath = Join-Path $repoRoot 'docs\examples\vba\JsonRuntime.bas'
 $jsonValuePath = Join-Path $repoRoot 'docs\examples\vba\JsonValue.cls'
 $thisWorkbookPath = Join-Path $repoRoot 'docs\examples\vba\ThisWorkbook.cls'
@@ -315,7 +315,7 @@ try {
     $priceList.Range('O7').NumberFormat = '#,##0.##'
     $priceList.Range('O10').NumberFormat = '0%'
 
-    [void](Add-ActionButton $priceList 'همگام‌سازی اکنون' 'PatrisDashboard.RefreshAllData' $priceList.Range('M3') $priceList.Range('M3:O4').Width $priceList.Range('M3:O4').Height)
+    [void](Add-ActionButton $priceList 'همگام‌سازی اکنون' 'ProductCatalogSync.RefreshAllData' $priceList.Range('M3') $priceList.Range('M3:O4').Width $priceList.Range('M3:O4').Height)
     $priceList.Range('M12:O12').Merge()
     $priceList.Range('M12').Value2 = 'وضعیت همگام‌سازی'
     Set-SectionStyle $priceList.Range('M12:O12') 'F6F6F6' '242424' 10
@@ -351,7 +351,7 @@ try {
     Set-SectionStyle $settings.Range('A1:F2') '1C61E7' 'FFFFFF' 17
     $settings.Range('A1:F2').HorizontalAlignment = -4108
 
-    $settings.Range('A3').Value2 = 'نشانی سرویس پاتریس'
+    $settings.Range('A3').Value2 = 'نشانی سرویس محصولات'
     $settings.Range('B3:F3').Merge()
     $settings.Range('B3').Value2 = 'http://127.0.0.1:18080/api/product-sync'
     $settings.Range('A4').Value2 = 'نشانی عمومی ووکامرس'
@@ -394,7 +394,7 @@ try {
     $settings.Range('B10:F12').HorizontalAlignment = -4108
 
     $settings.Range('A14:F17').Merge()
-    $settings.Range('A14').Value2 = "این سه مقدار همان تنظیمات فایل قبلی هستند و از صفحه «لیست قیمت» ویرایش می‌شوند.`nردیف‌های کالا در قالب ذخیره نمی‌شوند؛ دکمه همگام‌سازی آن‌ها را از پاتریس می‌گیرد و لینک ووکامرس را با شناسه WooID اضافه می‌کند.`nاگر وزن یا نرخ ارزی موجود نباشد، قیمت نهایی خالی می‌ماند و هیچ خطای #N/A نمایش داده نمی‌شود."
+    $settings.Range('A14').Value2 = "این سه مقدار همان تنظیمات فایل قبلی هستند و از صفحه «لیست قیمت» ویرایش می‌شوند.`nردیف‌های کالا در قالب ذخیره نمی‌شوند؛ دکمه همگام‌سازی آن‌ها را از سرویس محصولات می‌گیرد و لینک ووکامرس را با شناسه WooID اضافه می‌کند.`nاگر وزن یا نرخ ارزی موجود نباشد، قیمت نهایی خالی می‌ماند و هیچ خطای #N/A نمایش داده نمی‌شود."
     $settings.Range('A14:F17').WrapText = $true
     $settings.Range('A14:F17').VerticalAlignment = -4160
     $settings.Range('A14:F17').Interior.Color = ConvertTo-OleColor 'F6F6F6'
@@ -427,7 +427,7 @@ try {
     # Run a non-networking macro to force VBA parsing and validate the expected
     # sheet, table, and configuration contracts before packaging.
     try {
-        $excel.Run("'$($workbook.Name)'!PatrisDashboard.ValidateWorkbook")
+        $excel.Run("'$($workbook.Name)'!ProductCatalogSync.ValidateWorkbook")
     }
     catch {
         # Preserve the failed package at the requested diagnostic path so the

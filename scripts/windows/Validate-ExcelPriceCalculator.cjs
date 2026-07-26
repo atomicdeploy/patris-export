@@ -27,7 +27,7 @@ const defaultCandidate = path.join(
   repoRoot,
   'docs',
   'examples',
-  'Patris-Digitalogic-Price-Calculator.xltm',
+  'Digitalogic-Price-Calculator.xltm',
 );
 const defaultReference = path.join(
   os.homedir(),
@@ -47,7 +47,7 @@ function usage() {
     'Options:',
     `  --candidate PATH       Workbook/template to validate (default: ${defaultCandidate})`,
     `  --reference PATH       Archived calculator baseline (default: ${defaultReference})`,
-    '  --sync                 Run PatrisDashboard.RefreshAllData silently before validation',
+    '  --sync                 Run ProductCatalogSync.RefreshAllData silently before validation',
     '  --no-sync              Validate an already-synced workbook without running macros',
     '  --strict-reference     Fail on every comparable weight/rate difference from the archive',
     '  --json                 Print the complete machine-readable report',
@@ -549,7 +549,7 @@ try {
 
     if ($runSync) {
         $macroBookName = ([string]$candidateBook.Name).Replace("'", "''")
-        [void]$excel.Run("'$macroBookName'!PatrisDashboard.RefreshAllData", $true)
+        [void]$excel.Run("'$macroBookName'!ProductCatalogSync.RefreshAllData", $true)
         $syncRan = $true
     }
     $excel.CalculateFullRebuild()

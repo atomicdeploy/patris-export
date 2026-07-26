@@ -1,4 +1,4 @@
-Attribute VB_Name = "PatrisDashboard"
+Attribute VB_Name = "ProductCatalogSync"
 Option Explicit
 
 Private Const PRODUCTS_TABLE As String = "Products"
@@ -69,7 +69,7 @@ End Sub
 
 Public Sub RefreshAllData(Optional ByVal silent As Boolean = False)
     Dim previousCalculation As XlCalculation
-    Dim patrisRows As Long
+    Dim productRows As Long
     Dim wooRows As Long
     Dim wooMatches As Long
     Dim duplicateSkus As Long
@@ -85,12 +85,12 @@ Public Sub RefreshAllData(Optional ByVal silent As Boolean = False)
     Application.Calculation = xlCalculationManual
 
     Set settings = ConfigSheet()
-    patrisRows = RefreshPatrisContract()
+    productRows = RefreshProductContract()
     wooStatus = RefreshWooSafely(wooRows, wooMatches, duplicateSkus)
     Application.CalculateFull
 
     statusText = U("067E0627062A063106CC0633003A0020") & _
-        CStr(patrisRows) & U("00200631062F06CC0641061B0020") & wooStatus
+        CStr(productRows) & U("00200631062F06CC0641061B0020") & wooStatus
     If duplicateSkus > 0 Then
         statusText = statusText & U("061B0020") & CStr(duplicateSkus) & _
             U("002006A9062F0020062A06A906310627063106CC00200648064806A90627064506310633002006460627062F06CC062F0647002006AF06310641062A064700200634062F")
@@ -100,7 +100,7 @@ Public Sub RefreshAllData(Optional ByVal silent As Boolean = False)
     settings.Range("B7").NumberFormat = "yyyy-mm-dd hh:mm"
 
     If Not silent Then
-        ShowUnicodeMessage CStr(patrisRows) & _
+        ShowUnicodeMessage CStr(productRows) & _
             U("002006A906270644062706CC0020067E0627062A063106CC0633002006280647200C063106480632063106330627064606CC00200634062F002E") & _
             vbCrLf & CStr(wooMatches) & _
             U("0020067E06CC06480646062F0020062F064206CC064200200648064806A9062706450631063300200627064106320648062F064700200634062F002E"), _
@@ -142,7 +142,7 @@ Public Sub RefreshOnOpen()
     End If
 End Sub
 
-Public Function RefreshPatrisContract() As Long
+Public Function RefreshProductContract() As Long
     Dim endpoint As String
     Dim responseText As String
     Dim root As JsonValue
@@ -164,8 +164,8 @@ Public Function RefreshPatrisContract() As Long
 
     Set settings = ConfigSheet()
     endpoint = Trim$(CStr(settings.Range("B3").Value2))
-    If Not IsAllowedPatrisUrl(endpoint) Then
-        Err.Raise vbObjectError + 100, "RefreshPatrisContract", _
+    If Not IsAllowedProductServiceUrl(endpoint) Then
+        Err.Raise vbObjectError + 100, "RefreshProductContract", _
                   U("064606340627064606CC0020067E0627062A063106CC063300200628062706CC062F00200645062D064406CC00200648002006280627002000480054005400500020062806270634062F002E")
     End If
 
@@ -175,18 +175,18 @@ Public Function RefreshPatrisContract() As Long
     Set root = JsonRuntime.ParseJson(responseText)
     If root.Kind <> "object" Or _
        CStr(JsonRuntime.JsonText(root, "schema")) <> "patris.product-sync" Then
-        Err.Raise vbObjectError + 101, "RefreshPatrisContract", _
+        Err.Raise vbObjectError + 101, "RefreshProductContract", _
                   U("067E06270633062E0020067E0627062A063106CC063300200642063106270631062F0627062F002006450639062A06280631002006A90627064406270020064606CC0633062A002E")
     End If
 
     Set productsValue = JsonRuntime.JsonMember(root, "products")
     If productsValue Is Nothing Or productsValue.Kind <> "array" Then
-        Err.Raise vbObjectError + 102, "RefreshPatrisContract", _
+        Err.Raise vbObjectError + 102, "RefreshProductContract", _
                   U("0641064706310633062A002006A9062706440627064706270020062F06310020067E06270633062E0020067E0627062A063106CC06330020067E06CC062F0627002006460634062F002E")
     End If
     dataRows = JsonRuntime.JsonArrayCount(productsValue)
     If dataRows < 1 Then
-        Err.Raise vbObjectError + 103, "RefreshPatrisContract", _
+        Err.Raise vbObjectError + 103, "RefreshProductContract", _
                   U("0641064706310633062A002006A90627064406270647062706CC0020067E0627062A063106CC06330020062E0627064406CC002006270633062A002E")
     End If
 
@@ -197,18 +197,18 @@ Public Function RefreshPatrisContract() As Long
     For rowIndex = 1 To dataRows
         Set product = JsonRuntime.JsonArrayItem(productsValue, rowIndex)
         If product Is Nothing Or product.Kind <> "object" Then
-            Err.Raise vbObjectError + 104, "RefreshPatrisContract", _
+            Err.Raise vbObjectError + 104, "RefreshProductContract", _
                       U("06CC06A906CC00200627063200200631062F06CC0641200C0647062706CC0020067E0627062A063106CC0633002006450639062A062806310020064606CC0633062A002E")
         End If
 
         codeValue = Trim$(CStr( _
             BlankIfNull(JsonRuntime.JsonText(product, "product_code"))))
         If Len(codeValue) = 0 Then
-            Err.Raise vbObjectError + 105, "RefreshPatrisContract", _
+            Err.Raise vbObjectError + 105, "RefreshProductContract", _
                       U("06A9062F002006A906270644062706CC0020062E0627064406CC0020062F06310020067E06270633062E0020067E0627062A063106CC063300200648062C0648062F0020062F06270631062F002E")
         End If
         If codesSeen.Exists(codeValue) Then
-            Err.Raise vbObjectError + 106, "RefreshPatrisContract", _
+            Err.Raise vbObjectError + 106, "RefreshProductContract", _
                       U("06A9062F002006A906270644062706CC0020062A06A906310627063106CC0020062F06310020067E06270633062E0020067E0627062A063106CC063300200648062C0648062F0020062F06270631062F002E")
         End If
         codesSeen.Add codeValue, True
@@ -240,7 +240,7 @@ Public Function RefreshPatrisContract() As Long
     ReplaceProductTableData table, output, dataRows
     ApplyProductTableFormulas table
     ApplyProductTableFormatting table
-    RefreshPatrisContract = dataRows
+    RefreshProductContract = dataRows
 End Function
 
 Private Function RefreshWooSafely(ByRef totalRows As Long, _
@@ -476,11 +476,11 @@ Private Function HttpGet(ByVal endpoint As String, _
     HttpGet = CStr(http.responseText)
 End Function
 
-Private Function IsAllowedPatrisUrl(ByVal address As String) As Boolean
+Private Function IsAllowedProductServiceUrl(ByVal address As String) As Boolean
     Dim lowerAddress As String
 
     lowerAddress = LCase$(Trim$(address))
-    IsAllowedPatrisUrl = _
+    IsAllowedProductServiceUrl = _
         Left$(lowerAddress, Len("http://127.0.0.1/")) = "http://127.0.0.1/" Or _
         Left$(lowerAddress, Len("http://127.0.0.1:")) = "http://127.0.0.1:" Or _
         Left$(lowerAddress, Len("http://localhost/")) = "http://localhost/" Or _

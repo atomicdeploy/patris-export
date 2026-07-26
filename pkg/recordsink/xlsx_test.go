@@ -353,7 +353,7 @@ func TestResolveXLSXLanguage(t *testing.T) {
 }
 
 func TestDynamicCalculatorTemplateHasNeutralMetadataAndNoExternalConnections(t *testing.T) {
-	path := filepath.Join("..", "..", "docs", "examples", "Patris-Digitalogic-Price-Calculator.xltm")
+	path := filepath.Join("..", "..", "docs", "examples", "Digitalogic-Price-Calculator.xltm")
 	archive, err := zip.OpenReader(path)
 	if err != nil {
 		t.Fatal(err)
@@ -380,6 +380,15 @@ func TestDynamicCalculatorTemplateHasNeutralMetadataAndNoExternalConnections(t *
 				t.Fatalf("dashboard package entry %q leaked %q", entry.Name, forbidden)
 			}
 		}
+		if entry.Name == "xl/sharedStrings.xml" ||
+			strings.HasPrefix(entry.Name, "xl/worksheets/") ||
+			strings.HasPrefix(entry.Name, "xl/drawings/") {
+			for _, forbidden := range []string{"patris", "پاتریس"} {
+				if strings.Contains(lower, forbidden) {
+					t.Fatalf("customer-visible workbook entry %q leaked upstream branding %q", entry.Name, forbidden)
+				}
+			}
+		}
 		if entry.Name == "docProps/core.xml" {
 			coreProperties = string(content)
 		}
@@ -394,7 +403,7 @@ func TestDynamicCalculatorTemplateHasNeutralMetadataAndNoExternalConnections(t *
 }
 
 func TestDynamicCalculatorTemplatePreservesPersianPriceListContract(t *testing.T) {
-	path := filepath.Join("..", "..", "docs", "examples", "Patris-Digitalogic-Price-Calculator.xltm")
+	path := filepath.Join("..", "..", "docs", "examples", "Digitalogic-Price-Calculator.xltm")
 	book, err := excelize.OpenFile(path)
 	if err != nil {
 		t.Fatal(err)
@@ -512,7 +521,7 @@ func TestDynamicCalculatorTemplatePreservesPersianPriceListContract(t *testing.T
 }
 
 func TestDynamicCalculatorVBASourceValidatesContractsBeforeMutation(t *testing.T) {
-	path := filepath.Join("..", "..", "docs", "examples", "vba", "PatrisDashboard.bas")
+	path := filepath.Join("..", "..", "docs", "examples", "vba", "ProductCatalogSync.bas")
 	content, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
