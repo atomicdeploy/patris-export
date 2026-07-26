@@ -2,12 +2,14 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -18,6 +20,24 @@ import (
 type canonicalProjectionTestSource struct {
 	path string
 	rows []map[string]interface{}
+}
+
+type blockingCanonicalPricingProvider struct {
+	started      chan struct{}
+	canceled     chan struct{}
+	startedOnce  sync.Once
+	canceledOnce sync.Once
+}
+
+func (provider *blockingCanonicalPricingProvider) Prefetch(ctx context.Context, _ []string) pricingcatalog.Provider {
+	provider.startedOnce.Do(func() { close(provider.started) })
+	<-ctx.Done()
+	provider.canceledOnce.Do(func() { close(provider.canceled) })
+	return provider
+}
+
+func (*blockingCanonicalPricingProvider) Resolve(context.Context, string) pricingcatalog.Resolution {
+	return pricingcatalog.Resolution{}
 }
 
 func (source *canonicalProjectionTestSource) GetRecords() ([]map[string]interface{}, error) {
@@ -65,7 +85,7 @@ func TestStartWatchingDoesNotWaitForInitialDigitalogicProjection(t *testing.T) {
 	defer remote.Close()
 	defer releaseOnce.Do(func() { close(releaseBatch) })
 
-	srv := newCanonicalProjectionTestServer(t, remote.URL, "5s")
+	srv := newCanonicalProjectionTestServer(t, remote.URL, "5s", true, true)
 	startedAt := time.Now()
 	if err := srv.StartWatching(0); err != nil {
 		t.Fatalf("start watcher: %v", err)
@@ -97,7 +117,87 @@ func TestStartWatchingDoesNotWaitForInitialDigitalogicProjection(t *testing.T) {
 	releaseOnce.Do(func() { close(releaseBatch) })
 }
 
-func newCanonicalProjectionTestServer(t *testing.T, baseURL, timeout string) *Server {
+func TestStartWatchingSkipsDisabledInitialProjection(t *testing.T) {
+	tests := []struct {
+		name        string
+		sendEnabled bool
+		sendInitial bool
+	}{
+		{name: "updates disabled", sendEnabled: false, sendInitial: true},
+		{name: "initial delivery disabled", sendEnabled: true, sendInitial: false},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var requests atomic.Int32
+			remote := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				requests.Add(1)
+				http.Error(w, "initial projection should not run", http.StatusInternalServerError)
+			}))
+			defer remote.Close()
+
+			srv := newCanonicalProjectionTestServer(
+				t, remote.URL, "5s", test.sendEnabled, test.sendInitial,
+			)
+			if err := srv.StartWatching(0); err != nil {
+				t.Fatalf("start watcher: %v", err)
+			}
+			time.Sleep(100 * time.Millisecond)
+			if got := requests.Load(); got != 0 {
+				t.Fatalf("disabled initial delivery issued %d pricing requests", got)
+			}
+			if err := srv.Close(); err != nil {
+				t.Fatalf("close server: %v", err)
+			}
+		})
+	}
+}
+
+func TestInitialProjectionUsesCanonicalRequestDeadline(t *testing.T) {
+	srv := newCanonicalProjectionTestServer(
+		t, "https://digitalogic.example", "100ms", true, true,
+	)
+	provider := &blockingCanonicalPricingProvider{
+		started:  make(chan struct{}),
+		canceled: make(chan struct{}),
+	}
+	cfg := srv.Config()
+	material, err := json.Marshal(cfg.Canonical.Pricing)
+	if err != nil {
+		t.Fatalf("marshal pricing config key: %v", err)
+	}
+	srv.catalogProviderMu.Lock()
+	srv.catalogProvider = provider
+	srv.catalogProviderKey = string(material)
+	srv.catalogProviderMu.Unlock()
+
+	startedAt := time.Now()
+	if err := srv.StartWatching(0); err != nil {
+		t.Fatalf("start watcher: %v", err)
+	}
+	select {
+	case <-provider.started:
+	case <-time.After(time.Second):
+		t.Fatal("enabled initial projection did not start")
+	}
+	select {
+	case <-provider.canceled:
+	case <-time.After(2 * time.Second):
+		t.Fatal("background initial projection outlived the canonical request ceiling")
+	}
+	if elapsed := time.Since(startedAt); elapsed > 1500*time.Millisecond {
+		t.Fatalf("background initial projection cancellation took %s, want at most 1.5s", elapsed)
+	}
+	srv.backgroundWG.Wait()
+	if err := srv.Close(); err != nil {
+		t.Fatalf("close server: %v", err)
+	}
+}
+
+func newCanonicalProjectionTestServer(
+	t *testing.T,
+	baseURL, timeout string,
+	sendEnabled, sendInitial bool,
+) *Server {
 	t.Helper()
 	tempDir := t.TempDir()
 	configPath := filepath.Join(tempDir, "config.json")
@@ -114,6 +214,8 @@ func newCanonicalProjectionTestServer(t *testing.T, baseURL, timeout string) *Se
 			Timeout:   timeout,
 		},
 	}
+	cfg.SendUpdates.Enabled = sendEnabled
+	cfg.SendUpdates.Initial = sendInitial
 	if err := manager.Replace(cfg); err != nil {
 		t.Fatalf("store test config: %v", err)
 	}

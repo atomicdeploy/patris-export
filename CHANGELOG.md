@@ -13,6 +13,12 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Fixed
 
+- Canonical pricing cache fills now use context-aware serialization, so a
+  request waiting behind a slow projection returns at its own deadline instead
+  of inheriting the earlier request's runtime. Startup also skips the
+  canonical projection when initial delivery is disabled and bounds enabled
+  initial projections to the canonical request ceiling.
+
 ## [1.3.0] - 2026-07-26
 
 ### Added
