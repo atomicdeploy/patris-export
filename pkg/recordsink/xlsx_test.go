@@ -410,9 +410,9 @@ func dynamicCalculatorContracts() []calculatorTemplateContract {
 				"نام کالا",
 			},
 			cards: []calculatorCardContract{
-				{name: "Yuan_Price", tableRange: "M6:M7", valueCell: "M7", settingsCell: "B18"},
+				{name: "Yuan_Price", tableRange: "M6:M7", valueCell: "M7", settingsCell: "B10"},
 				{name: "Shipping", tableRange: "O6:O7", valueCell: "O7", settingsCell: "B22"},
-				{name: "Profit", tableRange: "O9:O10", valueCell: "O10", settingsCell: "B21"},
+				{name: "Profit", tableRange: "O9:O10", valueCell: "O10", settingsCell: "B13"},
 			},
 		},
 		{
@@ -439,9 +439,9 @@ func dynamicCalculatorContracts() []calculatorTemplateContract {
 				"تاریخ نرخ ارز",
 			},
 			cards: []calculatorCardContract{
-				{name: "Yuan_Price", tableRange: "T6:T7", valueCell: "T7", settingsCell: "B18"},
+				{name: "Yuan_Price", tableRange: "T6:T7", valueCell: "T7", settingsCell: "B10"},
 				{name: "Shipping", tableRange: "V6:V7", valueCell: "V7", settingsCell: "B22"},
-				{name: "Profit", tableRange: "V9:V10", valueCell: "V10", settingsCell: "B21"},
+				{name: "Profit", tableRange: "V9:V10", valueCell: "V10", settingsCell: "B13"},
 			},
 			advancedAudit: true,
 		},
@@ -792,7 +792,15 @@ func TestDynamicCalculatorVBASourceGuardsLivePricingBeforeMutation(t *testing.T)
 		`Attribute VB_Name = "ProductCatalogSync"`,
 		`Private Const SYNC_TABLE As String = "SyncData"`,
 		"Public Sub PreviewPricingChanges()",
+		"Private Sub PreviewPricingChangesCore(ByVal showMessage As Boolean)",
 		"Public Sub ApplyPricingChanges()",
+		"Public Sub HandlePricingProposalChanged()",
+		"mLastPreviewSettings = PricingSettingsCanonical()",
+		"mLastPreviewStateRevision <> _",
+		"mLastApplyRequestID = NewRequestID(\"apply\")",
+		"RefreshAllData True",
+		`ConfigSheet().Range("B10").Value2`,
+		`ConfigSheet().Range("B13").Value2`,
 		`requestBody = BuildPricingRequest("preview", requestID, vbNullString, False)`,
 		`JsonRuntime.JsonText(result, "preview_digest")`,
 		"If Len(mLastPreviewDigest) = 0 Then",
@@ -881,6 +889,21 @@ func TestDynamicCalculatorVBASourceGuardsLivePricingBeforeMutation(t *testing.T)
 	} {
 		if strings.Contains(strings.ToLower(source), strings.ToLower(forbidden)) {
 			t.Fatalf("VBA source contains forbidden legacy or credential path: %s", forbidden)
+		}
+	}
+
+	thisWorkbookPath := filepath.Join("..", "..", "docs", "examples", "vba", "ThisWorkbook.cls")
+	thisWorkbookContent, err := os.ReadFile(thisWorkbookPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, required := range []string{
+		"Private Sub Workbook_SheetChange",
+		`Intersect(Target, Sh.Range("B18:B21"))`,
+		"ProductCatalogSync.HandlePricingProposalChanged",
+	} {
+		if !strings.Contains(string(thisWorkbookContent), required) {
+			t.Fatalf("ThisWorkbook source is missing pricing-change guard: %s", required)
 		}
 	}
 

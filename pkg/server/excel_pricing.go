@@ -447,7 +447,14 @@ func (s *Server) completeExcelPricingApply(
 	if dispatch == nil {
 		dispatch = updateout.DispatchWithResult
 	}
-	delivery, err := dispatch(ctx, cfg.SendUpdates, event)
+	deliveryConfig := cfg.SendUpdates
+	if deliveryConfig.RetryAttempts < 10 {
+		deliveryConfig.RetryAttempts = 10
+	}
+	if backoff, err := time.ParseDuration(deliveryConfig.RetryBackoff); err != nil || backoff < 2*time.Second {
+		deliveryConfig.RetryBackoff = "2s"
+	}
+	delivery, err := dispatch(ctx, deliveryConfig, event)
 	if err != nil || !excelPricingDeliveryComplete(delivery, contract.EventID) {
 		return errors.New("canonical product-sync delivery failed")
 	}
@@ -473,7 +480,9 @@ func (s *Server) completeExcelPricingApply(
 
 func excelPricingDeliveryComplete(result updateout.DeliveryResult, eventID string) bool {
 	if result.HTTPStatus < 200 || result.HTTPStatus >= 300 ||
-		result.Retryable || result.PendingProducts != 0 || result.DeferredProducts != 0 ||
+		result.Retryable || result.PendingProducts != 0 ||
+		result.DeferredAmbiguous != 0 ||
+		result.DeferredProducts != result.DeferredMissing ||
 		result.EventID != eventID || result.Attempts < 1 {
 		return false
 	}

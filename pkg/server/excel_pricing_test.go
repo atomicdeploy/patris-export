@@ -359,6 +359,9 @@ func TestExcelPricingApplyRegeneratesDispatchesAndRefetchesState(t *testing.T) {
 		if cfg.ProductSyncSecretEnv != "PATRIS_TEST_EXCEL_PRICING_SECRET" {
 			t.Fatalf("dispatch secret env=%q", cfg.ProductSyncSecretEnv)
 		}
+		if cfg.RetryAttempts != 10 || cfg.RetryBackoff != "2s" {
+			t.Fatalf("protected pricing dispatch retry policy=%d/%q, want 10/2s", cfg.RetryAttempts, cfg.RetryBackoff)
+		}
 		if event.Contract == nil || event.Contract.Source != newSource || event.SnapshotContract == nil {
 			t.Fatalf("dispatch event did not carry regenerated contract: %#v", event)
 		}
@@ -388,7 +391,7 @@ func TestExcelPricingApplyRegeneratesDispatchesAndRefetchesState(t *testing.T) {
 	}
 }
 
-func TestExcelPricingApplyRejectsDeferredProductSync(t *testing.T) {
+func TestExcelPricingApplyRejectsAmbiguousDeferredProductSync(t *testing.T) {
 	oldSource := canonical.Source{ID: "source", Dataset: "dataset", Revision: excelPricingRevisionForTest("old-source")}
 	newSource := canonical.Source{ID: "source", Dataset: "dataset", Revision: excelPricingRevisionForTest("new-source")}
 	stateRevision := excelPricingRevisionForTest("new-settings")
@@ -402,11 +405,12 @@ func TestExcelPricingApplyRejectsDeferredProductSync(t *testing.T) {
 	server.excelPricing.canonical = canonicalProjectionSequence(oldSource, newSource)
 	server.excelPricing.dispatch = func(_ context.Context, _ updateout.Config, event updateout.Event) (updateout.DeliveryResult, error) {
 		return updateout.DeliveryResult{
-			HTTPStatus:       http.StatusOK,
-			Status:           "accepted",
-			EventID:          event.Contract.EventID,
-			Attempts:         1,
-			DeferredProducts: 1,
+			HTTPStatus:        http.StatusOK,
+			Status:            "accepted",
+			EventID:           event.Contract.EventID,
+			Attempts:          1,
+			DeferredProducts:  1,
+			DeferredAmbiguous: 1,
 		}, nil
 	}
 	token := openExcelPricingSession(t, server)
@@ -427,6 +431,58 @@ func TestExcelPricingApplyRejectsDeferredProductSync(t *testing.T) {
 	}
 	if remoteCalls.Load() != 1 {
 		t.Fatalf("remote calls=%d, want apply only and no state readback", remoteCalls.Load())
+	}
+}
+
+func TestExcelPricingApplyAcceptsMissingDeferredProductSync(t *testing.T) {
+	oldSource := canonical.Source{ID: "source", Dataset: "dataset", Revision: excelPricingRevisionForTest("old-source")}
+	newSource := canonical.Source{ID: "source", Dataset: "dataset", Revision: excelPricingRevisionForTest("new-source")}
+	stateRevision := excelPricingRevisionForTest("new-settings")
+	var remoteCalls atomic.Int32
+	remote := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		remoteCalls.Add(1)
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/apply"):
+			writeRemotePricingResponse(t, w, excelPricingApplySchema, stateRevision)
+		case strings.HasSuffix(r.URL.Path, "/state"):
+			writeRemotePricingResponse(t, w, excelPricingStateSchema, stateRevision)
+		default:
+			t.Fatalf("unexpected remote path %q", r.URL.Path)
+		}
+	}))
+	defer remote.Close()
+
+	server := newExcelPricingTestServer(t, remote.URL+"/wp-json/digitalogic/patris/product-sync")
+	server.excelPricing.canonical = canonicalProjectionSequence(oldSource, newSource)
+	server.excelPricing.dispatch = func(_ context.Context, _ updateout.Config, event updateout.Event) (updateout.DeliveryResult, error) {
+		return updateout.DeliveryResult{
+			HTTPStatus:       http.StatusOK,
+			Status:           "accepted",
+			EventID:          event.Contract.EventID,
+			Attempts:         1,
+			DeferredProducts: 120,
+			DeferredMissing:  120,
+		}, nil
+	}
+
+	token := openExcelPricingSession(t, server)
+	body := validExcelPricingMutationBody(
+		"apply",
+		"excel-apply-0003",
+		stateRevision,
+		excelPricingRevisionForTest("preview"),
+		"APPLY",
+	)
+	request := authenticatedExcelPricingRequest(http.MethodPost, "/api/excel/pricing-sync/apply", body, token)
+	request.Header.Set("Idempotency-Key", "excel-apply-0003")
+	request.Header.Set("If-Match", `"`+stateRevision+`"`)
+	response := httptest.NewRecorder()
+	server.router.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("apply status=%d, want 200: %s", response.Code, response.Body.String())
+	}
+	if remoteCalls.Load() != 2 {
+		t.Fatalf("remote calls=%d, want apply plus state readback", remoteCalls.Load())
 	}
 }
 

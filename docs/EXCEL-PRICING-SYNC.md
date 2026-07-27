@@ -171,14 +171,28 @@ URLs, logs, or command arguments.
 On the Persian `تنظیمات` sheet:
 
 1. Select **دریافت وضعیت قیمت**.
-2. Review or edit the highlighted dollar rate and effective date. Yuan and
-   default profit remain linked to their familiar calculator inputs.
-3. Select **پیش‌نمایش تغییرات** and review the warning count.
-4. Select **اعمال تغییرات** and approve the explicit Persian confirmation.
+2. Review or edit the highlighted yuan/dollar rates, effective date, or default
+   profit. Editing one of those proposal cells immediately creates a fresh
+   preview and opens the explicit Persian apply confirmation.
+3. Review every warning in that confirmation and approve it only when the
+   proposed document is correct. The separate preview/apply buttons remain
+   available as a manual fallback.
 
 Changing any setting or refreshing state after preview invalidates the local
 apply guard. The remote service independently enforces the exact revision,
 idempotency key, preview digest, settings document, source identity, and
 `APPLY` confirmation.
+
+Customer-facing calculated prices always use the last site-confirmed live
+state, not uncommitted proposal cells. Product delivery gets a bounded
+ten-attempt retry window. If apply or post-apply verification is uncertain,
+the workbook retains its confirmed live values and the same still-current
+preview reuses its apply idempotency key. Excel reports success only after a
+fresh state readback matches the applied revision.
+
+Terminal deferred rows whose exact reason is `missing` are allowed because
+they have no WooCommerce page to disagree with. Pending rows, ambiguous
+matches, receiver retries, identity mismatches, and incomplete readback remain
+hard failures.
 
 ![Persian Excel pricing state, preview, and apply controls](examples/Digitalogic-Price-Calculator-settings.png)

@@ -29,6 +29,10 @@ Private mSourceRevision As String
 Private mLastPreviewDigest As String
 Private mLastPreviewExpiresAt As String
 Private mLastPreviewStateRevision As String
+Private mLastPreviewSettings As String
+Private mLastApplyRequestID As String
+Private mProposalSyncActive As Boolean
+Private mLastRefreshSucceeded As Boolean
 
 #If VBA7 Then
 Private Declare PtrSafe Function MessageBoxW Lib "user32" ( _
@@ -76,12 +80,14 @@ Public Sub RefreshAllData(Optional ByVal silent As Boolean = False)
     Dim settings As Worksheet
 
     On Error GoTo Failed
+    mLastRefreshSucceeded = False
     previousCalculation = Application.Calculation
     Application.ScreenUpdating = False
     Application.EnableEvents = False
     Application.Calculation = xlCalculationManual
 
     Set settings = ConfigSheet()
+    InvalidatePricingPreview
     Set contract = LoadPatrisContract()
     ReadSourceIdentity contract
     Set siteRows = CreateObject("Scripting.Dictionary")
@@ -101,6 +107,7 @@ Public Sub RefreshAllData(Optional ByVal silent As Boolean = False)
     settings.Range("B6").Value = statusText
     settings.Range("B7").Value = Now
     settings.Range("B7").NumberFormat = "yyyy-mm-dd hh:mm"
+    mLastRefreshSucceeded = True
 
     If Not silent Then
         ShowUnicodeMessage T("sync_done") & vbCrLf & statusText, _
@@ -114,6 +121,7 @@ CleanExit:
     Exit Sub
 
 Failed:
+    mLastRefreshSucceeded = False
     statusText = T("sync_failed") & " " & SafeStatusError(Err.Description)
     On Error Resume Next
     If Not settings Is Nothing Then settings.Range("B6").Value = statusText
@@ -130,7 +138,24 @@ Public Sub RefreshOnOpen()
     End If
 End Sub
 
+Public Sub HandlePricingProposalChanged()
+    If mProposalSyncActive Then Exit Sub
+
+    On Error GoTo CleanExit
+    mProposalSyncActive = True
+    InvalidatePricingPreview
+    PreviewPricingChangesCore False
+    If Len(mLastPreviewDigest) > 0 Then ApplyPricingChanges
+
+CleanExit:
+    mProposalSyncActive = False
+End Sub
+
 Public Sub PreviewPricingChanges()
+    PreviewPricingChangesCore True
+End Sub
+
+Private Sub PreviewPricingChangesCore(ByVal showMessage As Boolean)
     Dim settings As Worksheet
     Dim requestID As String
     Dim requestBody As String
@@ -141,6 +166,7 @@ Public Sub PreviewPricingChanges()
 
     On Error GoTo Failed
     Set settings = ConfigSheet()
+    InvalidatePricingPreview
     EnsureSourceIdentity
     requestID = NewRequestID("preview")
     requestBody = BuildPricingRequest("preview", requestID, vbNullString, False)
@@ -156,6 +182,7 @@ Public Sub PreviewPricingChanges()
         JsonRuntime.JsonText(result, "expires_at"))))
     mLastPreviewStateRevision = Trim$(CStr(BlankIfNull( _
         JsonRuntime.JsonText(result, "state_revision"))))
+    mLastPreviewSettings = PricingSettingsCanonical()
     statusText = Trim$(CStr(BlankIfNull( _
         JsonRuntime.JsonText(result, "status"))))
     If Len(mLastPreviewDigest) = 0 Then
@@ -168,11 +195,14 @@ Public Sub PreviewPricingChanges()
     statusText = T("preview_ready") & " " & statusText & _
         WarningSummary(result)
     settings.Range("B23").Value2 = statusText
-    ShowUnicodeMessage CStr(settings.Range("B23").Value2), _
-        vbInformation, T("apply_title")
+    If showMessage Then
+        ShowUnicodeMessage CStr(settings.Range("B23").Value2), _
+            vbInformation, T("apply_title")
+    End If
     Exit Sub
 
 Failed:
+    InvalidatePricingPreview
     statusText = T("preview_failed") & " " & SafeStatusError(Err.Description)
     On Error Resume Next
     ConfigSheet().Range("B23").Value2 = statusText
@@ -189,52 +219,121 @@ Public Sub ApplyPricingChanges()
     Dim result As JsonValue
     Dim statusText As String
     Dim answer As Long
+    Dim savedPreviewDigest As String
+    Dim savedPreviewExpiresAt As String
+    Dim savedPreviewStateRevision As String
+    Dim savedPreviewSettings As String
+    Dim savedApplyRequestID As String
+    Dim appliedStateRevision As String
 
     On Error GoTo Failed
     Set settings = ConfigSheet()
     If Len(mLastPreviewDigest) = 0 Then
-        mLastPreviewDigest = Trim$(CStr(settings.Range("G26").Value2))
+        ShowUnicodeMessage T("preview_first"), vbExclamation, T("apply_title")
+        Exit Sub
     End If
-    If Len(mLastPreviewDigest) = 0 Then
+    If mLastPreviewSettings <> PricingSettingsCanonical() Then
+        InvalidatePricingPreview
+        ShowUnicodeMessage T("preview_first"), vbExclamation, T("apply_title")
+        Exit Sub
+    End If
+    If Len(mLastApplyRequestID) = 0 And _
+       mLastPreviewStateRevision <> _
+           Trim$(CStr(settings.Range("B14").Value2)) Then
+        InvalidatePricingPreview
         ShowUnicodeMessage T("preview_first"), vbExclamation, T("apply_title")
         Exit Sub
     End If
 
     answer = ShowUnicodeMessage( _
-        T("apply_confirm"), vbQuestion Or vbYesNo, T("apply_title"))
+        T("apply_confirm") & vbCrLf & vbCrLf & _
+        CStr(settings.Range("B23").Value2), _
+        vbQuestion Or vbYesNo, T("apply_title"))
     If answer <> vbYes Then Exit Sub
 
     EnsureSourceIdentity
-    requestID = NewRequestID("apply")
+    If Len(mLastApplyRequestID) = 0 Then
+        mLastApplyRequestID = NewRequestID("apply")
+        settings.Range("G28").Value2 = mLastApplyRequestID
+    End If
+    requestID = mLastApplyRequestID
+    savedPreviewDigest = mLastPreviewDigest
+    savedPreviewExpiresAt = mLastPreviewExpiresAt
+    savedPreviewStateRevision = mLastPreviewStateRevision
+    savedPreviewSettings = mLastPreviewSettings
+    savedApplyRequestID = mLastApplyRequestID
     requestBody = BuildPricingRequest( _
-        "apply", requestID, mLastPreviewDigest, True)
+        "apply", requestID, mLastPreviewDigest, True, _
+        mLastPreviewStateRevision)
     responseText = HttpJson( _
         PricingEndpoint("apply"), requestBody, requestID, _
-        Trim$(CStr(settings.Range("B14").Value2)))
+        mLastPreviewStateRevision)
     Set root = JsonRuntime.ParseJson(responseText)
     Set result = ResponseData(root)
+    appliedStateRevision = Trim$(CStr(BlankIfNull( _
+        JsonRuntime.JsonText(result, "state_revision"))))
+    If Len(appliedStateRevision) = 0 Then
+        Err.Raise vbObjectError + 161, "ApplyPricingChanges", _
+                  T("sync_failed")
+    End If
     statusText = Trim$(CStr(BlankIfNull( _
         JsonRuntime.JsonText(result, "status"))))
     statusText = T("apply_done") & " " & statusText & _
         WarningSummary(result)
 
-    mLastPreviewDigest = vbNullString
-    mLastPreviewExpiresAt = vbNullString
-    mLastPreviewStateRevision = vbNullString
-    settings.Range("G26:G27").ClearContents
+    RefreshAllData True
+    If Not mLastRefreshSucceeded Or _
+       Trim$(CStr(ConfigSheet().Range("B14").Value2)) <> _
+           appliedStateRevision Then
+        Err.Raise vbObjectError + 162, "ApplyPricingChanges", _
+                  T("sync_failed")
+    End If
     settings.Range("B23").Value2 = statusText
     ShowUnicodeMessage CStr(settings.Range("B23").Value2), _
         vbInformation, T("apply_title")
-    RefreshAllData True
     Exit Sub
 
 Failed:
     statusText = SafeStatusError(Err.Description)
     On Error Resume Next
+    If Len(savedPreviewDigest) > 0 And _
+       PricingSettingsCanonical() = savedPreviewSettings Then
+        mLastPreviewDigest = savedPreviewDigest
+        mLastPreviewExpiresAt = savedPreviewExpiresAt
+        mLastPreviewStateRevision = savedPreviewStateRevision
+        mLastPreviewSettings = savedPreviewSettings
+        mLastApplyRequestID = savedApplyRequestID
+        ConfigSheet().Range("G26").Value2 = savedPreviewDigest
+        ConfigSheet().Range("G27").Value2 = savedPreviewExpiresAt
+        ConfigSheet().Range("G28").Value2 = savedApplyRequestID
+    End If
     ConfigSheet().Range("B23").Value2 = statusText
     On Error GoTo 0
     ShowUnicodeMessage statusText, vbExclamation, T("apply_title")
 End Sub
+
+Private Sub InvalidatePricingPreview()
+    mLastPreviewDigest = vbNullString
+    mLastPreviewExpiresAt = vbNullString
+    mLastPreviewStateRevision = vbNullString
+    mLastPreviewSettings = vbNullString
+    mLastApplyRequestID = vbNullString
+
+    On Error Resume Next
+    ConfigSheet().Range("G26:G28").ClearContents
+    On Error GoTo 0
+End Sub
+
+Private Function PricingSettingsCanonical() As String
+    Dim settings As Worksheet
+
+    Set settings = ConfigSheet()
+    PricingSettingsCanonical = _
+        CanonicalCellText(settings.Range("B18").Value2) & "|" & _
+        CanonicalCellText(settings.Range("B19").Value2) & "|" & _
+        CanonicalCellText(settings.Range("B20").Value2) & "|" & _
+        CanonicalCellText(settings.Range("B21").Value2)
+End Function
 
 Private Function LoadPatrisContract() As JsonValue
     Dim endpoint As String
@@ -474,9 +573,9 @@ Private Function ImportPatrisContract(ByVal contract As JsonValue, _
     Set shippingCounts = CreateObject("Scripting.Dictionary")
     Set profitCounts = CreateObject("Scripting.Dictionary")
 
-    cnyValue = PositiveNumericOrBlank(ConfigSheet().Range("B18").Value2)
-    usdValue = PositiveNumericOrBlank(ConfigSheet().Range("B19").Value2)
-    rateDate = ConfigSheet().Range("B20").Value2
+    cnyValue = PositiveNumericOrBlank(ConfigSheet().Range("B10").Value2)
+    usdValue = PositiveNumericOrBlank(ConfigSheet().Range("B11").Value2)
+    rateDate = ConfigSheet().Range("B12").Value2
 
     For rowIndex = 1 To dataRows
         Set product = JsonRuntime.JsonArrayItem(productsValue, rowIndex)
@@ -580,9 +679,9 @@ Private Function ImportPatrisContract(ByVal contract As JsonValue, _
             End If
         End If
         If IsEmpty(syncOutput(rowIndex, 5)) Then
-            If IsNumeric(ConfigSheet().Range("B21").Value2) Then
+            If IsNumeric(ConfigSheet().Range("B13").Value2) Then
                 syncOutput(rowIndex, 5) = _
-                    CDbl(ConfigSheet().Range("B21").Value2) * 100#
+                    CDbl(ConfigSheet().Range("B13").Value2) * 100#
                 syncOutput(rowIndex, 14) = syncOutput(rowIndex, 5)
                 If mainColumns = ADVANCED_COLUMN_COUNT Then
                     mainOutput(rowIndex, 14) = syncOutput(rowIndex, 5)
@@ -807,12 +906,16 @@ End Function
 Private Function BuildPricingRequest(ByVal operationName As String, _
                                      ByVal requestID As String, _
                                      ByVal previewDigest As String, _
-                                     ByVal includeConfirmation As Boolean) As String
+                                     ByVal includeConfirmation As Boolean, _
+                                     Optional ByVal expectedRevision As String = "") As String
     Dim settings As Worksheet
     Dim body As String
     Dim profitPercent As Variant
 
     Set settings = ConfigSheet()
+    If Len(expectedRevision) = 0 Then
+        expectedRevision = Trim$(CStr(settings.Range("B14").Value2))
+    End If
     profitPercent = Empty
     If IsNumeric(settings.Range("B21").Value2) Then
         profitPercent = CDbl(settings.Range("B21").Value2) * 100#
@@ -823,7 +926,7 @@ Private Function BuildPricingRequest(ByVal operationName As String, _
         """operation"":" & JsonString(operationName) & "," & _
         """idempotency_key"":" & JsonString(requestID) & "," & _
         """expected_state_revision"":" & _
-        JsonString(Trim$(CStr(settings.Range("B14").Value2))) & "," & _
+        JsonString(expectedRevision) & "," & _
         """settings"":{" & _
         """dollar_price"":" & JsonNumberOrNull(settings.Range("B19").Value2) & "," & _
         """yuan_price"":" & JsonNumberOrNull(settings.Range("B18").Value2) & "," & _

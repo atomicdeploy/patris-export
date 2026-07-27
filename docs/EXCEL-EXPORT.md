@@ -142,6 +142,15 @@ server-bound preview digest, and an explicit Unicode confirmation. A rate older
 than seven days or a currency/profit difference above seven percent is reported
 in Persian and is never silently selected.
 
+The price cards, hidden calculation inputs, and final-price formulas use only
+the live site-confirmed values. Editing a proposal cell invalidates every older
+preview, automatically opens a fresh preview plus one Persian confirmation, and
+does not affect displayed customer prices until the apply/readback transaction
+finishes. Product delivery gets a bounded ten-attempt retry window. On an
+uncertain response, Excel keeps the unchanged live values and preserves the
+same apply idempotency key for a safe retry. A success message is shown only
+after a fresh state readback matches the applied revision.
+
 The calculated price converts goods and freight independently through their
 declared currencies, applies the per-product or global percentage profit, and
 rounds once to whole toman:

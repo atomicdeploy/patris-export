@@ -306,10 +306,15 @@ func TestDispatchProductSyncTerminalDeferredProductsDoNotRetry(t *testing.T) {
 	if err != nil {
 		t.Fatalf("terminal deferred reconciliation was rejected: %v", err)
 	}
-	if attempts != 1 || result.Attempts != 1 || result.Retryable || result.PendingProducts != 0 || result.DeferredProducts != 781 {
+	if attempts != 1 || result.Attempts != 1 || result.Retryable ||
+		result.PendingProducts != 0 || result.DeferredProducts != 781 ||
+		result.DeferredMissing != 780 || result.DeferredAmbiguous != 1 {
 		t.Fatalf("terminal deferred reconciliation triggered a retry: attempts=%d result=%+v", attempts, result)
 	}
-	if summary := result.DiagnosticSummary(); !strings.Contains(summary, "deferred_products=781") || strings.Contains(summary, "kala.db") || strings.Contains(summary, "SENSITIVE") {
+	if summary := result.DiagnosticSummary(); !strings.Contains(summary, "deferred_products=781") ||
+		!strings.Contains(summary, "deferred_missing=780") ||
+		!strings.Contains(summary, "deferred_ambiguous=1") ||
+		strings.Contains(summary, "kala.db") || strings.Contains(summary, "SENSITIVE") {
 		t.Fatalf("diagnostic summary was incomplete or exposed source data: %s", summary)
 	}
 }

@@ -67,13 +67,15 @@ var (
 // its response body or any credential material. Generic webhooks leave Status
 // and EventID empty.
 type DeliveryResult struct {
-	HTTPStatus       int
-	Status           string
-	EventID          string
-	Retryable        bool
-	PendingProducts  int
-	DeferredProducts int
-	Attempts         int
+	HTTPStatus        int
+	Status            string
+	EventID           string
+	Retryable         bool
+	PendingProducts   int
+	DeferredProducts  int
+	DeferredMissing   int
+	DeferredAmbiguous int
+	Attempts          int
 }
 
 // DiagnosticSummary returns only sanitized receiver state. It deliberately
@@ -81,9 +83,10 @@ type DeliveryResult struct {
 // strings, request headers, or credentials.
 func (result DeliveryResult) DiagnosticSummary() string {
 	return fmt.Sprintf(
-		"status=%s event_id=%s attempts=%d pending_products=%d deferred_products=%d",
+		"status=%s event_id=%s attempts=%d pending_products=%d deferred_products=%d deferred_missing=%d deferred_ambiguous=%d",
 		safeToken(result.Status), safeToken(result.EventID), result.Attempts,
 		result.PendingProducts, result.DeferredProducts,
+		result.DeferredMissing, result.DeferredAmbiguous,
 	)
 }
 
@@ -500,7 +503,11 @@ func applySuccessfulReceiverState(result *DeliveryResult, data receiverResponseD
 	if err != nil {
 		return err
 	}
-	if err := validateDeferredReconciliation(data.DeferredReconciliation, deferredProducts); err != nil {
+	deferredMissing, deferredAmbiguous, err := parseDeferredReconciliation(
+		data.DeferredReconciliation,
+		deferredProducts,
+	)
+	if err != nil {
 		return err
 	}
 
@@ -509,6 +516,8 @@ func applySuccessfulReceiverState(result *DeliveryResult, data receiverResponseD
 	result.Retryable = retryable
 	result.PendingProducts = pendingProducts
 	result.DeferredProducts = deferredProducts
+	result.DeferredMissing = deferredMissing
+	result.DeferredAmbiguous = deferredAmbiguous
 	if result.Status == "" || result.EventID == "" {
 		return errReceiverStateInvalid
 	}
@@ -570,44 +579,44 @@ type receiverDeferredReconciliation struct {
 	DetailsTruncated json.RawMessage   `json:"details_truncated"`
 }
 
-func validateDeferredReconciliation(raw json.RawMessage, total int) error {
+func parseDeferredReconciliation(raw json.RawMessage, total int) (int, int, error) {
 	raw = bytes.TrimSpace(raw)
 	if len(raw) == 0 {
-		return nil
+		return 0, 0, nil
 	}
 	if bytes.Equal(raw, []byte("null")) {
-		return errReceiverStateInvalid
+		return 0, 0, errReceiverStateInvalid
 	}
 	var summary receiverDeferredReconciliation
 	if err := json.Unmarshal(raw, &summary); err != nil {
-		return errReceiverStateInvalid
+		return 0, 0, errReceiverStateInvalid
 	}
 	missing, err := requiredReceiverProductCount(summary.Missing)
 	if err != nil {
-		return err
+		return 0, 0, err
 	}
 	ambiguous, err := requiredReceiverProductCount(summary.Ambiguous)
 	if err != nil {
-		return err
+		return 0, 0, err
 	}
 	truncated, err := requiredReceiverProductCount(summary.DetailsTruncated)
 	if err != nil {
-		return err
+		return 0, 0, err
 	}
 	if summary.Details == nil || len(summary.Details) > maxReceiverDeferredDetails {
-		return errReceiverStateInvalid
+		return 0, 0, errReceiverStateInvalid
 	}
 	for _, detail := range summary.Details {
 		detail = bytes.TrimSpace(detail)
 		if len(detail) < 2 || detail[0] != '{' || detail[len(detail)-1] != '}' {
-			return errReceiverStateInvalid
+			return 0, 0, errReceiverStateInvalid
 		}
 	}
 	deferred := uint64(total)
 	if uint64(missing)+uint64(ambiguous) != deferred || uint64(len(summary.Details))+uint64(truncated) != deferred {
-		return errReceiverStateInvalid
+		return 0, 0, errReceiverStateInvalid
 	}
-	return nil
+	return missing, ambiguous, nil
 }
 
 func requiredReceiverProductCount(raw json.RawMessage) (int, error) {

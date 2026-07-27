@@ -770,15 +770,19 @@ try {
         $productFactor = Currency-Factor-Or-Null $syncRow.Currency $syncRow
         $shipping = Numeric-Or-Null $syncRow.Shipping
         $profitPercent = Numeric-Or-Null $syncRow.ProfitPercent
-        if ($null -eq $profitPercent) { $profitPercent = 0.0 }
+        if ($null -eq $profitPercent) { $profitPercent = [decimal]0 }
         $shippingReady = $true
-        $shippingComponent = 0.0
+        $shippingComponent = [decimal]0
         if ($null -ne $weight -and $null -ne $shipping) {
             $shippingFactor = Currency-Factor-Or-Null $syncRow.ShippingCurrency $syncRow
             if ($null -eq $shippingFactor) {
                 $shippingReady = $false
             } else {
-                $shippingComponent = ($weight / 1000.0) * $shipping * $shippingFactor
+                $shippingComponent = (
+                    ([decimal]$weight / [decimal]1000) *
+                    [decimal]$shipping *
+                    [decimal]$shippingFactor
+                )
             }
         }
 
@@ -788,8 +792,12 @@ try {
         }
 
         $completeInputRows += 1
-        $expectedUnrounded = (($rate * $productFactor) + $shippingComponent) *
-            (1.0 + ($profitPercent / 100.0))
+        $expectedUnrounded = (
+            ([decimal]$rate * [decimal]$productFactor) +
+            [decimal]$shippingComponent
+        ) * (
+            [decimal]1 + ([decimal]$profitPercent / [decimal]100)
+        )
         $expected = [Math]::Round(
             $expectedUnrounded,
             0,

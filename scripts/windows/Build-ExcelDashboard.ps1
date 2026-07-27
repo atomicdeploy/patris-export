@@ -355,7 +355,7 @@ try {
     $profitValue = $priceList.Range("${configSecondColumn}10")
 
     $yuanHeader.Value2 = 'بهای یوآن'
-    $yuanValue.Formula = "=IF('تنظیمات'!B18="""","""",'تنظیمات'!B18)"
+    $yuanValue.Formula = "=IF('تنظیمات'!B10="""","""",'تنظیمات'!B10)"
     $yuanTable = $priceList.ListObjects.Add(1, $priceList.Range("${configFirstColumn}6:${configFirstColumn}7"), $null, 1)
     $yuanTable.Name = 'Yuan_Price'
     $yuanTable.TableStyle = 'TableStyleMedium2'
@@ -367,7 +367,7 @@ try {
     $shippingTable.TableStyle = 'TableStyleMedium2'
 
     $profitHeader.Value2 = 'درصد سود'
-    $profitValue.Formula = "=IF('تنظیمات'!B21="""","""",'تنظیمات'!B21)"
+    $profitValue.Formula = "=IF('تنظیمات'!B13="""","""",'تنظیمات'!B13)"
     $profitTable = $priceList.ListObjects.Add(1, $priceList.Range("${configSecondColumn}9:${configSecondColumn}10"), $null, 1)
     $profitTable.Name = 'Profit'
     $profitTable.TableStyle = 'TableStyleMedium2'
@@ -503,7 +503,7 @@ try {
 
     # Hidden base values and preview metadata are runtime-only conflict guards.
     $settings.Range('G18:G22').ClearContents()
-    $settings.Range('G26:G27').ClearContents()
+    $settings.Range('G26:G28').ClearContents()
     $settings.Columns('G').Hidden = $true
 
     # Technical join data is never user-facing and is empty in the template.
