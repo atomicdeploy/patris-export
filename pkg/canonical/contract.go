@@ -25,6 +25,19 @@ type Source struct {
 	Revision string `json:"revision"`
 }
 
+// SourceIdentity derives the same stable source ID and dataset used by
+// canonical envelopes without materializing the full product catalog.
+func SourceIdentity(source, sourceID, revision string) Source {
+	if strings.TrimSpace(sourceID) == "" {
+		sourceID = sourceBaseName(source)
+	}
+	return Source{
+		ID:       sourceID,
+		Dataset:  sourceBaseName(source),
+		Revision: revision,
+	}
+}
+
 func (source *Source) UnmarshalJSON(data []byte) error {
 	var raw map[string]json.RawMessage
 	if err := json.Unmarshal(data, &raw); err != nil {
@@ -199,15 +212,12 @@ func newEnvelopeBaseContext(ctx context.Context, rows []Product, categories []Ca
 	if err != nil {
 		return nil, err
 	}
-	if strings.TrimSpace(sourceID) == "" {
-		sourceID = sourceBaseName(source)
-	}
 	envelope := &Envelope{
 		Schema:           ContractName,
 		EventType:        "snapshot",
 		LocalCurrency:    LocalCurrency,
 		FormulaID:        FormulaID,
-		Source:           Source{ID: sourceID, Dataset: sourceBaseName(source), Revision: revision},
+		Source:           SourceIdentity(source, sourceID, revision),
 		GeneratedAt:      generatedAt.UTC().Format(time.RFC3339Nano),
 		Products:         products,
 		Categories:       categories,

@@ -48,8 +48,13 @@ State uses `patris.excel-pricing-companion-request/v1`:
   "schema": "patris.excel-pricing-companion-request/v1",
   "schema_version": 1,
   "operation": "state",
+  "source": {
+    "id": "patris-office",
+    "dataset": "kala.db",
+    "revision": "sha256:..."
+  },
   "page": 1,
-  "limit": 100,
+  "limit": 250,
   "locale": "fa"
 }
 ```
@@ -97,7 +102,7 @@ digest plus explicit confirmation:
 ```
 
 Product-level changes are deliberately unsupported on this global-settings
-surface. State paging is limited to 100 rows. Rates, date, percentage,
+surface. State paging is limited to 250 rows. Rates, date, percentage,
 revisions, idempotency, and confirmation are validated before network access.
 
 ## Protected remote boundary
@@ -112,9 +117,14 @@ same-origin WordPress routes:
 ```
 
 It reads the credential named by `send_updates.product_sync_secret_env` and
-injects it as `X-Patris-Product-Sync-Secret`. It also materializes the current
-canonical `patris.product-sync` contract and injects its exact
-`{id,dataset,revision}`. The workbook cannot provide or override either value.
+injects it as `X-Patris-Product-Sync-Secret`. For read-only state paging, the
+workbook forwards the source identity it just fetched from the local
+`/api/product-sync` contract; the companion accepts it only when its ID and
+dataset exactly match the configured local canonical source. This avoids
+rebuilding the full catalog for every state page. Preview and apply never
+accept a workbook-supplied source: the companion materializes a fresh canonical
+`patris.product-sync` contract and injects its exact `{id,dataset,revision}`.
+The workbook cannot provide or override the remote credential.
 
 The destination must be HTTPS except for loopback development, may not contain
 user information, a query, or a fragment, and must already be a WordPress REST

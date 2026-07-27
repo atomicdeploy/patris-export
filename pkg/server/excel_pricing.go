@@ -41,6 +41,7 @@ const (
 	excelPricingMaxSessions         = 128
 	excelPricingMaxRequestBytes     = 64 * 1024
 	excelPricingMaxResponseBytes    = 4 * 1024 * 1024
+	excelPricingMaxStatePageSize    = 250
 )
 
 var (
@@ -59,6 +60,7 @@ type excelPricingLocalRequest struct {
 	Schema                string                `json:"schema"`
 	SchemaVersion         int                   `json:"schema_version"`
 	Operation             string                `json:"operation"`
+	Source                *canonical.Source     `json:"source,omitempty"`
 	Page                  int                   `json:"page,omitempty"`
 	Limit                 int                   `json:"limit,omitempty"`
 	Locale                string                `json:"locale,omitempty"`
@@ -222,12 +224,22 @@ func (s *Server) handleExcelPricingOperation(w http.ResponseWriter, r *http.Requ
 		writeExcelPricingError(w, http.StatusServiceUnavailable, "remote_not_configured")
 		return
 	}
-	contract, err := s.excelPricingCanonical(operationContext, cfg)
-	if err != nil {
-		writeExcelPricingError(w, http.StatusServiceUnavailable, "canonical_source_unavailable")
-		return
+	var source canonical.Source
+	if operation == "state" {
+		if !s.excelPricingStateSourceMatches(local.Source, cfg) {
+			writeExcelPricingError(w, http.StatusConflict, "canonical_source_mismatch")
+			return
+		}
+		source = *local.Source
+	} else {
+		contract, err := s.excelPricingCanonical(operationContext, cfg)
+		if err != nil {
+			writeExcelPricingError(w, http.StatusServiceUnavailable, "canonical_source_unavailable")
+			return
+		}
+		source = contract.Source
 	}
-	remoteRequest := buildExcelPricingRemoteRequest(operation, local, contract.Source)
+	remoteRequest := buildExcelPricingRemoteRequest(operation, local, source)
 	remote, err := s.forwardExcelPricing(operationContext, cfg.SendUpdates, operation, remoteRequest, local)
 	if err != nil {
 		var remoteError *excelPricingRemoteError
@@ -290,6 +302,18 @@ func (s *Server) excelPricingCanonical(ctx context.Context, cfg appconfig.Config
 		return nil, errors.New("canonical source identity is unavailable")
 	}
 	return result.SyncEnvelope(nil), nil
+}
+
+func (s *Server) excelPricingStateSourceMatches(source *canonical.Source, cfg appconfig.Config) bool {
+	if source == nil || !isSHA256Revision(source.Revision) {
+		return false
+	}
+	sourcePath := strings.TrimSpace(s.currentDBPath())
+	if sourcePath == "" {
+		return false
+	}
+	expected := canonical.SourceIdentity(sourcePath, cfg.Canonical.SourceID, source.Revision)
+	return *source == expected
 }
 
 func buildExcelPricingRemoteRequest(operation string, local excelPricingLocalRequest, source canonical.Source) excelPricingRemoteRequest {
@@ -470,7 +494,13 @@ func validateExcelPricingLocalRequest(r *http.Request, operation string, request
 		if len(request.ProductChanges) != 0 {
 			return errors.New("state request has product changes")
 		}
-		if request.Page < 1 || request.Page > 1_000_000 || request.Limit < 1 || request.Limit > 100 {
+		if request.Source == nil || strings.TrimSpace(request.Source.ID) == "" ||
+			strings.TrimSpace(request.Source.Dataset) == "" ||
+			!isSHA256Revision(request.Source.Revision) {
+			return errors.New("state source identity is invalid")
+		}
+		if request.Page < 1 || request.Page > 1_000_000 ||
+			request.Limit < 1 || request.Limit > excelPricingMaxStatePageSize {
 			return errors.New("state pagination is invalid")
 		}
 		if request.Locale != "fa" && request.Locale != "fa_IR" {
@@ -481,6 +511,9 @@ func validateExcelPricingLocalRequest(r *http.Request, operation string, request
 			return errors.New("state request has mutation fields")
 		}
 	case "preview", "apply":
+		if request.Source != nil {
+			return errors.New("mutation request has caller-supplied source")
+		}
 		if !emptyJSONArray(request.ProductChanges) {
 			return errors.New("product changes must be an empty array")
 		}
