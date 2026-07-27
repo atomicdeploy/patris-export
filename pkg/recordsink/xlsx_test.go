@@ -383,67 +383,36 @@ type calculatorCardContract struct {
 }
 
 type calculatorTemplateContract struct {
-	name          string
-	fileName      string
-	edition       string
-	productRange  string
-	headers       []string
-	cards         []calculatorCardContract
-	advancedAudit bool
+	name         string
+	fileName     string
+	productRange string
+	headers      []string
+	cards        []calculatorCardContract
 }
 
 func dynamicCalculatorContracts() []calculatorTemplateContract {
 	return []calculatorTemplateContract{
 		{
-			name:         "standard",
-			fileName:     "لیست قیمت دیجیتالاجیک - استاندارد.xltm",
-			edition:      "استاندارد",
-			productRange: "B5:I6",
+			name:         "canonical",
+			fileName:     "لیست قیمت دیجیتالاجیک.xltm",
+			productRange: "B5:K6",
 			headers: []string{
-				"فی فروش",
-				"گرم",
+				"قیمت فروش (تومان)",
+				"وزن کالا (گرم)",
 				"سایر",
-				"فی فروش2",
-				"نرخ ارزی",
-				"همه انبارها",
+				"محل کالا",
+				"قیمت خرید (یوآن)",
+				"موجودی کل",
 				"کد کالا",
 				"نام کالا",
+				"شناسه ووکامرس",
+				"دسته‌بندی",
 			},
 			cards: []calculatorCardContract{
 				{name: "Yuan_Price", tableRange: "M6:M7", valueCell: "M7", settingsCell: "B10"},
-				{name: "Shipping", tableRange: "O6:O7", valueCell: "O7", settingsCell: "B22"},
+				{name: "Shipping", tableRange: "O6:O7", valueCell: "O7", settingsCell: "B14"},
 				{name: "Profit", tableRange: "O9:O10", valueCell: "O10", settingsCell: "B13"},
 			},
-		},
-		{
-			name:         "advanced",
-			fileName:     "لیست قیمت دیجیتالاجیک - پیشرفته.xltm",
-			edition:      "پیشرفته",
-			productRange: "B5:Q6",
-			headers: []string{
-				"قیمت نهایی محاسبه‌شده (تومان)",
-				"وزن کالا (گرم)",
-				"وزن و محل کالا",
-				"فی فروش منبع",
-				"قیمت ارزی",
-				"موجودی کل انبارها",
-				"کد کالا",
-				"نام کالا",
-				"شناسه و لینک ووکامرس",
-				"قیمت قابل‌مشاهده مشتری (تومان)",
-				"اختلاف با قیمت مشتری",
-				"وضعیت همگام‌سازی قیمت",
-				"ارز کالا",
-				"درصد سود",
-				"نرخ حمل هر کیلو",
-				"تاریخ نرخ ارز",
-			},
-			cards: []calculatorCardContract{
-				{name: "Yuan_Price", tableRange: "T6:T7", valueCell: "T7", settingsCell: "B10"},
-				{name: "Shipping", tableRange: "V6:V7", valueCell: "V7", settingsCell: "B22"},
-				{name: "Profit", tableRange: "V9:V10", valueCell: "V10", settingsCell: "B13"},
-			},
-			advancedAudit: true,
 		},
 	}
 }
@@ -512,17 +481,18 @@ func TestDynamicCalculatorTemplatesHaveNeutralMetadataAndNoExternalConnections(t
 
 func TestDynamicCalculatorTemplatesPreservePersianPriceListContracts(t *testing.T) {
 	const (
-		priceSheet    = "لیست قیمت"
-		settingsSheet = "تنظیمات"
-		syncSheet     = "داده‌های همگام‌سازی"
+		priceSheet     = "محصولات"
+		dashboardSheet = "داشبورد"
+		settingsSheet  = "تنظیمات"
+		syncSheet      = "داده‌های همگام‌سازی"
 	)
-	wantSheets := []string{priceSheet, settingsSheet, syncSheet}
+	wantSheets := []string{priceSheet, dashboardSheet, settingsSheet, syncSheet}
 	wantSyncHeaders := []string{
-		"کد کالا",
+		"کلید همگام‌سازی",
 		"ارز کالا",
 		"نرخ حمل هر کیلو",
 		"ارز حمل",
-		"درصد سود",
+		"حاشیه سود (درصد)",
 		"بهای یوآن",
 		"بهای دلار",
 		"تاریخ نرخ",
@@ -531,9 +501,13 @@ func TestDynamicCalculatorTemplatesPreservePersianPriceListContracts(t *testing.
 		"آخرین تغییر ووکامرس",
 		"بازبینی رکورد",
 		"نشانی محصول",
-		"سود مرجع",
-		"قیمت نهایی مرجع",
-		"قیمت فروش ویژه",
+		"حاشیه سود کالا",
+		"قیمت محاسباتی کالا",
+		"قیمت ویژه ووکامرس (ممیزی)",
+		"دسته‌بندی",
+		"وضعیت انتشار",
+		"هشدار قیمت",
+		"نوع ردیف",
 	}
 
 	for _, contract := range dynamicCalculatorContracts() {
@@ -548,7 +522,7 @@ func TestDynamicCalculatorTemplatesPreservePersianPriceListContracts(t *testing.
 			if got := book.GetSheetList(); strings.Join(got, "|") != strings.Join(wantSheets, "|") {
 				t.Fatalf("template sheet order = %v, want %v", got, wantSheets)
 			}
-			for _, sheet := range []string{priceSheet, settingsSheet} {
+			for _, sheet := range []string{priceSheet, dashboardSheet, settingsSheet} {
 				visible, visibleErr := book.GetSheetVisible(sheet)
 				if visibleErr != nil || !visible {
 					t.Fatalf("%s visibility = %v, want visible, err=%v", sheet, visible, visibleErr)
@@ -646,7 +620,7 @@ func TestDynamicCalculatorTemplatesPreservePersianPriceListContracts(t *testing.
 				if formulaErr != nil {
 					t.Fatal(formulaErr)
 				}
-				if !strings.Contains(formula, settingsSheet+"!"+card.settingsCell) {
+				if !strings.Contains(strings.ReplaceAll(formula, "'", ""), settingsSheet+"!"+card.settingsCell) {
 					t.Errorf("%s formula = %q, want dynamic reference to %s!%s", card.name, formula, settingsSheet, card.settingsCell)
 				}
 			}
@@ -654,7 +628,7 @@ func TestDynamicCalculatorTemplatesPreservePersianPriceListContracts(t *testing.
 			for cell, want := range map[string]string{
 				"B3": "http://127.0.0.1:18080/api/product-sync",
 				"B4": "http://127.0.0.1:18080/api/excel/pricing-sync/state",
-				"B8": contract.edition,
+				"G8": "canonical",
 			} {
 				got, valueErr := book.GetCellValue(settingsSheet, cell, excelize.Options{RawCellValue: true})
 				if valueErr != nil || got != want {
@@ -681,8 +655,8 @@ func TestDynamicCalculatorTemplatesPreservePersianPriceListContracts(t *testing.
 				t.Fatal(syncTableErr)
 			}
 			if len(syncTables) != 1 || syncTables[0].Name != "SyncData" ||
-				strings.ReplaceAll(syncTables[0].Range, "$", "") != "A1:P2" {
-				t.Fatalf("SyncData table = %+v, want empty A1:P2 table", syncTables)
+				strings.ReplaceAll(syncTables[0].Range, "$", "") != "A1:T2" {
+				t.Fatalf("SyncData table = %+v, want empty A1:T2 table", syncTables)
 			}
 			gotSyncHeaders := make([]string, 0, len(wantSyncHeaders))
 			for column := 1; column <= len(wantSyncHeaders); column++ {
@@ -716,32 +690,26 @@ func TestDynamicCalculatorTemplatesPreservePersianPriceListContracts(t *testing.
 				t.Fatalf("SyncData headers = %v, want %v", gotSyncHeaders, wantSyncHeaders)
 			}
 
-			if contract.advancedAudit {
-				for _, column := range []string{"J", "K", "L", "M"} {
-					visible, columnErr := book.GetColVisible(priceSheet, column)
-					if columnErr != nil || !visible {
-						t.Errorf("Advanced operational column %s visibility = %v, want visible, err=%v", column, visible, columnErr)
-					}
-				}
-				styleID, styleErr := book.GetCellStyle(priceSheet, "J6")
-				if styleErr != nil {
-					t.Fatal(styleErr)
-				}
-				wooLinkStyle, styleErr := book.GetStyle(styleID)
-				if styleErr != nil {
-					t.Fatal(styleErr)
-				}
-				if wooLinkStyle.Alignment == nil ||
-					wooLinkStyle.Alignment.Horizontal != "left" ||
-					wooLinkStyle.Alignment.ReadingOrder != 1 {
-					t.Errorf("Advanced WooID cell alignment = %+v, want left-to-right", wooLinkStyle.Alignment)
-				}
-				for _, column := range []string{"N", "O", "P", "Q"} {
-					visible, columnErr := book.GetColVisible(priceSheet, column)
-					if columnErr != nil || visible {
-						t.Errorf("Advanced audit column %s visibility = %v, want hidden, err=%v", column, visible, columnErr)
-					}
-				}
+			rawVisible, columnErr := book.GetColVisible(priceSheet, "D")
+			if columnErr != nil || rawVisible {
+				t.Errorf("raw compatibility column D visibility = %v, want hidden, err=%v", rawVisible, columnErr)
+			}
+			wooVisible, columnErr := book.GetColVisible(priceSheet, "J")
+			if columnErr != nil || !wooVisible {
+				t.Errorf("WooID column J visibility = %v, want visible, err=%v", wooVisible, columnErr)
+			}
+			styleID, styleErr := book.GetCellStyle(priceSheet, "J6")
+			if styleErr != nil {
+				t.Fatal(styleErr)
+			}
+			wooIDStyle, styleErr := book.GetStyle(styleID)
+			if styleErr != nil {
+				t.Fatal(styleErr)
+			}
+			if wooIDStyle.Alignment == nil ||
+				wooIDStyle.Alignment.Horizontal != "left" ||
+				wooIDStyle.Alignment.ReadingOrder != 1 {
+				t.Errorf("WooID cell alignment = %+v, want left-to-right", wooIDStyle.Alignment)
 			}
 		})
 	}
@@ -760,11 +728,13 @@ func TestDynamicCalculatorVBASourceGuardsLivePricingBeforeMutation(t *testing.T)
 	}
 	source := string(content)
 
-	replacePosition := strings.Index(source, "ReplaceTableData table, mainOutput, dataRows, mainColumns")
+	replacePosition := strings.Index(source, "ReplaceTableData table, mainOutput, dataRows, PRODUCT_COLUMN_COUNT")
 	for _, requiredBeforeReplace := range []string{
 		`CStr(JsonRuntime.JsonText(root, "schema")) <> "patris.product-sync"`,
 		`JsonRuntime.JsonText(sourceValue, "revision")`,
-		"If Len(codeValue) = 0 Or codesSeen.Exists(codeValue) Then",
+		`datasetRevision = SiteText(catalog, "dataset_revision")`,
+		"columnSignature <> RECONCILED_COLUMN_KEYS",
+		"If siteRows.Exists(identityKey) Then",
 	} {
 		position := strings.Index(source, requiredBeforeReplace)
 		if position < 0 || replacePosition < 0 || position > replacePosition {
@@ -772,9 +742,11 @@ func TestDynamicCalculatorVBASourceGuardsLivePricingBeforeMutation(t *testing.T)
 		}
 	}
 	readSourcePosition := strings.Index(source, "ReadSourceIdentity contract")
-	importPosition := strings.Index(source, "ImportPatrisContract(contract, siteRows)")
-	if readSourcePosition < 0 || importPosition < 0 || readSourcePosition > importPosition {
-		t.Fatalf("source identity must be validated before product import")
+	refreshPosition := strings.Index(source, "reconciledRowsFetched = RefreshPricingState(reconciledRows)")
+	importPosition := strings.Index(source, "productRows = ImportReconciledCatalog(reconciledRows)")
+	if readSourcePosition < 0 || refreshPosition < 0 || importPosition < 0 ||
+		readSourcePosition > refreshPosition || refreshPosition > importPosition {
+		t.Fatalf("source identity and complete reconciled snapshot must be validated before product import")
 	}
 	wooLinkRowPosition := strings.Index(source, "Private Sub ApplyWooLinkRow")
 	if wooLinkRowPosition < 0 {
@@ -801,6 +773,7 @@ func TestDynamicCalculatorVBASourceGuardsLivePricingBeforeMutation(t *testing.T)
 		"RefreshAllData True",
 		`ConfigSheet().Range("B10").Value2`,
 		`ConfigSheet().Range("B13").Value2`,
+		`settings.Range("B14").Value = remoteShipping`,
 		`requestBody = BuildPricingRequest("preview", requestID, vbNullString, False)`,
 		`JsonRuntime.JsonText(result, "preview_digest")`,
 		"If Len(mLastPreviewDigest) = 0 Then",
@@ -815,8 +788,16 @@ func TestDynamicCalculatorVBASourceGuardsLivePricingBeforeMutation(t *testing.T)
 		`Private Const PRICING_SESSION_SCHEMA As String = "patris.excel-pricing-companion-session/v1"`,
 		"Private Const STATE_PAGE_SIZE As Long = 250",
 		"Private Const MAX_STATE_PAGES As Long = 8",
+		"Private Const STATE_SNAPSHOT_RETRIES As Long = 3",
+		`Private Const RECONCILED_COLUMN_KEYS As String = _`,
 		"Private Const HTTP_TIMEOUT_MS As Long = 150000",
 		"Private Function StateRequestJson",
+		"Private Function RefreshPricingStateOnce",
+		`datasetRevision = SiteText(catalog, "dataset_revision")`,
+		"Private Function CatalogColumnSignature",
+		"Private Function CatalogCountSignature",
+		"paginationTotal <> firstPaginationTotal",
+		"siteRows.Count <> firstPaginationTotal",
 		"EnsureSourceIdentity",
 		`JsonString(mSourceID)`,
 		`JsonString(mSourceDataset)`,
@@ -824,6 +805,15 @@ func TestDynamicCalculatorVBASourceGuardsLivePricingBeforeMutation(t *testing.T)
 		`sessionText = HttpPostJsonRaw(`,
 		`http.setRequestHeader "Idempotency-Key", idempotencyKey`,
 		`"""expected_state_revision"":"`,
+		`"""client_id"":" & JsonString(PRICING_CONTRACT_CLIENT_ID)`,
+		`"""channel"":" & JsonString(PRICING_CONTRACT_CHANNEL)`,
+		`"""request_id"":" & JsonString(requestID)`,
+		`"""usd_effective_date"":" & JsonString(usdEffectiveDate)`,
+		`"""cny_effective_date"":" & JsonString(cnyEffectiveDate)`,
+		`"""profit_margin_percent"":" & JsonNumberOrNull(profitPercent)`,
+		`"""air_express_price_per_kg"":" & JsonNumberOrNull(settings.Range("B22").Value2)`,
+		`"""air_express_currency"":" & JsonString(shippingCurrency)`,
+		`"""shipping_catalog_revision"":" & JsonString(shippingRevision)`,
 		`http.setRequestHeader "If-Match", _`,
 		`Chr$(34) & expectedRevision & Chr$(34)`,
 		"Private Function ResponseErrorMessage",
@@ -837,21 +827,30 @@ func TestDynamicCalculatorVBASourceGuardsLivePricingBeforeMutation(t *testing.T)
 		"Private Function SyncSheet() As Worksheet",
 		"Private Function IsAllowedDigitalogicUrl",
 		`"https://digitalogic.ir/"`,
-		"siteRows.CompareMode = vbBinaryCompare",
-		"codesSeen.CompareMode = vbBinaryCompare",
+		"reconciledRows.CompareMode = vbBinaryCompare",
+		`patrisCodeValue = SiteText(reconciledRow, "patris_code")`,
+		`syncKey <> "woo:" & wooIDValue`,
+		`syncKey <> "patris:" & patrisCodeValue`,
+		`codeValue = SiteText(reconciledRow, "sku")`,
 		"ApplyWooLinkRow table, syncTable, rowIndex",
 		"Private Sub ApplyWooLinkRow",
 		"On Error GoTo RowFailed",
 		"RowFailed:",
-		`linkText = linkText & "WooID " & wooID`,
-		`linkCell.NumberFormat = "@"`,
+		`wooCell.NumberFormat = "@"`,
+		"wooCell.Value2 = wooID",
 		"linkCell.Value2 = linkText",
 		"table.Parent.Hyperlinks.Add",
 		"IsAllowedDigitalogicUrl(permalink)",
+		"linkCell.Font.Bold = True",
+		`Case "publish"`,
+		`Case "draft", "pending", "private", "future"`,
 		"table.ListColumns(1).DataBodyRange.FormulaR1C1 = priceFormula",
-		"=IFERROR(IF(RC[4]",
+		`"IF(RC[8]<>"""",""woo:""&RC[8],""patris:""&RC[6])"`,
+		`fallbackFormula = _`,
+		`readyFormula = _`,
 		"ROUND(",
-		"VLOOKUP(RC[6],SyncData",
+		",SyncData,20,FALSE)",
+		",SyncData,10,FALSE)",
 		`=""CNY""`,
 		`=""USD""`,
 		`=""IRR""`,
@@ -864,6 +863,9 @@ func TestDynamicCalculatorVBASourceGuardsLivePricingBeforeMutation(t *testing.T)
 		"ValidateUnicodeRuntime",
 		"MB_RIGHT",
 		"MB_RTLREADING",
+		"Public Sub SearchProducts()",
+		"Public Sub ClearProductSearch()",
+		"Public Sub HighlightSelectedProductRow",
 	} {
 		if !strings.Contains(source, required) {
 			t.Fatalf("VBA source is missing validation: %s", required)
@@ -881,6 +883,8 @@ func TestDynamicCalculatorVBASourceGuardsLivePricingBeforeMutation(t *testing.T)
 		"password",
 		"wp-json/wc/store",
 		"digitalogic.excel-pricing-sync-request/v1",
+		"default_profit_percent",
+		`linkText = linkText & "WooID "`,
 		"X-Patris-Product-Sync-Secret",
 		"PATRIS_PRODUCT_SYNC_SECRET",
 		"MsgBox ",
@@ -899,8 +903,10 @@ func TestDynamicCalculatorVBASourceGuardsLivePricingBeforeMutation(t *testing.T)
 	}
 	for _, required := range []string{
 		"Private Sub Workbook_SheetChange",
-		`Intersect(Target, Sh.Range("B18:B21"))`,
+		`Intersect(Target, Sh.Range("B18:B22"))`,
 		"ProductCatalogSync.HandlePricingProposalChanged",
+		"Private Sub Workbook_SheetSelectionChange",
+		"ProductCatalogSync.HighlightSelectedProductRow Target",
 	} {
 		if !strings.Contains(string(thisWorkbookContent), required) {
 			t.Fatalf("ThisWorkbook source is missing pricing-change guard: %s", required)

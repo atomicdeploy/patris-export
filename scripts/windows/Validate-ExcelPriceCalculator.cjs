@@ -5,7 +5,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 
-const STANDARD_HEADERS = Object.freeze([
+const REFERENCE_HEADERS = Object.freeze([
   'فی فروش',
   'گرم',
   'سایر',
@@ -16,31 +16,25 @@ const STANDARD_HEADERS = Object.freeze([
   'نام کالا',
 ]);
 
-const ADVANCED_HEADERS = Object.freeze([
-  'قیمت نهایی محاسبه‌شده (تومان)',
+const CANONICAL_HEADERS = Object.freeze([
+  'قیمت فروش (تومان)',
   'وزن کالا (گرم)',
-  'وزن و محل کالا',
-  'فی فروش منبع',
-  'قیمت ارزی',
-  'موجودی کل انبارها',
+  'سایر',
+  'محل کالا',
+  'قیمت خرید (یوآن)',
+  'موجودی کل',
   'کد کالا',
   'نام کالا',
-  'شناسه و لینک ووکامرس',
-  'قیمت قابل‌مشاهده مشتری (تومان)',
-  'اختلاف با قیمت مشتری',
-  'وضعیت همگام‌سازی قیمت',
-  'ارز کالا',
-  'درصد سود',
-  'نرخ حمل هر کیلو',
-  'تاریخ نرخ ارز',
+  'شناسه ووکامرس',
+  'دسته‌بندی',
 ]);
 
 const SYNC_DATA_HEADERS = Object.freeze([
-  'کد کالا',
+  'کلید همگام‌سازی',
   'ارز کالا',
   'نرخ حمل هر کیلو',
   'ارز حمل',
-  'درصد سود',
+  'حاشیه سود (درصد)',
   'بهای یوآن',
   'بهای دلار',
   'تاریخ نرخ',
@@ -49,17 +43,38 @@ const SYNC_DATA_HEADERS = Object.freeze([
   'آخرین تغییر ووکامرس',
   'بازبینی رکورد',
   'نشانی محصول',
-  'سود مرجع',
-  'قیمت نهایی مرجع',
-  'قیمت فروش ویژه',
+  'حاشیه سود کالا',
+  'قیمت محاسباتی کالا',
+  'قیمت ویژه ووکامرس (ممیزی)',
+  'دسته‌بندی',
+  'وضعیت انتشار',
+  'هشدار قیمت',
+  'نوع ردیف',
 ]);
+
+const CURRENT_ACCEPTANCE = Object.freeze({
+  rows: 1084,
+  patrisRows: 939,
+  fullWooRows: 965,
+  wooLeafRows: 964,
+  matchedRows: 819,
+  sourceOnlyRows: 120,
+  wooOnlyRows: 145,
+  ambiguousRows: 0,
+  excludedWooParentRows: 1,
+  relayProductCode: '109032',
+  relayPrice: 554541,
+  relayCategory: 'رله‌ها',
+  wooFallbackProductCode: '109001',
+  wooFallbackPrice: 1150000,
+});
 
 const repoRoot = path.resolve(__dirname, '..', '..');
 const defaultCandidate = path.join(
   repoRoot,
   'docs',
   'examples',
-  'لیست قیمت دیجیتالاجیک - استاندارد.xltm',
+  'لیست قیمت دیجیتالاجیک.xltm',
 );
 const defaultReference = path.join(
   os.homedir(),
@@ -67,8 +82,7 @@ const defaultReference = path.join(
   'Excel',
   'Archive',
   'Price Calculator',
-  '2026-07-25',
-  'ماشین حساب قیمت - مرجع ایستا - 1405-05-03.xlsb',
+  'ماشین حساب قیمت - مرجع ایستا.xlsb',
 );
 
 function usage() {
@@ -165,14 +179,21 @@ function structurallyMatchesDynamicPriceFormula(formula) {
     'ROUND(',
     'RC[1]',
     'RC[4]',
-    'VLOOKUP(RC[6],SYNCDATA,2,FALSE)',
-    'VLOOKUP(RC[6],SYNCDATA,3,FALSE)',
-    'VLOOKUP(RC[6],SYNCDATA,4,FALSE)',
-    'VLOOKUP(RC[6],SYNCDATA,5,FALSE)',
-    'VLOOKUP(RC[6],SYNCDATA,6,FALSE)',
-    'VLOOKUP(RC[6],SYNCDATA,7,FALSE)',
+    'IF(RC[8]<>"","WOO:"&RC[8],"PATRIS:"&RC[6])',
+    'SYNCDATA,2,FALSE)',
+    'SYNCDATA,3,FALSE)',
+    'SYNCDATA,4,FALSE)',
+    'SYNCDATA,5,FALSE)',
+    'SYNCDATA,6,FALSE)',
+    'SYNCDATA,7,FALSE)',
+    'SYNCDATA,10,FALSE)',
+    'SYNCDATA,20,FALSE)',
   ];
   return requiredTokens.every((token) => normalized.includes(token));
+}
+
+function isSHA256Revision(value) {
+  return /^sha256:[0-9a-f]{64}$/u.test(String(value || ''));
 }
 
 function buildFailures(report, options) {
@@ -182,15 +203,14 @@ function buildFailures(report, options) {
   };
 
   failUnless(
-    sameArray(report.reference.headers, STANDARD_HEADERS),
+    sameArray(report.reference.headers, REFERENCE_HEADERS),
     `archived headers changed: ${JSON.stringify(report.reference.headers)}`,
   );
-  const isStandard = sameArray(report.candidate.headers, STANDARD_HEADERS);
-  const isAdvanced = sameArray(report.candidate.headers, ADVANCED_HEADERS);
-  report.candidate.edition = isStandard ? 'Standard' : isAdvanced ? 'Advanced' : 'Unknown';
+  const isCanonical = sameArray(report.candidate.headers, CANONICAL_HEADERS);
+  report.candidate.edition = isCanonical ? 'Canonical' : 'Unknown';
   failUnless(
-    isStandard || isAdvanced,
-    `candidate headers must exactly match the Standard or Advanced Persian contract: ${JSON.stringify(report.candidate.headers)}`,
+    isCanonical,
+    `candidate headers must exactly match the canonical Persian contract: ${JSON.stringify(report.candidate.headers)}`,
   );
   failUnless(
     sameArray(report.syncData.headers, SYNC_DATA_HEADERS),
@@ -200,19 +220,84 @@ function buildFailures(report, options) {
     report.syncData.sheetVisibility === 2,
     `SyncData must remain xlSheetVeryHidden (2); got ${report.syncData.sheetVisibility}`,
   );
-  const expectedTableAddress = isStandard
-    ? /^B5:I\d+$/u
-    : isAdvanced
-      ? /^B5:Q\d+$/u
-      : /(?!)/u;
+  const expectedTableAddress = isCanonical ? /^B5:K\d+$/u : /(?!)/u;
   failUnless(
     expectedTableAddress.test(report.candidate.tableAddress),
     `${report.candidate.edition} Products table has an unexpected address: ${report.candidate.tableAddress}`,
   );
   failUnless(report.candidate.rowsWithCode > 0, 'Sync produced no product rows');
   failUnless(
+    report.candidate.wooOnlyRows > 0,
+    'the reconciled table contains no WooCommerce-only rows',
+  );
+  failUnless(
+    report.candidate.ambiguousRows === 0,
+    `${report.candidate.ambiguousRows} reconciled rows have an ambiguous WooCommerce identity`,
+  );
+  failUnless(
+    typeof report.candidate.fullWooRows === 'number'
+      && typeof report.candidate.wooLeafRows === 'number'
+      && report.candidate.fullWooRows >= report.candidate.wooLeafRows
+      && report.candidate.wooLeafRows > 0,
+    `invalid WooCommerce raw/leaf coverage (${report.candidate.fullWooRows}/${report.candidate.wooLeafRows})`,
+  );
+  failUnless(
+    report.candidate.matchedRows
+      + report.candidate.sourceOnlyRows
+      + report.candidate.wooOnlyRows
+      + report.candidate.ambiguousRows === report.candidate.rowsWithCode,
+    'reconciled row-kind counts do not equal the Products row count',
+  );
+  failUnless(
+    isSHA256Revision(report.candidate.datasetRevision),
+    `catalog dataset_revision is missing or invalid: ${report.candidate.datasetRevision}`,
+  );
+  failUnless(
+    isSHA256Revision(report.candidate.sourceRevision),
+    `catalog source revision is missing or invalid: ${report.candidate.sourceRevision}`,
+  );
+  failUnless(
+    report.candidate.paginationTotal === report.candidate.rowsWithCode,
+    `validated pagination total differs from Products (${report.candidate.paginationTotal}/${report.candidate.rowsWithCode})`,
+  );
+  failUnless(
+    typeof report.candidate.countSignature === 'string'
+      && report.candidate.countSignature.length > 0,
+    'the repeated reconciliation-count signature was not persisted after a complete snapshot read',
+  );
+  failUnless(
+    report.candidate.rowsWithCode === CURRENT_ACCEPTANCE.rows
+      && report.candidate.patrisRows === CURRENT_ACCEPTANCE.patrisRows
+      && report.candidate.fullWooRows === CURRENT_ACCEPTANCE.fullWooRows
+      && report.candidate.wooLeafRows === CURRENT_ACCEPTANCE.wooLeafRows
+      && report.candidate.matchedRows === CURRENT_ACCEPTANCE.matchedRows
+      && report.candidate.sourceOnlyRows === CURRENT_ACCEPTANCE.sourceOnlyRows
+      && report.candidate.wooOnlyRows === CURRENT_ACCEPTANCE.wooOnlyRows
+      && report.candidate.ambiguousRows === CURRENT_ACCEPTANCE.ambiguousRows
+      && report.candidate.excludedWooParentRows === CURRENT_ACCEPTANCE.excludedWooParentRows,
+    `current catalog snapshot differs from the accepted reconciled projection: ${JSON.stringify({
+      rows: report.candidate.rowsWithCode,
+      patrisRows: report.candidate.patrisRows,
+      fullWooRows: report.candidate.fullWooRows,
+      wooLeafRows: report.candidate.wooLeafRows,
+      matchedRows: report.candidate.matchedRows,
+      sourceOnlyRows: report.candidate.sourceOnlyRows,
+      wooOnlyRows: report.candidate.wooOnlyRows,
+      ambiguousRows: report.candidate.ambiguousRows,
+      excludedWooParentRows: report.candidate.excludedWooParentRows,
+    })}`,
+  );
+  failUnless(
     report.candidate.duplicateCodes === 0,
     `candidate contains ${report.candidate.duplicateCodes} duplicate product codes`,
+  );
+  failUnless(
+    report.candidate.invalidSyncIdentityRows === 0,
+    `${report.candidate.invalidSyncIdentityRows} visible rows do not preserve the authoritative sync_key identity`,
+  );
+  failUnless(
+    report.candidate.wooOnlySKUFallbackRows > 0,
+    'no WooCommerce-only row exposes its available SKU in کد کالا',
   );
   failUnless(
     typeof report.candidate.config.yuan === 'number'
@@ -271,12 +356,45 @@ function buildFailures(report, options) {
     'no rows have enough per-row SyncData inputs for an independent price calculation',
   );
   failUnless(
-    report.candidate.missingPriceForCompleteRows === 0,
-    `${report.candidate.missingPriceForCompleteRows} complete rows have a blank/non-numeric final price`,
+    report.candidate.fallbackPriceRows > 0,
+    'no incomplete rows preserve an existing WooCommerce effective price',
+  );
+  failUnless(
+    report.candidate.sourceOnlyUnsafeRows > 0,
+    'validation data contains no incomplete source-only row for the fail-closed regression check',
+  );
+  failUnless(
+    report.candidate.sourceOnlyUnsafePricedRows === 0,
+    `${report.candidate.sourceOnlyUnsafePricedRows} incomplete source-only rows incorrectly produced a price`,
+  );
+  failUnless(
+    report.candidate.missingExpectedPriceRows === 0,
+    `${report.candidate.missingExpectedPriceRows} locally calculable or Woo-fallback rows have a blank/non-numeric final price`,
   );
   failUnless(
     report.candidate.priceMismatchRows === 0,
     `${report.candidate.priceMismatchRows} final prices differ from the independently rounded per-row SyncData calculation`,
+  );
+  failUnless(
+    report.candidate.wooComparableRows > 0,
+    'no workbook prices can be compared with WooCommerce effective prices',
+  );
+  failUnless(
+    report.candidate.wooParityMismatchRows === 0,
+    `${report.candidate.wooParityMismatchRows} workbook prices differ from WooCommerce effective customer prices`,
+  );
+  failUnless(
+    report.regressions.relay109032.present
+      && report.regressions.relay109032.price === CURRENT_ACCEPTANCE.relayPrice
+      && report.regressions.relay109032.category === CURRENT_ACCEPTANCE.relayCategory,
+    `${CURRENT_ACCEPTANCE.relayProductCode} regression failed: ${JSON.stringify(report.regressions.relay109032)}`,
+  );
+  failUnless(
+    report.regressions.wooFallback109001.present
+      && report.regressions.wooFallback109001.price === CURRENT_ACCEPTANCE.wooFallbackPrice
+      && report.regressions.wooFallback109001.wooEffectivePrice === CURRENT_ACCEPTANCE.wooFallbackPrice
+      && report.regressions.wooFallback109001.warning.length > 0,
+    `${CURRENT_ACCEPTANCE.wooFallbackProductCode} Woo fallback regression failed: ${JSON.stringify(report.regressions.wooFallback109001)}`,
   );
   failUnless(
     report.errors.naCount === 0,
@@ -326,20 +444,35 @@ function printHumanReport(report) {
   console.log(`  Headers: ${report.candidate.headers.join(' | ')}`);
   console.log(`  Product rows: ${report.candidate.rowsWithCode}`);
   console.log(
+    `  Reconciled rows: matched=${report.candidate.matchedRows}, Patris-only=${report.candidate.sourceOnlyRows}, Woo-only=${report.candidate.wooOnlyRows}, ambiguous=${report.candidate.ambiguousRows}, Woo fetched=${report.candidate.fullWooRows}, Woo leaves=${report.candidate.wooLeafRows}`,
+  );
+  console.log(
+    `  Identity: invalid=${report.candidate.invalidSyncIdentityRows}, Woo-only SKU fallbacks=${report.candidate.wooOnlySKUFallbackRows}`,
+  );
+  console.log(
+    `  Snapshot: dataset=${report.candidate.datasetRevision}, source=${report.candidate.sourceRevision}, total=${report.candidate.paginationTotal}`,
+  );
+  console.log(
     `  Live config: yuan=${report.candidate.config.yuan}, shipping=${report.candidate.config.shipping}, profit=${report.candidate.config.profit}`,
   );
   console.log(
     `  SyncData: rows=${report.syncData.rowsWithCode}, hidden=${report.syncData.sheetVisibility === 2}, missing=${report.syncData.missingProductCodes}, extra=${report.syncData.extraCodes}`,
   );
   console.log(
-    `  Inputs/prices: weight=${report.candidate.numericWeightRows}, rate=${report.candidate.numericRateRows}, final=${report.candidate.numericPriceRows}, independently comparable=${report.candidate.completeInputRows}, incomplete SyncData=${report.candidate.unverifiableForeignPriceRows}`,
+    `  Inputs/prices: weight=${report.candidate.numericWeightRows}, rate=${report.candidate.numericRateRows}, final=${report.candidate.numericPriceRows}, independently comparable=${report.candidate.completeInputRows}, Woo fallback=${report.candidate.fallbackPriceRows}, intentionally blank=${report.candidate.intentionallyBlankRows}`,
   );
   console.log(
-    `  Formula: present=${report.candidate.priceFormulaRows}, structural=${report.candidate.structuralFormulaRows}, mismatches=${report.candidate.priceMismatchRows}`,
+    `  Formula: present=${report.candidate.priceFormulaRows}, structural=${report.candidate.structuralFormulaRows}, mismatches=${report.candidate.priceMismatchRows}, Woo parity=${report.candidate.wooComparableRows - report.candidate.wooParityMismatchRows}/${report.candidate.wooComparableRows}`,
+  );
+  console.log(
+    `  Fail-closed: unsafe source-only=${report.candidate.sourceOnlyUnsafeRows}, incorrectly priced=${report.candidate.sourceOnlyUnsafePricedRows}, missing expected=${report.candidate.missingExpectedPriceRows}`,
   );
   console.log(`  Errors: #N/A=${report.errors.naCount}, #VALUE!=${report.errors.valueCount}`);
   console.log(
     `  Archive overlap: rows=${report.comparison.overlapRows}, weight matches=${report.comparison.weightMatches}/${report.comparison.weightComparable}, rate matches=${report.comparison.rateMatches}/${report.comparison.rateComparable}`,
+  );
+  console.log(
+    `  Regressions: 109032=${report.regressions.relay109032.price}/${report.regressions.relay109032.category}, 109001 fallback=${report.regressions.wooFallback109001.price}`,
   );
 
   if (!report.passed) {
@@ -481,14 +614,23 @@ function Read-Products([object]$book) {
                 $rate = if ($columnCount -ge 5) {
                     Matrix-Value $values $rowCount $columnCount $row 5
                 } else { $null }
-                $code = if ($columnCount -ge 7) {
+                $productCode = if ($columnCount -ge 7) {
                     Normalized-Code (Matrix-Value $values $rowCount $columnCount $row 7)
                 } else { '' }
+                $wooID = if ($columnCount -ge 9) {
+                    Normalized-Code (Matrix-Value $values $rowCount $columnCount $row 9)
+                } else { '' }
+                $identityKey = ''
+                if ($wooID.Length -gt 0) {
+                    $identityKey = "woo:$wooID"
+                } elseif ($productCode.Length -gt 0) {
+                    $identityKey = "patris:$productCode"
+                }
                 $formula = [Convert]::ToString(
                     (Matrix-Value $formulas $rowCount $columnCount $row 1),
                     $invariant
                 )
-                if ($code.Length -gt 0) {
+                if ($identityKey.Length -gt 0) {
                     if ($formula.StartsWith('=')) {
                         if (-not $formulaCounts.ContainsKey($formula)) {
                             $formulaCounts[$formula] = 0
@@ -497,7 +639,9 @@ function Read-Products([object]$book) {
                     }
                     $rows += [pscustomobject]@{
                         Row = [int]$table.Range.Row + $row
-                        Code = $code
+                        Code = $identityKey
+                        ProductCode = $productCode
+                        WooID = $wooID
                         Price = $price
                         Weight = $weight
                         Rate = $rate
@@ -570,6 +714,24 @@ function Read-SyncData([object]$book) {
                         ProfitPercent = Matrix-Value $values $rowCount $columnCount $row 5
                         CNYRate = Matrix-Value $values $rowCount $columnCount $row 6
                         USDRate = Matrix-Value $values $rowCount $columnCount $row 7
+                        WooID = Matrix-Value $values $rowCount $columnCount $row 9
+                        WooEffectivePrice = Matrix-Value $values $rowCount $columnCount $row 10
+                        Categories = [Convert]::ToString(
+                            (Matrix-Value $values $rowCount $columnCount $row 17),
+                            $invariant
+                        ).Trim()
+                        PublicationStatus = [Convert]::ToString(
+                            (Matrix-Value $values $rowCount $columnCount $row 18),
+                            $invariant
+                        ).Trim()
+                        Warning = [Convert]::ToString(
+                            (Matrix-Value $values $rowCount $columnCount $row 19),
+                            $invariant
+                        ).Trim()
+                        RowKind = [Convert]::ToString(
+                            (Matrix-Value $values $rowCount $columnCount $row 20),
+                            $invariant
+                        ).Trim()
                     }
                 }
             }
@@ -671,6 +833,23 @@ function Row-Dictionary([object[]]$rows) {
     return [pscustomobject]@{ Values = $dictionary; Duplicates = $duplicates }
 }
 
+function ProductCode-Dictionary([object[]]$rows) {
+    $dictionary = [System.Collections.Generic.Dictionary[string, object]]::new(
+        [System.StringComparer]::Ordinal
+    )
+    $duplicates = 0
+    foreach ($row in $rows) {
+        $productCode = [Convert]::ToString($row.ProductCode, $invariant).Trim()
+        if ($productCode.Length -eq 0) { continue }
+        if ($dictionary.ContainsKey($productCode)) {
+            $duplicates += 1
+        } else {
+            $dictionary.Add($productCode, $row)
+        }
+    }
+    return [pscustomobject]@{ Values = $dictionary; Duplicates = $duplicates }
+}
+
 $excel = $null
 $candidateBook = $null
 $referenceBook = $null
@@ -701,11 +880,11 @@ try {
     }
     $excel.CalculateFullRebuild()
     $candidateSyncStatus = [Convert]::ToString(
-        (Sheet-Scalar $candidateBook 2 'B6'),
+        (Sheet-Scalar $candidateBook 3 'B6'),
         $invariant
     )
     $candidatePricingStatus = [Convert]::ToString(
-        (Sheet-Scalar $candidateBook 2 'B23'),
+        (Sheet-Scalar $candidateBook 3 'B23'),
         $invariant
     )
 
@@ -728,8 +907,9 @@ try {
     }
 
     $candidateDictionary = Row-Dictionary $candidateProducts.Rows
+    $candidateProductDictionary = ProductCode-Dictionary $candidateProducts.Rows
     $syncDictionary = Row-Dictionary $candidateSyncData.Rows
-    $referenceDictionary = Row-Dictionary $referenceProducts.Rows
+    $referenceDictionary = ProductCode-Dictionary $referenceProducts.Rows
     $missingProductCodes = 0
     $extraSyncCodes = 0
     foreach ($candidateCode in $candidateDictionary.Values.Keys) {
@@ -747,10 +927,33 @@ try {
     $numericRateRows = 0
     $numericPriceRows = 0
     $priceFormulaRows = 0
+    $wooOnlyRows = @(
+        $candidateSyncData.Rows |
+            Where-Object { $_.RowKind -eq 'فقط ووکامرس' }
+    ).Count
+    $matchedRows = @(
+        $candidateSyncData.Rows |
+            Where-Object { $_.RowKind -eq 'هماهنگ' }
+    ).Count
+    $sourceOnlyRows = @(
+        $candidateSyncData.Rows |
+            Where-Object { $_.RowKind -eq 'فقط سامانه کالا' }
+    ).Count
+    $ambiguousRows = @(
+        $candidateSyncData.Rows |
+            Where-Object { $_.RowKind -eq 'مبهم' }
+    ).Count
     $completeInputRows = 0
-    $unverifiableForeignPriceRows = 0
-    $missingPriceForCompleteRows = 0
+    $fallbackPriceRows = 0
+    $intentionallyBlankRows = 0
+    $sourceOnlyUnsafeRows = 0
+    $sourceOnlyUnsafePricedRows = 0
+    $missingExpectedPriceRows = 0
     $priceMismatchRows = 0
+    $wooComparableRows = 0
+    $wooParityMismatchRows = 0
+    $invalidSyncIdentityRows = 0
+    $wooOnlySKUFallbackRows = 0
     $priceMismatchSamples = @()
 
     foreach ($row in $candidateProducts.Rows) {
@@ -762,49 +965,112 @@ try {
         if ($null -ne $price) { $numericPriceRows += 1 }
         if ([string]$row.Formula -like '=*') { $priceFormulaRows += 1 }
 
-        if ($null -eq $rate -or -not $syncDictionary.Values.ContainsKey($row.Code)) {
+        if (-not $syncDictionary.Values.ContainsKey($row.Code)) {
             continue
         }
 
         $syncRow = $syncDictionary.Values[$row.Code]
+        $syncWooID = Normalized-Code $syncRow.WooID
+        switch ($syncRow.RowKind) {
+            'هماهنگ' {
+                if ($row.WooID.Length -eq 0 -or
+                    $syncWooID -ne $row.WooID -or
+                    $row.Code -cne "woo:$($row.WooID)" -or
+                    $row.ProductCode.Length -eq 0) {
+                    $invalidSyncIdentityRows += 1
+                }
+            }
+            'فقط سامانه کالا' {
+                if ($row.ProductCode.Length -eq 0 -or
+                    $row.Code -cne "patris:$($row.ProductCode)") {
+                    $invalidSyncIdentityRows += 1
+                }
+            }
+            'فقط ووکامرس' {
+                if ($row.WooID.Length -eq 0 -or
+                    $syncWooID -ne $row.WooID -or
+                    $row.Code -cne "woo:$($row.WooID)") {
+                    $invalidSyncIdentityRows += 1
+                }
+                if ($row.ProductCode.Length -gt 0) {
+                    $wooOnlySKUFallbackRows += 1
+                }
+            }
+        }
         $productFactor = Currency-Factor-Or-Null $syncRow.Currency $syncRow
         $shipping = Numeric-Or-Null $syncRow.Shipping
         $profitPercent = Numeric-Or-Null $syncRow.ProfitPercent
-        if ($null -eq $profitPercent) { $profitPercent = [decimal]0 }
-        $shippingReady = $true
-        $shippingComponent = [decimal]0
-        if ($null -ne $weight -and $null -ne $shipping) {
-            $shippingFactor = Currency-Factor-Or-Null $syncRow.ShippingCurrency $syncRow
-            if ($null -eq $shippingFactor) {
-                $shippingReady = $false
-            } else {
-                $shippingComponent = (
-                    ([decimal]$weight / [decimal]1000) *
-                    [decimal]$shipping *
-                    [decimal]$shippingFactor
-                )
+        $shippingFactor = Currency-Factor-Or-Null $syncRow.ShippingCurrency $syncRow
+        $sitePrice = Numeric-Or-Null $syncRow.WooEffectivePrice
+        $rowEligible = (
+            $syncRow.RowKind -eq 'هماهنگ' -or
+            $syncRow.RowKind -eq 'فقط سامانه کالا'
+        )
+        $localReady = (
+            $rowEligible -and
+            $null -ne $rate -and $rate -gt 0 -and
+            $null -ne $weight -and $weight -ge 0 -and
+            $null -ne $shipping -and $shipping -ge 0 -and
+            $null -ne $profitPercent -and $profitPercent -ge 0 -and
+            $null -ne $productFactor -and $productFactor -gt 0 -and
+            $null -ne $shippingFactor -and $shippingFactor -gt 0
+        )
+
+        $unsafeSourceOnly = (
+            $syncRow.RowKind -eq 'فقط سامانه کالا' -and
+            $null -ne $rate -and $rate -gt 0 -and
+            -not $localReady -and
+            ($null -eq $sitePrice -or $sitePrice -le 0)
+        )
+        if ($unsafeSourceOnly) {
+            $sourceOnlyUnsafeRows += 1
+            if ($null -ne $price) {
+                $sourceOnlyUnsafePricedRows += 1
+                if ($priceMismatchSamples.Count -lt 20) {
+                    $priceMismatchSamples += "$($row.Code): unsafe incomplete source-only row produced price=$price"
+                }
             }
         }
 
-        if ($null -eq $productFactor -or -not $shippingReady) {
-            $unverifiableForeignPriceRows += 1
+        $expected = $null
+        if ($localReady) {
+            $completeInputRows += 1
+            $shippingComponent = (
+                ([decimal]$weight / [decimal]1000) *
+                [decimal]$shipping *
+                [decimal]$shippingFactor
+            )
+            $expectedUnrounded = (
+                ([decimal]$rate * [decimal]$productFactor) +
+                [decimal]$shippingComponent
+            ) * (
+                [decimal]1 + ([decimal]$profitPercent / [decimal]100)
+            )
+            $expected = [Math]::Round(
+                $expectedUnrounded,
+                0,
+                [System.MidpointRounding]::AwayFromZero
+            )
+        } elseif ($null -ne $sitePrice -and $sitePrice -gt 0) {
+            $fallbackPriceRows += 1
+            $expected = $sitePrice
+        } else {
+            $intentionallyBlankRows += 1
             continue
         }
 
-        $completeInputRows += 1
-        $expectedUnrounded = (
-            ([decimal]$rate * [decimal]$productFactor) +
-            [decimal]$shippingComponent
-        ) * (
-            [decimal]1 + ([decimal]$profitPercent / [decimal]100)
-        )
-        $expected = [Math]::Round(
-            $expectedUnrounded,
-            0,
-            [System.MidpointRounding]::AwayFromZero
-        )
+        if ($null -ne $sitePrice -and $sitePrice -gt 0 -and $null -ne $price) {
+            $wooComparableRows += 1
+            if ([Math]::Abs($price - $sitePrice) -gt 0.01) {
+                $wooParityMismatchRows += 1
+                if ($priceMismatchSamples.Count -lt 20) {
+                    $priceMismatchSamples += "$($row.Code): workbook=$price WooCommerce=$sitePrice"
+                }
+            }
+        }
+
         if ($null -eq $price) {
-            $missingPriceForCompleteRows += 1
+            $missingExpectedPriceRows += 1
             if ($priceMismatchSamples.Count -lt 20) {
                 $priceMismatchSamples += "$($row.Code): expected=$expected, got blank/error"
             }
@@ -820,6 +1086,42 @@ try {
         }
     }
 
+    $relayRegression = [pscustomobject]@{
+        present = $false
+        price = $null
+        category = ''
+        wooEffectivePrice = $null
+    }
+    if ($candidateProductDictionary.Values.ContainsKey('109032')) {
+        $relayRow = $candidateProductDictionary.Values['109032']
+        $relayRegression.present = $true
+        $relayRegression.price = Numeric-Or-Null $relayRow.Price
+        if ($syncDictionary.Values.ContainsKey($relayRow.Code)) {
+            $relaySyncRow = $syncDictionary.Values[$relayRow.Code]
+            $relayRegression.category = [string]$relaySyncRow.Categories
+            $relayRegression.wooEffectivePrice = Numeric-Or-Null $relaySyncRow.WooEffectivePrice
+        }
+    }
+
+    $wooFallbackRegression = [pscustomobject]@{
+        present = $false
+        price = $null
+        wooEffectivePrice = $null
+        warning = ''
+        rowKind = ''
+    }
+    if ($candidateProductDictionary.Values.ContainsKey('109001')) {
+        $fallbackRow = $candidateProductDictionary.Values['109001']
+        $wooFallbackRegression.present = $true
+        $wooFallbackRegression.price = Numeric-Or-Null $fallbackRow.Price
+        if ($syncDictionary.Values.ContainsKey($fallbackRow.Code)) {
+            $fallbackSyncRow = $syncDictionary.Values[$fallbackRow.Code]
+            $wooFallbackRegression.wooEffectivePrice = Numeric-Or-Null $fallbackSyncRow.WooEffectivePrice
+            $wooFallbackRegression.warning = [string]$fallbackSyncRow.Warning
+            $wooFallbackRegression.rowKind = [string]$fallbackSyncRow.RowKind
+        }
+    }
+
     $overlapRows = 0
     $weightComparable = 0
     $weightMatches = 0
@@ -832,12 +1134,12 @@ try {
     $comparisonSamples = @()
 
     foreach ($entry in $referenceDictionary.Values.GetEnumerator()) {
-        if (-not $candidateDictionary.Values.ContainsKey($entry.Key)) {
+        if (-not $candidateProductDictionary.Values.ContainsKey($entry.Key)) {
             continue
         }
         $overlapRows += 1
         $referenceRow = $entry.Value
-        $candidateRow = $candidateDictionary.Values[$entry.Key]
+        $candidateRow = $candidateProductDictionary.Values[$entry.Key]
 
         $referenceWeight = Numeric-Or-Null $referenceRow.Weight
         if ($null -ne $referenceWeight) {
@@ -897,10 +1199,38 @@ try {
             numericRateRows = $numericRateRows
             numericPriceRows = $numericPriceRows
             priceFormulaRows = $priceFormulaRows
+            wooOnlyRows = $wooOnlyRows
+            matchedRows = $matchedRows
+            sourceOnlyRows = $sourceOnlyRows
+            ambiguousRows = $ambiguousRows
+            fullWooRows = Numeric-Or-Null (Sheet-Scalar $candidateBook 3 'G32')
+            wooLeafRows = Numeric-Or-Null (Sheet-Scalar $candidateBook 3 'G33')
+            patrisRows = Numeric-Or-Null (Sheet-Scalar $candidateBook 3 'G42')
+            excludedWooParentRows = Numeric-Or-Null (Sheet-Scalar $candidateBook 3 'G43')
+            datasetRevision = [Convert]::ToString(
+                (Sheet-Scalar $candidateBook 3 'G44'),
+                $invariant
+            ).Trim()
+            sourceRevision = [Convert]::ToString(
+                (Sheet-Scalar $candidateBook 3 'G45'),
+                $invariant
+            ).Trim()
+            paginationTotal = Numeric-Or-Null (Sheet-Scalar $candidateBook 3 'G46')
+            countSignature = [Convert]::ToString(
+                (Sheet-Scalar $candidateBook 3 'G47'),
+                $invariant
+            ).Trim()
             completeInputRows = $completeInputRows
-            unverifiableForeignPriceRows = $unverifiableForeignPriceRows
-            missingPriceForCompleteRows = $missingPriceForCompleteRows
+            fallbackPriceRows = $fallbackPriceRows
+            intentionallyBlankRows = $intentionallyBlankRows
+            sourceOnlyUnsafeRows = $sourceOnlyUnsafeRows
+            sourceOnlyUnsafePricedRows = $sourceOnlyUnsafePricedRows
+            missingExpectedPriceRows = $missingExpectedPriceRows
             priceMismatchRows = $priceMismatchRows
+            wooComparableRows = $wooComparableRows
+            wooParityMismatchRows = $wooParityMismatchRows
+            invalidSyncIdentityRows = $invalidSyncIdentityRows
+            wooOnlySKUFallbackRows = $wooOnlySKUFallbackRows
             priceMismatchSamples = $priceMismatchSamples
             formulaSignatures = $candidateProducts.FormulaSignatures
         }
@@ -932,6 +1262,10 @@ try {
             rateDifferences = $rateDifferences
             rateMissing = $rateMissing
             samples = $comparisonSamples
+        }
+        regressions = [pscustomobject]@{
+            relay109032 = $relayRegression
+            wooFallback109001 = $wooFallbackRegression
         }
     }
     [Console]::Out.WriteLine(($report | ConvertTo-Json -Depth 10 -Compress))

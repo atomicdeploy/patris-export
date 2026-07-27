@@ -6,20 +6,33 @@ Private Const SYNC_TABLE As String = "SyncData"
 Private Const YUAN_TABLE As String = "Yuan_Price"
 Private Const SHIPPING_TABLE As String = "Shipping"
 Private Const PROFIT_TABLE As String = "Profit"
-Private Const STANDARD_COLUMN_COUNT As Long = 8
-Private Const ADVANCED_COLUMN_COUNT As Long = 16
-Private Const SYNC_COLUMN_COUNT As Long = 16
+Private Const PRODUCT_COLUMN_COUNT As Long = 10
+Private Const SYNC_COLUMN_COUNT As Long = 20
 Private Const STATE_PAGE_SIZE As Long = 250
 Private Const MAX_STATE_PAGES As Long = 8
+Private Const STATE_SNAPSHOT_RETRIES As Long = 3
 Private Const HTTP_TIMEOUT_MS As Long = 150000
 Private Const PRICING_HTTP_TIMEOUT_MS As Long = 240000
 Private Const MAX_PRICING_RESPONSE_CHARS As Long = 4194304
 Private Const PRICING_CLIENT_HEADER As String = "X-Patris-Excel-Client"
 Private Const PRICING_CLIENT_ID As String = "digitalogic-price-calculator/v1"
+Private Const PRICING_CONTRACT_CLIENT_ID As String = "digitalogic-price-calculator"
+Private Const PRICING_CONTRACT_CHANNEL As String = "excel-workbook"
 Private Const PRICING_CSRF_HEADER As String = "X-Patris-Excel-CSRF-Token"
 Private Const PRICING_REQUEST_SCHEMA As String = "patris.excel-pricing-companion-request/v1"
 Private Const PRICING_SESSION_SCHEMA As String = "patris.excel-pricing-companion-session/v1"
 Private Const LOOPBACK_PREFIX As String = "http://127.0.0.1:18080/"
+Private Const RECONCILED_COLUMN_KEYS As String = _
+    "sync_key,reconciliation_status,patris_code,woocommerce_id,parent_id," & _
+    "product_type,publication_status,name,part_number,sku,categories," & _
+    "category_ids,currency,regular_price,sale_price,effective_price," & _
+    "patris_final_price,price_status,stock_quantity,stock_status," & _
+    "patris_total_stock,patris_minimum_stock,patris_location,weight_grams," & _
+    "woocommerce_weight,woocommerce_weight_unit,foreign_price," & _
+    "foreign_currency,shipping_method_id,shipping_method_name_en," & _
+    "shipping_method_name_fa,shipping_price_per_kg," & _
+    "shipping_price_per_kg_currency,profit_margin_percent,permalink," & _
+    "image_url,updated_at,sync_status,sync_error,record_revision"
 Private Const MB_RIGHT As Long = &H80000
 Private Const MB_RTLREADING As Long = &H100000
 
@@ -51,17 +64,15 @@ Private Declare Function MessageBoxW Lib "user32" ( _
 Public Sub ValidateWorkbook()
     Dim table As ListObject
     Dim syncTable As ListObject
-    Dim expectedColumns As Long
 
     ValidateUnicodeRuntime
     Set table = PriceSheet().ListObjects(PRODUCTS_TABLE)
     Set syncTable = SyncSheet().ListObjects(SYNC_TABLE)
-    expectedColumns = IIf(IsAdvanced(), ADVANCED_COLUMN_COUNT, STANDARD_COLUMN_COUNT)
 
     If table.Range.Row <> 5 Or table.Range.Column <> 2 Then
         Err.Raise vbObjectError + 90, "ValidateWorkbook", T("invalid_workbook")
     End If
-    If table.ListColumns.Count <> expectedColumns Then
+    If table.ListColumns.Count <> PRODUCT_COLUMN_COUNT Then
         Err.Raise vbObjectError + 91, "ValidateWorkbook", T("invalid_workbook")
     End If
     If syncTable.ListColumns.Count <> SYNC_COLUMN_COUNT Then
@@ -72,8 +83,9 @@ End Sub
 Public Sub RefreshAllData(Optional ByVal silent As Boolean = False)
     Dim previousCalculation As XlCalculation
     Dim contract As JsonValue
-    Dim siteRows As Object
-    Dim patrisRows As Long
+    Dim reconciledRows As Object
+    Dim productRows As Long
+    Dim reconciledRowsFetched As Long
     Dim wooRows As Long
     Dim parity As Variant
     Dim statusText As String
@@ -88,21 +100,39 @@ Public Sub RefreshAllData(Optional ByVal silent As Boolean = False)
 
     Set settings = ConfigSheet()
     InvalidatePricingPreview
+    settings.Range("G31:G47").ClearContents
+    settings.Range("G31").Value2 = False
     Set contract = LoadPatrisContract()
     ReadSourceIdentity contract
-    Set siteRows = CreateObject("Scripting.Dictionary")
-    siteRows.CompareMode = vbBinaryCompare
-    wooRows = RefreshPricingState(siteRows)
-    patrisRows = ImportPatrisContract(contract, siteRows)
+    Set reconciledRows = CreateObject("Scripting.Dictionary")
+    reconciledRows.CompareMode = vbBinaryCompare
+    reconciledRowsFetched = RefreshPricingState(reconciledRows)
+    productRows = ImportReconciledCatalog(reconciledRows)
+    If productRows <> reconciledRowsFetched Then
+        Err.Raise vbObjectError + 115, "RefreshAllData", T("invalid_workbook")
+    End If
+    wooRows = CLng(Val(CStr(settings.Range("G32").Value2)))
     Application.CalculateFullRebuild
     parity = PriceParitySummary()
 
-    statusText = CStr(patrisRows) & " " & T("patris_rows") & U("061B") & " " & _
+    statusText = CStr(productRows) & " " & T("patris_rows") & U("061B") & " " & _
         CStr(wooRows) & " " & T("woo_products") & U("061B") & " " & _
-        CStr(parity(0)) & " " & T("matched") & U("061B") & " " & _
+        CStr(settings.Range("G34").Value2) & " " & T("matched") & U("061B") & " " & _
+        CStr(settings.Range("G35").Value2) & " " & T("source_only") & U("061B") & " " & _
+        CStr(settings.Range("G36").Value2) & " " & T("woo_only") & U("061B") & " " & _
+        CStr(parity(0)) & " " & T("price_matched") & U("061B") & " " & _
         CStr(parity(1)) & " " & T("over_limit")
     If CBool(settings.Range("G15").Value2) Then
         statusText = statusText & U("061B") & " " & T("stale_rate")
+    End If
+    If CBool(settings.Range("G40").Value2) Then
+        statusText = statusText & U("061B") & " " & _
+            T("proposal_drift_critical")
+    ElseIf CBool(settings.Range("G39").Value2) Then
+        statusText = statusText & U("061B") & " " & T("proposal_drift")
+    End If
+    If CBool(settings.Range("G31").Value2) Then
+        statusText = statusText & U("061B") & " " & T("identity_warning")
     End If
     settings.Range("B6").Value = statusText
     settings.Range("B7").Value = Now
@@ -136,6 +166,63 @@ Public Sub RefreshOnOpen()
     If Trim$(CStr(ConfigSheet().Range("B5").Value2)) = U("062806440647") Then
         RefreshAllData True
     End If
+End Sub
+
+Public Sub SearchProducts()
+    Dim table As ListObject
+    Dim query As String
+    Dim found As Range
+
+    Set table = PriceSheet().ListObjects(PRODUCTS_TABLE)
+    query = Trim$(CStr( _
+        ThisWorkbook.Names("ProductSearchQuery").RefersToRange.Value2))
+    If Len(query) = 0 Then
+        ThisWorkbook.Names("ProductSearchQuery").RefersToRange.Select
+        Exit Sub
+    End If
+    If table.DataBodyRange Is Nothing Then Exit Sub
+
+    Set found = table.DataBodyRange.Find( _
+        What:=query, _
+        After:=table.DataBodyRange.Cells(table.DataBodyRange.Cells.Count), _
+        LookIn:=xlValues, _
+        LookAt:=xlPart, _
+        SearchOrder:=xlByRows, _
+        SearchDirection:=xlNext, _
+        MatchCase:=False)
+    If found Is Nothing Then
+        ShowUnicodeMessage T("search_missing"), vbInformation, T("search_title")
+    Else
+        Application.Goto found, True
+    End If
+End Sub
+
+Public Sub ClearProductSearch()
+    Dim table As ListObject
+
+    On Error Resume Next
+    ThisWorkbook.Names("ProductSearchQuery").RefersToRange.ClearContents
+    Set table = PriceSheet().ListObjects(PRODUCTS_TABLE)
+    If table.AutoFilter.FilterMode Then table.AutoFilter.ShowAllData
+    ThisWorkbook.Names("ProductSearchQuery").RefersToRange.Select
+    On Error GoTo 0
+End Sub
+
+Public Sub HighlightSelectedProductRow(ByVal target As Range)
+    Dim table As ListObject
+    Dim selectedRow As Long
+
+    On Error GoTo CleanExit
+    Set table = PriceSheet().ListObjects(PRODUCTS_TABLE)
+    If Not table.DataBodyRange Is Nothing Then
+        If Not Intersect(target.Cells(1, 1), table.DataBodyRange) Is Nothing Then
+            selectedRow = target.Row
+        End If
+    End If
+    Application.EnableEvents = False
+    ConfigSheet().Range("G30").Value2 = selectedRow
+CleanExit:
+    Application.EnableEvents = True
 End Sub
 
 Public Sub HandlePricingProposalChanged()
@@ -172,7 +259,7 @@ Private Sub PreviewPricingChangesCore(ByVal showMessage As Boolean)
     requestBody = BuildPricingRequest("preview", requestID, vbNullString, False)
     responseText = HttpJson( _
         PricingEndpoint("preview"), requestBody, requestID, _
-        Trim$(CStr(settings.Range("B14").Value2)))
+        Trim$(CStr(settings.Range("G14").Value2)))
     Set root = JsonRuntime.ParseJson(responseText)
     Set result = ResponseData(root)
 
@@ -239,7 +326,7 @@ Public Sub ApplyPricingChanges()
     End If
     If Len(mLastApplyRequestID) = 0 And _
        mLastPreviewStateRevision <> _
-           Trim$(CStr(settings.Range("B14").Value2)) Then
+           Trim$(CStr(settings.Range("G14").Value2)) Then
         InvalidatePricingPreview
         ShowUnicodeMessage T("preview_first"), vbExclamation, T("apply_title")
         Exit Sub
@@ -283,7 +370,7 @@ Public Sub ApplyPricingChanges()
 
     RefreshAllData True
     If Not mLastRefreshSucceeded Or _
-       Trim$(CStr(ConfigSheet().Range("B14").Value2)) <> _
+       Trim$(CStr(ConfigSheet().Range("G14").Value2)) <> _
            appliedStateRevision Then
         Err.Raise vbObjectError + 162, "ApplyPricingChanges", _
                   T("sync_failed")
@@ -332,7 +419,11 @@ Private Function PricingSettingsCanonical() As String
         CanonicalCellText(settings.Range("B18").Value2) & "|" & _
         CanonicalCellText(settings.Range("B19").Value2) & "|" & _
         CanonicalCellText(settings.Range("B20").Value2) & "|" & _
-        CanonicalCellText(settings.Range("B21").Value2)
+        CanonicalCellText(settings.Range("B21").Value2) & "|" & _
+        CanonicalCellText(settings.Range("B22").Value2) & "|" & _
+        CanonicalCellText(settings.Range("H14").Value2) & "|" & _
+        CanonicalCellText(settings.Range("H15").Value2) & "|" & _
+        CanonicalCellText(settings.Range("H16").Value2)
 End Function
 
 Private Function LoadPatrisContract() As JsonValue
@@ -403,6 +494,32 @@ Private Sub EnsureSourceIdentity()
 End Sub
 
 Private Function RefreshPricingState(ByVal siteRows As Object) As Long
+    Dim attempt As Long
+    Dim fetchedRows As Long
+    Dim savedErrorNumber As Long
+    Dim savedErrorDescription As String
+
+    For attempt = 1 To STATE_SNAPSHOT_RETRIES
+        siteRows.RemoveAll
+        ConfigSheet().Range("G34:G47").ClearContents
+        Err.Clear
+        On Error Resume Next
+        fetchedRows = RefreshPricingStateOnce(siteRows)
+        savedErrorNumber = Err.Number
+        savedErrorDescription = Err.Description
+        Err.Clear
+        On Error GoTo 0
+        If savedErrorNumber = 0 Then
+            RefreshPricingState = fetchedRows
+            Exit Function
+        End If
+    Next attempt
+
+    If savedErrorNumber = 0 Then savedErrorNumber = vbObjectError + 130
+    Err.Raise savedErrorNumber, "RefreshPricingState", savedErrorDescription
+End Function
+
+Private Function RefreshPricingStateOnce(ByVal siteRows As Object) As Long
     Dim page As Long
     Dim requestBody As String
     Dim responseText As String
@@ -414,8 +531,26 @@ Private Function RefreshPricingState(ByVal siteRows As Object) As Long
     Dim rowValue As JsonValue
     Dim rowIndex As Long
     Dim pageRows As Long
-    Dim codeValue As String
+    Dim identityKey As String
+    Dim datasetName As String
+    Dim datasetRevision As String
+    Dim sourceRevision As String
+    Dim pageRevision As String
+    Dim columnSignature As String
+    Dim countSignature As String
+    Dim firstDatasetRevision As String
+    Dim firstSourceRevision As String
+    Dim firstColumnSignature As String
+    Dim firstCountSignature As String
+    Dim paginationPage As Long
+    Dim paginationLimit As Long
+    Dim paginationTotal As Long
+    Dim paginationPages As Long
+    Dim firstPaginationLimit As Long
+    Dim firstPaginationTotal As Long
+    Dim firstPaginationPages As Long
     Dim hasMore As Boolean
+    Dim completed As Boolean
 
     For page = 1 To MAX_STATE_PAGES
         requestBody = StateRequestJson(page)
@@ -429,6 +564,31 @@ Private Function RefreshPricingState(ByVal siteRows As Object) As Long
             Err.Raise vbObjectError + 110, "RefreshPricingState", _
                       T("bridge_missing")
         End If
+        datasetName = Trim$(CStr(BlankIfNull( _
+            JsonRuntime.JsonText(catalog, "dataset"))))
+        If datasetName <> "reconciled_products" Then
+            Err.Raise vbObjectError + 116, "RefreshPricingState", _
+                      T("invalid_workbook")
+        End If
+        datasetRevision = SiteText(catalog, "dataset_revision")
+        pageRevision = SiteText(catalog, "page_revision")
+        If Not IsSHA256RevisionText(datasetRevision) Or _
+           Not IsSHA256RevisionText(pageRevision) Then
+            Err.Raise vbObjectError + 120, "RefreshPricingState", _
+                      T("invalid_workbook")
+        End If
+        sourceRevision = StateSourceRevision(state)
+        If Not IsSHA256RevisionText(sourceRevision) Then
+            Err.Raise vbObjectError + 121, "RefreshPricingState", _
+                      T("invalid_workbook")
+        End If
+        columnSignature = CatalogColumnSignature(catalog)
+        If columnSignature <> RECONCILED_COLUMN_KEYS Then
+            Err.Raise vbObjectError + 122, "RefreshPricingState", _
+                      T("invalid_workbook")
+        End If
+        countSignature = CatalogCountSignature(catalog)
+
         Set rowsValue = JsonRuntime.JsonMember(catalog, "rows")
         If rowsValue Is Nothing Or rowsValue.Kind <> "array" Then
             Err.Raise vbObjectError + 111, "RefreshPricingState", _
@@ -438,62 +598,335 @@ Private Function RefreshPricingState(ByVal siteRows As Object) As Long
         pageRows = JsonRuntime.JsonArrayCount(rowsValue)
         For rowIndex = 1 To pageRows
             Set rowValue = JsonRuntime.JsonArrayItem(rowsValue, rowIndex)
-            codeValue = Trim$(CStr(BlankIfNull( _
-                JsonRuntime.JsonText(rowValue, "patris_code"))))
-            If Len(codeValue) > 0 And Not siteRows.Exists(codeValue) Then
-                siteRows.Add codeValue, rowValue
+            identityKey = Trim$(CStr(BlankIfNull( _
+                JsonRuntime.JsonText(rowValue, "sync_key"))))
+            If Len(identityKey) = 0 Then
+                Err.Raise vbObjectError + 113, "RefreshPricingState", _
+                          T("invalid_workbook")
             End If
+            If siteRows.Exists(identityKey) Then
+                Err.Raise vbObjectError + 114, "RefreshPricingState", _
+                          T("invalid_workbook")
+            End If
+            siteRows.Add identityKey, rowValue
         Next rowIndex
-        RefreshPricingState = RefreshPricingState + pageRows
-
         Set pagination = JsonRuntime.JsonMember(catalog, "pagination")
-        hasMore = False
-        If Not pagination Is Nothing Then
-            hasMore = BooleanValue( _
-                JsonRuntime.JsonText(pagination, "has_more"))
+        If pagination Is Nothing Or pagination.Kind <> "object" Then
+            Err.Raise vbObjectError + 123, "RefreshPricingState", _
+                      T("invalid_workbook")
         End If
-        If Not hasMore Then Exit For
+        paginationPage = RequiredWholeNumber(pagination, "page")
+        paginationLimit = RequiredWholeNumber(pagination, "limit")
+        paginationTotal = RequiredWholeNumber(pagination, "total")
+        paginationPages = RequiredWholeNumber(pagination, "pages")
+        hasMore = BooleanValue( _
+            JsonRuntime.JsonText(pagination, "has_more"))
+
+        If paginationPage <> page Or paginationLimit <> STATE_PAGE_SIZE Or _
+           paginationTotal < 1 Or paginationPages < 1 Or _
+           paginationPages > MAX_STATE_PAGES Or pageRows > paginationLimit Or _
+           hasMore <> (paginationPage < paginationPages) Then
+            Err.Raise vbObjectError + 124, "RefreshPricingState", _
+                      T("invalid_workbook")
+        End If
+        If page = 1 Then
+            firstDatasetRevision = datasetRevision
+            firstSourceRevision = sourceRevision
+            firstColumnSignature = columnSignature
+            firstCountSignature = countSignature
+            firstPaginationLimit = paginationLimit
+            firstPaginationTotal = paginationTotal
+            firstPaginationPages = paginationPages
+            ApplyReconciliationCounts catalog
+        ElseIf datasetRevision <> firstDatasetRevision Or _
+               sourceRevision <> firstSourceRevision Or _
+               columnSignature <> firstColumnSignature Or _
+               countSignature <> firstCountSignature Or _
+               paginationLimit <> firstPaginationLimit Or _
+               paginationTotal <> firstPaginationTotal Or _
+               paginationPages <> firstPaginationPages Then
+            Err.Raise vbObjectError + 130, "RefreshPricingState", _
+                      T("invalid_workbook")
+        End If
+        If paginationTotal <> CLng(Val(CStr( _
+           ConfigSheet().Range("G38").Value2))) Then
+            Err.Raise vbObjectError + 131, "RefreshPricingState", _
+                      T("invalid_workbook")
+        End If
+
+        RefreshPricingStateOnce = RefreshPricingStateOnce + pageRows
+        If Not hasMore Then
+            completed = True
+            Exit For
+        End If
     Next page
+    If Not completed Or _
+       RefreshPricingStateOnce <> firstPaginationTotal Or _
+       siteRows.Count <> firstPaginationTotal Or _
+       RefreshPricingStateOnce <> CLng(Val(CStr( _
+           ConfigSheet().Range("G38").Value2))) Then
+        Err.Raise vbObjectError + 117, "RefreshPricingState", _
+                  T("invalid_workbook")
+    End If
+    ConfigSheet().Range("G44").Value2 = firstDatasetRevision
+    ConfigSheet().Range("G45").Value2 = firstSourceRevision
+    ConfigSheet().Range("G46").Value2 = firstPaginationTotal
+    ConfigSheet().Range("G47").Value2 = firstCountSignature
+End Function
+
+Private Sub ApplyReconciliationCounts(ByVal catalog As JsonValue)
+    Dim reconciliation As JsonValue
+    Dim counts As JsonValue
+    Dim settings As Worksheet
+    Dim wooRaw As Variant
+    Dim wooLeaves As Variant
+    Dim excludedParents As Variant
+
+    Set reconciliation = JsonRuntime.JsonMember(catalog, "reconciliation")
+    If reconciliation Is Nothing Or reconciliation.Kind <> "object" Then
+        Err.Raise vbObjectError + 118, "ApplyReconciliationCounts", _
+                  T("invalid_workbook")
+    End If
+    Set counts = JsonRuntime.JsonMember(reconciliation, "counts")
+    If counts Is Nothing Or counts.Kind <> "object" Then
+        Err.Raise vbObjectError + 119, "ApplyReconciliationCounts", _
+                  T("invalid_workbook")
+    End If
+    Set settings = ConfigSheet()
+    wooRaw = NumericOrBlank( _
+        JsonRuntime.JsonText(counts, "woocommerce_raw"))
+    wooLeaves = NumericOrBlank( _
+        JsonRuntime.JsonText(counts, "woocommerce_leaves"))
+    excludedParents = NumericOrBlank( _
+        JsonRuntime.JsonText(counts, "variable_parents_excluded"))
+    If IsEmpty(wooRaw) Or IsEmpty(wooLeaves) Or IsEmpty(excludedParents) Or _
+       CDbl(wooRaw) < 0 Or CDbl(wooLeaves) < 0 Or _
+       CDbl(excludedParents) < 0 Or _
+       CLng(wooRaw) <> CDbl(wooRaw) Or _
+       CLng(wooLeaves) <> CDbl(wooLeaves) Or _
+       CLng(excludedParents) <> CDbl(excludedParents) Then
+        Err.Raise vbObjectError + 125, "ApplyReconciliationCounts", _
+                  T("invalid_workbook")
+    End If
+    settings.Range("G32").Value2 = CLng(wooRaw)
+    settings.Range("G33").Value2 = CLng(wooLeaves)
+    settings.Range("G34").Value2 = NumericOrBlank( _
+        JsonRuntime.JsonText(counts, "matched"))
+    settings.Range("G35").Value2 = NumericOrBlank( _
+        JsonRuntime.JsonText(counts, "patris_only"))
+    settings.Range("G36").Value2 = NumericOrBlank( _
+        JsonRuntime.JsonText(counts, "woo_only"))
+    settings.Range("G38").Value2 = NumericOrBlank( _
+        JsonRuntime.JsonText(counts, "union_rows"))
+    settings.Range("G41").Value2 = NumericOrBlank( _
+        JsonRuntime.JsonText(counts, "ambiguous_codes"))
+    settings.Range("G42").Value2 = NumericOrBlank( _
+        JsonRuntime.JsonText(counts, "patris_products"))
+    settings.Range("G43").Value2 = CLng(excludedParents)
+End Sub
+
+Private Function StateSourceRevision(ByVal state As JsonValue) As String
+    Dim sourceValue As JsonValue
+
+    Set sourceValue = JsonRuntime.JsonMember(state, "source")
+    If sourceValue Is Nothing Or sourceValue.Kind <> "object" Then Exit Function
+    StateSourceRevision = SiteText(sourceValue, "revision")
+End Function
+
+Private Function CatalogColumnSignature(ByVal catalog As JsonValue) As String
+    Dim columnsValue As JsonValue
+    Dim columnValue As JsonValue
+    Dim columnIndex As Long
+    Dim columnKey As String
+
+    Set columnsValue = JsonRuntime.JsonMember(catalog, "columns")
+    If columnsValue Is Nothing Or columnsValue.Kind <> "array" Then
+        Err.Raise vbObjectError + 132, "CatalogColumnSignature", _
+                  T("invalid_workbook")
+    End If
+    For columnIndex = 1 To JsonRuntime.JsonArrayCount(columnsValue)
+        Set columnValue = JsonRuntime.JsonArrayItem( _
+            columnsValue, columnIndex)
+        If columnValue Is Nothing Or columnValue.Kind <> "object" Then
+            Err.Raise vbObjectError + 133, "CatalogColumnSignature", _
+                      T("invalid_workbook")
+        End If
+        columnKey = SiteText(columnValue, "key")
+        If Len(columnKey) = 0 Or InStr(1, columnKey, ",", vbBinaryCompare) > 0 Then
+            Err.Raise vbObjectError + 134, "CatalogColumnSignature", _
+                      T("invalid_workbook")
+        End If
+        If Len(CatalogColumnSignature) > 0 Then
+            CatalogColumnSignature = CatalogColumnSignature & ","
+        End If
+        CatalogColumnSignature = CatalogColumnSignature & columnKey
+    Next columnIndex
+End Function
+
+Private Function CatalogCountSignature(ByVal catalog As JsonValue) As String
+    Dim reconciliation As JsonValue
+    Dim counts As JsonValue
+    Dim fields As Variant
+    Dim fieldName As Variant
+    Dim countValue As Variant
+
+    Set reconciliation = JsonRuntime.JsonMember(catalog, "reconciliation")
+    If reconciliation Is Nothing Or reconciliation.Kind <> "object" Then
+        Err.Raise vbObjectError + 135, "CatalogCountSignature", _
+                  T("invalid_workbook")
+    End If
+    Set counts = JsonRuntime.JsonMember(reconciliation, "counts")
+    If counts Is Nothing Or counts.Kind <> "object" Then
+        Err.Raise vbObjectError + 136, "CatalogCountSignature", _
+                  T("invalid_workbook")
+    End If
+    fields = Array( _
+        "patris_products", "woocommerce_raw", "woocommerce_leaves", _
+        "union_rows", "matched", "patris_only", "woo_only", _
+        "ambiguous_codes", "variable_parents_excluded")
+    For Each fieldName In fields
+        countValue = NumericOrBlank( _
+            JsonRuntime.JsonText(counts, CStr(fieldName)))
+        If IsEmpty(countValue) Or CDbl(countValue) < 0 Or _
+           CLng(countValue) <> CDbl(countValue) Then
+            Err.Raise vbObjectError + 137, "CatalogCountSignature", _
+                      T("invalid_workbook")
+        End If
+        If Len(CatalogCountSignature) > 0 Then
+            CatalogCountSignature = CatalogCountSignature & "|"
+        End If
+        CatalogCountSignature = CatalogCountSignature & CStr(fieldName) & _
+            "=" & CStr(CLng(countValue))
+    Next fieldName
+End Function
+
+Private Function RequiredWholeNumber(ByVal objectValue As JsonValue, _
+                                     ByVal fieldName As String) As Long
+    Dim numberValue As Variant
+
+    numberValue = NumericOrBlank( _
+        JsonRuntime.JsonText(objectValue, fieldName))
+    If IsEmpty(numberValue) Or CDbl(numberValue) < 0 Or _
+       CLng(numberValue) <> CDbl(numberValue) Then
+        Err.Raise vbObjectError + 138, "RequiredWholeNumber", _
+                  T("invalid_workbook")
+    End If
+    RequiredWholeNumber = CLng(numberValue)
+End Function
+
+Private Function IsSHA256RevisionText(ByVal value As String) As Boolean
+    Dim index As Long
+    Dim character As String
+
+    If Len(value) <> 71 Or Left$(value, 7) <> "sha256:" Or _
+       value <> LCase$(value) Then Exit Function
+    For index = 8 To 71
+        character = Mid$(value, index, 1)
+        If Not ((character >= "0" And character <= "9") Or _
+                (character >= "a" And character <= "f")) Then Exit Function
+    Next index
+    IsSHA256RevisionText = True
 End Function
 
 Private Sub ApplyGlobalState(ByVal state As JsonValue)
     Dim settings As Worksheet
+    Dim primarySettings As JsonValue
+    Dim freshness As JsonValue
     Dim currencyState As JsonValue
+    Dim shippingState As JsonValue
+    Dim profitMargin As JsonValue
     Dim markup As JsonValue
     Dim remoteCNY As Variant
     Dim remoteUSD As Variant
     Dim remoteDate As Variant
     Dim remoteProfit As Variant
+    Dim remoteShipping As Variant
+    Dim shippingCurrency As String
+    Dim shippingRevision As String
+    Dim remoteUSDDate As Variant
+    Dim remoteCNYDate As Variant
     Dim stale As Boolean
 
     Set settings = ConfigSheet()
+    Set primarySettings = JsonRuntime.JsonMember(state, "settings")
+    Set freshness = JsonRuntime.JsonMember(state, "freshness")
     Set currencyState = JsonRuntime.JsonMember(state, "currency")
+    Set shippingState = JsonRuntime.JsonMember(state, "shipping")
+    Set profitMargin = JsonRuntime.JsonMember(state, "profit_margin")
     Set markup = JsonRuntime.JsonMember(state, "default_markup")
-    If currencyState Is Nothing Then
-        Err.Raise vbObjectError + 112, "ApplyGlobalState", T("bridge_missing")
+
+    If Not primarySettings Is Nothing Then
+        remoteCNY = PositiveNumericOrBlank( _
+            JsonRuntime.JsonText(primarySettings, "yuan_price"))
+        remoteUSD = PositiveNumericOrBlank( _
+            JsonRuntime.JsonText(primarySettings, "dollar_price"))
+        remoteDate = BlankIfNull( _
+            JsonRuntime.JsonText(primarySettings, "effective_date"))
+        remoteUSDDate = BlankIfNull( _
+            JsonRuntime.JsonText(primarySettings, "usd_effective_date"))
+        remoteCNYDate = BlankIfNull( _
+            JsonRuntime.JsonText(primarySettings, "cny_effective_date"))
+        If IsEmpty(remoteCNYDate) Then remoteCNYDate = remoteDate
+        If IsEmpty(remoteUSDDate) Then remoteUSDDate = remoteDate
+        remoteProfit = NumericOrBlank( _
+            JsonRuntime.JsonText(primarySettings, "profit_margin_percent"))
+        If Not IsEmpty(remoteProfit) Then remoteProfit = CDbl(remoteProfit) / 100#
+        remoteShipping = PositiveNumericOrBlank( _
+            JsonRuntime.JsonText(primarySettings, "air_express_price_per_kg"))
+        shippingCurrency = UCase$(Trim$(CStr(BlankIfNull( _
+            JsonRuntime.JsonText(primarySettings, "air_express_currency")))))
+        shippingRevision = Trim$(CStr(BlankIfNull( _
+            JsonRuntime.JsonText(primarySettings, "shipping_catalog_revision"))))
+    Else
+        If currencyState Is Nothing Then
+            Err.Raise vbObjectError + 112, "ApplyGlobalState", T("bridge_missing")
+        End If
+        remoteCNY = PositiveNumericOrBlank( _
+            JsonRuntime.JsonText(currencyState, "yuan_price"))
+        remoteUSD = PositiveNumericOrBlank( _
+            JsonRuntime.JsonText(currencyState, "dollar_price"))
+        remoteDate = BlankIfNull( _
+            JsonRuntime.JsonText(currencyState, "effective_date"))
+        If IsEmpty(remoteDate) Then
+            remoteDate = BlankIfNull( _
+                JsonRuntime.JsonText(currencyState, "update_date"))
+        End If
+        remoteCNYDate = remoteDate
+        remoteUSDDate = remoteDate
+        remoteProfit = Empty
+        If Not profitMargin Is Nothing Then
+            remoteProfit = NumericOrBlank( _
+                JsonRuntime.JsonText(profitMargin, "profit_margin_percent"))
+        End If
+        If IsEmpty(remoteProfit) And Not markup Is Nothing Then
+            If BooleanValue(JsonRuntime.JsonText(markup, "configured")) Then
+                remoteProfit = NumericOrBlank( _
+                    JsonRuntime.JsonText(markup, "profit_percent"))
+            End If
+        End If
+        If Not IsEmpty(remoteProfit) Then remoteProfit = CDbl(remoteProfit) / 100#
     End If
 
-    remoteCNY = PositiveNumericOrBlank( _
-        JsonRuntime.JsonText(currencyState, "yuan_price"))
-    remoteUSD = PositiveNumericOrBlank( _
-        JsonRuntime.JsonText(currencyState, "dollar_price"))
-    remoteDate = BlankIfNull( _
-        JsonRuntime.JsonText(currencyState, "effective_date"))
-    If IsEmpty(remoteDate) Then
-        remoteDate = BlankIfNull( _
-            JsonRuntime.JsonText(currencyState, "update_date"))
+    If (IsEmpty(remoteShipping) Or Len(shippingCurrency) = 0 Or _
+        Len(shippingRevision) = 0) And Not shippingState Is Nothing Then
+        remoteShipping = PositiveNumericOrBlank( _
+            JsonRuntime.JsonText(shippingState, "price_per_kg"))
+        shippingCurrency = UCase$(Trim$(CStr(BlankIfNull( _
+            JsonRuntime.JsonText(shippingState, "currency")))))
+        shippingRevision = Trim$(CStr(BlankIfNull( _
+            JsonRuntime.JsonText(shippingState, "catalog_revision"))))
     End If
-    remoteProfit = Empty
-    If Not markup Is Nothing Then
-        If BooleanValue(JsonRuntime.JsonText(markup, "configured")) Then
-            remoteProfit = NumericOrBlank( _
-                JsonRuntime.JsonText(markup, "profit_percent"))
-            If Not IsEmpty(remoteProfit) Then remoteProfit = CDbl(remoteProfit) / 100#
-        End If
+
+    stale = False
+    If Not freshness Is Nothing Then
+        stale = BooleanValue(JsonRuntime.JsonText(freshness, "stale"))
+    ElseIf Not currencyState Is Nothing Then
+        stale = BooleanValue(JsonRuntime.JsonText(currencyState, "stale"))
     End If
-    stale = BooleanValue(JsonRuntime.JsonText(currencyState, "stale"))
     If Not stale Then
-        stale = CurrencyDateAgeDays(CStr(remoteDate)) > _
+        stale = CurrencyDateAgeDays(CStr(remoteCNYDate)) > _
+            CLng(Val(CStr(settings.Range("B25").Value2))) Or _
+            CurrencyDateAgeDays(CStr(remoteUSDDate)) > _
             CLng(Val(CStr(settings.Range("B25").Value2)))
     End If
 
@@ -501,16 +934,24 @@ Private Sub ApplyGlobalState(ByVal state As JsonValue)
     settings.Range("B11").Value = remoteUSD
     settings.Range("B12").Value = remoteDate
     settings.Range("B13").Value = remoteProfit
-    settings.Range("B14").Value = BlankIfNull( _
-        JsonRuntime.JsonText(state, "state_revision"))
+    settings.Range("B14").Value = remoteShipping
     settings.Range("B15").Value = BlankIfNull( _
         JsonRuntime.JsonText(state, "generated_at"))
+    settings.Range("G14").Value = BlankIfNull( _
+        JsonRuntime.JsonText(state, "state_revision"))
     settings.Range("G15").Value = stale
+    settings.Range("H14").Value = shippingCurrency
+    settings.Range("H15").Value = shippingRevision
+    settings.Range("H16").Value = remoteUSDDate
+    settings.Range("H17").Value = remoteCNYDate
 
     UpdateProposalCell settings.Range("B18"), settings.Range("G18"), remoteCNY
     UpdateProposalCell settings.Range("B19"), settings.Range("G19"), remoteUSD
     UpdateProposalCell settings.Range("B20"), settings.Range("G20"), remoteDate
     UpdateProposalCell settings.Range("B21"), settings.Range("G21"), remoteProfit
+    UpdateProposalCell settings.Range("B22"), settings.Range("G22"), remoteShipping
+    UpdateProposalDriftFlags settings, remoteCNY, remoteUSD, remoteDate, _
+        remoteProfit, remoteShipping
 End Sub
 
 Private Sub UpdateProposalCell(ByVal proposal As Range, _
@@ -527,25 +968,83 @@ Private Sub UpdateProposalCell(ByVal proposal As Range, _
     baseline.Value = remoteValue
 End Sub
 
-Private Function ImportPatrisContract(ByVal contract As JsonValue, _
-                                      ByVal siteRows As Object) As Long
-    Dim productsValue As JsonValue
-    Dim product As JsonValue
-    Dim siteRow As JsonValue
+Private Sub UpdateProposalDriftFlags(ByVal settings As Worksheet, _
+                                     ByVal remoteCNY As Variant, _
+                                     ByVal remoteUSD As Variant, _
+                                     ByVal remoteDate As Variant, _
+                                     ByVal remoteProfit As Variant, _
+                                     ByVal remoteShipping As Variant)
+    Dim threshold As Double
+    Dim mismatch As Boolean
+    Dim critical As Boolean
+
+    threshold = CDbl(settings.Range("B24").Value2)
+    CompareProposalNumber settings.Range("B18").Value2, remoteCNY, _
+        threshold, mismatch, critical
+    CompareProposalNumber settings.Range("B19").Value2, remoteUSD, _
+        threshold, mismatch, critical
+    CompareProposalNumber settings.Range("B21").Value2, remoteProfit, _
+        threshold, mismatch, critical
+    CompareProposalNumber settings.Range("B22").Value2, remoteShipping, _
+        threshold, mismatch, critical
+    If CanonicalCellText(settings.Range("B20").Value2) <> _
+       CanonicalCellText(remoteDate) Then mismatch = True
+    settings.Range("G39").Value2 = mismatch
+    settings.Range("G40").Value2 = critical
+End Sub
+
+Private Sub CompareProposalNumber(ByVal proposalValue As Variant, _
+                                  ByVal remoteValue As Variant, _
+                                  ByVal threshold As Double, _
+                                  ByRef mismatch As Boolean, _
+                                  ByRef critical As Boolean)
+    Dim proposalNumber As Variant
+    Dim remoteNumber As Variant
+    Dim difference As Double
+
+    proposalNumber = NumericOrBlank(proposalValue)
+    remoteNumber = NumericOrBlank(remoteValue)
+    If IsEmpty(proposalNumber) Or IsEmpty(remoteNumber) Then
+        If IsEmpty(proposalNumber) Xor IsEmpty(remoteNumber) Then
+            mismatch = True
+            critical = True
+        End If
+        Exit Sub
+    End If
+    If Abs(CDbl(proposalNumber) - CDbl(remoteNumber)) <= 0.000000001 Then _
+        Exit Sub
+    mismatch = True
+    If CDbl(remoteNumber) = 0 Then
+        critical = True
+    Else
+        difference = Abs(CDbl(proposalNumber) - CDbl(remoteNumber)) / _
+            Abs(CDbl(remoteNumber))
+        If difference > threshold Then critical = True
+    End If
+End Sub
+
+Private Function ImportReconciledCatalog(ByVal reconciledRows As Object) As Long
+    Dim reconciledRow As JsonValue
     Dim table As ListObject
     Dim syncTable As ListObject
     Dim mainOutput() As Variant
     Dim syncOutput() As Variant
-    Dim codesSeen As Object
     Dim shippingCounts As Object
     Dim profitCounts As Object
-    Dim dataRows As Long
-    Dim mainColumns As Long
-    Dim rowIndex As Long
+    Dim rowKey As Variant
+    Dim syncKey As String
+    Dim reconciliationStatus As String
+    Dim rowKind As String
     Dim codeValue As String
+    Dim patrisCodeValue As String
+    Dim wooIDValue As String
     Dim weightValue As Variant
     Dim foreignPrice As Variant
     Dim locationValue As String
+    Dim categoryValue As String
+    Dim priceWarning As String
+    Dim goodsCurrency As String
+    Dim shippingCurrency As String
     Dim profitValue As Variant
     Dim shippingValue As Variant
     Dim commonShipping As Variant
@@ -553,23 +1052,20 @@ Private Function ImportPatrisContract(ByVal contract As JsonValue, _
     Dim cnyValue As Variant
     Dim usdValue As Variant
     Dim rateDate As Variant
+    Dim dataRows As Long
+    Dim outputRow As Long
+    Dim matchedRows As Long
+    Dim sourceOnlyRows As Long
+    Dim wooOnlyRows As Long
+    Dim ambiguousRows As Long
 
-    Set productsValue = JsonRuntime.JsonMember(contract, "products")
-    If productsValue Is Nothing Or productsValue.Kind <> "array" Then
-        Err.Raise vbObjectError + 120, "ImportPatrisContract", _
-                  T("invalid_workbook")
-    End If
-    dataRows = JsonRuntime.JsonArrayCount(productsValue)
+    dataRows = reconciledRows.Count
     If dataRows < 1 Then
-        Err.Raise vbObjectError + 121, "ImportPatrisContract", _
+        Err.Raise vbObjectError + 126, "ImportReconciledCatalog", _
                   T("invalid_workbook")
     End If
-
-    mainColumns = IIf(IsAdvanced(), ADVANCED_COLUMN_COUNT, STANDARD_COLUMN_COUNT)
-    ReDim mainOutput(1 To dataRows, 1 To mainColumns)
+    ReDim mainOutput(1 To dataRows, 1 To PRODUCT_COLUMN_COUNT)
     ReDim syncOutput(1 To dataRows, 1 To SYNC_COLUMN_COUNT)
-    Set codesSeen = CreateObject("Scripting.Dictionary")
-    codesSeen.CompareMode = vbBinaryCompare
     Set shippingCounts = CreateObject("Scripting.Dictionary")
     Set profitCounts = CreateObject("Scripting.Dictionary")
 
@@ -577,127 +1073,192 @@ Private Function ImportPatrisContract(ByVal contract As JsonValue, _
     usdValue = PositiveNumericOrBlank(ConfigSheet().Range("B11").Value2)
     rateDate = ConfigSheet().Range("B12").Value2
 
-    For rowIndex = 1 To dataRows
-        Set product = JsonRuntime.JsonArrayItem(productsValue, rowIndex)
-        codeValue = Trim$(CStr(BlankIfNull( _
-            JsonRuntime.JsonText(product, "product_code"))))
-        If Len(codeValue) = 0 Or codesSeen.Exists(codeValue) Then
-            Err.Raise vbObjectError + 122, "ImportPatrisContract", _
+    For Each rowKey In reconciledRows.Keys
+        outputRow = outputRow + 1
+        Set reconciledRow = reconciledRows(CStr(rowKey))
+        syncKey = SiteText(reconciledRow, "sync_key")
+        If syncKey <> CStr(rowKey) Then
+            Err.Raise vbObjectError + 127, "ImportReconciledCatalog", _
                       T("invalid_workbook")
         End If
-        codesSeen.Add codeValue, True
+        reconciliationStatus = LCase$( _
+            SiteText(reconciledRow, "reconciliation_status"))
+        Select Case reconciliationStatus
+            Case "matched"
+                rowKind = T("row_kind_matched")
+                matchedRows = matchedRows + 1
+            Case "patris_only"
+                rowKind = T("row_kind_source_only")
+                sourceOnlyRows = sourceOnlyRows + 1
+            Case "woo_only"
+                rowKind = T("row_kind_woo_only")
+                wooOnlyRows = wooOnlyRows + 1
+            Case "ambiguous"
+                rowKind = T("row_kind_ambiguous")
+                ambiguousRows = ambiguousRows + 1
+                ConfigSheet().Range("G31").Value2 = True
+            Case Else
+                Err.Raise vbObjectError + 128, "ImportReconciledCatalog", _
+                          T("invalid_workbook")
+        End Select
 
-        Set siteRow = Nothing
-        If siteRows.Exists(codeValue) Then Set siteRow = siteRows(codeValue)
-        weightValue = NumericOrBlank(JsonRuntime.JsonText(product, "weight_grams"))
+        patrisCodeValue = SiteText(reconciledRow, "patris_code")
+        codeValue = patrisCodeValue
+        wooIDValue = SiteText(reconciledRow, "woocommerce_id")
+        Select Case reconciliationStatus
+            Case "matched"
+                If Len(wooIDValue) = 0 Or _
+                   syncKey <> "woo:" & wooIDValue Or _
+                   Len(patrisCodeValue) = 0 Then
+                    Err.Raise vbObjectError + 139, _
+                              "ImportReconciledCatalog", _
+                              T("invalid_workbook")
+                End If
+            Case "patris_only"
+                If Len(patrisCodeValue) = 0 Or _
+                   syncKey <> "patris:" & patrisCodeValue Then
+                    Err.Raise vbObjectError + 140, _
+                              "ImportReconciledCatalog", _
+                              T("invalid_workbook")
+                End If
+            Case "woo_only"
+                If Len(wooIDValue) = 0 Or _
+                   syncKey <> "woo:" & wooIDValue Then
+                    Err.Raise vbObjectError + 141, _
+                              "ImportReconciledCatalog", _
+                              T("invalid_workbook")
+                End If
+                If Len(codeValue) = 0 Then
+                    codeValue = SiteText(reconciledRow, "sku")
+                End If
+        End Select
+        weightValue = SiteNumeric(reconciledRow, "weight_grams")
         foreignPrice = PositiveNumericOrBlank( _
-            JsonRuntime.JsonText(product, "foreign_price"))
-        locationValue = Trim$(CStr(BlankIfNull( _
-            JsonRuntime.JsonText(product, "location"))))
-        profitValue = NumericOrBlank( _
-            JsonRuntime.JsonText(product, "markup_percent"))
-        If IsEmpty(profitValue) And Not siteRow Is Nothing Then
-            profitValue = NumericOrBlank( _
-                JsonRuntime.JsonText(siteRow, "profit_percent"))
-        End If
-        shippingValue = NumericOrBlank( _
-            JsonRuntime.JsonText(product, "shipping_price_per_kg"))
-        If IsEmpty(shippingValue) And Not siteRow Is Nothing Then
-            shippingValue = NumericOrBlank( _
-                JsonRuntime.JsonText(siteRow, "shipping_price_per_kg"))
-        End If
+            JsonRuntime.JsonText(reconciledRow, "foreign_price"))
+        locationValue = SiteText(reconciledRow, "patris_location")
+        categoryValue = SiteText(reconciledRow, "categories")
+        goodsCurrency = SiteText(reconciledRow, "foreign_currency")
+        shippingValue = SiteNumeric( _
+            reconciledRow, "shipping_price_per_kg")
+        shippingCurrency = SiteText( _
+            reconciledRow, "shipping_price_per_kg_currency")
+        profitValue = SiteNumeric( _
+            reconciledRow, "profit_margin_percent")
+
+        Select Case reconciliationStatus
+            Case "ambiguous"
+                priceWarning = T("ambiguous_woo_match")
+            Case "woo_only"
+                If Not IsEmpty(SiteNumeric( _
+                    reconciledRow, "effective_price")) Then
+                    priceWarning = T("woo_only_preserved_price")
+                Else
+                    priceWarning = T("woo_only_price_unavailable")
+                End If
+            Case Else
+                priceWarning = vbNullString
+                If IsEmpty(foreignPrice) Or IsEmpty(weightValue) Or _
+                   IsEmpty(shippingValue) Or IsEmpty(profitValue) Or _
+                   Len(goodsCurrency) = 0 Or Len(shippingCurrency) = 0 Then
+                    If reconciliationStatus = "matched" And _
+                       Not IsEmpty(SiteNumeric( _
+                           reconciledRow, "effective_price")) Then
+                        If IsEmpty(foreignPrice) Then
+                            priceWarning = T( _
+                                "preserved_price_missing_purchase")
+                        ElseIf IsEmpty(weightValue) Then
+                            priceWarning = T( _
+                                "preserved_price_missing_weight")
+                        Else
+                            priceWarning = T( _
+                                "preserved_price_incomplete")
+                        End If
+                    Else
+                        priceWarning = T( _
+                            "price_unavailable_incomplete")
+                    End If
+                End If
+        End Select
         CountNumericValue shippingCounts, shippingValue
         CountNumericValue profitCounts, profitValue
 
-        mainOutput(rowIndex, 1) = Empty
-        mainOutput(rowIndex, 2) = weightValue
-        mainOutput(rowIndex, 3) = BuildOtherText(weightValue, locationValue)
-        mainOutput(rowIndex, 4) = PositiveNumericOrBlank( _
-            JsonRuntime.JsonText(product, "sale_price_source"))
-        mainOutput(rowIndex, 5) = foreignPrice
-        mainOutput(rowIndex, 6) = NumericOrBlank( _
-            JsonRuntime.JsonText(product, "total_stock"))
-        mainOutput(rowIndex, 7) = codeValue
-        mainOutput(rowIndex, 8) = BlankIfNull( _
-            JsonRuntime.JsonText(product, "name"))
+        mainOutput(outputRow, 1) = Empty
+        mainOutput(outputRow, 2) = weightValue
+        mainOutput(outputRow, 3) = BuildOtherText( _
+            weightValue, locationValue)
+        mainOutput(outputRow, 4) = locationValue
+        mainOutput(outputRow, 5) = foreignPrice
+        mainOutput(outputRow, 6) = FirstNumeric( _
+            SiteNumeric(reconciledRow, "patris_total_stock"), _
+            SiteNumeric(reconciledRow, "stock_quantity"))
+        mainOutput(outputRow, 7) = codeValue
+        mainOutput(outputRow, 8) = SiteText(reconciledRow, "name")
+        mainOutput(outputRow, 9) = wooIDValue
+        mainOutput(outputRow, 10) = categoryValue
 
-        syncOutput(rowIndex, 1) = codeValue
-        syncOutput(rowIndex, 2) = FirstText( _
-            JsonRuntime.JsonText(product, "foreign_currency"), _
-            SiteText(siteRow, "foreign_currency"), vbNullString)
-        syncOutput(rowIndex, 3) = shippingValue
-        syncOutput(rowIndex, 4) = FirstText( _
-            JsonRuntime.JsonText(product, "shipping_price_per_kg_currency"), _
-            SiteText(siteRow, "shipping_price_per_kg_currency"), vbNullString)
-        syncOutput(rowIndex, 5) = profitValue
-        syncOutput(rowIndex, 6) = FirstNumeric( _
-            cnyValue, JsonRuntime.JsonText(product, "irt_per_cny"))
-        syncOutput(rowIndex, 7) = usdValue
-        syncOutput(rowIndex, 8) = FirstText( _
-            rateDate, JsonRuntime.JsonText(product, "currency_effective_date"), vbNullString)
-        syncOutput(rowIndex, 9) = SiteNumeric(siteRow, "woocommerce_id")
-        syncOutput(rowIndex, 10) = SiteNumeric(siteRow, "effective_price")
-        syncOutput(rowIndex, 11) = SiteText(siteRow, "updated_at")
-        syncOutput(rowIndex, 12) = SiteText(siteRow, "record_revision")
-        syncOutput(rowIndex, 13) = SiteText(siteRow, "permalink")
-        syncOutput(rowIndex, 14) = profitValue
-        syncOutput(rowIndex, 15) = FirstNumeric( _
-            JsonRuntime.JsonText(product, "final_price"), _
-            SiteNumeric(siteRow, "patris_final_price"))
-        syncOutput(rowIndex, 16) = SiteNumeric(siteRow, "sale_price")
+        syncOutput(outputRow, 1) = syncKey
+        syncOutput(outputRow, 2) = goodsCurrency
+        syncOutput(outputRow, 3) = shippingValue
+        syncOutput(outputRow, 4) = shippingCurrency
+        syncOutput(outputRow, 5) = profitValue
+        syncOutput(outputRow, 6) = cnyValue
+        syncOutput(outputRow, 7) = usdValue
+        syncOutput(outputRow, 8) = rateDate
+        syncOutput(outputRow, 9) = wooIDValue
+        syncOutput(outputRow, 10) = SiteNumeric( _
+            reconciledRow, "effective_price")
+        syncOutput(outputRow, 11) = SiteText(reconciledRow, "updated_at")
+        syncOutput(outputRow, 12) = SiteText( _
+            reconciledRow, "record_revision")
+        syncOutput(outputRow, 13) = SiteText(reconciledRow, "permalink")
+        syncOutput(outputRow, 14) = profitValue
+        syncOutput(outputRow, 15) = SiteNumeric( _
+            reconciledRow, "patris_final_price")
+        syncOutput(outputRow, 16) = SiteNumeric( _
+            reconciledRow, "sale_price")
+        syncOutput(outputRow, 17) = categoryValue
+        syncOutput(outputRow, 18) = SiteText( _
+            reconciledRow, "publication_status")
+        syncOutput(outputRow, 19) = priceWarning
+        syncOutput(outputRow, 20) = rowKind
+    Next rowKey
 
-        If mainColumns = ADVANCED_COLUMN_COUNT Then
-            mainOutput(rowIndex, 9) = syncOutput(rowIndex, 9)
-            mainOutput(rowIndex, 10) = syncOutput(rowIndex, 10)
-            mainOutput(rowIndex, 11) = Empty
-            mainOutput(rowIndex, 12) = Empty
-            mainOutput(rowIndex, 13) = syncOutput(rowIndex, 2)
-            mainOutput(rowIndex, 14) = profitValue
-            mainOutput(rowIndex, 15) = shippingValue
-            mainOutput(rowIndex, 16) = syncOutput(rowIndex, 8)
-        End If
-    Next rowIndex
+    If matchedRows <> CLng(Val(CStr(ConfigSheet().Range("G34").Value2))) Or _
+       sourceOnlyRows <> CLng(Val(CStr(ConfigSheet().Range("G35").Value2))) Or _
+       wooOnlyRows <> CLng(Val(CStr(ConfigSheet().Range("G36").Value2))) Or _
+       dataRows <> CLng(Val(CStr(ConfigSheet().Range("G38").Value2))) Then
+        Err.Raise vbObjectError + 129, "ImportReconciledCatalog", _
+                  T("invalid_workbook")
+    End If
+    ConfigSheet().Range("G37").Value2 = ambiguousRows
 
     commonShipping = MostCommonNumeric(shippingCounts)
     commonProfit = MostCommonNumeric(profitCounts)
-    If Len(CanonicalCellText(ConfigSheet().Range("B22").Value2)) = 0 Then
+    If Len(CanonicalCellText(ConfigSheet().Range("B14").Value2)) = 0 And _
+       Not IsEmpty(commonShipping) Then
+        ConfigSheet().Range("B14").Value = commonShipping
+    End If
+    If Len(CanonicalCellText(ConfigSheet().Range("B22").Value2)) = 0 And _
+       Not IsEmpty(commonShipping) Then
         ConfigSheet().Range("B22").Value = commonShipping
+    End If
+    If Len(CanonicalCellText(ConfigSheet().Range("B13").Value2)) = 0 And _
+       Not IsEmpty(commonProfit) Then
+        ConfigSheet().Range("B13").Value = CDbl(commonProfit) / 100#
     End If
     If Len(CanonicalCellText(ConfigSheet().Range("B21").Value2)) = 0 And _
        Not IsEmpty(commonProfit) Then
         ConfigSheet().Range("B21").Value = CDbl(commonProfit) / 100#
     End If
-    For rowIndex = 1 To dataRows
-        If IsEmpty(syncOutput(rowIndex, 3)) Then
-            syncOutput(rowIndex, 3) = ConfigSheet().Range("B22").Value2
-            If Len(CanonicalCellText(syncOutput(rowIndex, 3))) > 0 And _
-               Len(CanonicalCellText(syncOutput(rowIndex, 4))) = 0 Then
-                syncOutput(rowIndex, 4) = "CNY"
-            End If
-            If mainColumns = ADVANCED_COLUMN_COUNT Then
-                mainOutput(rowIndex, 15) = syncOutput(rowIndex, 3)
-            End If
-        End If
-        If IsEmpty(syncOutput(rowIndex, 5)) Then
-            If IsNumeric(ConfigSheet().Range("B13").Value2) Then
-                syncOutput(rowIndex, 5) = _
-                    CDbl(ConfigSheet().Range("B13").Value2) * 100#
-                syncOutput(rowIndex, 14) = syncOutput(rowIndex, 5)
-                If mainColumns = ADVANCED_COLUMN_COUNT Then
-                    mainOutput(rowIndex, 14) = syncOutput(rowIndex, 5)
-                End If
-            End If
-        End If
-    Next rowIndex
 
     Set table = PriceSheet().ListObjects(PRODUCTS_TABLE)
     Set syncTable = SyncSheet().ListObjects(SYNC_TABLE)
-    ReplaceTableData table, mainOutput, dataRows, mainColumns
+    ReplaceTableData table, mainOutput, dataRows, PRODUCT_COLUMN_COUNT
     ReplaceTableData syncTable, syncOutput, dataRows, SYNC_COLUMN_COUNT
     ApplyProductTableFormulas table
     ApplyProductTableFormatting table
     ApplyWooLinks table, syncTable
-    ImportPatrisContract = dataRows
+    ImportReconciledCatalog = dataRows
 End Function
 
 Private Sub ReplaceTableData(ByVal table As ListObject, _
@@ -715,64 +1276,102 @@ Private Sub ReplaceTableData(ByVal table As ListObject, _
     table.Resize parentSheet.Range( _
         parentSheet.Cells(firstRow, firstColumn), _
         parentSheet.Cells(firstRow + dataRows, firstColumn + dataColumns - 1))
+    If table.Name = SYNC_TABLE Then
+        parentSheet.Cells(firstRow + 1, firstColumn).Resize( _
+            dataRows, 1).NumberFormat = "@"
+    End If
     parentSheet.Cells(firstRow + 1, firstColumn).Resize( _
         dataRows, dataColumns).Value = output
 End Sub
 
 Private Sub ApplyProductTableFormulas(ByVal table As ListObject)
     Dim priceFormula As String
-    Dim differenceFormula As String
-    Dim statusFormula As String
+    Dim fallbackFormula As String
+    Dim readyFormula As String
+    Dim lookupExpression As String
+    Dim eligibleKindFormula As String
 
     If table.DataBodyRange Is Nothing Then Exit Sub
+    lookupExpression = _
+        "IF(RC[8]<>"""",""woo:""&RC[8],""patris:""&RC[6])"
+    eligibleKindFormula = _
+        "OR(VLOOKUP(" & lookupExpression & ",SyncData,20,FALSE)=""" & _
+        T("row_kind_matched") & """,VLOOKUP(" & lookupExpression & _
+        ",SyncData,20,FALSE)=""" & T("row_kind_source_only") & """)"
+    fallbackFormula = _
+        "IFERROR(IF(VLOOKUP(" & lookupExpression & _
+        ",SyncData,10,FALSE)>0,VLOOKUP(" & lookupExpression & _
+        ",SyncData,10,FALSE),""""),"""")"
+    readyFormula = _
+        "AND(" & eligibleKindFormula & ",RC[4]<>"""",RC[4]>0," & _
+        "RC[1]<>"""",RC[1]>=0," & _
+        "VLOOKUP(" & lookupExpression & ",SyncData,3,FALSE)<>""""," & _
+        "VLOOKUP(" & lookupExpression & ",SyncData,3,FALSE)>=0," & _
+        "VLOOKUP(" & lookupExpression & ",SyncData,5,FALSE)<>""""," & _
+        "VLOOKUP(" & lookupExpression & ",SyncData,5,FALSE)>=0," & _
+        "OR(AND(VLOOKUP(" & lookupExpression & _
+        ",SyncData,2,FALSE)=""CNY"",VLOOKUP(" & lookupExpression & _
+        ",SyncData,6,FALSE)>0),AND(VLOOKUP(" & lookupExpression & _
+        ",SyncData,2,FALSE)=""USD"",VLOOKUP(" & lookupExpression & _
+        ",SyncData,7,FALSE)>0),VLOOKUP(" & lookupExpression & _
+        ",SyncData,2,FALSE)=""IRR"",VLOOKUP(" & lookupExpression & _
+        ",SyncData,2,FALSE)=""IRT"")," & _
+        "OR(AND(VLOOKUP(" & lookupExpression & _
+        ",SyncData,4,FALSE)=""CNY"",VLOOKUP(" & lookupExpression & _
+        ",SyncData,6,FALSE)>0),AND(VLOOKUP(" & lookupExpression & _
+        ",SyncData,4,FALSE)=""USD"",VLOOKUP(" & lookupExpression & _
+        ",SyncData,7,FALSE)>0),VLOOKUP(" & lookupExpression & _
+        ",SyncData,4,FALSE)=""IRR"",VLOOKUP(" & lookupExpression & _
+        ",SyncData,4,FALSE)=""IRT""))"
     priceFormula = _
-        "=IFERROR(IF(RC[4]="""","""",ROUND((" & _
-        "(RC[4]*IF(VLOOKUP(RC[6],SyncData,2,FALSE)=""CNY""," & _
-        "VLOOKUP(RC[6],SyncData,6,FALSE),IF(VLOOKUP(RC[6],SyncData,2,FALSE)=""USD""," & _
-        "VLOOKUP(RC[6],SyncData,7,FALSE),IF(VLOOKUP(RC[6],SyncData,2,FALSE)=""IRR"",0.1," & _
-        "IF(VLOOKUP(RC[6],SyncData,2,FALSE)=""IRT"",1,NA())))))+" & _
-        "IF(OR(RC[1]="""",VLOOKUP(RC[6],SyncData,3,FALSE)=""""),0," & _
-        "(RC[1]/1000)*VLOOKUP(RC[6],SyncData,3,FALSE)*" & _
-        "IF(VLOOKUP(RC[6],SyncData,4,FALSE)=""CNY"",VLOOKUP(RC[6],SyncData,6,FALSE)," & _
-        "IF(VLOOKUP(RC[6],SyncData,4,FALSE)=""USD"",VLOOKUP(RC[6],SyncData,7,FALSE)," & _
-        "IF(VLOOKUP(RC[6],SyncData,4,FALSE)=""IRR"",0.1," & _
-        "IF(VLOOKUP(RC[6],SyncData,4,FALSE)=""IRT"",1,NA()))))))" & _
-        "*(1+VLOOKUP(RC[6],SyncData,5,FALSE)/100),0)),"""")"
+        "=IFERROR(IF(" & readyFormula & ",ROUND((" & _
+        "(RC[4]*IF(VLOOKUP(" & lookupExpression & _
+        ",SyncData,2,FALSE)=""CNY"",VLOOKUP(" & lookupExpression & _
+        ",SyncData,6,FALSE),IF(VLOOKUP(" & lookupExpression & _
+        ",SyncData,2,FALSE)=""USD"",VLOOKUP(" & lookupExpression & _
+        ",SyncData,7,FALSE),IF(VLOOKUP(" & lookupExpression & _
+        ",SyncData,2,FALSE)=""IRR"",0.1,IF(VLOOKUP(" & lookupExpression & _
+        ",SyncData,2,FALSE)=""IRT"",1,NA())))))+" & _
+        "IF(OR(RC[1]="""",VLOOKUP(" & lookupExpression & _
+        ",SyncData,3,FALSE)=""""),0,(RC[1]/1000)*VLOOKUP(" & _
+        lookupExpression & ",SyncData,3,FALSE)*IF(VLOOKUP(" & _
+        lookupExpression & ",SyncData,4,FALSE)=""CNY"",VLOOKUP(" & _
+        lookupExpression & ",SyncData,6,FALSE),IF(VLOOKUP(" & _
+        lookupExpression & ",SyncData,4,FALSE)=""USD"",VLOOKUP(" & _
+        lookupExpression & ",SyncData,7,FALSE),IF(VLOOKUP(" & _
+        lookupExpression & ",SyncData,4,FALSE)=""IRR"",0.1,IF(VLOOKUP(" & _
+        lookupExpression & ",SyncData,4,FALSE)=""IRT"",1,NA()))))))" & _
+        "*(1+VLOOKUP(" & lookupExpression & ",SyncData,5,FALSE)/100),0)," & _
+        fallbackFormula & ")," & fallbackFormula & ")"
     table.ListColumns(1).DataBodyRange.FormulaR1C1 = priceFormula
-
-    If table.ListColumns.Count = ADVANCED_COLUMN_COUNT Then
-        differenceFormula = _
-            "=IFERROR(IF(OR(RC[-10]="""",RC[-1]="""",RC[-1]=0),""""," & _
-            "(RC[-10]-RC[-1])/RC[-1]),"""")"
-        table.ListColumns(11).DataBodyRange.FormulaR1C1 = differenceFormula
-        statusFormula = _
-            "=IFERROR(IF(RC[-11]="""",""" & T("price_missing") & """," & _
-            "IF(RC[-2]="""",""" & T("woo_missing") & """," & _
-            "IF('" & ConfigSheet().Name & "'!R15C7=TRUE,""" & T("status_stale") & """," & _
-            "IF(VLOOKUP(RC[-5],SyncData,16,FALSE)<>"""",""" & T("status_sale") & """," & _
-            "IF(ABS(RC[-1])>'" & ConfigSheet().Name & "'!R24C2,""" & T("status_drift") & """," & _
-            "IF(ABS(RC[-1])>0.000001,""" & T("status_sync") & """,""" & _
-            T("matched") & """)))))),"""")"
-        table.ListColumns(12).DataBodyRange.FormulaR1C1 = statusFormula
-    End If
 End Sub
 
 Private Sub ApplyProductTableFormatting(ByVal table As ListObject)
+    Dim highlightRule As FormatCondition
+
     If table.DataBodyRange Is Nothing Then Exit Sub
     table.ListColumns(1).DataBodyRange.NumberFormat = "#,##0"
-    table.ListColumns(2).DataBodyRange.NumberFormat = "#,##0.########"
-    table.ListColumns(4).DataBodyRange.NumberFormat = "#,##0.########"
-    table.ListColumns(5).DataBodyRange.NumberFormat = "#,##0.########"
-    table.ListColumns(6).DataBodyRange.NumberFormat = "#,##0.########"
+    table.ListColumns(2).DataBodyRange.NumberFormat = "General"
+    table.ListColumns(5).DataBodyRange.NumberFormat = "General"
+    table.ListColumns(6).DataBodyRange.NumberFormat = "General"
     table.ListColumns(7).DataBodyRange.NumberFormat = "@"
-    If table.ListColumns.Count = ADVANCED_COLUMN_COUNT Then
-        table.ListColumns(9).DataBodyRange.NumberFormat = "0"
-        table.ListColumns(10).DataBodyRange.NumberFormat = "#,##0"
-        table.ListColumns(11).DataBodyRange.NumberFormat = "0.0%"
-        table.ListColumns(14).DataBodyRange.NumberFormat = "0.00""%"""
-        table.ListColumns(15).DataBodyRange.NumberFormat = "#,##0.######"
-        table.ListColumns(16).DataBodyRange.NumberFormat = "yyyy/mm/dd"
-    End If
+    table.ListColumns(9).DataBodyRange.NumberFormat = "@"
+    table.ListColumns(1).DataBodyRange.ReadingOrder = xlLTR
+    table.ListColumns(2).DataBodyRange.ReadingOrder = xlLTR
+    table.ListColumns(5).DataBodyRange.ReadingOrder = xlLTR
+    table.ListColumns(6).DataBodyRange.ReadingOrder = xlLTR
+    table.ListColumns(7).DataBodyRange.ReadingOrder = xlLTR
+    table.ListColumns(9).DataBodyRange.ReadingOrder = xlLTR
+    table.ListColumns(7).DataBodyRange.Font.Name = "Yekan Bakh"
+    table.ListColumns(9).DataBodyRange.Font.Name = "Yekan Bakh"
+    table.ListColumns(8).DataBodyRange.Font.Name = "Yekan Bakh"
+    table.ListColumns(8).DataBodyRange.Font.Bold = True
+    table.DataBodyRange.Rows.RowHeight = 24
+    table.DataBodyRange.FormatConditions.Delete
+    Set highlightRule = table.DataBodyRange.FormatConditions.Add( _
+        Type:=xlExpression, _
+        Formula1:="=ROW()=SelectedProductRow")
+    highlightRule.Interior.Color = RGB(255, 244, 204)
 End Sub
 
 Private Sub ApplyWooLinks(ByVal table As ListObject, _
@@ -791,60 +1390,71 @@ Private Sub ApplyWooLinkRow(ByVal table As ListObject, _
     Dim wooID As String
     Dim permalink As String
     Dim linkText As String
+    Dim publicationStatus As String
     Dim linkCell As Range
-    Dim isAdvanced As Boolean
+    Dim wooCell As Range
 
     On Error GoTo RowFailed
-    isAdvanced = (table.ListColumns.Count = ADVANCED_COLUMN_COUNT)
     wooID = Trim$(CStr(syncTable.DataBodyRange.Cells(rowIndex, 9).Value2))
     permalink = Trim$(CStr(syncTable.DataBodyRange.Cells(rowIndex, 13).Value2))
-    If isAdvanced Then
-        Set linkCell = table.DataBodyRange.Cells(rowIndex, 9)
-        linkText = vbNullString
-    Else
-        Set linkCell = table.DataBodyRange.Cells(rowIndex, 8)
-        linkText = CStr(linkCell.Value2)
-    End If
+    publicationStatus = LCase$(Trim$(CStr( _
+        syncTable.DataBodyRange.Cells(rowIndex, 18).Value2)))
+    Set linkCell = table.DataBodyRange.Cells(rowIndex, 8)
+    Set wooCell = table.DataBodyRange.Cells(rowIndex, 9)
+    linkText = CStr(linkCell.Value2)
+
+    wooCell.NumberFormat = "@"
+    wooCell.ReadingOrder = xlLTR
+    wooCell.Font.Name = "Yekan Bakh"
+    wooCell.Value2 = wooID
+    linkCell.Hyperlinks.Delete
+    linkCell.Value2 = linkText
+    linkCell.Font.Name = "Yekan Bakh"
+    linkCell.Font.Bold = True
+    Select Case publicationStatus
+        Case "publish"
+            linkCell.Font.Color = RGB(1, 104, 205)
+        Case "draft", "pending", "private", "future"
+            linkCell.Font.Color = RGB(180, 111, 0)
+        Case Else
+            linkCell.Font.Color = RGB(164, 40, 40)
+    End Select
 
     If Len(wooID) = 0 Then
-        On Error Resume Next
-        linkCell.Hyperlinks.Delete
-        If isAdvanced Then linkCell.ClearContents
-        Err.Clear
-        On Error GoTo 0
+        linkCell.Font.Color = RGB(164, 40, 40)
         Exit Sub
     End If
-
-    If Len(linkText) > 0 Then linkText = linkText & " - "
-    linkText = linkText & "WooID " & wooID
-
-    On Error Resume Next
-    linkCell.Hyperlinks.Delete
-    Err.Clear
-    On Error GoTo RowFailed
-    linkCell.NumberFormat = "@"
-    linkCell.Value2 = linkText
-
-    If isAdvanced Then
-        On Error Resume Next
-        linkCell.HorizontalAlignment = xlLeft
-        linkCell.ReadingOrder = xlLTR
-        Err.Clear
-        On Error GoTo RowFailed
+    If Len(linkText) = 0 Then
+        linkText = wooID
+        linkCell.Value2 = linkText
     End If
 
     If IsAllowedDigitalogicUrl(permalink) Then
         table.Parent.Hyperlinks.Add _
             Anchor:=linkCell, Address:=permalink, _
             TextToDisplay:=linkText
+        linkCell.Font.Bold = True
+        Select Case publicationStatus
+            Case "publish"
+                linkCell.Font.Color = RGB(1, 104, 205)
+            Case "draft", "pending", "private", "future"
+                linkCell.Font.Color = RGB(180, 111, 0)
+            Case Else
+                linkCell.Font.Color = RGB(164, 40, 40)
+        End Select
     End If
     Exit Sub
 
 RowFailed:
     On Error Resume Next
+    If Not wooCell Is Nothing Then
+        wooCell.NumberFormat = "@"
+        wooCell.Value2 = wooID
+    End If
     If Not linkCell Is Nothing And Len(linkText) > 0 Then
-        linkCell.NumberFormat = "@"
         linkCell.Value2 = linkText
+        linkCell.Font.Bold = True
+        linkCell.Font.Color = RGB(164, 40, 40)
     End If
     Err.Clear
     On Error GoTo 0
@@ -856,7 +1466,6 @@ Private Function PriceParitySummary() As Variant
     Dim rowIndex As Long
     Dim calculated As Variant
     Dim wooPrice As Variant
-    Dim salePrice As Variant
     Dim difference As Double
     Dim threshold As Double
     Dim matched As Long
@@ -875,10 +1484,8 @@ Private Function PriceParitySummary() As Variant
             table.DataBodyRange.Cells(rowIndex, 1).Value2)
         wooPrice = NumericOrBlank( _
             syncTable.DataBodyRange.Cells(rowIndex, 10).Value2)
-        salePrice = NumericOrBlank( _
-            syncTable.DataBodyRange.Cells(rowIndex, 16).Value2)
-        If IsEmpty(salePrice) And Not IsEmpty(calculated) And _
-           Not IsEmpty(wooPrice) And CDbl(wooPrice) > 0 Then
+        If Not IsEmpty(calculated) And Not IsEmpty(wooPrice) And _
+           CDbl(wooPrice) > 0 Then
             difference = Abs(CDbl(calculated) - CDbl(wooPrice)) / CDbl(wooPrice)
             If difference <= 0.000001 Then
                 matched = matched + 1
@@ -891,7 +1498,10 @@ Private Function PriceParitySummary() As Variant
 End Function
 
 Private Function StateRequestJson(ByVal page As Long) As String
+    Dim requestID As String
+
     EnsureSourceIdentity
+    requestID = NewRequestID("state")
     StateRequestJson = _
         "{""schema"":" & JsonString(PRICING_REQUEST_SCHEMA) & "," & _
         """schema_version"":1," & _
@@ -899,6 +1509,9 @@ Private Function StateRequestJson(ByVal page As Long) As String
         """id"":" & JsonString(mSourceID) & "," & _
         """dataset"":" & JsonString(mSourceDataset) & "," & _
         """revision"":" & JsonString(mSourceRevision) & "}," & _
+        """client_id"":" & JsonString(PRICING_CONTRACT_CLIENT_ID) & "," & _
+        """channel"":" & JsonString(PRICING_CONTRACT_CHANNEL) & "," & _
+        """request_id"":" & JsonString(requestID) & "," & _
         """page"":" & CStr(page) & "," & _
         """limit"":" & CStr(STATE_PAGE_SIZE) & ",""locale"":""fa""}"
 End Function
@@ -911,27 +1524,49 @@ Private Function BuildPricingRequest(ByVal operationName As String, _
     Dim settings As Worksheet
     Dim body As String
     Dim profitPercent As Variant
+    Dim shippingCurrency As String
+    Dim shippingRevision As String
+    Dim usdEffectiveDate As String
+    Dim cnyEffectiveDate As String
 
     Set settings = ConfigSheet()
+    If BooleanValue(settings.Range("G31").Value2) Then
+        Err.Raise vbObjectError + 163, "BuildPricingRequest", _
+                  T("identity_warning")
+    End If
     If Len(expectedRevision) = 0 Then
-        expectedRevision = Trim$(CStr(settings.Range("B14").Value2))
+        expectedRevision = Trim$(CStr(settings.Range("G14").Value2))
     End If
     profitPercent = Empty
     If IsNumeric(settings.Range("B21").Value2) Then
         profitPercent = CDbl(settings.Range("B21").Value2) * 100#
     End If
+    shippingCurrency = UCase$(Trim$(CStr(settings.Range("H14").Value2)))
+    shippingRevision = Trim$(CStr(settings.Range("H15").Value2))
+    usdEffectiveDate = Trim$(CStr(settings.Range("H16").Value2))
+    cnyEffectiveDate = Trim$(CStr(settings.Range("B20").Value2))
+    ValidatePricingSettings settings, profitPercent, shippingCurrency, _
+        shippingRevision, usdEffectiveDate, cnyEffectiveDate
 
     body = "{""schema"":" & JsonString(PRICING_REQUEST_SCHEMA) & "," & _
         """schema_version"":1," & _
         """operation"":" & JsonString(operationName) & "," & _
+        """client_id"":" & JsonString(PRICING_CONTRACT_CLIENT_ID) & "," & _
+        """channel"":" & JsonString(PRICING_CONTRACT_CHANNEL) & "," & _
+        """request_id"":" & JsonString(requestID) & "," & _
         """idempotency_key"":" & JsonString(requestID) & "," & _
         """expected_state_revision"":" & _
         JsonString(expectedRevision) & "," & _
         """settings"":{" & _
         """dollar_price"":" & JsonNumberOrNull(settings.Range("B19").Value2) & "," & _
         """yuan_price"":" & JsonNumberOrNull(settings.Range("B18").Value2) & "," & _
-        """effective_date"":" & JsonString(Trim$(CStr(settings.Range("B20").Value2))) & "," & _
-        """default_profit_percent"":" & JsonNumberOrNull(profitPercent) & "}," & _
+        """effective_date"":" & JsonString(cnyEffectiveDate) & "," & _
+        """usd_effective_date"":" & JsonString(usdEffectiveDate) & "," & _
+        """cny_effective_date"":" & JsonString(cnyEffectiveDate) & "," & _
+        """profit_margin_percent"":" & JsonNumberOrNull(profitPercent) & "," & _
+        """air_express_price_per_kg"":" & JsonNumberOrNull(settings.Range("B22").Value2) & "," & _
+        """air_express_currency"":" & JsonString(shippingCurrency) & "," & _
+        """shipping_catalog_revision"":" & JsonString(shippingRevision) & "}," & _
         """product_changes"":[]"
     If Len(previewDigest) > 0 Then
         body = body & ",""preview_digest"":" & JsonString(previewDigest)
@@ -941,6 +1576,41 @@ Private Function BuildPricingRequest(ByVal operationName As String, _
     End If
     BuildPricingRequest = body & "}"
 End Function
+
+Private Sub ValidatePricingSettings(ByVal settings As Worksheet, _
+                                    ByVal profitPercent As Variant, _
+                                    ByVal shippingCurrency As String, _
+                                    ByVal shippingRevision As String, _
+                                    ByVal usdEffectiveDate As String, _
+                                    ByVal cnyEffectiveDate As String)
+    Dim dateText As String
+
+    dateText = Trim$(CStr(settings.Range("B20").Value2))
+    If Not IsNumeric(settings.Range("B18").Value2) Then GoTo InvalidSettings
+    If CDbl(settings.Range("B18").Value2) <= 0 Then GoTo InvalidSettings
+    If Not IsNumeric(settings.Range("B19").Value2) Then GoTo InvalidSettings
+    If CDbl(settings.Range("B19").Value2) <= 0 Then GoTo InvalidSettings
+    If Len(dateText) <> 10 Then GoTo InvalidSettings
+    If Mid$(dateText, 5, 1) <> "-" Then GoTo InvalidSettings
+    If Mid$(dateText, 8, 1) <> "-" Then GoTo InvalidSettings
+    If cnyEffectiveDate <> dateText Then GoTo InvalidSettings
+    If Len(usdEffectiveDate) <> 10 Then GoTo InvalidSettings
+    If Mid$(usdEffectiveDate, 5, 1) <> "-" Then GoTo InvalidSettings
+    If Mid$(usdEffectiveDate, 8, 1) <> "-" Then GoTo InvalidSettings
+    If IsEmpty(profitPercent) Or IsNull(profitPercent) Then GoTo InvalidSettings
+    If Not IsNumeric(profitPercent) Then GoTo InvalidSettings
+    If CDbl(profitPercent) < 0 Or CDbl(profitPercent) > 1000 Then GoTo InvalidSettings
+    If Not IsNumeric(settings.Range("B22").Value2) Then GoTo InvalidSettings
+    If CDbl(settings.Range("B22").Value2) <= 0 Then GoTo InvalidSettings
+    If shippingCurrency <> "CNY" And shippingCurrency <> "IRR" Then GoTo InvalidSettings
+    If Len(shippingRevision) <> 71 Then GoTo InvalidSettings
+    If Left$(shippingRevision, 7) <> "sha256:" Then GoTo InvalidSettings
+    Exit Sub
+
+InvalidSettings:
+    Err.Raise vbObjectError + 164, "ValidatePricingSettings", _
+              T("settings_required")
+End Sub
 
 Private Function PricingEndpoint(ByVal operationName As String) As String
     PricingEndpoint = PricingBaseURL() & "/" & operationName
@@ -1247,6 +1917,7 @@ Private Function CurrencyDateAgeDays(ByVal value As String) As Long
             CLng(Left$(normalized, 4)), _
             CLng(Mid$(normalized, 6, 2)), _
             CLng(Right$(normalized, 2)))
+        If parsedDate > Date Then GoTo InvalidDate
         CurrencyDateAgeDays = DateDiff("d", parsedDate, Date)
         Exit Function
     End If
@@ -1317,7 +1988,8 @@ Private Function SafeStatusError(ByVal message As String) As String
 End Function
 
 Private Function PriceSheet() As Worksheet
-    Set PriceSheet = ThisWorkbook.Worksheets(U("064406CC0633062A0020064206CC0645062A"))
+    Set PriceSheet = ThisWorkbook.Worksheets( _
+        U("0645062D0635064806440627062A"))
 End Function
 
 Private Function ConfigSheet() As Worksheet
@@ -1327,11 +1999,6 @@ End Function
 Private Function SyncSheet() As Worksheet
     Set SyncSheet = ThisWorkbook.Worksheets( _
         U("062F0627062F0647200C0647062706CC00200647064506AF06270645200C06330627063206CC"))
-End Function
-
-Private Function IsAdvanced() As Boolean
-    IsAdvanced = LCase$(Trim$(CStr( _
-        ConfigSheet().Range("G8").Value2))) = "advanced"
 End Function
 
 Private Sub ValidateUnicodeRuntime()
@@ -1366,6 +2033,12 @@ Private Function T(ByVal key As String) As String
             T = U("06A906270644062706CC00200648064806A90627064506310633")
         Case "matched"
             T = U("0647064506270647064606AF")
+        Case "price_matched"
+            T = U("064206CC0645062A00200647064506270647064606AF")
+        Case "source_only"
+            T = U("0641064206370020063306270645062706460647002006A9062706440627")
+        Case "woo_only"
+            T = U("06410642063700200648064806A90627064506310633")
         Case "over_limit"
             T = U("06A906270644062700200628062700200627062E062A0644062706410020062806CC06340020062706320020062D062F00200645062C06270632")
         Case "stale_rate"
@@ -1398,6 +2071,42 @@ Private Function T(ByVal key As String) As String
             T = U("064606CC0627063200200628064700200647064506AF06270645200C06330627063206CC")
         Case "status_sale"
             T = U("06410631064806340020064806CC0698064700200641063906270644")
+        Case "search_title"
+            T = U("062C0633062A200C0648062C064806CC00200645062D063506480644")
+        Case "search_missing"
+            T = U("0645062D06350648064406CC00200628062700200639062806270631062A0020064806270631062F0020067E06CC062F0627002006460634062F002E")
+        Case "preserved_price_missing_weight"
+            T = U("064806320646002006A906270644062700200646062706450648062C0648062F002006270633062A061B0020064206CC0645062A00200633062706CC062A0020062D0641063800200634062F002E")
+        Case "preserved_price_missing_purchase"
+            T = U("064206CC0645062A0020062E063106CC062F00200646062706450648062C0648062F002006270633062A061B0020064206CC0645062A00200633062706CC062A0020062D0641063800200634062F002E")
+        Case "preserved_price_incomplete"
+            T = U("062706370644062706390627062A0020064206CC0645062A200C06AF06300627063106CC00200646062706420635002006270633062A061B0020064206CC0645062A00200633062706CC062A0020062D0641063800200634062F002E")
+        Case "price_unavailable_incomplete"
+            T = U("062706370644062706390627062A0020064206CC0645062A200C06AF06300627063106CC00200646062706420635002006270633062A061B0020064206CC0645062A002006460645062706CC06340020062F0627062F064700200646064506CC200C06340648062F002E")
+        Case "woo_only_preserved_price"
+            T = U("062706CC0646002006A906270644062700200641064206370020062F063100200648064806A90627064506310633002006450648062C0648062F002006270633062A061B0020064206CC0645062A00200633062706CC062A00200628062F0648064600200645062D062706330628064700200645062D064406CC002006460645062706CC06340020062F0627062F06470020064506CC200C06340648062F002E")
+        Case "woo_only_price_unavailable"
+            T = U("062706CC0646002006A906270644062700200641064206370020062F063100200648064806A90627064506310633002006450648062C0648062F002006270633062A002006480020064206CC0645062A00200642062706280644002006460645062706CC063400200646062F0627062F002E")
+        Case "ambiguous_woo_match"
+            T = U("062A0637062806CC0642002006A9062F002006A90627064406270020062F063100200648064806A9062706450631063300200645062806470645002006270633062A061B0020064206CC0645062A00200633062706CC062A002006280631062706CC0020062706CC064600200631062F06CC06410020062D0641063800200634062F0647002006480020062706390645062706440020062A063A06CC06CC06310627062A002006450633062F0648062F002006270633062A002E")
+        Case "orphan_woo_variation"
+            T = U("062A06460648063900200648064806A9062706450631063300200628062F0648064600200645062D063506480644002006450627062F0631002006270633062A061B0020062706390645062706440020062A063A06CC06CC06310627062A002006450633062F0648062F002006270633062A002E")
+        Case "identity_warning"
+            T = U("06470634062F0627063100200647064806CC062A06CC003A0020062A0637062806CC064200200648064806A9062706450631063300200645062806470645002006CC062700200646062706420635002006270633062A061B0020062706390645062706440020062A063A06CC06CC06310627062A002006450633062F0648062F00200634062F002E")
+        Case "proposal_drift"
+            T = U("06470634062F06270631003A0020064506420627062F06CC06310020067E06CC0634064606470627062F06CC0020062706CC064600200641062706CC064400200628062700200633062706CC062A002006CC06A90633062706460020064606CC0633062A002E")
+        Case "proposal_drift_critical"
+            T = U("06470634062F0627063100200628062D06310627064606CC003A00200627062E062A064406270641002006CC06A906CC002006270632002006460631062E200C06470627060C0020062D06450644002006CC06270020062D0627063406CC0647002006330648062F0020062806CC0634002006270632002006F7066A002006270633062A002E")
+        Case "row_kind_matched"
+            T = U("0647064506270647064606AF")
+        Case "row_kind_source_only"
+            T = U("0641064206370020063306270645062706460647002006A9062706440627")
+        Case "row_kind_woo_only"
+            T = U("06410642063700200648064806A90627064506310633")
+        Case "row_kind_ambiguous"
+            T = U("0645062806470645")
+        Case "settings_required"
+            T = U("0647064506470020064506420627062F06CC06310020064206CC0645062A200C06AF06300627063106CC00200628062706CC062F002006450639062A0628063100200648002006A906270645064400200628062706340646062F002E")
         Case Else
             T = key
     End Select

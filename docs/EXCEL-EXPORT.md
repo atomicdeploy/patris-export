@@ -86,27 +86,34 @@ one response.
 
 ## Dynamic macro templates
 
-Two canonical right-to-left Persian templates are built from the same VBA
-source:
-
-- `docs/examples/لیست قیمت دیجیتالاجیک - استاندارد.xltm`
-- `docs/examples/لیست قیمت دیجیتالاجیک - پیشرفته.xltm`
-
-The Standard edition keeps the original eight visible columns, in the original
-order:
+There is one canonical right-to-left Persian template:
 
 ```text
-فی فروش | گرم | سایر | فی فروش2 | نرخ ارزی | همه انبارها | کد کالا | نام کالا
+docs/examples/لیست قیمت دیجیتالاجیک.xltm
 ```
 
-The Advanced edition keeps the same eight product facts and adds only four
-normally visible operational columns: the linked WooCommerce ID, the
-customer-visible WooCommerce price, its difference from the calculated price,
-and the synchronization status. Its currency, profit, freight, and rate-date
-audit columns are present but hidden by default. Technical join data is stored
-only in the `xlSheetVeryHidden` sheet `داده‌های همگام‌سازی`.
+Its `محصولات` table uses this exact user-facing contract:
 
-Both templates are empty at rest: they contain no product rows, prices, cached
+```text
+قیمت فروش (تومان) | وزن کالا (گرم) | سایر | محل کالا |
+قیمت خرید (یوآن) | موجودی کل | کد کالا | نام کالا |
+شناسه ووکامرس | دسته‌بندی
+```
+
+`سایر` contains raw compatibility text and is hidden by default. WooCommerce
+ID has its own column. A product name is bold and linked only when a verified
+WooCommerce permalink exists; link color distinguishes published, draft-like,
+and missing products. Visible categories come only from the WooCommerce/site
+record and never fall back to a Patris category code.
+
+`داشبورد` contains formula-backed catalog and publication summaries.
+`تنظیمات` contains the live site values, proposed edits, warnings, and the
+guarded preview/apply controls. Product search and clear buttons live directly
+on `محصولات`; selecting a product highlights its complete table row. Technical
+join and audit data is stored only in the `xlSheetVeryHidden` sheet
+`داده‌های همگام‌سازی`.
+
+The template is empty at rest: it contains no product rows, prices, cached
 responses, or credential material. Opening an `.xltm` creates a separate
 macro-enabled workbook instance, so **Save As** writes a working copy instead
 of overwriting the canonical empty template.
@@ -120,27 +127,55 @@ POST http://127.0.0.1:18080/api/excel/pricing-sync/preview
 POST http://127.0.0.1:18080/api/excel/pricing-sync/apply
 ```
 
+The `/api/excel/pricing-sync/*` path is intentionally a private Excel adapter:
+it handles the loopback session, CSRF token, and workbook-specific request
+validation. The WordPress endpoint and its response schemas are application
+neutral (`/wp-json/digitalogic/pricing/sync/*`); they are not an Excel API.
+
 The workbook never receives a WordPress, WooCommerce, or local product-sync
 secret. Before each pricing operation it opens a short-lived loopback companion
 session and sends the companion client header plus CSRF token; the local service
 injects the protected server-side credential and the exact current source ID,
-dataset, and revision. The join key is the case-sensitive `product_code`
-contract field, displayed to users as `کد کالا`; names are never identity
-fallbacks and WooCommerce-only rows are never invented. Where a public page
-exists, `WooID <id>` is the hyperlink text.
+dataset, and revision.
+
+`state.catalog` must be the shared `reconciled_products` projection used by both
+the workbook and the Google Sheets workflow. It is the complete leaf-product
+union, not a workbook-side join: `matched`, `patris_only`, `woo_only`, and
+`ambiguous` are explicit row states; variable WooCommerce parent rows are
+excluded. A WooCommerce-backed row uses `woo:<id>` as its technical sync key.
+A Patris-only row uses `patris:<exact-product-code>`. Names are never identity
+fallbacks, and an ambiguous identity blocks apply.
+
+Every state page carries the same SHA-256 `catalog.dataset_revision`, ordered
+column-key contract, reconciliation counts, source revision, page size, total,
+and page count. Excel discards the complete partial result and retries the
+snapshot up to three times if any one of those values changes, a page is
+missing or duplicated, or the final unique-key count differs from the declared
+total. It fails closed after the bounded retries instead of showing a
+cross-revision catalog.
+
+The visible table is the reconciled union of Patris and WooCommerce rows.
+A WooCommerce-only row shows its WooCommerce `sku` in `کد کالا` when one
+exists, otherwise that visible cell remains blank. It retains its separate
+WooCommerce ID, page, category, state, and effective-price fallback, and uses
+only the verified `woo:<id>` sync key in the hidden technical sheet. A visible
+SKU is never treated as a Patris identity or writeback key. Where a public page
+exists, the bold product name is the hyperlink and WooID remains in its own
+column.
 
 The three familiar calculator cards and table names remain:
 
 - `Yuan_Price` / `بهای یوآن`;
-- `Shipping` / `نرخ حمل CNY`;
-- `Profit` / `درصد سود`.
+- `Shipping` / `نرخ حمل هوایی (یوآن/کیلوگرم)`;
+- `Profit` / `حاشیه سود`.
 
 They are blank in the template and filled dynamically. The Settings sheet shows
-the live site values separately from the workbook proposal. A proposal can be
-previewed and applied only with a current state revision, idempotency key,
-server-bound preview digest, and an explicit Unicode confirmation. A rate older
-than seven days or a currency/profit difference above seven percent is reported
-in Persian and is never silently selected.
+the live site values separately from the workbook proposal. Yuan, USD, profit
+margin, and air-express shipping are one atomic settings document. A proposal
+can be previewed and applied only with the current settings and shipping-catalog
+revisions, an idempotency key, a server-bound preview digest, and an explicit
+Unicode confirmation. A rate older than seven days or a difference above seven
+percent is reported in Persian and is never silently selected.
 
 The price cards, hidden calculation inputs, and final-price formulas use only
 the live site-confirmed values. Editing a proposal cell invalidates every older
@@ -152,8 +187,8 @@ same apply idempotency key for a safe retry. A success message is shown only
 after a fresh state readback matches the applied revision.
 
 The calculated price converts goods and freight independently through their
-declared currencies, applies the per-product or global percentage profit, and
-rounds once to whole toman:
+declared currencies, applies the shared profit margin, and rounds once to whole
+toman:
 
 ```text
 ROUND(
@@ -164,16 +199,20 @@ ROUND(
 )
 ```
 
-Missing weight makes only the freight component zero. Missing price, profit,
-required exchange rate, or an unsupported/absent currency fails closed to a
-blank result. `IFERROR` guards lookup failures, so the workbooks do not expose
-`#N/A` or `#VALUE!`.
+All inputs used by the local formula are required: purchase price, weight,
+freight, profit margin, and every applicable currency rate. The formula never
+silently substitutes zero. If local inputs are incomplete but WooCommerce has
+a positive effective customer price, Excel preserves that exact price and
+shows a Persian warning. If neither calculation nor a verified WooCommerce
+fallback is possible, the final price remains blank. `IFERROR` guards lookup
+failures, so the workbook does not expose `#N/A` or `#VALUE!`.
 
 After an approved settings apply, the companion invalidates its pricing cache,
 regenerates the full canonical Patris contract, sends it through the existing
 WooCommerce product-sync receiver, and verifies a fresh state readback before
-Excel reports success. The Advanced edition still shows deliberate
-WooCommerce sale prices separately from the calculated canonical price.
+Excel reports success. The customer-visible WooCommerce price and `قیمت فروش
+(تومان)` are one invariant; the workbook never presents a second customer
+price as an alternative.
 
 Enable macros only after reviewing:
 
@@ -192,5 +231,3 @@ The package is reopened by the Go/Excelize regression suite for macro-package
 and metadata checks. Its VBA is also imported, compiled, calculated, and
 integration-tested with native Excel 16. LibreOffice compatibility is not
 claimed without a LibreOffice runtime in the validation environment.
-
-![نسخه پیشرفته لیست قیمت دیجیتالاجیک](examples/لیست%20قیمت%20دیجیتالاجیک%20-%20پیشرفته%20-%20پیش‌نمایش.png)

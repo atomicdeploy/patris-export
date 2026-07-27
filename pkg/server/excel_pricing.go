@@ -29,12 +29,14 @@ import (
 const (
 	excelPricingLocalRequestSchema  = "patris.excel-pricing-companion-request/v1"
 	excelPricingSessionSchema       = "patris.excel-pricing-companion-session/v1"
-	excelPricingRemoteRequestSchema = "digitalogic.excel-pricing-sync-request/v1"
-	excelPricingStateSchema         = "digitalogic.excel-pricing-sync-state/v1"
-	excelPricingPreviewSchema       = "digitalogic.excel-pricing-sync-preview/v1"
-	excelPricingApplySchema         = "digitalogic.excel-pricing-sync-apply/v1"
+	excelPricingRemoteRequestSchema = "digitalogic.pricing-sync-request/v1"
+	excelPricingStateSchema         = "digitalogic.pricing-sync-state/v1"
+	excelPricingPreviewSchema       = "digitalogic.pricing-sync-preview/v1"
+	excelPricingApplySchema         = "digitalogic.pricing-sync-apply/v1"
 	excelPricingClientHeader        = "X-Patris-Excel-Client"
 	excelPricingClientID            = "digitalogic-price-calculator/v1"
+	excelPricingContractClientID    = "digitalogic-price-calculator"
+	excelPricingContractChannel     = "excel-workbook"
 	excelPricingCSRFHeader          = "X-Patris-Excel-CSRF-Token"
 	excelPricingSessionTTL          = 10 * time.Minute
 	excelPricingOperationTimeout    = 4 * time.Minute
@@ -47,19 +49,28 @@ const (
 var (
 	excelPricingIdempotencyPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$`)
 	excelPricingProfitPattern      = regexp.MustCompile(`^(?:0|[1-9][0-9]{0,3})(?:\.[0-9]{1,12})?$`)
+	excelPricingShippingPattern    = regexp.MustCompile(`^(?:0|[1-9][0-9]{0,17})(?:\.[0-9]{1,12})?$`)
 )
 
 type excelPricingSettings struct {
-	DollarPrice          int64  `json:"dollar_price"`
-	YuanPrice            int64  `json:"yuan_price"`
-	EffectiveDate        string `json:"effective_date"`
-	DefaultProfitPercent string `json:"default_profit_percent"`
+	DollarPrice             int64       `json:"dollar_price"`
+	YuanPrice               int64       `json:"yuan_price"`
+	EffectiveDate           string      `json:"effective_date"`
+	USDEffectiveDate        string      `json:"usd_effective_date"`
+	CNYEffectiveDate        string      `json:"cny_effective_date"`
+	ProfitMarginPercent     json.Number `json:"profit_margin_percent"`
+	AirExpressPricePerKG    json.Number `json:"air_express_price_per_kg"`
+	AirExpressCurrency      string      `json:"air_express_currency"`
+	ShippingCatalogRevision string      `json:"shipping_catalog_revision"`
 }
 
 type excelPricingLocalRequest struct {
 	Schema                string                `json:"schema"`
 	SchemaVersion         int                   `json:"schema_version"`
 	Operation             string                `json:"operation"`
+	ClientID              string                `json:"client_id"`
+	Channel               string                `json:"channel"`
+	RequestID             string                `json:"request_id"`
 	Source                *canonical.Source     `json:"source,omitempty"`
 	Page                  int                   `json:"page,omitempty"`
 	Limit                 int                   `json:"limit,omitempty"`
@@ -76,6 +87,9 @@ type excelPricingRemoteRequest struct {
 	Schema                string                `json:"schema"`
 	SchemaVersion         int                   `json:"schema_version"`
 	Operation             string                `json:"operation"`
+	ClientID              string                `json:"client_id"`
+	Channel               string                `json:"channel"`
+	RequestID             string                `json:"request_id"`
 	Source                canonical.Source      `json:"source"`
 	Page                  int                   `json:"page,omitempty"`
 	Limit                 int                   `json:"limit,omitempty"`
@@ -321,6 +335,9 @@ func buildExcelPricingRemoteRequest(operation string, local excelPricingLocalReq
 		Schema:                excelPricingRemoteRequestSchema,
 		SchemaVersion:         1,
 		Operation:             operation,
+		ClientID:              local.ClientID,
+		Channel:               local.Channel,
+		RequestID:             local.RequestID,
 		Source:                source,
 		Page:                  local.Page,
 		Limit:                 local.Limit,
@@ -463,9 +480,13 @@ func (s *Server) completeExcelPricingApply(
 		Schema:        excelPricingLocalRequestSchema,
 		SchemaVersion: 1,
 		Operation:     "state",
-		Page:          1,
-		Limit:         1,
-		Locale:        "fa",
+		ClientID:      excelPricingContractClientID,
+		Channel:       excelPricingContractChannel,
+		RequestID: "excel-state-readback-" +
+			strings.TrimPrefix(applied.stateRevision, "sha256:")[:32],
+		Page:   1,
+		Limit:  1,
+		Locale: "fa",
 	}
 	remotePayload := buildExcelPricingRemoteRequest("state", stateRequest, contract.Source)
 	state, err := s.forwardExcelPricing(ctx, cfg.SendUpdates, "state", remotePayload, stateRequest)
@@ -495,7 +516,12 @@ func excelPricingDeliveryComplete(result updateout.DeliveryResult, eventID strin
 }
 
 func validateExcelPricingLocalRequest(r *http.Request, operation string, request excelPricingLocalRequest) error {
-	if request.Schema != excelPricingLocalRequestSchema || request.SchemaVersion != 1 || request.Operation != operation {
+	if request.Schema != excelPricingLocalRequestSchema ||
+		request.SchemaVersion != 1 ||
+		request.Operation != operation ||
+		request.ClientID != excelPricingContractClientID ||
+		request.Channel != excelPricingContractChannel ||
+		!excelPricingIdempotencyPattern.MatchString(request.RequestID) {
 		return errors.New("request identity is invalid")
 	}
 	switch operation {
@@ -527,6 +553,7 @@ func validateExcelPricingLocalRequest(r *http.Request, operation string, request
 			return errors.New("product changes must be an empty array")
 		}
 		if !excelPricingIdempotencyPattern.MatchString(request.IdempotencyKey) ||
+			request.RequestID != request.IdempotencyKey ||
 			!singleHeaderEquals(r, "Idempotency-Key", request.IdempotencyKey) ||
 			!isSHA256Revision(request.ExpectedStateRevision) ||
 			!singleHeaderEquals(r, "If-Match", `"`+request.ExpectedStateRevision+`"`) ||
@@ -553,18 +580,41 @@ func validateExcelPricingSettings(settings excelPricingSettings) error {
 		settings.YuanPrice < 1 || settings.YuanPrice > 1_000_000_000 {
 		return errors.New("currency rate is invalid")
 	}
-	parsed, err := time.Parse("2006-01-02", settings.EffectiveDate)
-	if err != nil || parsed.Format("2006-01-02") != settings.EffectiveDate {
+	if !validExcelPricingDate(settings.EffectiveDate) ||
+		!validExcelPricingDate(settings.USDEffectiveDate) ||
+		!validExcelPricingDate(settings.CNYEffectiveDate) ||
+		settings.EffectiveDate != settings.CNYEffectiveDate {
 		return errors.New("effective date is invalid")
 	}
-	if !excelPricingProfitPattern.MatchString(settings.DefaultProfitPercent) {
+	profitText := settings.ProfitMarginPercent.String()
+	if !excelPricingProfitPattern.MatchString(profitText) {
 		return errors.New("profit is invalid")
 	}
-	profit, err := strconv.ParseFloat(settings.DefaultProfitPercent, 64)
+	profit, err := strconv.ParseFloat(profitText, 64)
 	if err != nil || profit < 0 || profit > 1000 {
 		return errors.New("profit is invalid")
 	}
+	shippingText := settings.AirExpressPricePerKG.String()
+	if !excelPricingShippingPattern.MatchString(shippingText) {
+		return errors.New("shipping price is invalid")
+	}
+	shipping, err := strconv.ParseFloat(shippingText, 64)
+	if err != nil || shipping <= 0 {
+		return errors.New("shipping price is invalid")
+	}
+	if settings.AirExpressCurrency != "CNY" &&
+		settings.AirExpressCurrency != "IRR" {
+		return errors.New("shipping currency is invalid")
+	}
+	if !isSHA256Revision(settings.ShippingCatalogRevision) {
+		return errors.New("shipping catalog revision is invalid")
+	}
 	return nil
+}
+
+func validExcelPricingDate(value string) bool {
+	parsed, err := time.Parse("2006-01-02", value)
+	return err == nil && parsed.Format("2006-01-02") == value
 }
 
 func excelPricingLocalRequestAllowed(r *http.Request) bool {
@@ -600,7 +650,7 @@ func excelPricingRemoteURL(productSyncURL, operation string) (string, error) {
 		return "", errors.New("product-sync destination is not a WordPress REST route")
 	}
 	prefix := strings.TrimSuffix(parsed.Path[:index], "/")
-	parsed.Path = prefix + "/wp-json/digitalogic/excel/pricing-sync/" + operation
+	parsed.Path = prefix + "/wp-json/digitalogic/pricing/sync/" + operation
 	parsed.RawPath = ""
 	return parsed.String(), nil
 }

@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -62,7 +63,7 @@ func TestExcelPricingSessionRequiresDirectLoopbackAndNoProxyEvidence(t *testing.
 func TestExcelPricingStateInjectsProtectedCredentialAndCanonicalSource(t *testing.T) {
 	var received map[string]interface{}
 	remote := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/wp-json/digitalogic/excel/pricing-sync/state" {
+		if r.URL.Path != "/wp-json/digitalogic/pricing/sync/state" {
 			t.Fatalf("remote path=%q", r.URL.Path)
 		}
 		if got := r.Header.Get(updateout.ProductSyncSecretHeader); got != excelPricingTestSecret {
@@ -103,6 +104,11 @@ func TestExcelPricingStateInjectsProtectedCredentialAndCanonicalSource(t *testin
 	}
 	if received["schema"] != excelPricingRemoteRequestSchema || received["operation"] != "state" {
 		t.Fatalf("remote identity=%#v", received)
+	}
+	if received["client_id"] != excelPricingContractClientID ||
+		received["channel"] != excelPricingContractChannel ||
+		received["request_id"] != "excel-state-test-0001" {
+		t.Fatalf("remote client context=%#v", received)
 	}
 	if received["page"] != float64(1) || received["limit"] != float64(250) {
 		t.Fatalf("remote pagination=%#v/%#v, want 1/250", received["page"], received["limit"])
@@ -209,6 +215,9 @@ func TestExcelPricingMutationRejectsCallerSuppliedSource(t *testing.T) {
 
 func TestExcelPricingPreviewPreservesOptimisticHeadersAndRejectsDrift(t *testing.T) {
 	stateRevision := excelPricingRevisionForTest("settings-preview")
+	source := canonical.Source{
+		ID: "source", Dataset: "dataset", Revision: excelPricingRevisionForTest("source"),
+	}
 	var calls atomic.Int32
 	remote := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls.Add(1)
@@ -222,16 +231,37 @@ func TestExcelPricingPreviewPreservesOptimisticHeadersAndRejectsDrift(t *testing
 		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 			t.Fatal(err)
 		}
-		if changes, ok := payload["product_changes"].([]interface{}); !ok || len(changes) != 0 {
-			t.Fatalf("product_changes=%#v, want empty array", payload["product_changes"])
+		expected := map[string]interface{}{
+			"schema":                  excelPricingRemoteRequestSchema,
+			"schema_version":          float64(1),
+			"operation":               "preview",
+			"client_id":               excelPricingContractClientID,
+			"channel":                 excelPricingContractChannel,
+			"request_id":              "excel-preview-0001",
+			"source":                  jsonMapForTest(t, source),
+			"idempotency_key":         "excel-preview-0001",
+			"expected_state_revision": stateRevision,
+			"settings": map[string]interface{}{
+				"dollar_price":              float64(187891),
+				"yuan_price":                float64(29500),
+				"effective_date":            "2026-07-27",
+				"usd_effective_date":        "2026-07-26",
+				"cny_effective_date":        "2026-07-27",
+				"profit_margin_percent":     float64(30),
+				"air_express_price_per_kg":  float64(120),
+				"air_express_currency":      "CNY",
+				"shipping_catalog_revision": excelPricingRevisionForTest("shipping-catalog"),
+			},
+			"product_changes": []interface{}{},
+		}
+		if !reflect.DeepEqual(payload, expected) {
+			t.Fatalf("forwarded universal pricing JSON mismatch:\n got: %#v\nwant: %#v", payload, expected)
 		}
 		writeRemotePricingResponse(t, w, excelPricingPreviewSchema, stateRevision)
 	}))
 	defer remote.Close()
 	server := newExcelPricingTestServer(t, remote.URL+"/wp-json/digitalogic/patris/product-sync")
-	server.excelPricing.canonical = canonicalProjectionSequence(canonical.Source{
-		ID: "source", Dataset: "dataset", Revision: excelPricingRevisionForTest("source"),
-	})
+	server.excelPricing.canonical = canonicalProjectionSequence(source)
 	token := openExcelPricingSession(t, server)
 	body := validExcelPricingMutationBody("preview", "excel-preview-0001", stateRevision, "", "")
 	request := authenticatedExcelPricingRequest(http.MethodPost, "/api/excel/pricing-sync/preview", body, token)
@@ -317,6 +347,113 @@ func TestExcelPricingMutationRejectsNullChangesAndUppercaseRevision(t *testing.T
 	}
 	if calls.Load() != 0 {
 		t.Fatalf("invalid idempotency reached remote: calls=%d", calls.Load())
+	}
+}
+
+func TestExcelPricingMutationRequiresCompleteAtomicSettingsAndClientContext(t *testing.T) {
+	var remoteCalls atomic.Int32
+	remote := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		remoteCalls.Add(1)
+		writeRemotePricingResponse(t, w, excelPricingPreviewSchema, excelPricingRevisionForTest("settings"))
+	}))
+	defer remote.Close()
+
+	server := newExcelPricingTestServer(t, remote.URL+"/wp-json/digitalogic/patris/product-sync")
+	var canonicalCalls atomic.Int32
+	server.excelPricing.canonical = func(context.Context) (recordpipe.Result, error) {
+		canonicalCalls.Add(1)
+		return recordpipe.Result{}, nil
+	}
+	token := openExcelPricingSession(t, server)
+	stateRevision := excelPricingRevisionForTest("settings-complete")
+
+	mutations := map[string]func(map[string]interface{}){
+		"missing USD date": func(payload map[string]interface{}) {
+			delete(payload["settings"].(map[string]interface{}), "usd_effective_date")
+		},
+		"CNY date differs from effective date": func(payload map[string]interface{}) {
+			payload["settings"].(map[string]interface{})["cny_effective_date"] = "2026-07-28"
+		},
+		"legacy default profit field": func(payload map[string]interface{}) {
+			settings := payload["settings"].(map[string]interface{})
+			delete(settings, "profit_margin_percent")
+			settings["default_profit_percent"] = 30
+		},
+		"missing shipping revision": func(payload map[string]interface{}) {
+			delete(payload["settings"].(map[string]interface{}), "shipping_catalog_revision")
+		},
+		"invalid shipping currency": func(payload map[string]interface{}) {
+			payload["settings"].(map[string]interface{})["air_express_currency"] = "USD"
+		},
+		"zero shipping amount": func(payload map[string]interface{}) {
+			payload["settings"].(map[string]interface{})["air_express_price_per_kg"] = 0
+		},
+		"wrong client ID": func(payload map[string]interface{}) {
+			payload["client_id"] = "another-client"
+		},
+		"request and idempotency mismatch": func(payload map[string]interface{}) {
+			payload["request_id"] = "excel-preview-different"
+		},
+	}
+
+	for name, mutate := range mutations {
+		t.Run(name, func(t *testing.T) {
+			var payload map[string]interface{}
+			if err := json.Unmarshal([]byte(validExcelPricingMutationBody(
+				"preview", "excel-preview-complete-0001", stateRevision, "", "",
+			)), &payload); err != nil {
+				t.Fatal(err)
+			}
+			mutate(payload)
+			body, err := json.Marshal(payload)
+			if err != nil {
+				t.Fatal(err)
+			}
+			request := authenticatedExcelPricingRequest(
+				http.MethodPost,
+				"/api/excel/pricing-sync/preview",
+				string(body),
+				token,
+			)
+			request.Header.Set("Idempotency-Key", "excel-preview-complete-0001")
+			request.Header.Set("If-Match", `"`+stateRevision+`"`)
+			response := httptest.NewRecorder()
+			server.router.ServeHTTP(response, request)
+			if response.Code != http.StatusBadRequest {
+				t.Fatalf("status=%d, want 400: %s", response.Code, response.Body.String())
+			}
+		})
+	}
+	if canonicalCalls.Load() != 0 || remoteCalls.Load() != 0 {
+		t.Fatalf("invalid atomic settings reached canonical=%d remote=%d", canonicalCalls.Load(), remoteCalls.Load())
+	}
+}
+
+func TestValidateExcelPricingSettingsUsesUniversalShippingRange(t *testing.T) {
+	settings := excelPricingSettings{
+		DollarPrice:             187891,
+		YuanPrice:               29500,
+		EffectiveDate:           "2026-07-27",
+		USDEffectiveDate:        "2026-07-26",
+		CNYEffectiveDate:        "2026-07-27",
+		ProfitMarginPercent:     json.Number("30.25"),
+		AirExpressPricePerKG:    json.Number("123456789012345678.123456789012"),
+		AirExpressCurrency:      "CNY",
+		ShippingCatalogRevision: excelPricingRevisionForTest("shipping-catalog"),
+	}
+	if err := validateExcelPricingSettings(settings); err != nil {
+		t.Fatalf("universal shipping range was rejected: %v", err)
+	}
+	for _, invalid := range []string{
+		"1234567890123456789",
+		"1.1234567890123",
+		"1e3",
+		"0",
+	} {
+		settings.AirExpressPricePerKG = json.Number(invalid)
+		if err := validateExcelPricingSettings(settings); err == nil {
+			t.Errorf("invalid shipping amount %q was accepted", invalid)
+		}
 	}
 }
 
@@ -609,7 +746,7 @@ func TestExcelPricingRemoteURLIsSameOriginAndFixedPath(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got != "https://digitalogic.ir/subdir/wp-json/digitalogic/excel/pricing-sync/preview" {
+	if got != "https://digitalogic.ir/subdir/wp-json/digitalogic/pricing/sync/preview" {
 		t.Fatalf("remote pricing URL=%q", got)
 	}
 	for _, candidate := range []string{
@@ -700,13 +837,21 @@ func validExcelPricingMutationBody(operation, idempotency, stateRevision, previe
 		"schema":                  excelPricingLocalRequestSchema,
 		"schema_version":          1,
 		"operation":               operation,
+		"client_id":               excelPricingContractClientID,
+		"channel":                 excelPricingContractChannel,
+		"request_id":              idempotency,
 		"idempotency_key":         idempotency,
 		"expected_state_revision": stateRevision,
 		"settings": map[string]interface{}{
-			"dollar_price":           170000,
-			"yuan_price":             25300,
-			"effective_date":         "2026-07-26",
-			"default_profit_percent": "30",
+			"dollar_price":              187891,
+			"yuan_price":                29500,
+			"effective_date":            "2026-07-27",
+			"usd_effective_date":        "2026-07-26",
+			"cny_effective_date":        "2026-07-27",
+			"profit_margin_percent":     30,
+			"air_express_price_per_kg":  120,
+			"air_express_currency":      "CNY",
+			"shipping_catalog_revision": excelPricingRevisionForTest("shipping-catalog"),
 		},
 		"product_changes": []interface{}{},
 	}
@@ -725,6 +870,9 @@ func validExcelPricingStateBody(source canonical.Source, page, limit int) string
 		"schema":         excelPricingLocalRequestSchema,
 		"schema_version": 1,
 		"operation":      "state",
+		"client_id":      excelPricingContractClientID,
+		"channel":        excelPricingContractChannel,
+		"request_id":     "excel-state-test-0001",
 		"source":         source,
 		"page":           page,
 		"limit":          limit,
@@ -732,6 +880,19 @@ func validExcelPricingStateBody(source canonical.Source, page, limit int) string
 	}
 	encoded, _ := json.Marshal(payload)
 	return string(encoded)
+}
+
+func jsonMapForTest(t *testing.T, value interface{}) map[string]interface{} {
+	t.Helper()
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded map[string]interface{}
+	if err := json.Unmarshal(encoded, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	return decoded
 }
 
 func excelPricingStateSourceForTest() canonical.Source {

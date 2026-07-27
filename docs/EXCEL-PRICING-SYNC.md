@@ -1,10 +1,9 @@
 # Excel pricing-settings companion
 
 Patris Export is the credential boundary between the canonical Persian
-`لیست قیمت دیجیتالاجیک - استاندارد.xltm` and
-`لیست قیمت دیجیتالاجیک - پیشرفته.xltm` workbooks and Digitalogic's guarded
-pricing-settings API. The workbooks never contain a WordPress, WooCommerce, or
-product-sync credential.
+`لیست قیمت دیجیتالاجیک.xltm` workbook and Digitalogic's guarded pricing-settings
+API. The workbook never contains a WordPress, WooCommerce, or product-sync
+credential.
 
 ## Local loopback contract
 
@@ -41,13 +40,20 @@ responses to 4 MiB.
 
 ## Local request schema
 
-State uses `patris.excel-pricing-companion-request/v1`:
+The workbook uses the local adapter schema
+`patris.excel-pricing-companion-request/v1`. The adapter validates it and maps
+it to Digitalogic's universal `digitalogic.pricing-sync-request/v1` contract,
+adding only the protected credential and verified current Patris catalog
+identity. State uses:
 
 ```json
 {
   "schema": "patris.excel-pricing-companion-request/v1",
   "schema_version": 1,
   "operation": "state",
+  "client_id": "digitalogic-price-calculator",
+  "channel": "excel-workbook",
+  "request_id": "excel-state-20260727-0001",
   "source": {
     "id": "patris-office",
     "dataset": "kala.db",
@@ -67,13 +73,21 @@ must equal the body value and `If-Match` must contain the quoted body revision.
   "schema": "patris.excel-pricing-companion-request/v1",
   "schema_version": 1,
   "operation": "preview",
-  "idempotency_key": "excel-preview-20260726-0001",
+  "client_id": "digitalogic-price-calculator",
+  "channel": "excel-workbook",
+  "request_id": "excel-preview-20260727-0001",
+  "idempotency_key": "excel-preview-20260727-0001",
   "expected_state_revision": "sha256:...",
   "settings": {
-    "dollar_price": 170000,
-    "yuan_price": 25300,
-    "effective_date": "2026-07-26",
-    "default_profit_percent": "30"
+    "dollar_price": 200000,
+    "yuan_price": 30000,
+    "effective_date": "2026-07-27",
+    "usd_effective_date": "2026-07-27",
+    "cny_effective_date": "2026-07-27",
+    "profit_margin_percent": 30,
+    "air_express_price_per_kg": 120,
+    "air_express_currency": "CNY",
+    "shipping_catalog_revision": "sha256:..."
   },
   "product_changes": []
 }
@@ -87,13 +101,21 @@ digest plus explicit confirmation:
   "schema": "patris.excel-pricing-companion-request/v1",
   "schema_version": 1,
   "operation": "apply",
-  "idempotency_key": "excel-apply-20260726-0001",
+  "client_id": "digitalogic-price-calculator",
+  "channel": "excel-workbook",
+  "request_id": "excel-apply-20260727-0001",
+  "idempotency_key": "excel-apply-20260727-0001",
   "expected_state_revision": "sha256:...",
   "settings": {
-    "dollar_price": 170000,
-    "yuan_price": 25300,
-    "effective_date": "2026-07-26",
-    "default_profit_percent": "30"
+    "dollar_price": 200000,
+    "yuan_price": 30000,
+    "effective_date": "2026-07-27",
+    "usd_effective_date": "2026-07-27",
+    "cny_effective_date": "2026-07-27",
+    "profit_margin_percent": 30,
+    "air_express_price_per_kg": 120,
+    "air_express_currency": "CNY",
+    "shipping_catalog_revision": "sha256:..."
   },
   "product_changes": [],
   "preview_digest": "sha256:...",
@@ -102,8 +124,10 @@ digest plus explicit confirmation:
 ```
 
 Product-level changes are deliberately unsupported on this global-settings
-surface. State paging is limited to 250 rows. Rates, date, percentage,
-revisions, idempotency, and confirmation are validated before network access.
+surface. State paging is limited to 250 rows. Rates, date, profit margin,
+shipping amount/currency/catalog revision, state revision, idempotency, and
+confirmation are validated before network access. All pricing settings are one
+atomic document; shipping is never applied separately.
 
 ## Protected remote boundary
 
@@ -111,9 +135,9 @@ The companion uses the existing `send_updates.url` only to derive the exact
 same-origin WordPress routes:
 
 ```text
-/wp-json/digitalogic/excel/pricing-sync/state
-/wp-json/digitalogic/excel/pricing-sync/preview
-/wp-json/digitalogic/excel/pricing-sync/apply
+/wp-json/digitalogic/pricing/sync/state
+/wp-json/digitalogic/pricing/sync/preview
+/wp-json/digitalogic/pricing/sync/apply
 ```
 
 It reads the credential named by `send_updates.product_sync_secret_env` and
@@ -134,9 +158,30 @@ are not logged or copied into local errors.
 
 Successful responses preserve Digitalogic's schemas:
 
-- `digitalogic.excel-pricing-sync-state/v1`
-- `digitalogic.excel-pricing-sync-preview/v1`
-- `digitalogic.excel-pricing-sync-apply/v1`
+- `digitalogic.pricing-sync-state/v1`
+- `digitalogic.pricing-sync-preview/v1`
+- `digitalogic.pricing-sync-apply/v1`
+
+For state paging, `state.catalog.dataset` is
+`reconciled_products`. The catalog envelope carries one stable
+`dataset_revision`, a per-page `page_revision`, explicit reconciliation
+counts, and rows from the complete
+Patris/WooCommerce leaf-product union. Its row identity and status are shared
+with Google Sheets:
+
+- `woo:<id>` for every WooCommerce-backed leaf row;
+- `patris:<exact-product-code>` for a Patris-only row;
+- `matched`, `patris_only`, `woo_only`, or `ambiguous` as
+  `reconciliation_status`.
+
+The workbook consumes this projection directly and does not repeat the join.
+Only global settings are writable from this template. An ambiguous catalog
+identity, an invalid per-page revision, or reconciliation counts that disagree
+with the returned rows is a hard failure. Across pages it also requires one
+unchanged dataset revision, source revision, ordered column-key list, total,
+page size, page count, and count document. A mismatch discards all fetched
+pages and retries the full snapshot at most three times; no partial catalog is
+imported.
 
 After a successful apply, Patris invalidates its pricing-catalog cache,
 regenerates the canonical product contract, synchronously sends that contract
@@ -170,10 +215,11 @@ URLs, logs, or command arguments.
 
 On the Persian `تنظیمات` sheet:
 
-1. Select **دریافت وضعیت قیمت**.
-2. Review or edit the highlighted yuan/dollar rates, effective date, or default
-   profit. Editing one of those proposal cells immediately creates a fresh
-   preview and opens the explicit Persian apply confirmation.
+1. Select **همگام‌سازی اکنون** on `محصولات`, or use refresh-on-open.
+2. Review or edit the highlighted yuan/dollar rates, effective date, profit
+   margin, or air-express shipping price. Editing one of those proposal cells
+   immediately creates a fresh preview and opens the explicit Persian apply
+   confirmation.
 3. Review every warning in that confirmation and approve it only when the
    proposed document is correct. The separate preview/apply buttons remain
    available as a manual fallback.

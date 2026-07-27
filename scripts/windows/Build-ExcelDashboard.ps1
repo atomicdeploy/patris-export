@@ -1,17 +1,15 @@
 ﻿[CmdletBinding()]
 param(
-    [ValidateSet('Standard', 'Advanced')]
-    [string]$Edition = 'Standard',
     [string]$OutputPath,
     [string]$DistributionCopyPath,
     [string]$PreviewDirectory,
-    [string]$ChecksumManifestPath
+    [string]$ChecksumManifestPath,
+    [string]$LogoPath
 )
 
 $ErrorActionPreference = 'Stop'
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
-$editionFa = if ($Edition -eq 'Advanced') { 'پیشرفته' } else { 'استاندارد' }
-$canonicalFileName = "لیست قیمت دیجیتالاجیک - $editionFa.xltm"
+$canonicalFileName = 'لیست قیمت دیجیتالاجیک.xltm'
 if ([string]::IsNullOrWhiteSpace($OutputPath)) {
     $OutputPath = Join-Path $repoRoot (Join-Path 'docs\examples' $canonicalFileName)
 }
@@ -19,15 +17,22 @@ if ([string]::IsNullOrWhiteSpace($DistributionCopyPath)) {
     $DistributionCopyPath = Join-Path $repoRoot (Join-Path 'outputs\patris-excel-15' $canonicalFileName)
 }
 if ([string]::IsNullOrWhiteSpace($PreviewDirectory)) {
-    $PreviewDirectory = Join-Path $repoRoot (Join-Path 'outputs\patris-excel-15\preview' $Edition.ToLowerInvariant())
+    $PreviewDirectory = Join-Path $repoRoot 'outputs\patris-excel-15\preview\canonical'
 }
 if ([string]::IsNullOrWhiteSpace($ChecksumManifestPath)) {
     $ChecksumManifestPath = Join-Path $repoRoot 'outputs\patris-excel-15\checksums\SHA256SUMS-price-calculators.txt'
+}
+if ([string]::IsNullOrWhiteSpace($LogoPath)) {
+    $LogoPath = Join-Path $repoRoot 'docs\examples\assets\digitalogic-logo.svg'
 }
 $OutputPath = [IO.Path]::GetFullPath($OutputPath)
 $DistributionCopyPath = [IO.Path]::GetFullPath($DistributionCopyPath)
 $PreviewDirectory = [IO.Path]::GetFullPath($PreviewDirectory)
 $ChecksumManifestPath = [IO.Path]::GetFullPath($ChecksumManifestPath)
+$LogoPath = [IO.Path]::GetFullPath($LogoPath)
+if (-not (Test-Path -LiteralPath $LogoPath -PathType Leaf)) {
+    throw "The official Digitalogic logo is missing: $LogoPath"
+}
 $vbaModulePath = Join-Path $repoRoot 'docs\examples\vba\ProductCatalogSync.bas'
 $jsonRuntimePath = Join-Path $repoRoot 'docs\examples\vba\JsonRuntime.bas'
 $jsonValuePath = Join-Path $repoRoot 'docs\examples\vba\JsonValue.cls'
@@ -50,7 +55,7 @@ function ConvertTo-OleColor([string]$Hex) {
 function Set-SectionStyle($Range, [string]$Fill, [string]$FontColor = 'FFFFFF', [int]$FontSize = 11) {
     $Range.Interior.Color = ConvertTo-OleColor $Fill
     $Range.Font.Color = ConvertTo-OleColor $FontColor
-    $Range.Font.Name = 'Yekan Bakh FaNum'
+    $Range.Font.Name = 'Yekan Bakh'
     $Range.Font.Size = $FontSize
     $Range.Font.Bold = $true
     $Range.VerticalAlignment = -4108
@@ -58,16 +63,31 @@ function Set-SectionStyle($Range, [string]$Fill, [string]$FontColor = 'FFFFFF', 
 
 function Add-ActionButton($Sheet, [string]$Text, [string]$Macro, $Anchor, [double]$Width = 112, [double]$Height = 30) {
     $shape = $Sheet.Shapes.AddShape(5, $Anchor.Left, $Anchor.Top, $Width, $Height)
-    $shape.Fill.ForeColor.RGB = ConvertTo-OleColor '1C61E7'
-    $shape.Line.ForeColor.RGB = ConvertTo-OleColor '174FC0'
+    $shape.Fill.ForeColor.RGB = ConvertTo-OleColor '0168CD'
+    $shape.Line.ForeColor.RGB = ConvertTo-OleColor '0059B0'
     $shape.TextFrame2.TextRange.Text = $Text
-    $shape.TextFrame2.TextRange.Font.Name = 'Yekan Bakh FaNum'
+    $shape.TextFrame2.TextRange.Font.Name = 'Yekan Bakh'
     $shape.TextFrame2.TextRange.Font.Size = 11
     $shape.TextFrame2.TextRange.Font.Bold = $true
     $shape.TextFrame2.TextRange.Font.Fill.ForeColor.RGB = ConvertTo-OleColor 'FFFFFF'
     $shape.TextFrame2.VerticalAnchor = 3
     $shape.TextFrame2.TextRange.ParagraphFormat.Alignment = 2
     $shape.OnAction = $Macro
+    return $shape
+}
+
+function Add-BrandLogo($Sheet, [string]$Path, $Anchor, [double]$Width = 208, [double]$Height = 48) {
+    $shape = $Sheet.Shapes.AddPicture(
+        $Path,
+        $false,
+        $true,
+        $Anchor.Left,
+        $Anchor.Top,
+        $Width,
+        $Height
+    )
+    $shape.AlternativeText = 'نشان رسمی دیجیتالاجیک'
+    $shape.LockAspectRatio = -1
     return $shape
 }
 
@@ -216,134 +236,117 @@ try {
         $workbook.Worksheets.Item($workbook.Worksheets.Count).Delete()
     }
 
-    # The canonical workbook intentionally keeps the familiar Persian price-list
-    # layout. Product rows are empty in the template and are created only by Sync.
+    # Product rows are empty in the template and are created only by Sync.
     $priceList = $workbook.Worksheets.Item(1)
-    $priceList.Name = 'لیست قیمت'
-    $settings = $workbook.Worksheets.Add([Type]::Missing, $priceList)
+    $priceList.Name = 'محصولات'
+    $dashboard = $workbook.Worksheets.Add([Type]::Missing, $priceList)
+    $dashboard.Name = 'داشبورد'
+    $settings = $workbook.Worksheets.Add([Type]::Missing, $dashboard)
     $settings.Name = 'تنظیمات'
     $syncData = $workbook.Worksheets.Add([Type]::Missing, $settings)
     $syncData.Name = 'داده‌های همگام‌سازی'
 
-    foreach ($sheet in @($priceList, $settings, $syncData)) {
-        $sheet.Cells.Font.Name = 'Yekan Bakh FaNum'
+    foreach ($sheet in @($priceList, $dashboard, $settings, $syncData)) {
+        $sheet.Cells.Font.Name = 'Yekan Bakh'
         $sheet.Cells.Font.Size = 11
-        $sheet.Cells.Font.Color = ConvertTo-OleColor '282828'
+        $sheet.Cells.Font.Color = ConvertTo-OleColor '2F414B'
         $sheet.Cells.ReadingOrder = -5004
         $sheet.Activate()
         $excel.ActiveWindow.DisplayRightToLeft = $true
     }
 
-    # Main sheet: the original eight visible columns, in the original order.
+    # Main sheet: one canonical Persian table. The raw "other" projection remains
+    # available for audit, but is collapsed by default.
     $priceList.Activate()
-    $excel.ActiveWindow.DisplayGridlines = $true
-    $priceList.Range('B3').Value2 = "لیست کالاها - $editionFa"
-    $priceList.Range('B3').Font.Size = 16
-    $priceList.Range('B3').Font.Bold = $true
-    $priceList.Range('B3').Font.Color = ConvertTo-OleColor '242424'
+    $excel.ActiveWindow.DisplayGridlines = $false
+    $priceList.Range('B1:K2').Interior.Color = ConvertTo-OleColor 'FFFFFF'
+    $priceList.Range('E1:K2').Merge()
+    $priceList.Range('E1').Value2 = 'لیست قیمت دیجیتالاجیک'
+    $priceList.Range('E1').Font.Name = 'Yekan Bakh'
+    $priceList.Range('E1').Font.Size = 20
+    $priceList.Range('E1').Font.Bold = $true
+    $priceList.Range('E1').Font.Color = ConvertTo-OleColor '2F414B'
+    $priceList.Range('E1').HorizontalAlignment = -4152
+    $priceList.Range('E1').VerticalAlignment = -4108
+    [void](Add-BrandLogo $priceList $LogoPath $priceList.Range('B1') 190 43)
 
-    $headers = if ($Edition -eq 'Advanced') {
-        @(
-            'قیمت نهایی محاسبه‌شده (تومان)',
-            'وزن کالا (گرم)',
-            'وزن و محل کالا',
-            'فی فروش منبع',
-            'قیمت ارزی',
-            'موجودی کل انبارها',
-            'کد کالا',
-            'نام کالا',
-            'شناسه و لینک ووکامرس',
-            'قیمت قابل‌مشاهده مشتری (تومان)',
-            'اختلاف با قیمت مشتری',
-            'وضعیت همگام‌سازی قیمت',
-            'ارز کالا',
-            'درصد سود',
-            'نرخ حمل هر کیلو',
-            'تاریخ نرخ ارز'
-        )
-    }
-    else {
-        @(
-            'فی فروش',
-            'گرم',
-            'سایر',
-            'فی فروش2',
-            'نرخ ارزی',
-            'همه انبارها',
-            'کد کالا',
-            'نام کالا'
-        )
-    }
+    $priceList.Range('B3').Value2 = 'جست‌وجوی کالا'
+    $priceList.Range('B3').Font.Bold = $true
+    $priceList.Range('C3:E3').Merge()
+    $priceList.Range('C3').Interior.Color = ConvertTo-OleColor 'F4F8FB'
+    $priceList.Range('C3:E3').Borders.Color = ConvertTo-OleColor 'A9CFE4'
+    $priceList.Range('C3').HorizontalAlignment = -4152
+    $priceList.Range('C3').ReadingOrder = -5004
+    [void]$workbook.Names.Add('ProductSearchQuery', $priceList.Range('C3'))
+    [void](Add-ActionButton $priceList 'پیدا کردن' 'ProductCatalogSync.SearchProducts' $priceList.Range('F3') $priceList.Range('F3').Width 27)
+    [void](Add-ActionButton $priceList 'پاک کردن' 'ProductCatalogSync.ClearProductSearch' $priceList.Range('G3') $priceList.Range('G3').Width 27)
+    [void](Add-ActionButton $priceList 'همگام‌سازی اکنون' 'ProductCatalogSync.RefreshAllData' $priceList.Range('I3') $priceList.Range('I3:K3').Width 27)
+
+    $headers = @(
+        'قیمت فروش (تومان)',
+        'وزن کالا (گرم)',
+        'سایر',
+        'محل کالا',
+        'قیمت خرید (یوآن)',
+        'موجودی کل',
+        'کد کالا',
+        'نام کالا',
+        'شناسه ووکامرس',
+        'دسته‌بندی'
+    )
     for ($column = 0; $column -lt $headers.Count; $column++) {
         $priceList.Cells.Item(5, $column + 2).Value2 = $headers[$column]
     }
-    $productLastColumn = if ($Edition -eq 'Advanced') { 'Q' } else { 'I' }
+    $productLastColumn = 'K'
     $productTable = $priceList.ListObjects.Add(1, $priceList.Range("B5:${productLastColumn}6"), $null, 1)
     $productTable.Name = 'Products'
     $productTable.TableStyle = 'TableStyleMedium2'
     [void]$productTable.DataBodyRange.Delete()
-    $priceList.Range("B5:${productLastColumn}5").Interior.Color = ConvertTo-OleColor '1C61E7'
+    $priceList.Range("B5:${productLastColumn}5").Interior.Color = ConvertTo-OleColor '0168CD'
     $priceList.Range("B5:${productLastColumn}5").Font.Color = ConvertTo-OleColor 'FFFFFF'
+    $priceList.Range("B5:${productLastColumn}5").Font.Name = 'Yekan Bakh'
     $priceList.Range("B5:${productLastColumn}5").Font.Bold = $true
     $priceList.Range("B5:${productLastColumn}5").HorizontalAlignment = -4108
     $priceList.Range("B5:${productLastColumn}5").VerticalAlignment = -4108
-    $priceList.Range("B5:${productLastColumn}5").Borders.Color = ConvertTo-OleColor '174FC0'
+    $priceList.Range("B5:${productLastColumn}5").Borders.Color = ConvertTo-OleColor '0059B0'
     $priceList.Range("B5:${productLastColumn}5").Borders.Weight = 2
     $priceList.Rows.Item(5).RowHeight = 31
 
-    $priceList.Columns('B').ColumnWidth = 18
-    $priceList.Columns('C').ColumnWidth = 13.57
-    $priceList.Columns('D').ColumnWidth = 19.14
-    $priceList.Columns('E').ColumnWidth = 17.43
-    $priceList.Columns('F').ColumnWidth = 14.57
-    $priceList.Columns('G').ColumnWidth = 17.71
-    $priceList.Columns('H').ColumnWidth = 17.43
-    $priceList.Columns('I').ColumnWidth = 59.86
-    if ($Edition -eq 'Advanced') {
-        $priceList.Columns('J').ColumnWidth = 20
-        $priceList.Columns('K').ColumnWidth = 23
-        $priceList.Columns('L').ColumnWidth = 18
-        $priceList.Columns('M').ColumnWidth = 28
-        $priceList.Columns('N').ColumnWidth = 11
-        $priceList.Columns('O').ColumnWidth = 12
-        $priceList.Columns('P').ColumnWidth = 15
-        $priceList.Columns('Q').ColumnWidth = 14
-        $configFirstColumn = 'T'
-        $configSecondColumn = 'V'
-        $configLastColumn = 'V'
-    }
-    else {
-        $priceList.Columns('J').ColumnWidth = 2.29
-        $priceList.Columns('K').ColumnWidth = 1.71
-        $priceList.Columns('L').ColumnWidth = 2.43
-        $priceList.Columns('M').ColumnWidth = 12.71
-        $priceList.Columns('N').ColumnWidth = 2.86
-        $priceList.Columns('O').ColumnWidth = 12.71
-        $configFirstColumn = 'M'
-        $configSecondColumn = 'O'
-        $configLastColumn = 'O'
-    }
+    $priceList.Columns('B').ColumnWidth = 20
+    $priceList.Columns('C').ColumnWidth = 16
+    $priceList.Columns('D').ColumnWidth = 18
+    $priceList.Columns('E').ColumnWidth = 18
+    $priceList.Columns('F').ColumnWidth = 18
+    $priceList.Columns('G').ColumnWidth = 14
+    $priceList.Columns('H').ColumnWidth = 17
+    $priceList.Columns('I').ColumnWidth = 48
+    $priceList.Columns('J').ColumnWidth = 17
+    $priceList.Columns('K').ColumnWidth = 30
+    $priceList.Columns('L').ColumnWidth = 2.5
+    $priceList.Columns('M:O').ColumnWidth = 15
+    $priceList.Columns('O').ColumnWidth = 24
+    $configFirstColumn = 'M'
+    $configSecondColumn = 'O'
+    $configLastColumn = 'O'
     $priceList.Columns('B').NumberFormat = '#,##0'
-    $priceList.Columns('C').NumberFormat = '#,##0.##'
-    $priceList.Columns('E').NumberFormat = '#,##0'
-    $priceList.Columns('F').NumberFormat = '#,##0.####'
-    $priceList.Columns('G').NumberFormat = '#,##0.##'
-    if ($Edition -eq 'Advanced') {
-        $priceList.Columns('J').NumberFormat = '@'
-        $priceList.Columns('J').HorizontalAlignment = -4131
-        $priceList.Columns('J').ReadingOrder = -5003
-        $priceList.Columns('K').NumberFormat = '#,##0'
-        $priceList.Columns('L').NumberFormat = '0.0%'
-        $priceList.Columns('O').NumberFormat = '0.00"%"'
-        $priceList.Columns('P').NumberFormat = '0.######'
-        $priceList.Columns('Q').NumberFormat = 'yyyy/mm/dd'
-        # Technical pricing inputs remain in the table for auditability and
-        # formulas, but stay collapsed by default. The user can unhide them.
-        $priceList.Columns('N:Q').Hidden = $true
-    }
+    $priceList.Columns('C').NumberFormat = 'General'
+    $priceList.Columns('F').NumberFormat = 'General'
+    $priceList.Columns('G').NumberFormat = 'General'
+    $priceList.Columns('H').NumberFormat = '@'
+    $priceList.Columns('J').NumberFormat = '@'
+    $priceList.Columns('B:C').ReadingOrder = -5003
+    $priceList.Columns('F:H').ReadingOrder = -5003
+    $priceList.Columns('J').ReadingOrder = -5003
+    $priceList.Columns('H').Font.Name = 'Yekan Bakh'
+    $priceList.Columns('J').Font.Name = 'Yekan Bakh'
+    $priceList.Columns('D').Hidden = $true
     $priceList.Columns('B').Font.Bold = $true
-    $priceList.Columns('B:H').HorizontalAlignment = -4152
-    $priceList.Columns('I').HorizontalAlignment = -4131
+    $priceList.Columns('B:C').HorizontalAlignment = -4152
+    $priceList.Columns('F:H').HorizontalAlignment = -4152
+    $priceList.Columns('J').HorizontalAlignment = -4131
+    $priceList.Columns('I').HorizontalAlignment = -4152
+    $priceList.Columns('I').Font.Bold = $true
+    $priceList.Columns('K').HorizontalAlignment = -4152
 
     # Keep the three familiar configuration cards, but leave their values empty
     # in the template. Sync fills them from the living Digitalogic state.
@@ -360,24 +363,26 @@ try {
     $yuanTable.Name = 'Yuan_Price'
     $yuanTable.TableStyle = 'TableStyleMedium2'
 
-    $shippingHeader.Value2 = 'نرخ حمل CNY'
-    $shippingValue.Formula = "=IF('تنظیمات'!B22="""","""",'تنظیمات'!B22)"
+    $shippingHeader.Value2 = 'نرخ حمل هوایی (یوآن/کیلوگرم)'
+    $shippingValue.Formula = "=IF('تنظیمات'!B14="""","""",'تنظیمات'!B14)"
     $shippingTable = $priceList.ListObjects.Add(1, $priceList.Range("${configSecondColumn}6:${configSecondColumn}7"), $null, 1)
     $shippingTable.Name = 'Shipping'
     $shippingTable.TableStyle = 'TableStyleMedium2'
 
-    $profitHeader.Value2 = 'درصد سود'
+    $profitHeader.Value2 = 'حاشیه سود'
     $profitValue.Formula = "=IF('تنظیمات'!B13="""","""",'تنظیمات'!B13)"
     $profitTable = $priceList.ListObjects.Add(1, $priceList.Range("${configSecondColumn}9:${configSecondColumn}10"), $null, 1)
     $profitTable.Name = 'Profit'
     $profitTable.TableStyle = 'TableStyleMedium2'
 
     foreach ($configHeader in @($yuanHeader, $shippingHeader, $profitHeader)) {
-        $configHeader.Interior.Color = ConvertTo-OleColor '1C61E7'
+        $configHeader.Interior.Color = ConvertTo-OleColor '0168CD'
         $configHeader.Font.Color = ConvertTo-OleColor 'FFFFFF'
         $configHeader.Font.Bold = $true
         $configHeader.HorizontalAlignment = -4108
+        $configHeader.WrapText = $true
     }
+    $priceList.Rows.Item(6).RowHeight = 34
     foreach ($configValue in @($yuanValue, $shippingValue, $profitValue)) {
         $configValue.Interior.Color = ConvertTo-OleColor 'DDE8FC'
         $configValue.Font.Color = ConvertTo-OleColor '242424'
@@ -386,15 +391,17 @@ try {
         $configValue.Borders.Color = ConvertTo-OleColor 'B9CCF4'
     }
     $yuanValue.NumberFormat = '#,##0'
-    $shippingValue.NumberFormat = '#,##0.##'
+    $shippingValue.NumberFormat = 'General'
     $profitValue.NumberFormat = '0%'
+    foreach ($configValue in @($yuanValue, $shippingValue, $profitValue)) {
+        $configValue.ReadingOrder = -5003
+        $configValue.Font.Name = 'Yekan Bakh'
+    }
 
-    $buttonRange = $priceList.Range("${configFirstColumn}3:${configLastColumn}4")
-    [void](Add-ActionButton $priceList 'همگام‌سازی اکنون' 'ProductCatalogSync.RefreshAllData' $buttonRange.Cells.Item(1, 1) $buttonRange.Width $buttonRange.Height)
     $statusHeaderRange = $priceList.Range("${configFirstColumn}12:${configLastColumn}12")
-    $statusBodyRange = $priceList.Range("${configFirstColumn}13:${configLastColumn}14")
-    $updatedHeaderRange = $priceList.Range("${configFirstColumn}16:${configLastColumn}16")
-    $updatedBodyRange = $priceList.Range("${configFirstColumn}17:${configLastColumn}17")
+    $statusBodyRange = $priceList.Range("${configFirstColumn}13:${configLastColumn}16")
+    $updatedHeaderRange = $priceList.Range("${configFirstColumn}18:${configLastColumn}18")
+    $updatedBodyRange = $priceList.Range("${configFirstColumn}19:${configLastColumn}19")
     $statusHeaderRange.Merge()
     $statusHeaderRange.Cells.Item(1, 1).Value2 = 'وضعیت همگام‌سازی'
     Set-SectionStyle $statusHeaderRange 'F6F6F6' '242424' 10
@@ -405,6 +412,7 @@ try {
     $statusBodyRange.VerticalAlignment = -4108
     $statusBodyRange.Interior.Color = ConvertTo-OleColor 'DDE8FC'
     $statusBodyRange.Borders.Color = ConvertTo-OleColor 'B9CCF4'
+    $priceList.Rows('13:16').RowHeight = 24
     $updatedHeaderRange.Merge()
     $updatedHeaderRange.Cells.Item(1, 1).Value2 = 'آخرین به‌روزرسانی'
     Set-SectionStyle $updatedHeaderRange 'F6F6F6' '242424' 10
@@ -414,21 +422,169 @@ try {
     $updatedBodyRange.HorizontalAlignment = -4108
     $updatedBodyRange.Interior.Color = ConvertTo-OleColor 'DDE8FC'
     $updatedBodyRange.Borders.Color = ConvertTo-OleColor 'B9CCF4'
-    $priceList.Range("B5:${productLastColumn}1000").Borders.Color = ConvertTo-OleColor 'D9D9D9'
+    $priceList.Range("B5:${productLastColumn}1000").Borders.Color = ConvertTo-OleColor 'D9E5EC'
 
     $excel.ActiveWindow.SplitRow = 5
     $excel.ActiveWindow.FreezePanes = $true
     $excel.ActiveWindow.Zoom = 90
 
+    # Technical join data is never user-facing and is empty in the template.
+    # It is created before Dashboard formulas so structured references resolve.
+    $syncHeaders = @(
+        'کلید همگام‌سازی',
+        'ارز کالا',
+        'نرخ حمل هر کیلو',
+        'ارز حمل',
+        'حاشیه سود (درصد)',
+        'بهای یوآن',
+        'بهای دلار',
+        'تاریخ نرخ',
+        'شناسه ووکامرس',
+        'قیمت مشتری ووکامرس',
+        'آخرین تغییر ووکامرس',
+        'بازبینی رکورد',
+        'نشانی محصول',
+        'حاشیه سود کالا',
+        'قیمت محاسباتی کالا',
+        'قیمت ویژه ووکامرس (ممیزی)',
+        'دسته‌بندی',
+        'وضعیت انتشار',
+        'هشدار قیمت',
+        'نوع ردیف'
+    )
+    for ($column = 0; $column -lt $syncHeaders.Count; $column++) {
+        $syncData.Cells.Item(1, $column + 1).Value2 = $syncHeaders[$column]
+    }
+    $syncTable = $syncData.ListObjects.Add(1, $syncData.Range('A1:T2'), $null, 1)
+    $syncTable.Name = 'SyncData'
+    $syncTable.TableStyle = 'TableStyleMedium2'
+    [void]$syncTable.DataBodyRange.Delete()
+    $syncData.Visible = 2
+
+    # Dashboard: compact, formula-backed operating view of the live table.
+    $dashboard.Activate()
+    $excel.ActiveWindow.DisplayGridlines = $false
+    $dashboard.Columns('A').ColumnWidth = 2.5
+    $dashboard.Columns('B').ColumnWidth = 22
+    $dashboard.Columns('C').ColumnWidth = 8
+    $dashboard.Columns('D:I').ColumnWidth = 15
+    $dashboard.Range('B1:I2').Interior.Color = ConvertTo-OleColor 'FFFFFF'
+    $dashboard.Range('E1:I2').Merge()
+    $dashboard.Range('E1').Value2 = 'داشبورد قیمت و موجودی'
+    $dashboard.Range('E1').Font.Name = 'Yekan Bakh'
+    $dashboard.Range('E1').Font.Size = 20
+    $dashboard.Range('E1').Font.Bold = $true
+    $dashboard.Range('E1').Font.Color = ConvertTo-OleColor '2F414B'
+    $dashboard.Range('E1').HorizontalAlignment = -4152
+    $dashboard.Range('E1').VerticalAlignment = -4108
+    [void](Add-BrandLogo $dashboard $LogoPath $dashboard.Range('B1') 190 43)
+
+    $dashboardCards = @(
+        @{ Header = 'B4:C4'; Value = 'B5:C6'; Label = 'تعداد کالاها'; Formula = '=COUNTA(Products[نام کالا])'; Format = '#,##0' },
+        @{ Header = 'D4:E4'; Value = 'D5:E6'; Label = 'منتشرشده در سایت'; Formula = '=COUNTIF(SyncData[وضعیت انتشار],"publish")'; Format = '#,##0' },
+        @{ Header = 'F4:G4'; Value = 'F5:G6'; Label = 'پیش‌نویس سایت'; Formula = '=COUNTIF(SyncData[وضعیت انتشار],"draft")'; Format = '#,##0' },
+        @{ Header = 'H4:I4'; Value = 'H5:I6'; Label = 'بدون صفحه ووکامرس'; Formula = '=COUNTIFS(Products[نام کالا],"<>",Products[شناسه ووکامرس],"")'; Format = '#,##0' },
+        @{ Header = 'B8:C8'; Value = 'B9:C10'; Label = 'موجودی کل'; Formula = '=IFERROR(SUM(Products[موجودی کل]),0)'; Format = 'General' },
+        @{ Header = 'D8:E8'; Value = 'D9:E10'; Label = 'کالاهای موجود'; Formula = '=COUNTIF(Products[موجودی کل],">0")'; Format = '#,##0' },
+        @{ Header = 'F8:G8'; Value = 'F9:G10'; Label = 'کالاهای ناموجود'; Formula = '=COUNTIFS(Products[نام کالا],"<>",Products[موجودی کل],0)'; Format = '#,##0' },
+        @{ Header = 'H8:I8'; Value = 'H9:I10'; Label = 'دسته‌بندی‌های فعال'; Formula = '=IFERROR(SUMPRODUCT((Products[دسته‌بندی]<>"")/COUNTIF(Products[دسته‌بندی],Products[دسته‌بندی]&"")),0)'; Format = '#,##0' },
+        @{ Header = 'B12:E12'; Value = 'B13:E14'; Label = 'ارزش فروش موجودی (تومان)'; Formula = '=IFERROR(SUMPRODUCT(Products[قیمت فروش (تومان)],Products[موجودی کل]),0)'; Format = '#,##0' },
+        @{ Header = 'F12:G12'; Value = 'F13:G14'; Label = 'بهای یوآن'; Formula = "=IF('تنظیمات'!B10="""","""",'تنظیمات'!B10)"; Format = '#,##0' },
+        @{ Header = 'H12:I12'; Value = 'H13:I14'; Label = 'حاشیه سود'; Formula = "=IF('تنظیمات'!B13="""","""",'تنظیمات'!B13)"; Format = '0%' }
+    )
+    foreach ($card in $dashboardCards) {
+        $header = $dashboard.Range($card.Header)
+        $value = $dashboard.Range($card.Value)
+        $header.Merge()
+        $value.Merge()
+        $header.Cells.Item(1, 1).Value2 = $card.Label
+        try {
+            $value.Cells.Item(1, 1).Formula = $card.Formula
+        }
+        catch {
+            throw "Dashboard formula failed for '$($card.Label)': $($card.Formula)"
+        }
+        Set-SectionStyle $header 'EAF5FB' '2F414B' 10
+        $header.HorizontalAlignment = -4108
+        $value.Interior.Color = ConvertTo-OleColor 'FFFFFF'
+        $value.Font.Name = 'Yekan Bakh'
+        $value.Font.Size = 17
+        $value.Font.Bold = $true
+        $value.Font.Color = ConvertTo-OleColor '0168CD'
+        $value.HorizontalAlignment = -4108
+        $value.VerticalAlignment = -4108
+        $value.NumberFormat = $card.Format
+        $value.ReadingOrder = -5003
+        $header.Borders.Color = ConvertTo-OleColor 'A9CFE4'
+        $value.Borders.Color = ConvertTo-OleColor 'A9CFE4'
+    }
+    $dashboard.Range('B16:I16').Merge()
+    $dashboard.Range('B16').Value2 = 'وضعیت همگام‌سازی'
+    Set-SectionStyle $dashboard.Range('B16:I16') '2F414B' 'FFFFFF' 11
+    $dashboard.Range('B17:I19').Merge()
+    $dashboard.Range('B17').Formula = "='تنظیمات'!B6"
+    $dashboard.Range('B17:I19').WrapText = $true
+    $dashboard.Range('B17:I19').HorizontalAlignment = -4108
+    $dashboard.Range('B17:I19').VerticalAlignment = -4108
+    $dashboard.Range('B17:I19').Interior.Color = ConvertTo-OleColor 'F4F8FB'
+    $dashboard.Range('B17:I19').Borders.Color = ConvertTo-OleColor 'A9CFE4'
+    $dashboard.Range('B21').Value2 = 'وضعیت'
+    $dashboard.Range('C21').Value2 = 'تعداد'
+    $dashboard.Range('B22').Value2 = 'منتشرشده'
+    $dashboard.Range('B23').Value2 = 'پیش‌نویس'
+    $dashboard.Range('B24').Value2 = 'بدون صفحه'
+    $dashboard.Range('C22').Formula = '=COUNTIF(SyncData[وضعیت انتشار],"publish")'
+    $dashboard.Range('C23').Formula = '=COUNTIF(SyncData[وضعیت انتشار],"draft")'
+    $dashboard.Range('C24').Formula = '=COUNTIFS(Products[نام کالا],"<>",Products[شناسه ووکامرس],"")'
+    $dashboard.Range('B21:C24').Borders.Color = ConvertTo-OleColor 'A9CFE4'
+    $dashboard.Range('B21:C21').Interior.Color = ConvertTo-OleColor '0168CD'
+    $dashboard.Range('B21:C21').Font.Color = ConvertTo-OleColor 'FFFFFF'
+    $dashboard.Range('B21:C21').Font.Bold = $true
+    $dashboard.Range('C22:C24').NumberFormat = '#,##0'
+    $dashboard.Range('C22:C24').ReadingOrder = -5003
+    $dashboard.Range('B26').Value2 = 'هشدار'
+    $dashboard.Range('C26').Value2 = 'تعداد'
+    $dashboard.Range('B27').Value2 = 'دسته‌بندی نامشخص'
+    $dashboard.Range('B28').Value2 = 'هشدارهای قیمت'
+    $dashboard.Range('B29').Value2 = 'فقط در ووکامرس'
+    $dashboard.Range('C27').Formula = '=COUNTIFS(Products[نام کالا],"<>",Products[دسته‌بندی],"")'
+    $dashboard.Range('C28').Formula = '=COUNTIF(SyncData[هشدار قیمت],"<>")'
+    $dashboard.Range('C29').Formula = '=COUNTIF(SyncData[نوع ردیف],"فقط ووکامرس")'
+    $dashboard.Range('B26:C29').Borders.Color = ConvertTo-OleColor 'F0C36D'
+    $dashboard.Range('B26:C26').Interior.Color = ConvertTo-OleColor 'FFF3D6'
+    $dashboard.Range('B26:C26').Font.Bold = $true
+    $dashboard.Range('C27:C29').NumberFormat = '#,##0'
+    $dashboard.Range('C27:C29').ReadingOrder = -5003
+    $chartObject = $dashboard.ChartObjects().Add(
+        $dashboard.Range('E21').Left,
+        $dashboard.Range('E21').Top,
+        $dashboard.Range('E21:I32').Width,
+        $dashboard.Range('E21:I32').Height
+    )
+    $chart = $chartObject.Chart
+    $chart.SetSourceData($dashboard.Range('B21:C24'))
+    $chart.ChartType = -4120
+    $chart.HasTitle = $true
+    $chart.ChartTitle.Text = 'وضعیت انتشار ووکامرس'
+    $chart.HasLegend = $true
+    $chart.Legend.Position = -4107
+    $excel.ActiveWindow.Zoom = 90
+
     # Settings stays because it is useful, but every visible label is Persian.
     $settings.Activate()
     $excel.ActiveWindow.DisplayGridlines = $false
-    $settings.Columns('A').ColumnWidth = 28
-    $settings.Columns('B:F').ColumnWidth = 18
-    $settings.Range('A1:F2').Merge()
-    $settings.Range('A1').Value2 = "تنظیمات همگام‌سازی و محاسبه قیمت - $editionFa"
-    Set-SectionStyle $settings.Range('A1:F2') '1C61E7' 'FFFFFF' 17
-    $settings.Range('A1:F2').HorizontalAlignment = -4108
+    $settings.Columns('A').ColumnWidth = 40
+    $settings.Columns('B:F').ColumnWidth = 16
+    $settings.Range('A1:F2').Interior.Color = ConvertTo-OleColor 'FFFFFF'
+    $settings.Range('C1:F2').Merge()
+    $settings.Range('C1').Value2 = 'تنظیمات همگام‌سازی و محاسبه قیمت'
+    $settings.Range('C1').Font.Name = 'Yekan Bakh'
+    $settings.Range('C1').Font.Size = 17
+    $settings.Range('C1').Font.Bold = $true
+    $settings.Range('C1').Font.Color = ConvertTo-OleColor '2F414B'
+    $settings.Range('C1').HorizontalAlignment = -4152
+    $settings.Range('C1').VerticalAlignment = -4108
+    [void](Add-BrandLogo $settings $LogoPath $settings.Range('A1') 160 36)
 
     $settings.Range('A3').Value2 = 'نشانی سرویس محصولات'
     $settings.Range('B3:F3').Merge()
@@ -437,29 +593,31 @@ try {
     $settings.Range('B4:F4').Merge()
     $settings.Range('B4').Value2 = 'http://127.0.0.1:18080/api/excel/pricing-sync/state'
     $settings.Range('A5').Value2 = 'همگام‌سازی خودکار هنگام بازشدن'
+    $settings.Range('B5:F5').Merge()
     $settings.Range('B5').Value2 = 'بله'
     $settings.Range('B5').Validation.Delete()
     $settings.Range('B5').Validation.Add(3, 1, 1, 'بله,خیر')
     $settings.Range('A6').Value2 = 'وضعیت'
     $settings.Range('B6:F6').Merge()
     $settings.Range('B6').Value2 = 'هنوز همگام‌سازی نشده است.'
+    $settings.Range('B6:F6').WrapText = $true
+    $settings.Rows.Item(6).RowHeight = 45
     $settings.Range('A7').Value2 = 'آخرین به‌روزرسانی موفق'
     $settings.Range('B7:F7').Merge()
     $settings.Range('B7:F7').ClearContents()
     $settings.Range('B7:F7').NumberFormat = 'yyyy/mm/dd hh:mm'
-    $settings.Range('A8').Value2 = 'نسخه'
-    $settings.Range('B8').Value2 = $editionFa
-    $settings.Range('G8').Value2 = $Edition.ToLowerInvariant()
+    $settings.Range('A8:F8').ClearContents()
+    $settings.Range('G8').Value2 = 'canonical'
     $settings.Rows.Item(8).Hidden = $true
-    $settings.Range('A3:A8').Font.Bold = $true
-    $settings.Range('A3:F8').Borders.Color = ConvertTo-OleColor 'D9D9D9'
-    $settings.Range('B3:F8').Interior.Color = ConvertTo-OleColor 'F6F6F6'
+    $settings.Range('A3:A7').Font.Bold = $true
+    $settings.Range('A3:F7').Borders.Color = ConvertTo-OleColor 'D9D9D9'
+    $settings.Range('B3:F7').Interior.Color = ConvertTo-OleColor 'F6F6F6'
     $settings.Range('B3:F4').ReadingOrder = -5003
 
     $settings.Range('A9:F9').Merge()
     $settings.Range('A9').Value2 = 'مقادیر زنده سایت'
     Set-SectionStyle $settings.Range('A9:F9') 'DDE8FC' '242424' 12
-    $liveLabels = @('بهای یوآن سایت', 'بهای دلار سایت', 'تاریخ مؤثر نرخ‌ها', 'سود پیش‌فرض سایت', 'بازبینی وضعیت سایت', 'زمان دریافت وضعیت')
+    $liveLabels = @('بهای یوآن سایت', 'بهای دلار سایت', 'تاریخ مؤثر یوآن', 'حاشیه سود سایت', 'نرخ حمل هوایی سایت (یوآن/کیلوگرم)', 'زمان دریافت وضعیت')
     for ($rowOffset = 0; $rowOffset -lt $liveLabels.Count; $rowOffset++) {
         $row = 10 + $rowOffset
         $settings.Cells.Item($row, 1).Value2 = $liveLabels[$rowOffset]
@@ -467,6 +625,7 @@ try {
     }
     $settings.Range('B10:B11').NumberFormat = '#,##0'
     $settings.Range('B13').NumberFormat = '0%'
+    $settings.Range('B14').NumberFormat = 'General'
     $settings.Range('A10:A15').Font.Bold = $true
     $settings.Range('A10:F15').Borders.Color = ConvertTo-OleColor 'B9CCF4'
     $settings.Range('B10:F15').Interior.Color = ConvertTo-OleColor 'F6F6F6'
@@ -475,7 +634,7 @@ try {
     $settings.Range('A17:F17').Merge()
     $settings.Range('A17').Value2 = 'مقادیر پیشنهادی این فایل'
     Set-SectionStyle $settings.Range('A17:F17') 'DDE8FC' '242424' 12
-    $proposalLabels = @('بهای یوآن', 'بهای دلار', 'تاریخ مؤثر', 'درصد سود', 'نرخ حمل CNY', 'وضعیت پیش‌نمایش')
+    $proposalLabels = @('بهای یوآن', 'بهای دلار', 'تاریخ مؤثر یوآن', 'حاشیه سود', 'نرخ حمل هوایی (یوآن/کیلوگرم)', 'وضعیت پیش‌نمایش')
     for ($rowOffset = 0; $rowOffset -lt $proposalLabels.Count; $rowOffset++) {
         $row = 18 + $rowOffset
         $settings.Cells.Item($row, 1).Value2 = $proposalLabels[$rowOffset]
@@ -483,11 +642,20 @@ try {
     }
     $settings.Range('B18:B19').NumberFormat = '#,##0'
     $settings.Range('B21').NumberFormat = '0%'
-    $settings.Range('B22').NumberFormat = '#,##0.##'
+    $settings.Range('B22').NumberFormat = 'General'
     $settings.Range('A18:A23').Font.Bold = $true
     $settings.Range('A18:F23').Borders.Color = ConvertTo-OleColor 'B9CCF4'
     $settings.Range('B18:F23').Interior.Color = ConvertTo-OleColor 'FFF8E7'
     $settings.Range('B18:F23').HorizontalAlignment = -4108
+    $settings.Range('B22').Validation.Delete()
+    $settings.Range('B22').Validation.Add(2, 1, 5, '0')
+    $settings.Range('B22').Validation.ErrorTitle = 'نرخ حمل نامعتبر'
+    $settings.Range('B22').Validation.ErrorMessage = 'نرخ حمل باید عددی بزرگ‌تر از صفر باشد.'
+    $settings.Range('B22').Validation.ShowError = $true
+    $settings.Range('B10:B14').ReadingOrder = -5003
+    $settings.Range('B18:B22').ReadingOrder = -5003
+    $settings.Range('B10:B14').Font.Name = 'Yekan Bakh'
+    $settings.Range('B18:B22').Font.Name = 'Yekan Bakh'
 
     $settings.Range('A24').Value2 = 'حد هشدار اختلاف قیمت'
     $settings.Range('B24').Value2 = 0.07
@@ -497,44 +665,26 @@ try {
     $settings.Range('A24:A25').Font.Bold = $true
     $settings.Range('A24:F25').Borders.Color = ConvertTo-OleColor 'D9D9D9'
     $settings.Range('B24:F25').Interior.Color = ConvertTo-OleColor 'F6F6F6'
+    $settings.Range('A3:A25').WrapText = $true
+    $settings.Rows.Item(14).RowHeight = 30
+    $settings.Rows.Item(22).RowHeight = 30
 
     [void](Add-ActionButton $settings 'پیش‌نمایش تغییرات' 'ProductCatalogSync.PreviewPricingChanges' $settings.Range('A27') $settings.Range('A27:C28').Width $settings.Range('A27:C28').Height)
     [void](Add-ActionButton $settings 'اعمال تغییرات تأییدشده' 'ProductCatalogSync.ApplyPricingChanges' $settings.Range('D27') $settings.Range('D27:F28').Width $settings.Range('D27:F28').Height)
 
-    # Hidden base values and preview metadata are runtime-only conflict guards.
+    # Hidden base values, state/shipping revisions, and preview metadata are
+    # runtime-only conflict guards. The template itself persists no live values.
     $settings.Range('G18:G22').ClearContents()
+    $settings.Range('G14:G15').ClearContents()
     $settings.Range('G26:G28').ClearContents()
+    $settings.Range('H14:H17').ClearContents()
+    $settings.Range('G30:G47').ClearContents()
+    $settings.Range('G30').Value2 = 0
+    [void]$workbook.Names.Add('SelectedProductRow', $settings.Range('G30'))
     $settings.Columns('G').Hidden = $true
+    $settings.Columns('H').Hidden = $true
 
-    # Technical join data is never user-facing and is empty in the template.
-    $syncHeaders = @(
-        'کد کالا',
-        'ارز کالا',
-        'نرخ حمل هر کیلو',
-        'ارز حمل',
-        'درصد سود',
-        'بهای یوآن',
-        'بهای دلار',
-        'تاریخ نرخ',
-        'شناسه ووکامرس',
-        'قیمت مشتری ووکامرس',
-        'آخرین تغییر ووکامرس',
-        'بازبینی رکورد',
-        'نشانی محصول',
-        'سود مرجع',
-        'قیمت نهایی مرجع',
-        'قیمت فروش ویژه'
-    )
-    for ($column = 0; $column -lt $syncHeaders.Count; $column++) {
-        $syncData.Cells.Item(1, $column + 1).Value2 = $syncHeaders[$column]
-    }
-    $syncTable = $syncData.ListObjects.Add(1, $syncData.Range('A1:P2'), $null, 1)
-    $syncTable.Name = 'SyncData'
-    $syncTable.TableStyle = 'TableStyleMedium2'
-    [void]$syncTable.DataBodyRange.Delete()
-    $syncData.Visible = 2
-
-    $priceList.PageSetup.PrintArea = if ($Edition -eq 'Advanced') { '$B$3:$V$30' } else { '$B$3:$O$30' }
+    $priceList.PageSetup.PrintArea = '$B$1:$O$30'
     $priceList.PageSetup.Orientation = 2
     $priceList.PageSetup.Zoom = $false
     $priceList.PageSetup.FitToPagesWide = 1
@@ -543,8 +693,12 @@ try {
     $settings.PageSetup.Zoom = $false
     $settings.PageSetup.FitToPagesWide = 1
     $settings.PageSetup.FitToPagesTall = 1
+    $dashboard.PageSetup.PrintArea = '$B$1:$I$32'
+    $dashboard.PageSetup.Zoom = $false
+    $dashboard.PageSetup.FitToPagesWide = 1
+    $dashboard.PageSetup.FitToPagesTall = 1
     $priceList.Activate()
-    $excel.ActiveWindow.DisplayGridlines = $true
+    $excel.ActiveWindow.DisplayGridlines = $false
     $excel.ActiveWindow.DisplayRightToLeft = $true
     $excel.ActiveWindow.Zoom = 90
 
@@ -574,6 +728,7 @@ try {
     $workbook.Save()
 
     $priceList.ExportAsFixedFormat(0, (Join-Path $PreviewDirectory 'price-list.pdf'))
+    $dashboard.ExportAsFixedFormat(0, (Join-Path $PreviewDirectory 'dashboard.pdf'))
     $settings.ExportAsFixedFormat(0, (Join-Path $PreviewDirectory 'settings.pdf'))
 
     $excelVersion = [string]$excel.Version
@@ -600,6 +755,8 @@ try {
     }
     foreach ($obsoleteName in @(
         'Digitalogic-Price-Calculator.xltm',
+        'لیست قیمت دیجیتالاجیک - استاندارد.xltm',
+        'لیست قیمت دیجیتالاجیک - پیشرفته.xltm',
         'لیست قیمت پاتریس و دیجیتالاجیک - استاندارد.xltm',
         'لیست قیمت پاتریس و دیجیتالاجیک - پیشرفته.xltm'
     )) {
@@ -613,7 +770,7 @@ try {
     ) -join "`n"
     [IO.File]::WriteAllText($ChecksumManifestPath, ($manifestText + "`n"), $utf8NoBom)
     [pscustomobject]@{
-        edition = $Edition
+        edition = 'canonical'
         output = $OutputPath
         distribution_copy = $DistributionCopyPath
         sha256 = $hash.Hash.ToLowerInvariant()
