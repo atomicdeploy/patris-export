@@ -670,6 +670,11 @@ func TestDynamicCalculatorTemplatesPreservePersianPriceListContracts(t *testing.
 					t.Fatalf("%s!%s persisted runtime pricing state %q, err=%v", settingsSheet, cell, value, valueErr)
 				}
 			}
+			if value, valueErr := book.GetCellValue(
+				settingsSheet, "A27", excelize.Options{RawCellValue: true},
+			); valueErr != nil || value != "" {
+				t.Fatalf("%s!A27 retained unnecessary static text %q, err=%v", settingsSheet, value, valueErr)
+			}
 
 			syncTables, syncTableErr := book.GetTables(syncSheet)
 			if syncTableErr != nil {
@@ -718,6 +723,19 @@ func TestDynamicCalculatorTemplatesPreservePersianPriceListContracts(t *testing.
 						t.Errorf("Advanced operational column %s visibility = %v, want visible, err=%v", column, visible, columnErr)
 					}
 				}
+				styleID, styleErr := book.GetCellStyle(priceSheet, "J6")
+				if styleErr != nil {
+					t.Fatal(styleErr)
+				}
+				wooLinkStyle, styleErr := book.GetStyle(styleID)
+				if styleErr != nil {
+					t.Fatal(styleErr)
+				}
+				if wooLinkStyle.Alignment == nil ||
+					wooLinkStyle.Alignment.Horizontal != "left" ||
+					wooLinkStyle.Alignment.ReadingOrder != 1 {
+					t.Errorf("Advanced WooID cell alignment = %+v, want left-to-right", wooLinkStyle.Alignment)
+				}
 				for _, column := range []string{"N", "O", "P", "Q"} {
 					visible, columnErr := book.GetColVisible(priceSheet, column)
 					if columnErr != nil || visible {
@@ -758,6 +776,17 @@ func TestDynamicCalculatorVBASourceGuardsLivePricingBeforeMutation(t *testing.T)
 	if readSourcePosition < 0 || importPosition < 0 || readSourcePosition > importPosition {
 		t.Fatalf("source identity must be validated before product import")
 	}
+	wooLinkRowPosition := strings.Index(source, "Private Sub ApplyWooLinkRow")
+	if wooLinkRowPosition < 0 {
+		t.Fatal("per-row WooCommerce link helper is missing")
+	}
+	wooLinkRowSource := source[wooLinkRowPosition:]
+	wooLinkValuePosition := strings.Index(wooLinkRowSource, "linkCell.Value2 = linkText")
+	wooLinkAddPosition := strings.Index(wooLinkRowSource, "table.Parent.Hyperlinks.Add")
+	if wooLinkValuePosition < 0 || wooLinkAddPosition < 0 ||
+		wooLinkValuePosition > wooLinkAddPosition {
+		t.Fatal("WooCommerce link text must be written before the optional hyperlink is added")
+	}
 
 	for _, required := range []string{
 		`Attribute VB_Name = "ProductCatalogSync"`,
@@ -776,6 +805,14 @@ func TestDynamicCalculatorVBASourceGuardsLivePricingBeforeMutation(t *testing.T)
 		`Private Const PRICING_CSRF_HEADER As String = "X-Patris-Excel-CSRF-Token"`,
 		`Private Const PRICING_REQUEST_SCHEMA As String = "patris.excel-pricing-companion-request/v1"`,
 		`Private Const PRICING_SESSION_SCHEMA As String = "patris.excel-pricing-companion-session/v1"`,
+		"Private Const STATE_PAGE_SIZE As Long = 250",
+		"Private Const MAX_STATE_PAGES As Long = 8",
+		"Private Const HTTP_TIMEOUT_MS As Long = 150000",
+		"Private Function StateRequestJson",
+		"EnsureSourceIdentity",
+		`JsonString(mSourceID)`,
+		`JsonString(mSourceDataset)`,
+		`JsonString(mSourceRevision)`,
 		`sessionText = HttpPostJsonRaw(`,
 		`http.setRequestHeader "Idempotency-Key", idempotencyKey`,
 		`"""expected_state_revision"":"`,
@@ -794,7 +831,13 @@ func TestDynamicCalculatorVBASourceGuardsLivePricingBeforeMutation(t *testing.T)
 		`"https://digitalogic.ir/"`,
 		"siteRows.CompareMode = vbBinaryCompare",
 		"codesSeen.CompareMode = vbBinaryCompare",
+		"ApplyWooLinkRow table, syncTable, rowIndex",
+		"Private Sub ApplyWooLinkRow",
+		"On Error GoTo RowFailed",
+		"RowFailed:",
 		`linkText = linkText & "WooID " & wooID`,
+		`linkCell.NumberFormat = "@"`,
+		"linkCell.Value2 = linkText",
 		"table.Parent.Hyperlinks.Add",
 		"IsAllowedDigitalogicUrl(permalink)",
 		"table.ListColumns(1).DataBodyRange.FormulaR1C1 = priceFormula",

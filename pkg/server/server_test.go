@@ -943,8 +943,8 @@ func TestCanonicalRequestTimeoutBoundsDigitalogicPricing(t *testing.T) {
 	}
 
 	cfg.Canonical.Pricing.Digitalogic.Timeout = "15s"
-	if got := canonicalRequestTimeout(cfg); got != 20*time.Second {
-		t.Fatalf("Digitalogic timeout with grace = %s, want 20s", got)
+	if got := canonicalRequestTimeout(cfg); got != 30*time.Second {
+		t.Fatalf("Digitalogic timeout with transform grace = %s, want 30s", got)
 	}
 
 	cfg.Canonical.Pricing.Digitalogic.Timeout = "10m"

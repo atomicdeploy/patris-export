@@ -9,9 +9,9 @@ Private Const PROFIT_TABLE As String = "Profit"
 Private Const STANDARD_COLUMN_COUNT As Long = 8
 Private Const ADVANCED_COLUMN_COUNT As Long = 16
 Private Const SYNC_COLUMN_COUNT As Long = 16
-Private Const STATE_PAGE_SIZE As Long = 100
-Private Const MAX_STATE_PAGES As Long = 20
-Private Const HTTP_TIMEOUT_MS As Long = 90000
+Private Const STATE_PAGE_SIZE As Long = 250
+Private Const MAX_STATE_PAGES As Long = 8
+Private Const HTTP_TIMEOUT_MS As Long = 150000
 Private Const PRICING_HTTP_TIMEOUT_MS As Long = 240000
 Private Const MAX_PRICING_RESPONSE_CHARS As Long = 4194304
 Private Const PRICING_CLIENT_HEADER As String = "X-Patris-Excel-Client"
@@ -679,37 +679,76 @@ End Sub
 Private Sub ApplyWooLinks(ByVal table As ListObject, _
                           ByVal syncTable As ListObject)
     Dim rowIndex As Long
+
+    If table.DataBodyRange Is Nothing Or syncTable.DataBodyRange Is Nothing Then Exit Sub
+    For rowIndex = 1 To table.DataBodyRange.Rows.Count
+        ApplyWooLinkRow table, syncTable, rowIndex
+    Next rowIndex
+End Sub
+
+Private Sub ApplyWooLinkRow(ByVal table As ListObject, _
+                            ByVal syncTable As ListObject, _
+                            ByVal rowIndex As Long)
     Dim wooID As String
     Dim permalink As String
     Dim linkText As String
     Dim linkCell As Range
+    Dim isAdvanced As Boolean
 
-    If table.DataBodyRange Is Nothing Or syncTable.DataBodyRange Is Nothing Then Exit Sub
-    For rowIndex = 1 To table.DataBodyRange.Rows.Count
-        wooID = Trim$(CStr(syncTable.DataBodyRange.Cells(rowIndex, 9).Value2))
-        permalink = Trim$(CStr(syncTable.DataBodyRange.Cells(rowIndex, 13).Value2))
-        If table.ListColumns.Count = ADVANCED_COLUMN_COUNT Then
-            Set linkCell = table.DataBodyRange.Cells(rowIndex, 9)
-            linkText = vbNullString
-        Else
-            Set linkCell = table.DataBodyRange.Cells(rowIndex, 8)
-            linkText = CStr(linkCell.Value2)
-        End If
+    On Error GoTo RowFailed
+    isAdvanced = (table.ListColumns.Count = ADVANCED_COLUMN_COUNT)
+    wooID = Trim$(CStr(syncTable.DataBodyRange.Cells(rowIndex, 9).Value2))
+    permalink = Trim$(CStr(syncTable.DataBodyRange.Cells(rowIndex, 13).Value2))
+    If isAdvanced Then
+        Set linkCell = table.DataBodyRange.Cells(rowIndex, 9)
+        linkText = vbNullString
+    Else
+        Set linkCell = table.DataBodyRange.Cells(rowIndex, 8)
+        linkText = CStr(linkCell.Value2)
+    End If
+
+    If Len(wooID) = 0 Then
+        On Error Resume Next
         linkCell.Hyperlinks.Delete
-        If Len(wooID) > 0 Then
-            If Len(linkText) > 0 Then linkText = linkText & " - "
-            linkText = linkText & "WooID " & wooID
-            If IsAllowedDigitalogicUrl(permalink) Then
-                table.Parent.Hyperlinks.Add _
-                    Anchor:=linkCell, Address:=permalink, _
-                    TextToDisplay:=linkText
-            Else
-                linkCell.Value = linkText
-            End If
-        ElseIf table.ListColumns.Count = ADVANCED_COLUMN_COUNT Then
-            linkCell.ClearContents
-        End If
-    Next rowIndex
+        If isAdvanced Then linkCell.ClearContents
+        Err.Clear
+        On Error GoTo 0
+        Exit Sub
+    End If
+
+    If Len(linkText) > 0 Then linkText = linkText & " - "
+    linkText = linkText & "WooID " & wooID
+
+    On Error Resume Next
+    linkCell.Hyperlinks.Delete
+    Err.Clear
+    On Error GoTo RowFailed
+    linkCell.NumberFormat = "@"
+    linkCell.Value2 = linkText
+
+    If isAdvanced Then
+        On Error Resume Next
+        linkCell.HorizontalAlignment = xlLeft
+        linkCell.ReadingOrder = xlLTR
+        Err.Clear
+        On Error GoTo RowFailed
+    End If
+
+    If IsAllowedDigitalogicUrl(permalink) Then
+        table.Parent.Hyperlinks.Add _
+            Anchor:=linkCell, Address:=permalink, _
+            TextToDisplay:=linkText
+    End If
+    Exit Sub
+
+RowFailed:
+    On Error Resume Next
+    If Not linkCell Is Nothing And Len(linkText) > 0 Then
+        linkCell.NumberFormat = "@"
+        linkCell.Value2 = linkText
+    End If
+    Err.Clear
+    On Error GoTo 0
 End Sub
 
 Private Function PriceParitySummary() As Variant
@@ -753,10 +792,15 @@ Private Function PriceParitySummary() As Variant
 End Function
 
 Private Function StateRequestJson(ByVal page As Long) As String
+    EnsureSourceIdentity
     StateRequestJson = _
         "{""schema"":" & JsonString(PRICING_REQUEST_SCHEMA) & "," & _
         """schema_version"":1," & _
-        """operation"":""state"",""page"":" & CStr(page) & "," & _
+        """operation"":""state"",""source"":{" & _
+        """id"":" & JsonString(mSourceID) & "," & _
+        """dataset"":" & JsonString(mSourceDataset) & "," & _
+        """revision"":" & JsonString(mSourceRevision) & "}," & _
+        """page"":" & CStr(page) & "," & _
         """limit"":" & CStr(STATE_PAGE_SIZE) & ",""locale"":""fa""}"
 End Function
 
