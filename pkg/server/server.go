@@ -710,9 +710,12 @@ func canonicalRequestTimeout(cfg appconfig.Config) time.Duration {
 	timeout := 30 * time.Second
 	if strings.EqualFold(strings.TrimSpace(cfg.Canonical.Pricing.Mode), "digitalogic") {
 		if configured, err := time.ParseDuration(strings.TrimSpace(cfg.Canonical.Pricing.Digitalogic.Timeout)); err == nil && configured > 0 {
+			// The remote deadline covers catalog and assignment requests. Keep a
+			// separate bounded window for transforming, hashing, and encoding a
+			// large canonical workbook contract after those requests complete.
 			grace := configured
-			if grace > 5*time.Second {
-				grace = 5 * time.Second
+			if grace > 30*time.Second {
+				grace = 30 * time.Second
 			}
 			timeout = configured + grace
 		}

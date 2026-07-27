@@ -48,6 +48,25 @@ func canonicalTestConfig(code string) (Config, pricingcatalog.Provider) {
 	return cfg, pricingcatalog.NewProvider(cfg.Pricing)
 }
 
+func TestSourceIdentityMatchesCanonicalCrossPlatformNaming(t *testing.T) {
+	revision := "sha256:" + strings.Repeat("a", 64)
+	for name, source := range map[string]string{
+		"windows": `C:\Patris\data4\KALA.DB`,
+		"url":     "https://example.invalid/export/KALA.DB",
+	} {
+		t.Run(name, func(t *testing.T) {
+			got := SourceIdentity(source, "patris-office", revision)
+			want := (Source{ID: "patris-office", Dataset: "kala.db", Revision: revision})
+			if got != want {
+				t.Fatalf("source identity=%#v, want %#v", got, want)
+			}
+		})
+	}
+	if got := SourceIdentity(`C:\Patris\data4\KALA.DB`, " ", revision); got.ID != "kala.db" {
+		t.Fatalf("default source ID=%q, want kala.db", got.ID)
+	}
+}
+
 func TestLandedPriceExactWorkbookFixture(t *testing.T) {
 	got, err := LandedPrice("240", "120", pricingcatalog.CurrencyCNY, "24.5", "30", "29000")
 	if err != nil {

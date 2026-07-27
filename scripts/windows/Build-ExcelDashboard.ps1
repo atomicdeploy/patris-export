@@ -330,6 +330,8 @@ try {
     $priceList.Columns('G').NumberFormat = '#,##0.##'
     if ($Edition -eq 'Advanced') {
         $priceList.Columns('J').NumberFormat = '@'
+        $priceList.Columns('J').HorizontalAlignment = -4131
+        $priceList.Columns('J').ReadingOrder = -5003
         $priceList.Columns('K').NumberFormat = '#,##0'
         $priceList.Columns('L').NumberFormat = '0.0%'
         $priceList.Columns('O').NumberFormat = '0.00"%"'
@@ -496,16 +498,8 @@ try {
     $settings.Range('A24:F25').Borders.Color = ConvertTo-OleColor 'D9D9D9'
     $settings.Range('B24:F25').Interior.Color = ConvertTo-OleColor 'F6F6F6'
 
-    $settings.Range('A27:F28').Merge()
-    $settings.Range('A27').Value2 = 'قالب هیچ ردیف کالایی را ذخیره نمی‌کند. همگام‌سازی، داده‌های سرویس محصولات و قیمت قابل مشاهده مشتری در ووکامرس را دریافت و اختلاف‌ها را کنترل می‌کند.'
-    $settings.Range('A27:F28').WrapText = $true
-    $settings.Range('A27:F28').VerticalAlignment = -4108
-    $settings.Range('A27:F28').HorizontalAlignment = -4108
-    $settings.Range('A27:F28').Interior.Color = ConvertTo-OleColor 'F6F6F6'
-    $settings.Range('A27:F28').Borders.Color = ConvertTo-OleColor 'D9D9D9'
-
-    [void](Add-ActionButton $settings 'پیش‌نمایش تغییرات' 'ProductCatalogSync.PreviewPricingChanges' $settings.Range('A30') $settings.Range('A30:C31').Width $settings.Range('A30:C31').Height)
-    [void](Add-ActionButton $settings 'اعمال تغییرات تأییدشده' 'ProductCatalogSync.ApplyPricingChanges' $settings.Range('D30') $settings.Range('D30:F31').Width $settings.Range('D30:F31').Height)
+    [void](Add-ActionButton $settings 'پیش‌نمایش تغییرات' 'ProductCatalogSync.PreviewPricingChanges' $settings.Range('A27') $settings.Range('A27:C28').Width $settings.Range('A27:C28').Height)
+    [void](Add-ActionButton $settings 'اعمال تغییرات تأییدشده' 'ProductCatalogSync.ApplyPricingChanges' $settings.Range('D27') $settings.Range('D27:F28').Width $settings.Range('D27:F28').Height)
 
     # Hidden base values and preview metadata are runtime-only conflict guards.
     $settings.Range('G18:G22').ClearContents()
@@ -545,7 +539,7 @@ try {
     $priceList.PageSetup.Zoom = $false
     $priceList.PageSetup.FitToPagesWide = 1
     $priceList.PageSetup.FitToPagesTall = 1
-    $settings.PageSetup.PrintArea = '$A$1:$F$31'
+    $settings.PageSetup.PrintArea = '$A$1:$F$28'
     $settings.PageSetup.Zoom = $false
     $settings.PageSetup.FitToPagesWide = 1
     $settings.PageSetup.FitToPagesTall = 1

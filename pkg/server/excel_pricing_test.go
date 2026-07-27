@@ -79,17 +79,18 @@ func TestExcelPricingStateInjectsProtectedCredentialAndCanonicalSource(t *testin
 	defer remote.Close()
 
 	server := newExcelPricingTestServer(t, remote.URL+"/wp-json/digitalogic/patris/product-sync")
-	source := canonical.Source{
-		ID:       "patris-office",
-		Dataset:  "kala.db",
-		Revision: excelPricingRevisionForTest("source-a"),
+	source := excelPricingStateSourceForTest()
+	var canonicalCalls atomic.Int32
+	projection := canonicalProjectionSequence(source)
+	server.excelPricing.canonical = func(ctx context.Context) (recordpipe.Result, error) {
+		canonicalCalls.Add(1)
+		return projection(ctx)
 	}
-	server.excelPricing.canonical = canonicalProjectionSequence(source)
 	token := openExcelPricingSession(t, server)
 	request := authenticatedExcelPricingRequest(
 		http.MethodPost,
 		"/api/excel/pricing-sync/state",
-		`{"schema":"patris.excel-pricing-companion-request/v1","schema_version":1,"operation":"state","page":1,"limit":100,"locale":"fa"}`,
+		validExcelPricingStateBody(source, 1, 250),
 		token,
 	)
 	response := httptest.NewRecorder()
@@ -103,9 +104,106 @@ func TestExcelPricingStateInjectsProtectedCredentialAndCanonicalSource(t *testin
 	if received["schema"] != excelPricingRemoteRequestSchema || received["operation"] != "state" {
 		t.Fatalf("remote identity=%#v", received)
 	}
+	if received["page"] != float64(1) || received["limit"] != float64(250) {
+		t.Fatalf("remote pagination=%#v/%#v, want 1/250", received["page"], received["limit"])
+	}
 	remoteSource, ok := received["source"].(map[string]interface{})
 	if !ok || remoteSource["id"] != source.ID || remoteSource["dataset"] != source.Dataset || remoteSource["revision"] != source.Revision {
 		t.Fatalf("remote source=%#v, want %#v", received["source"], source)
+	}
+	if canonicalCalls.Load() != 0 {
+		t.Fatalf("read-only state rebuilt canonical source %d time(s), want 0", canonicalCalls.Load())
+	}
+}
+
+func TestExcelPricingStateRejectsPageSizeAboveBound(t *testing.T) {
+	server := newExcelPricingTestServer(t, "https://digitalogic.example/wp-json/digitalogic/patris/product-sync")
+	token := openExcelPricingSession(t, server)
+	request := authenticatedExcelPricingRequest(
+		http.MethodPost,
+		"/api/excel/pricing-sync/state",
+		validExcelPricingStateBody(excelPricingStateSourceForTest(), 1, 251),
+		token,
+	)
+	response := httptest.NewRecorder()
+	server.router.ServeHTTP(response, request)
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("state status=%d, want 400: %s", response.Code, response.Body.String())
+	}
+}
+
+func TestExcelPricingStateRequiresExpectedSourceIdentity(t *testing.T) {
+	server := newExcelPricingTestServer(t, "https://digitalogic.example/wp-json/digitalogic/patris/product-sync")
+	token := openExcelPricingSession(t, server)
+	mismatched := excelPricingStateSourceForTest()
+	mismatched.ID = "unexpected-source"
+	wrongDataset := excelPricingStateSourceForTest()
+	wrongDataset.Dataset = "other.db"
+	invalidRevision := excelPricingStateSourceForTest()
+	invalidRevision.Revision = "SHA256:" + strings.Repeat("A", 64)
+	for name, body := range map[string]string{
+		"missing":          `{"schema":"patris.excel-pricing-companion-request/v1","schema_version":1,"operation":"state","page":1,"limit":1,"locale":"fa"}`,
+		"wrong ID":         validExcelPricingStateBody(mismatched, 1, 1),
+		"wrong dataset":    validExcelPricingStateBody(wrongDataset, 1, 1),
+		"invalid revision": validExcelPricingStateBody(invalidRevision, 1, 1),
+	} {
+		t.Run(name, func(t *testing.T) {
+			request := authenticatedExcelPricingRequest(
+				http.MethodPost,
+				"/api/excel/pricing-sync/state",
+				body,
+				token,
+			)
+			response := httptest.NewRecorder()
+			server.router.ServeHTTP(response, request)
+			want := http.StatusBadRequest
+			if name == "wrong ID" || name == "wrong dataset" {
+				want = http.StatusConflict
+			}
+			if response.Code != want {
+				t.Fatalf("state status=%d, want %d: %s", response.Code, want, response.Body.String())
+			}
+		})
+	}
+}
+
+func TestExcelPricingMutationRejectsCallerSuppliedSource(t *testing.T) {
+	var remoteCalls atomic.Int32
+	remote := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		remoteCalls.Add(1)
+	}))
+	defer remote.Close()
+	server := newExcelPricingTestServer(t, remote.URL+"/wp-json/digitalogic/patris/product-sync")
+	var canonicalCalls atomic.Int32
+	server.excelPricing.canonical = func(context.Context) (recordpipe.Result, error) {
+		canonicalCalls.Add(1)
+		return recordpipe.Result{}, nil
+	}
+	stateRevision := excelPricingRevisionForTest("settings-preview-source-rejected")
+	var payload map[string]interface{}
+	if err := json.Unmarshal([]byte(validExcelPricingMutationBody(
+		"preview", "excel-preview-source-0001", stateRevision, "", "",
+	)), &payload); err != nil {
+		t.Fatal(err)
+	}
+	payload["source"] = excelPricingStateSourceForTest()
+	body, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	token := openExcelPricingSession(t, server)
+	request := authenticatedExcelPricingRequest(
+		http.MethodPost, "/api/excel/pricing-sync/preview", string(body), token,
+	)
+	request.Header.Set("Idempotency-Key", "excel-preview-source-0001")
+	request.Header.Set("If-Match", `"`+stateRevision+`"`)
+	response := httptest.NewRecorder()
+	server.router.ServeHTTP(response, request)
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("preview status=%d, want 400: %s", response.Code, response.Body.String())
+	}
+	if canonicalCalls.Load() != 0 || remoteCalls.Load() != 0 {
+		t.Fatalf("rejected source reached canonical=%d remote=%d", canonicalCalls.Load(), remoteCalls.Load())
 	}
 }
 
@@ -351,7 +449,7 @@ func TestExcelPricingRemoteErrorsAndRedirectsAreSecretSafe(t *testing.T) {
 	request := authenticatedExcelPricingRequest(
 		http.MethodPost,
 		"/api/excel/pricing-sync/state",
-		`{"schema":"patris.excel-pricing-companion-request/v1","schema_version":1,"operation":"state","page":1,"limit":1,"locale":"fa"}`,
+		validExcelPricingStateBody(excelPricingStateSourceForTest(), 1, 1),
 		token,
 	)
 	response := httptest.NewRecorder()
@@ -380,7 +478,7 @@ func TestExcelPricingRejectsNonJSONRemoteSuccess(t *testing.T) {
 	request := authenticatedExcelPricingRequest(
 		http.MethodPost,
 		"/api/excel/pricing-sync/state",
-		`{"schema":"patris.excel-pricing-companion-request/v1","schema_version":1,"operation":"state","page":1,"limit":1,"locale":"fa"}`,
+		validExcelPricingStateBody(excelPricingStateSourceForTest(), 1, 1),
 		token,
 	)
 	response := httptest.NewRecorder()
@@ -434,7 +532,7 @@ func TestExcelPricingBoundsTimeoutsAndMessageSizes(t *testing.T) {
 	request := authenticatedExcelPricingRequest(
 		http.MethodPost,
 		"/api/excel/pricing-sync/state",
-		`{"schema":"patris.excel-pricing-companion-request/v1","schema_version":1,"operation":"state","page":1,"limit":1,"locale":"fa"}`,
+		validExcelPricingStateBody(excelPricingStateSourceForTest(), 1, 1),
 		token,
 	)
 	response = httptest.NewRecorder()
@@ -478,6 +576,7 @@ func newExcelPricingTestServer(t *testing.T, productSyncURL string) *Server {
 		t.Fatal(err)
 	}
 	if err := manager.Update(func(cfg *appconfig.Config) {
+		cfg.Canonical.SourceID = "source"
 		cfg.SendUpdates = updateout.Config{
 			Enabled:              true,
 			URL:                  productSyncURL,
@@ -498,6 +597,7 @@ func newExcelPricingTestServer(t *testing.T, productSyncURL string) *Server {
 		router:       mux.NewRouter(),
 		config:       manager,
 		excelPricing: state,
+		dbPath:       "dataset",
 	}
 	server.setupRoutes()
 	return server
@@ -562,6 +662,28 @@ func validExcelPricingMutationBody(operation, idempotency, stateRevision, previe
 	}
 	encoded, _ := json.Marshal(payload)
 	return string(encoded)
+}
+
+func validExcelPricingStateBody(source canonical.Source, page, limit int) string {
+	payload := map[string]interface{}{
+		"schema":         excelPricingLocalRequestSchema,
+		"schema_version": 1,
+		"operation":      "state",
+		"source":         source,
+		"page":           page,
+		"limit":          limit,
+		"locale":         "fa",
+	}
+	encoded, _ := json.Marshal(payload)
+	return string(encoded)
+}
+
+func excelPricingStateSourceForTest() canonical.Source {
+	return canonical.Source{
+		ID:       "source",
+		Dataset:  "dataset",
+		Revision: excelPricingRevisionForTest("state-source"),
+	}
 }
 
 func canonicalProjectionSequence(sources ...canonical.Source) func(context.Context) (recordpipe.Result, error) {
