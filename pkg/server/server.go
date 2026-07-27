@@ -1582,9 +1582,13 @@ func (s *Server) broadcastUpdate() {
 }
 
 func (s *Server) dispatchInitialUpdate(ctx context.Context) {
+	cfg := s.Config().SendUpdates
+	if !cfg.Enabled || !cfg.Initial {
+		return
+	}
 	result, err := s.RecordResultContext(ctx)
 	if err != nil {
-		if errors.Is(err, context.Canceled) {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return
 		}
 		log.Printf("Failed to prepare initial send update payload: %v", err)
@@ -1603,10 +1607,16 @@ func (s *Server) dispatchInitialUpdate(ctx context.Context) {
 }
 
 func (s *Server) dispatchInitialUpdateAsync() {
+	cfg := s.Config()
+	if !cfg.SendUpdates.Enabled || !cfg.SendUpdates.Initial {
+		return
+	}
 	s.backgroundWG.Add(1)
 	go func() {
 		defer s.backgroundWG.Done()
-		s.dispatchInitialUpdate(s.backgroundCtx)
+		ctx, cancel := context.WithTimeout(s.backgroundCtx, canonicalRequestTimeout(cfg))
+		defer cancel()
+		s.dispatchInitialUpdate(ctx)
 	}()
 }
 

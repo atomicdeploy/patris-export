@@ -191,6 +191,14 @@ so the configured pricing phase retains an 85-second hard request ceiling.
 For a 939-Code projection, the default settings issue two 500-or-smaller pages
 concurrently instead of waiting for them sequentially.
 
+Pricing catalog and assignment-prefetch cache fills are serialized with
+context-aware gates. A request waiting behind another projection stops at its
+own cancellation or deadline and does not start another remote page after that
+deadline. Initial outbound delivery materializes a canonical snapshot only
+when both `send_updates.enabled` and `send_updates.initial` are true. When
+enabled, that background projection uses the same canonical request ceiling;
+disabling initial delivery therefore avoids a startup pricing read entirely.
+
 Transport completion is separate from catalog completeness. Digitalogic must
 still assign a shipping method to the intended product rows and configure a
 global or product-specific percentage markup before those rows can expose a

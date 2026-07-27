@@ -3,6 +3,7 @@ package pricingcatalog
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -229,6 +230,155 @@ func TestHTTPProviderConcurrentPrefetchHonorsCallerCancellation(t *testing.T) {
 	provider.mu.Unlock()
 	if committed != 0 {
 		t.Fatalf("caller-canceled prefetch committed %d assignments", committed)
+	}
+}
+
+func TestHTTPProviderQueuedPrefetchHonorsCallerDeadline(t *testing.T) {
+	firstBatchStarted := make(chan struct{})
+	releaseFirstBatch := make(chan struct{})
+	firstPrefetchDone := make(chan struct{})
+	var batchRequests atomic.Int32
+	var startedOnce sync.Once
+	var releaseOnce sync.Once
+	defer releaseOnce.Do(func() { close(releaseFirstBatch) })
+
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		recorder := httptest.NewRecorder()
+		if r.URL.Path == "/integration/catalog" {
+			writeConcurrentPricingCatalog(recorder)
+			response := recorder.Result()
+			response.Request = r
+			return response, nil
+		}
+		if r.URL.Path != "/integration/pricing-assignments/batch" {
+			http.NotFound(recorder, r)
+			response := recorder.Result()
+			response.Request = r
+			return response, nil
+		}
+
+		var request struct {
+			Codes []string `json:"codes"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			return nil, err
+		}
+		if batchRequests.Add(1) == 1 {
+			startedOnce.Do(func() { close(firstBatchStarted) })
+			select {
+			case <-releaseFirstBatch:
+			case <-r.Context().Done():
+				return nil, r.Context().Err()
+			}
+		}
+		writeConcurrentAssignmentPage(recorder, request.Codes)
+		response := recorder.Result()
+		response.Request = r
+		return response, nil
+	})}
+
+	provider := newHTTPProvider(DigitalogicConfig{
+		BaseURL: "https://digitalogic.example", BatchSize: 1, Timeout: "2s",
+	}, client, time.Now)
+	go func() {
+		defer close(firstPrefetchDone)
+		provider.Prefetch(context.Background(), []string{"A"})
+	}()
+	select {
+	case <-firstBatchStarted:
+	case <-time.After(time.Second):
+		t.Fatal("first pricing prefetch did not reach the batch transport")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer cancel()
+	startedAt := time.Now()
+	provider.Prefetch(ctx, []string{"B"})
+	if elapsed := time.Since(startedAt); elapsed > 250*time.Millisecond {
+		t.Fatalf("queued pricing prefetch outlived caller deadline: %s", elapsed)
+	}
+	if !errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		t.Fatalf("queued pricing prefetch context error = %v, want deadline exceeded", ctx.Err())
+	}
+	if got := batchRequests.Load(); got != 1 {
+		t.Fatalf("deadline-expired queued prefetch started %d batch requests, want one existing request", got)
+	}
+
+	releaseOnce.Do(func() { close(releaseFirstBatch) })
+	select {
+	case <-firstPrefetchDone:
+	case <-time.After(time.Second):
+		t.Fatal("first pricing prefetch did not finish after release")
+	}
+}
+
+func TestHTTPProviderQueuedCatalogFetchHonorsCallerDeadline(t *testing.T) {
+	firstCatalogStarted := make(chan struct{})
+	releaseFirstCatalog := make(chan struct{})
+	firstResolveDone := make(chan struct{})
+	var catalogRequests atomic.Int32
+	var startedOnce sync.Once
+	var releaseOnce sync.Once
+	defer releaseOnce.Do(func() { close(releaseFirstCatalog) })
+
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		recorder := httptest.NewRecorder()
+		switch r.URL.Path {
+		case "/integration/catalog":
+			if catalogRequests.Add(1) == 1 {
+				startedOnce.Do(func() { close(firstCatalogStarted) })
+				select {
+				case <-releaseFirstCatalog:
+				case <-r.Context().Done():
+					return nil, r.Context().Err()
+				}
+			}
+			writeConcurrentPricingCatalog(recorder)
+		case "/integration/products/by-code/A/pricing":
+			fmt.Fprint(recorder, `{"data":{"code":"A","shipping_method_id":"air","profit_percent":"30","profit_percent_source":"global_default","pricing_warnings":[]}}`)
+		default:
+			http.NotFound(recorder, r)
+		}
+		response := recorder.Result()
+		response.Request = r
+		return response, nil
+	})}
+
+	provider := newHTTPProvider(DigitalogicConfig{
+		BaseURL: "https://digitalogic.example", Timeout: "2s",
+	}, client, time.Now)
+	go func() {
+		defer close(firstResolveDone)
+		provider.Resolve(context.Background(), "A")
+	}()
+	select {
+	case <-firstCatalogStarted:
+	case <-time.After(time.Second):
+		t.Fatal("first catalog fetch did not reach the transport")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer cancel()
+	startedAt := time.Now()
+	resolution := provider.Resolve(ctx, "B")
+	if elapsed := time.Since(startedAt); elapsed > 250*time.Millisecond {
+		t.Fatalf("queued catalog fetch outlived caller deadline: %s", elapsed)
+	}
+	if !errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		t.Fatalf("queued catalog fetch context error = %v, want deadline exceeded", ctx.Err())
+	}
+	if resolution.CatalogStatus != "unavailable" || !contains(resolution.Warnings, "pricing_catalog_fetch_failed") {
+		t.Fatalf("queued catalog resolution did not fail closed: %+v", resolution)
+	}
+	if got := catalogRequests.Load(); got != 1 {
+		t.Fatalf("deadline-expired queued catalog fetch started %d requests, want one existing request", got)
+	}
+
+	releaseOnce.Do(func() { close(releaseFirstCatalog) })
+	select {
+	case <-firstResolveDone:
+	case <-time.After(time.Second):
+		t.Fatal("first catalog resolution did not finish after release")
 	}
 }
 

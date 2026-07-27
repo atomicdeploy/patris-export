@@ -126,6 +126,36 @@ type remoteStatusError struct {
 	status int
 }
 
+// contextGate serializes remote cache fills without making a queued caller
+// outlive its own cancellation or deadline. A sync.Mutex cannot be abandoned
+// while Lock is waiting, which allowed one slow pricing projection to hold
+// later canonical requests past their documented request ceiling.
+type contextGate struct {
+	ready chan struct{}
+}
+
+func newContextGate() *contextGate {
+	gate := &contextGate{ready: make(chan struct{}, 1)}
+	gate.ready <- struct{}{}
+	return gate
+}
+
+func (gate *contextGate) lock(ctx context.Context) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-gate.ready:
+		return nil
+	}
+}
+
+func (gate *contextGate) unlock() {
+	gate.ready <- struct{}{}
+}
+
 func (e *remoteStatusError) Error() string {
 	return fmt.Sprintf("HTTP status %d", e.status)
 }
@@ -202,17 +232,17 @@ type httpProvider struct {
 	freshFor time.Duration
 	maxStale time.Duration
 
-	mu             sync.Mutex
-	catalogFetchMu sync.Mutex
-	prefetchMu     sync.Mutex
-	catalog        *catalogSnapshot
-	catalogFailure time.Time
-	batchFailure   *prefetchDiagnostic
-	assignments    map[string]*list.Element
-	diagnostics    map[string]*list.Element
-	lru            *list.List
-	diagnosticLRU  *list.List
-	configError    string
+	mu               sync.Mutex
+	catalogFetchGate *contextGate
+	prefetchGate     *contextGate
+	catalog          *catalogSnapshot
+	catalogFailure   time.Time
+	batchFailure     *prefetchDiagnostic
+	assignments      map[string]*list.Element
+	diagnostics      map[string]*list.Element
+	lru              *list.List
+	diagnosticLRU    *list.List
+	configError      string
 }
 
 func newHTTPProvider(cfg DigitalogicConfig, client *http.Client, now func() time.Time) *httpProvider {
@@ -229,15 +259,17 @@ func newHTTPProvider(cfg DigitalogicConfig, client *http.Client, now func() time
 		}
 	}
 	provider := &httpProvider{
-		config:        normalized,
-		client:        client,
-		now:           now,
-		freshFor:      parseDuration(normalized.FreshFor, defaultFreshFor),
-		maxStale:      parseDuration(normalized.MaxStale, defaultMaxStale),
-		assignments:   make(map[string]*list.Element),
-		diagnostics:   make(map[string]*list.Element),
-		lru:           list.New(),
-		diagnosticLRU: list.New(),
+		config:           normalized,
+		client:           client,
+		now:              now,
+		freshFor:         parseDuration(normalized.FreshFor, defaultFreshFor),
+		maxStale:         parseDuration(normalized.MaxStale, defaultMaxStale),
+		catalogFetchGate: newContextGate(),
+		prefetchGate:     newContextGate(),
+		assignments:      make(map[string]*list.Element),
+		diagnostics:      make(map[string]*list.Element),
+		lru:              list.New(),
+		diagnosticLRU:    list.New(),
 	}
 	provider.configError = validateBaseURL(normalized.BaseURL)
 	if provider.configError == "" {
@@ -274,8 +306,16 @@ func (p *httpProvider) Prefetch(ctx context.Context, codes []string) Provider {
 	if p.configError != "" || len(codes) == 0 {
 		return p
 	}
-	p.prefetchMu.Lock()
-	defer p.prefetchMu.Unlock()
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := p.prefetchGate.lock(ctx); err != nil {
+		return p
+	}
+	defer p.prefetchGate.unlock()
+	if err := ctx.Err(); err != nil {
+		return p
+	}
 	if catalog, _, _ := p.resolveCatalog(ctx); catalog == nil {
 		return p
 	}
@@ -533,6 +573,9 @@ func (p *httpProvider) resolve(ctx context.Context, code string, run *prefetchRu
 }
 
 func (p *httpProvider) resolveCatalog(ctx context.Context) (*catalogSnapshot, string, []string) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	now := p.now().UTC()
 	p.mu.Lock()
 	cached := p.catalog
@@ -551,8 +594,13 @@ func (p *httpProvider) resolveCatalog(ctx context.Context) (*catalogSnapshot, st
 		return nil, "unavailable", []string{"pricing_catalog_fetch_failed"}
 	}
 	p.mu.Unlock()
-	p.catalogFetchMu.Lock()
-	defer p.catalogFetchMu.Unlock()
+	if err := p.catalogFetchGate.lock(ctx); err != nil {
+		return nil, "unavailable", []string{"pricing_catalog_fetch_failed"}
+	}
+	defer p.catalogFetchGate.unlock()
+	if err := ctx.Err(); err != nil {
+		return nil, "unavailable", []string{"pricing_catalog_fetch_failed"}
+	}
 
 	// Another resolver may have refreshed the catalog while this caller waited.
 	now = p.now().UTC()
