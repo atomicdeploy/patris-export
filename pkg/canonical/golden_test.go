@@ -63,7 +63,7 @@ func syntheticGoldenEnvelope() *Envelope {
 		{"Code": "101001", "Name": "Synthetic modules"},
 		{
 			"Code": "101001001", "Name": "Synthetic priced product", "Serial": "SYNTH-PN-001", "Vahed": "unit",
-			"foreign_price": "24.5", "weight_grams": "240", "location": "TEST-A", "FOROSH": 100000, "KHARYD": 90000,
+			"Sharh1": "1000\r0\r0\r24.5", "weight_grams": "240", "location": "TEST-A", "FOROSH": 100000, "KHARYD": 90000,
 			"ANBAR": []interface{}{3, 2}, "ALLANBAR": 5, "Sefaresh": 1, "source_updated_at": "2026-01-01T00:00:00Z",
 		},
 		{

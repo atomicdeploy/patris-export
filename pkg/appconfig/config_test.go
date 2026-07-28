@@ -380,6 +380,18 @@ func TestCanonicalKalaProfileAndPricingProviderDefaults(t *testing.T) {
 	if cfg.Canonical.Pricing.Mode != "static" {
 		t.Fatalf("offline static pricing must be the standalone default, got %q", cfg.Canonical.Pricing.Mode)
 	}
+	if cfg.Canonical.Pricing.UseSalePriceDirectFallback {
+		t.Fatal("direct Patris sale-price fallback must be disabled by default")
+	}
+}
+
+func TestApplyEnvCanExplicitlyEnableDirectSaleFallback(t *testing.T) {
+	t.Setenv("PATRIS_EXPORT_USE_SALE_PRICE_DIRECT_FALLBACK", "true")
+	cfg := Default()
+	ApplyEnv(&cfg)
+	if !cfg.Canonical.Pricing.UseSalePriceDirectFallback {
+		t.Fatal("direct sale fallback environment flag was not applied")
+	}
 }
 
 func TestApplyEnvConfiguresDigitalogicWithoutStoringCredentials(t *testing.T) {

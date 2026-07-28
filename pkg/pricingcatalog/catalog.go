@@ -17,6 +17,7 @@ const (
 	ModeDigitalogic     = "digitalogic"
 	CurrencyCNY         = "CNY"
 	CurrencyIRR         = "IRR"
+	MethodDomestic      = "domestic"
 	RoundingModeHalfUp  = "nearest_half_up"
 	MinimumRoundDigits  = 0
 	MaximumRoundDigits  = 9
@@ -38,9 +39,10 @@ const (
 // for offline use; Digitalogic reads the living integration catalog and the
 // exact Code/SKU product assignment endpoints.
 type Config struct {
-	Mode        string            `json:"mode,omitempty" yaml:"mode,omitempty" toml:"mode,omitempty"`
-	Static      StaticConfig      `json:"static,omitempty" yaml:"static,omitempty" toml:"static,omitempty"`
-	Digitalogic DigitalogicConfig `json:"digitalogic,omitempty" yaml:"digitalogic,omitempty" toml:"digitalogic,omitempty"`
+	Mode                       string            `json:"mode,omitempty" yaml:"mode,omitempty" toml:"mode,omitempty"`
+	UseSalePriceDirectFallback bool              `json:"use_sale_price_direct_fallback,omitempty" yaml:"use_sale_price_direct_fallback,omitempty" toml:"use_sale_price_direct_fallback,omitempty"`
+	Static                     StaticConfig      `json:"static,omitempty" yaml:"static,omitempty" toml:"static,omitempty"`
+	Digitalogic                DigitalogicConfig `json:"digitalogic,omitempty" yaml:"digitalogic,omitempty" toml:"digitalogic,omitempty"`
 }
 
 type StaticConfig struct {
@@ -214,7 +216,7 @@ func Configured(cfg Config) bool {
 		return strings.TrimSpace(cfg.Digitalogic.BaseURL) != ""
 	case ModeStatic:
 		static := cfg.Static
-		return static.CNYToIRT != nil || static.RoundingDigits != nil || static.roundingDigitsPresent || strings.TrimSpace(static.CurrencyEffectiveDate) != "" || len(static.SelectedWarehouses) > 0 || len(static.Methods) > 0 || len(static.Assignments) > 0 || static.DefaultAssignment != nil
+		return cfg.UseSalePriceDirectFallback || static.CNYToIRT != nil || static.RoundingDigits != nil || static.roundingDigitsPresent || strings.TrimSpace(static.CurrencyEffectiveDate) != "" || len(static.SelectedWarehouses) > 0 || len(static.Methods) > 0 || len(static.Assignments) > 0 || static.DefaultAssignment != nil
 	default:
 		return false
 	}
@@ -341,6 +343,16 @@ func finishResolution(value Resolution) Resolution {
 	currencyExplicitlyNull := value.ExplicitNulls["shipping_price_per_kg_currency"]
 	priceAvailable := validPositive(value.ShippingPricePerKg)
 	currencyAvailable := validShippingCurrency(value.ShippingPricePerKgCurrency)
+	if value.MethodID == MethodDomestic {
+		priceAvailable = validZero(value.ShippingPricePerKg)
+		currencyAvailable = value.ShippingPricePerKgCurrency == CurrencyIRR
+		if value.ShippingPricePerKg != nil && !priceAvailable && !priceExplicitlyNull {
+			value.Warnings = append(value.Warnings, "domestic_shipping_price_must_be_zero")
+		}
+		if value.ShippingPricePerKgCurrency != "" && !currencyAvailable && !currencyExplicitlyNull {
+			value.Warnings = append(value.Warnings, "domestic_shipping_currency_must_be_irr")
+		}
+	}
 	if !priceAvailable {
 		value.ShippingPricePerKg = nil
 		value.Warnings = append(value.Warnings, "shipping_price_per_kg_missing")
@@ -402,6 +414,11 @@ func validPositive(value *Decimal) bool {
 func validNonNegative(value *Decimal) bool {
 	parsed, ok := decimalRat(value)
 	return ok && parsed.Sign() >= 0
+}
+
+func validZero(value *Decimal) bool {
+	parsed, ok := decimalRat(value)
+	return ok && parsed.Sign() == 0
 }
 
 func decimalRat(value *Decimal) (*big.Rat, bool) {

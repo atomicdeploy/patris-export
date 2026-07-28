@@ -208,6 +208,7 @@ func TestFormulaXLSXLocalizesHeadersSplitsWarehousesAndCalculates(t *testing.T) 
 	if formula, err := book.GetCellFormula("Records", finalCell); err != nil ||
 		!strings.Contains(formula, `"foreign_price"`) ||
 		!strings.Contains(formula, `"partner_price"`) ||
+		!strings.Contains(formula, `"sale_price_direct"`) ||
 		!strings.Contains(formula, `ROUND(`) {
 		t.Fatalf("living source-aware formula = %q, err=%v", formula, err)
 	}
@@ -293,6 +294,13 @@ func TestFormulaXLSXSupportsCNYAndIRRFreightAndRejectsInvalidCurrency(t *testing
 			"price_rounding_mode":   "nearest_half_up",
 			"final_price":           json.Number("123500"),
 		},
+		{
+			"product_code":          "DIRECT-1",
+			"price_source_amount":   json.Number("12000"),
+			"price_source_currency": "IRR",
+			"price_source_kind":     "sale_price_direct",
+			"final_price":           json.Number("1200"),
+		},
 	}
 	if err := WriteXLSX(path, rows, "product_code", XLSXOptions{Language: "en", Mode: "formula"}); err != nil {
 		t.Fatal(err)
@@ -304,7 +312,7 @@ func TestFormulaXLSXSupportsCNYAndIRRFreightAndRejectsInvalidCurrency(t *testing
 	defer book.Close()
 	columns := headerColumns(mustXLSXRows(t, book, "Records")[0])
 	finalColumn := columns["Final Price (IRT)"]
-	for row, want := range map[int]string{2: "4290000", 3: "4290000", 4: "", 5: "123500"} {
+	for row, want := range map[int]string{2: "4290000", 3: "4290000", 4: "", 5: "123500", 6: "1200"} {
 		cell, _ := excelize.CoordinatesToCellName(finalColumn, row)
 		got, calcErr := book.CalcCellValue("Records", cell, excelize.Options{RawCellValue: true})
 		if calcErr != nil || got != want {
@@ -314,7 +322,8 @@ func TestFormulaXLSXSupportsCNYAndIRRFreightAndRejectsInvalidCurrency(t *testing
 	formulaCell, _ := excelize.CoordinatesToCellName(finalColumn, 2)
 	formula, err := book.GetCellFormula("Records", formulaCell)
 	if err != nil || !strings.Contains(formula, `="CNY"`) || !strings.Contains(formula, `="IRR"`) ||
-		!strings.Contains(formula, `"partner_price"`) || !strings.Contains(formula, "/10") {
+		!strings.Contains(formula, `"partner_price"`) || !strings.Contains(formula, `"sale_price_direct"`) ||
+		!strings.Contains(formula, "MOD(") || !strings.Contains(formula, "/10") {
 		t.Fatalf("currency-aware formula = %q, err=%v", formula, err)
 	}
 }

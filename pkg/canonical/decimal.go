@@ -60,6 +60,23 @@ func PartnerPrice(partnerIRR, markupPercent string, roundingDigits int) (int64, 
 	return roundPrice(new(big.Rat).Mul(goodsIRT, markupMultiplier), roundingDigits)
 }
 
+// DirectSalePrice uses Patris' sale amount without freight, markup, or
+// commercial rounding. The source amount is IRR while final_price is expressed
+// in the contract's IRT local currency, so the only operation is the exact
+// ten-to-one currency-unit conversion. Values that cannot be represented as a
+// whole IRT integer fail closed instead of being rounded.
+func DirectSalePrice(saleIRR string) (int64, error) {
+	value, ok := new(big.Rat).SetString(strings.TrimSpace(saleIRR))
+	if !ok || value.Sign() <= 0 {
+		return 0, fmt.Errorf("sale_price_direct input must be a finite positive decimal")
+	}
+	value.Quo(value, big.NewRat(10, 1))
+	if !value.IsInt() || !value.Num().IsInt64() {
+		return 0, fmt.Errorf("sale_price_direct must convert exactly to a whole IRT integer")
+	}
+	return value.Num().Int64(), nil
+}
+
 func roundPrice(result *big.Rat, roundingDigits int) (int64, error) {
 	if result == nil || result.Sign() < 0 {
 		return 0, fmt.Errorf("price result must be a non-negative rational")

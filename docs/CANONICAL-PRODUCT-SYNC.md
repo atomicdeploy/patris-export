@@ -10,6 +10,7 @@ Raw mode remains available for diagnostics.
 The profile converts Patris text, preserves `Code` as a string, compacts
 warehouses, and parses:
 
+- the first numeric `Sharh1` slot as `partner_price_source` in IRR;
 - the fourth numeric `Sharh1` slot as the foreign CNY unit price;
 - grams and the remaining storage location from `Sharh2`;
 - serial, unit, source sale/purchase prices, minimum stock, and selected
@@ -19,10 +20,21 @@ warehouses, and parses:
 - `landed_price` with exact decimal arithmetic, CNY-first source selection,
   and one final nearest half-up round.
 
-The formula produces IRT. A strictly positive CNY value is preferred. When it
-is missing, null, invalid, or non-positive, a strictly positive Patris
-`FOROSH` value (`sale_price_source`, the partner price) is used as IRR.
-Freight is applied only to the CNY path and may itself be quoted in CNY or IRR:
+The formula produces IRT and selects the first route that can complete. A
+strictly positive CNY value wins only when weight is strictly positive and an
+enabled, assigned, non-domestic shipping method supplies a complete freight
+pair alongside FX, markup, and rounding. Otherwise the strictly positive first
+`Sharh1` slot (`partner_price_source`) is used in IRR when markup and rounding
+are complete. That partner route is always emitted as `domestic` /
+`خرید داخلی` with an explicit zero IRR/kg freight rate.
+
+An optional final fallback may use positive Patris `FOROSH`
+(`sale_price_source`) directly. It is disabled by default through
+`use_sale_price_direct_fallback: false`. When explicitly enabled it applies no
+freight, markup, or rounding and emits the same domestic zero-freight method.
+The exact IRR amount is converted to the contract's IRT unit; a value that is
+not exactly representable as a whole IRT integer fails closed. Freight is
+applied only to the CNY route and may itself be quoted in CNY or IRR:
 
 ```text
 if selected source is CNY:
@@ -31,10 +43,13 @@ if selected source is CNY:
     then weight_g / 1000 * shipping_price_per_kg * IRT_per_CNY
     else weight_g / 1000 * shipping_price_per_kg / 10
   unrounded = (goods_IRT + shipping_IRT) * (1 + markup_percent / 100)
-else selected source is partner-price IRR:
+else if selected source is partner-price IRR:
   unrounded = partner_IRR / 10 * (1 + markup_percent / 100)
+else if the explicit direct-sale fallback is enabled:
+  final_price = sale_price_IRR / 10 exactly
 
-final_price = nearest_half_up(unrounded, quantum = 10 ^ rounding_digits)
+for foreign or partner:
+  final_price = nearest_half_up(unrounded, quantum = 10 ^ rounding_digits)
 ```
 
 For example, `123,456 IRT` with `rounding_digits: 2` becomes `123,500 IRT`;
@@ -54,10 +69,10 @@ never become a destructive zero or a generated JSON `null`. Duplicate Codes are
 quarantined from the contract.
 
 Raw `Sharh1`, `Sharh2`, `FOROSH`, `KHARYD`, `Kharyd_E`, `ALLANBAR`, and
-`ANBAR*` keys never cross the `patris.product-sync` boundary. `FOROSH` is the
-only Patris partner-price fallback and remains exposed canonically as
-`sale_price_source`; `KHARYD` is purchase cost, while `Kharyd_E` is an internal
-purchase estimate and is not a selling-price source.
+`ANBAR*` keys never cross the `patris.product-sync` boundary. The first
+`Sharh1` slot is exposed independently as `partner_price_source`; `FOROSH`
+remains the distinct `sale_price_source`. `KHARYD` is purchase cost, while
+`Kharyd_E` is an internal purchase estimate and is not a selling-price source.
 
 The wire boundary is sparse. A key that was never received or derived from a
 real value is omitted from JSON and from the union of CSV/XLSX/SQL columns. A
@@ -73,10 +88,13 @@ and `IRR`; no inferred default or alternate field name is accepted.
 
 The selected usable source is carried as an all-or-omitted trio:
 `price_source_amount`, `price_source_currency`, and `price_source_kind`.
-`price_source_kind` is `foreign_price` with `CNY`, or `partner_price` with
-`IRR`. Non-positive raw facts remain distinguishable from omission and null,
-but never populate the selected trio. `price_rounding_digits` and the fixed
-`price_rounding_mode: nearest_half_up` record calculation provenance.
+`price_source_kind` is `foreign_price` with `CNY`, `partner_price` with `IRR`,
+or the explicitly enabled `sale_price_direct` with `IRR`. Non-positive raw
+facts remain distinguishable from omission and null, but never populate the
+selected trio. Calculated foreign and partner routes carry
+`price_rounding_digits` and the fixed
+`price_rounding_mode: nearest_half_up`; the unmodified direct-sale route omits
+markup and rounding fields.
 
 This is a living integration standard. The current field set and routes are the
 only supported shape; producers and consumers change together.
@@ -97,6 +115,7 @@ Static mode is the standalone default. It works without WordPress or a network:
     },
     "pricing": {
       "mode": "static",
+      "use_sale_price_direct_fallback": false,
       "static": {
         "revision": "office-rates-2026-07-16",
         "cny_to_irt": 29000,
@@ -122,7 +141,9 @@ Every configured shipping method requires an explicit currency selection. For
 an IRR quote, the same method entry can instead use
 `{"price_per_kg": 22000000, "currency": "IRR"}`. Missing or unsupported
 currency values omit the flattened shipping pair and add warnings rather than
-guessing a unit.
+guessing a unit. The reserved `domestic` method is the sole exception that
+accepts and emits `{"price_per_kg": 0, "currency": "IRR"}`; foreign CNY
+pricing cannot select it.
 
 ## Digitalogic provider
 
@@ -203,17 +224,20 @@ $env:DIGITALOGIC_PRICING_READ_TOKEN = "..."
 $env:PATRIS_EXPORT_PRICING_TIMEOUT = "60s"
 $env:PATRIS_EXPORT_PRICING_BATCH_SIZE = "500"
 $env:PATRIS_EXPORT_PRICING_BATCH_CONCURRENCY = "2"
+$env:PATRIS_EXPORT_USE_SALE_PRICE_DIRECT_FALLBACK = "false"
 patris-export serve C:\Patris\data4\kala.db
 ```
 
 `PATRIS_EXPORT_PRICING_TIMEOUT`, `PATRIS_EXPORT_PRICING_BATCH_SIZE`, and
 `PATRIS_EXPORT_PRICING_BATCH_CONCURRENCY` override the same normalized
-Digitalogic provider used by file configuration. Batch size is capped at the
-endpoint maximum of 500 and concurrency is capped at four. The HTTP timeout
-defaults to 60 seconds and is normalized to the inclusive range from 100
-milliseconds through 80 seconds. Canonical HTTP routes add at most five
-seconds of cooperative-cancellation grace to a normalized Digitalogic timeout,
-so the configured pricing phase retains an 85-second hard request ceiling.
+Digitalogic provider used by file configuration.
+`PATRIS_EXPORT_USE_SALE_PRICE_DIRECT_FALLBACK` explicitly controls the final
+direct-sale route and defaults to false. Batch size is capped at the endpoint
+maximum of 500 and concurrency is capped at four. The HTTP timeout defaults to
+60 seconds and is normalized to the inclusive range from 100 milliseconds
+through 80 seconds. Canonical HTTP routes add at most five seconds of
+cooperative-cancellation grace to a normalized Digitalogic timeout, so the
+configured pricing phase retains an 85-second hard request ceiling.
 For a 939-Code projection, the default settings issue two 500-or-smaller pages
 concurrently instead of waiting for them sequentially.
 
@@ -259,10 +283,13 @@ The dedicated pricing-input bearer should authorize only the catalog, batch,
 and exact-Code read routes, never a write route. Do not reuse a product-sync
 write secret. Patris accepts only the current integration-catalog document kind,
 an `IRT` local currency, and the current `landed_price` formula. The CNY price
-path additionally requires a valid CNY-to-IRT rate, weight, and freight pair.
-The partner-price path uses positive Patris `FOROSH` in IRR, markup, and rounding
-without requiring FX, weight, or freight. A document-kind, local-currency, or
-formula mismatch omits `final_price` and adds explicit warnings.
+path additionally requires a valid CNY-to-IRT rate, strictly positive weight,
+an enabled non-domestic method, and a freight pair. The partner-price path uses
+the positive first `Sharh1` slot in IRR with markup and rounding, forces
+domestic zero freight, and does not require FX or weight. The optional direct
+`FOROSH` route remains off unless explicitly enabled. A document-kind,
+local-currency, or formula mismatch omits `final_price` and adds explicit
+warnings.
 
 ## Transport contract
 
@@ -310,6 +337,7 @@ exports and catalog values must never be committed as golden fixtures.
       "category_code": "113007",
       "foreign_currency": "CNY",
       "foreign_price": 24.5,
+      "partner_price_source": 1000,
       "weight_grams": 240,
       "shipping_method_id": "air_express",
       "shipping_price_per_kg": 120,

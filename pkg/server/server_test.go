@@ -826,7 +826,8 @@ func TestCanonicalKalaParityAcrossRESTCSVXLSXAndWebSocket(t *testing.T) {
 	formula, err := formulaBook.GetCellFormula("Records", formulaCell)
 	if err != nil || !strings.Contains(formula, "ROUND((") || !strings.Contains(formula, `="CNY"`) ||
 		!strings.Contains(formula, `="IRR"`) || !strings.Contains(formula, `"foreign_price"`) ||
-		!strings.Contains(formula, `"partner_price"`) || !strings.Contains(formula, `/10`) {
+		!strings.Contains(formula, `"partner_price"`) || !strings.Contains(formula, `"sale_price_direct"`) ||
+		!strings.Contains(formula, `MOD(`) || !strings.Contains(formula, `/10`) {
 		t.Fatalf("formula XLSX final price formula = %q, err=%v", formula, err)
 	}
 	formulaView, err := formulaBook.GetSheetView("Records", 0)

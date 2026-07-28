@@ -34,6 +34,7 @@ var canonicalXLSXFields = []string{
 	"serial",
 	"unit",
 	"sale_price_source",
+	"partner_price_source",
 	"purchase_price_source",
 	"warehouse_stock",
 	"total_stock",
@@ -471,7 +472,7 @@ func xlsxPriceFormula(row int, fieldColumns map[string]int) (string, bool) {
 		references[field] = cellName
 	}
 	return fmt.Sprintf(
-		`=IF(AND(%s="foreign_price",%s="CNY",COUNT(%s,%s,%s,%s,%s,%s)=6,OR(%s="CNY",%s="IRR")),ROUND((%s*%s+%s/1000*IF(%s="CNY",%s*%s,%s/10))*(1+%s/100),-%s),IF(AND(%s="partner_price",%s="IRR",COUNT(%s,%s,%s)=3),ROUND((%s/10)*(1+%s/100),-%s),""))`,
+		`=IF(AND(%s="foreign_price",%s="CNY",COUNT(%s,%s,%s,%s,%s,%s)=6,OR(%s="CNY",%s="IRR")),ROUND((%s*%s+%s/1000*IF(%s="CNY",%s*%s,%s/10))*(1+%s/100),-%s),IF(AND(%s="partner_price",%s="IRR",COUNT(%s,%s,%s)=3),ROUND((%s/10)*(1+%s/100),-%s),IF(AND(%s="sale_price_direct",%s="IRR",COUNT(%s)=1,MOD(%s,10)=0),%s/10,"")))`,
 		references["price_source_kind"],
 		references["price_source_currency"],
 		references["price_source_amount"],
@@ -499,6 +500,11 @@ func xlsxPriceFormula(row int, fieldColumns map[string]int) (string, bool) {
 		references["price_source_amount"],
 		references["markup_percent"],
 		references["price_rounding_digits"],
+		references["price_source_kind"],
+		references["price_source_currency"],
+		references["price_source_amount"],
+		references["price_source_amount"],
+		references["price_source_amount"],
 	), true
 }
 

@@ -42,6 +42,59 @@ func TestConfiguredDistinguishesStandaloneFromActivePricing(t *testing.T) {
 	}
 }
 
+func TestDirectSaleFallbackFlagIsExplicitAndDisabledByDefault(t *testing.T) {
+	if Configured(Config{Mode: ModeStatic}) {
+		t.Fatal("empty static config unexpectedly enabled pricing")
+	}
+	var config Config
+	if err := json.Unmarshal([]byte(`{"mode":"static","use_sale_price_direct_fallback":true}`), &config); err != nil {
+		t.Fatal(err)
+	}
+	if !config.UseSalePriceDirectFallback || !Configured(config) {
+		t.Fatalf("direct sale fallback flag was not retained as active: %+v", config)
+	}
+	encoded, err := json.Marshal(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(encoded), `"use_sale_price_direct_fallback":true`) {
+		t.Fatalf("direct fallback flag missing from config JSON: %s", encoded)
+	}
+}
+
+func TestDomesticMethodAcceptsExplicitZeroIRRFreight(t *testing.T) {
+	zero := Decimal("0")
+	enabled := true
+	config := Config{Mode: ModeStatic, Static: StaticConfig{
+		Methods: []Method{{
+			ID: MethodDomestic, Enabled: &enabled, PricePerKg: &zero, Currency: CurrencyIRR,
+		}},
+		DefaultAssignment: &Assignment{MethodID: MethodDomestic},
+	}}
+	resolution := NewProvider(config).Resolve(context.Background(), "A")
+	if resolution.MethodID != MethodDomestic || decimalText(resolution.ShippingPricePerKg) != "0" || resolution.ShippingPricePerKgCurrency != CurrencyIRR {
+		t.Fatalf("domestic zero freight was not retained: %+v", resolution)
+	}
+	for _, warning := range []string{"shipping_price_per_kg_missing", "shipping_price_per_kg_currency_missing"} {
+		if contains(resolution.Warnings, warning) {
+			t.Fatalf("domestic zero freight produced %s: %v", warning, resolution.Warnings)
+		}
+	}
+
+	positive := Decimal("1")
+	config.Static.Methods[0].PricePerKg = &positive
+	config.Static.Methods[0].Currency = CurrencyCNY
+	invalid := NewProvider(config).Resolve(context.Background(), "A")
+	if invalid.ShippingPricePerKg != nil || invalid.ShippingPricePerKgCurrency != "" {
+		t.Fatalf("non-zero/CNY domestic freight was retained: %+v", invalid)
+	}
+	for _, warning := range []string{"domestic_shipping_price_must_be_zero", "domestic_shipping_currency_must_be_irr"} {
+		if !contains(invalid.Warnings, warning) {
+			t.Fatalf("invalid domestic freight missed %s: %v", warning, invalid.Warnings)
+		}
+	}
+}
+
 func TestNormalizeUsesCurrentShippingKeys(t *testing.T) {
 	var cfg Config
 	if err := json.Unmarshal([]byte(`{"mode":"static","static":{"shipping_methods":[{"id":"air","price_per_kg":120,"currency":"CNY"}],"assignments":{"A":{"shipping_method_id":"air"}}}}`), &cfg); err != nil {

@@ -317,7 +317,7 @@ test('known column keys use human localized labels and custom labels remain auth
     assert.doesNotMatch(source, /shipping_price_per_kg_cny|freight_cny_per_kg/);
 
     const machineFields = [
-        'product_code', 'category_code', 'part_number', 'sale_price_source',
+        'product_code', 'category_code', 'part_number', 'sale_price_source', 'partner_price_source',
         'purchase_price_source', 'total_stock', 'minimum_stock', 'foreign_currency',
         'foreign_price', 'weight_grams', 'shipping_method_id', 'shipping_price_per_kg',
         'shipping_price_per_kg_currency',

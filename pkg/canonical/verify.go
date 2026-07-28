@@ -391,11 +391,25 @@ func validateProductIdentity(product Product, index int) error {
 	if err := validateNonNegativeDecimal(path+".foreign_price", product.ForeignPrice); err != nil {
 		return err
 	}
-	if err := validatePositiveDecimal(path+".weight_grams", product.WeightGrams); err != nil {
+	if product.PartnerPriceSource != nil {
+		if _, ok := product.PartnerPriceSource.Rat(); !ok {
+			return fmt.Errorf("%s.partner_price_source must be a finite decimal", path)
+		}
+	}
+	if err := validateNonNegativeDecimal(path+".weight_grams", product.WeightGrams); err != nil {
 		return err
 	}
-	if err := validatePositiveDecimal(path+".shipping_price_per_kg", product.ShippingPricePerKg); err != nil {
-		return err
+	if product.ShippingMethodID == pricingcatalog.MethodDomestic {
+		if err := validateNonNegativeDecimal(path+".shipping_price_per_kg", product.ShippingPricePerKg); err != nil {
+			return err
+		}
+		if product.ShippingPricePerKg == nil || product.ShippingPricePerKg.String() != "0" || product.ShippingPricePerKgCurrency != pricingcatalog.CurrencyIRR {
+			return fmt.Errorf("%s domestic shipping must use an explicit zero IRR rate", path)
+		}
+	} else {
+		if err := validatePositiveDecimal(path+".shipping_price_per_kg", product.ShippingPricePerKg); err != nil {
+			return err
+		}
 	}
 	if err := validatePositiveDecimal(path+".irt_per_cny", product.IRTPerCNY); err != nil {
 		return err
@@ -426,12 +440,28 @@ func validateProductIdentity(product Product, index int) error {
 			if product.PriceSourceCurrency != pricingcatalog.CurrencyCNY {
 				return fmt.Errorf("%s foreign_price source must use CNY", path)
 			}
+			if product.ShippingMethodID == pricingcatalog.MethodDomestic {
+				return fmt.Errorf("%s foreign_price source must use a non-domestic shipping method", path)
+			}
+			if err := validatePositiveDecimal(path+".weight_grams", product.WeightGrams); err != nil || product.WeightGrams == nil {
+				return fmt.Errorf("%s foreign_price source must carry a positive weight_grams", path)
+			}
 		case PriceSourceKindPartner:
 			if product.PriceSourceCurrency != pricingcatalog.CurrencyIRR {
 				return fmt.Errorf("%s partner_price source must use IRR", path)
 			}
+			if product.ShippingMethodID != pricingcatalog.MethodDomestic {
+				return fmt.Errorf("%s partner_price source must use domestic shipping", path)
+			}
+		case PriceSourceKindSaleDirect:
+			if product.PriceSourceCurrency != pricingcatalog.CurrencyIRR {
+				return fmt.Errorf("%s sale_price_direct source must use IRR", path)
+			}
+			if product.ShippingMethodID != pricingcatalog.MethodDomestic {
+				return fmt.Errorf("%s sale_price_direct source must use domestic shipping", path)
+			}
 		default:
-			return fmt.Errorf("%s.price_source_kind must be foreign_price or partner_price", path)
+			return fmt.Errorf("%s.price_source_kind must be foreign_price, partner_price, or sale_price_direct", path)
 		}
 	}
 
@@ -451,14 +481,29 @@ func validateProductIdentity(product Product, index int) error {
 	} else if roundingModePresent {
 		return fmt.Errorf("%s.price_rounding_mode requires price_rounding_digits", path)
 	}
+	if product.PriceSourceKind == PriceSourceKindSaleDirect {
+		if roundingDigitsPresent || roundingModePresent || product.MarkupPercent != nil || product.presence("markup_percent") != fieldAbsent {
+			return fmt.Errorf("%s sale_price_direct must omit markup and rounding fields", path)
+		}
+	}
 	if product.presence("final_price") == fieldNull {
 		return fmt.Errorf("%s.final_price must be omitted when unavailable, not null", path)
 	}
 	if product.FinalPrice != nil && *product.FinalPrice < 0 {
 		return fmt.Errorf("%s.final_price must be a non-negative integer", path)
 	}
-	if product.FinalPrice != nil && (!priceAmountPresent || product.PriceRoundingDigits == nil || product.PriceRoundingMode != pricingcatalog.RoundingModeHalfUp) {
-		return fmt.Errorf("%s.final_price requires a usable selected source and rounding provenance", path)
+	if product.FinalPrice != nil && !priceAmountPresent {
+		return fmt.Errorf("%s.final_price requires a usable selected source", path)
+	}
+	if product.FinalPrice != nil && product.PriceSourceKind != PriceSourceKindSaleDirect &&
+		(product.PriceRoundingDigits == nil || product.PriceRoundingMode != pricingcatalog.RoundingModeHalfUp) {
+		return fmt.Errorf("%s.final_price requires rounding provenance for calculated sources", path)
+	}
+	if product.FinalPrice != nil && product.PriceSourceKind == PriceSourceKindSaleDirect {
+		expected, err := DirectSalePrice(product.PriceSourceAmount.String())
+		if err != nil || expected != *product.FinalPrice {
+			return fmt.Errorf("%s.final_price must be the exact unmodified sale_price_direct amount in IRT", path)
+		}
 	}
 	if !validSHA256Identity(product.RecordHash) {
 		return fmt.Errorf("%s.record_hash must be a lowercase sha256 identity", path)

@@ -22,6 +22,7 @@ var xlsxColumnLabels = map[string]xlsxLocalizedLabel{
 	"serial":                         {English: "Serial", Persian: "سریال"},
 	"unit":                           {English: "Unit", Persian: "واحد"},
 	"sale_price_source":              {English: "Sale Price (Source)", Persian: "قیمت فروش (منبع)"},
+	"partner_price_source":           {English: "Partner Price (Source)", Persian: "قیمت همکار (منبع)"},
 	"purchase_price_source":          {English: "Purchase Price (Source)", Persian: "قیمت خرید (منبع)"},
 	"warehouse_stock":                {English: "Warehouse Stock", Persian: "موجودی انبار"},
 	"total_stock":                    {English: "Total Stock", Persian: "موجودی کل"},

@@ -1017,7 +1017,7 @@ func canonicalFieldKind(field string) valueKind {
 		return valueKindBoolean
 	case "final_price", "price_rounding_digits":
 		return valueKindInteger
-	case "price_source_amount":
+	case "price_source_amount", "partner_price_source":
 		return valueKindDecimal
 	case "sale_price_source", "purchase_price_source", "total_stock", "minimum_stock", "foreign_price", "weight_grams", "shipping_price_per_kg", "markup_percent", "irt_per_cny":
 		return valueKindReal
