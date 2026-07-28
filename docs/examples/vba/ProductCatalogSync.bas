@@ -12,7 +12,7 @@ Private Const STATE_PAGE_SIZE As Long = 250
 Private Const MAX_STATE_PAGES As Long = 8
 Private Const STATE_SNAPSHOT_RETRIES As Long = 3
 Private Const HTTP_TIMEOUT_MS As Long = 150000
-Private Const PRICING_HTTP_TIMEOUT_MS As Long = 240000
+Private Const PRICING_HTTP_TIMEOUT_MS As Long = 600000
 Private Const MAX_PRICING_RESPONSE_CHARS As Long = 4194304
 Private Const PRICING_CLIENT_HEADER As String = "X-Patris-Excel-Client"
 Private Const PRICING_CLIENT_ID As String = "digitalogic-price-calculator/v1"
@@ -30,7 +30,9 @@ Private Const RECONCILED_COLUMN_KEYS As String = _
     "patris_final_price,price_status,stock_quantity,stock_status," & _
     "patris_total_stock,patris_minimum_stock,patris_location,weight_grams," & _
     "woocommerce_weight,woocommerce_weight_unit,foreign_price," & _
-    "foreign_currency,shipping_method_id,shipping_method_name_en," & _
+    "foreign_currency,partner_price_irr,price_source_amount," & _
+    "price_source_currency,price_source_kind,price_rounding_digits," & _
+    "price_rounding_mode,shipping_method_id,shipping_method_name_en," & _
     "shipping_method_name_fa,shipping_price_per_kg," & _
     "shipping_price_per_kg_currency,profit_margin_percent,permalink," & _
     "image_url,updated_at,sync_status,sync_error,record_revision"

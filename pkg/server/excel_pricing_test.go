@@ -698,6 +698,13 @@ func TestExcelPricingRejectsNonJSONRemoteSuccess(t *testing.T) {
 }
 
 func TestExcelPricingBoundsTimeoutsAndMessageSizes(t *testing.T) {
+	if excelPricingOperationTimeout != 8*time.Minute {
+		t.Fatalf(
+			"pricing operation timeout=%s, want %s",
+			excelPricingOperationTimeout,
+			8*time.Minute,
+		)
+	}
 	for value, want := range map[string]time.Duration{
 		"invalid": 10 * time.Second,
 		"1ms":     time.Second,

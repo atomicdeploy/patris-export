@@ -807,6 +807,45 @@ func TestDynamicCalculatorVBASourceGuardsLivePricingBeforeMutation(t *testing.T)
 	}
 	source := string(content)
 
+	constantStart := strings.Index(
+		source,
+		`Private Const RECONCILED_COLUMN_KEYS As String = _`,
+	)
+	constantEnd := strings.Index(source, "Private Const MB_RIGHT")
+	if constantStart < 0 || constantEnd <= constantStart {
+		t.Fatal("reconciled catalog column signature constant is missing")
+	}
+	var reconciledColumns strings.Builder
+	for _, line := range strings.Split(source[constantStart:constantEnd], "\n") {
+		parts := strings.Split(line, `"`)
+		for index := 1; index < len(parts); index += 2 {
+			reconciledColumns.WriteString(parts[index])
+		}
+	}
+	wantReconciledColumns := strings.Join([]string{
+		"sync_key", "reconciliation_status", "patris_code",
+		"woocommerce_id", "parent_id", "product_type", "publication_status",
+		"name", "part_number", "sku", "categories", "category_ids", "currency",
+		"regular_price", "sale_price", "effective_price", "patris_final_price",
+		"price_status", "stock_quantity", "stock_status", "patris_total_stock",
+		"patris_minimum_stock", "patris_location", "weight_grams",
+		"woocommerce_weight", "woocommerce_weight_unit", "foreign_price",
+		"foreign_currency", "partner_price_irr", "price_source_amount",
+		"price_source_currency", "price_source_kind", "price_rounding_digits",
+		"price_rounding_mode", "shipping_method_id", "shipping_method_name_en",
+		"shipping_method_name_fa", "shipping_price_per_kg",
+		"shipping_price_per_kg_currency", "profit_margin_percent", "permalink",
+		"image_url", "updated_at", "sync_status", "sync_error",
+		"record_revision",
+	}, ",")
+	if reconciledColumns.String() != wantReconciledColumns {
+		t.Fatalf(
+			"VBA reconciled catalog columns = %q, want %q",
+			reconciledColumns.String(),
+			wantReconciledColumns,
+		)
+	}
+
 	replacePosition := strings.Index(source, "ReplaceTableData table, mainOutput, dataRows, PRODUCT_COLUMN_COUNT")
 	for _, requiredBeforeReplace := range []string{
 		`CStr(JsonRuntime.JsonText(root, "schema")) <> "patris.product-sync"`,
@@ -882,6 +921,7 @@ func TestDynamicCalculatorVBASourceGuardsLivePricingBeforeMutation(t *testing.T)
 		"Private Const STATE_SNAPSHOT_RETRIES As Long = 3",
 		`Private Const RECONCILED_COLUMN_KEYS As String = _`,
 		"Private Const HTTP_TIMEOUT_MS As Long = 150000",
+		"Private Const PRICING_HTTP_TIMEOUT_MS As Long = 600000",
 		"Private Function StateRequestJson",
 		"Private Function RefreshPricingStateOnce",
 		"Public Function RefreshAllDataForValidation() As Boolean",

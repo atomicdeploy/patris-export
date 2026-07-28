@@ -152,9 +152,12 @@ The workbook cannot provide or override the remote credential.
 
 The destination must be HTTPS except for loopback development, may not contain
 user information, a query, or a fragment, and must already be a WordPress REST
-path. Redirects are not followed. Timeouts are bounded between one and thirty
-seconds. Remote credentials, response bodies, target URLs, and transport errors
-are not logged or copied into local errors.
+path. Redirects are not followed. Each remote request uses the configured
+timeout bounded between one second and two minutes. The complete apply
+operation has an eight-minute server budget, and Excel waits up to ten minutes,
+so a full catalog delivery can finish its retry and final state readback after
+an upstream gateway timeout. Remote credentials, response bodies, target URLs,
+and transport errors are not logged or copied into local errors.
 
 Successful responses preserve Digitalogic's schemas:
 
@@ -197,8 +200,9 @@ regenerates the canonical product contract, synchronously sends that contract
 through the existing protected product-sync delivery path, and refetches
 pricing state with the new source revision. Apply succeeds locally only when
 the product-sync receiver reports a terminal accepted/current/replayed/recovered
-result with the exact event ID and zero pending or deferred products, and the
-final state revision exactly matches Digitalogic's apply readback.
+result with the exact event ID, zero pending or ambiguous products, and every
+terminal deferred product classified as missing in WooCommerce. The final
+state revision must exactly match Digitalogic's apply readback.
 
 ## Configuration
 

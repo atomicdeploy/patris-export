@@ -39,7 +39,7 @@ const (
 	excelPricingContractChannel     = "excel-workbook"
 	excelPricingCSRFHeader          = "X-Patris-Excel-CSRF-Token"
 	excelPricingSessionTTL          = 10 * time.Minute
-	excelPricingOperationTimeout    = 4 * time.Minute
+	excelPricingOperationTimeout    = 8 * time.Minute
 	excelPricingMaxSessions         = 128
 	excelPricingMaxRequestBytes     = 64 * 1024
 	excelPricingMaxResponseBytes    = 4 * 1024 * 1024
