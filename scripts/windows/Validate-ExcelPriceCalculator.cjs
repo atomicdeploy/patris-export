@@ -179,6 +179,7 @@ function structurallyMatchesDynamicPriceFormula(formula) {
     'SYNCDATA,7,FALSE)',
     'SYNCDATA,10,FALSE)',
     'SYNCDATA,20,FALSE)',
+    "'تنظیمات'!R15C2",
   ];
   return requiredTokens.every((token) => normalized.includes(token));
 }
@@ -335,6 +336,12 @@ function buildFailures(report, options) {
       && Number.isFinite(report.candidate.config.profit)
       && report.candidate.config.profit >= 0,
     `live Profit must be a non-negative decimal; got ${report.candidate.config.profit}`,
+  );
+  failUnless(
+    Number.isInteger(report.candidate.config.roundingDigits)
+      && report.candidate.config.roundingDigits >= 0
+      && report.candidate.config.roundingDigits <= 9,
+    `live rounding digits must be an integer from 0 through 9; got ${report.candidate.config.roundingDigits}`,
   );
   failUnless(
     sameFiniteNumber(
@@ -498,7 +505,7 @@ function printHumanReport(report) {
     `  Snapshot: dataset=${report.candidate.datasetRevision}, source=${report.candidate.sourceRevision}, total=${report.candidate.paginationTotal}`,
   );
   console.log(
-    `  Live config: yuan=${report.candidate.config.yuan}, usd=${report.candidate.config.usd}, shipping=${report.candidate.config.shipping}, profit=${report.candidate.config.profit}; cards=${report.candidate.config.cardYuan}/${report.candidate.config.cardShipping}/${report.candidate.config.cardProfit}`,
+    `  Live config: yuan=${report.candidate.config.yuan}, usd=${report.candidate.config.usd}, shipping=${report.candidate.config.shipping}, profit=${report.candidate.config.profit}, roundingDigits=${report.candidate.config.roundingDigits}; cards=${report.candidate.config.cardYuan}/${report.candidate.config.cardShipping}/${report.candidate.config.cardProfit}`,
   );
   console.log(
     `  SyncData: rows=${report.syncData.rowsWithCode}, hidden=${report.syncData.sheetVisibility === 2}, missing=${report.syncData.missingProductCodes}, extra=${report.syncData.extraCodes}`,
@@ -943,6 +950,7 @@ try {
         usd = Numeric-Or-Null (Sheet-Scalar $candidateBook 3 'B11')
         shipping = Numeric-Or-Null (Sheet-Scalar $candidateBook 3 'B14')
         profit = Numeric-Or-Null (Sheet-Scalar $candidateBook 3 'B13')
+        roundingDigits = Numeric-Or-Null (Sheet-Scalar $candidateBook 3 'B15')
         cardYuan = Numeric-Or-Null (Table-Scalar $candidateBook 'Yuan_Price')
         cardShipping = Numeric-Or-Null (Table-Scalar $candidateBook 'Shipping')
         cardProfit = Numeric-Or-Null (Table-Scalar $candidateBook 'Profit')
@@ -1098,11 +1106,16 @@ try {
             ) * (
                 [decimal]1 + ([decimal]$profitPercent / [decimal]100)
             )
+            $roundingDigits = [int]$candidateConfig.roundingDigits
+            $quantum = [decimal]1
+            for ($roundingIndex = 0; $roundingIndex -lt $roundingDigits; $roundingIndex++) {
+                $quantum *= [decimal]10
+            }
             $expected = [Math]::Round(
-                $expectedUnrounded,
+                $expectedUnrounded / $quantum,
                 0,
                 [System.MidpointRounding]::AwayFromZero
-            )
+            ) * $quantum
         } elseif ($null -ne $sitePrice -and $sitePrice -gt 0) {
             $fallbackPriceRows += 1
             $expected = $sitePrice

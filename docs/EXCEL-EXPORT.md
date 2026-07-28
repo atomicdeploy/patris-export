@@ -36,14 +36,18 @@ equivalents), rather than being serialized into one object cell.
 shipping_irt = IF(shipping_price_per_kg_currency="CNY",
   weight_grams/1000*shipping_price_per_kg*irt_per_cny,
   weight_grams/1000*shipping_price_per_kg/10)
-ROUND((foreign_price*irt_per_cny + shipping_irt)*(1+markup_percent/100),0)
+ROUND(
+  (foreign_price*irt_per_cny + shipping_irt)*(1+markup_percent/100),
+  -price_rounding_digits
+)
 ```
 
 The generated formula uses `COUNT` plus an exact currency-token guard and
 returns a blank when any numeric input is missing/non-numeric or the shipping
 currency is not uppercase `CNY` or `IRR`. CNY freight is converted through the
 IRT/CNY rate; IRR freight is divided by 10. The workbook applies markup and
-rounds once, at the final whole-IRT result. Excel is instructed to perform a
+rounds once using the shared 0–9 digit `nearest_half_up` policy. For example,
+two digits rounds 123,456 IRT to 123,500 IRT. Excel performs a
 full recalculation on open and save. Formula and shipping/profit columns only
 exist when the active integration produced the required amount/currency pair.
 
@@ -116,7 +120,10 @@ join and audit data is stored only in the `xlSheetVeryHidden` sheet
 The template is empty at rest: it contains no product rows, prices, cached
 responses, or credential material. Opening an `.xltm` creates a separate
 macro-enabled workbook instance, so **Save As** writes a working copy instead
-of overwriting the canonical empty template.
+of overwriting the canonical empty template. Saving as `.xlsx` creates a
+macro-free snapshot and removes the search, sync, preview/apply buttons, their
+macro assignments, and the selection-highlighting controls. The logo, chart,
+tables, formulas, and synchronized values remain.
 
 Refresh-on-open and **همگام‌سازی اکنون** use only the local Patris companion:
 
@@ -187,17 +194,20 @@ same apply idempotency key for a safe retry. A success message is shown only
 after a fresh state readback matches the applied revision.
 
 The calculated price converts goods and freight independently through their
-declared currencies, applies the shared profit margin, and rounds once to whole
-toman:
+declared currencies, applies the shared profit margin, and rounds once with the
+site-owned 0–9 digit `nearest_half_up` policy:
 
 ```text
 ROUND(
   (foreign_price * goods_currency_to_irt
    + weight_grams / 1000 * freight_per_kg * freight_currency_to_irt)
   * (1 + profit_percent / 100),
-  0
+  -rounding_digits
 )
 ```
+
+`rounding_digits=2` means the quantum is 100 toman, so 123,449 becomes 123,400,
+123,450 becomes 123,500, and 123,456 becomes 123,500.
 
 All inputs used by the local formula are required: purchase price, weight,
 freight, profit margin, and every applicable currency rate. The formula never

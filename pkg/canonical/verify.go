@@ -406,11 +406,59 @@ func validateProductIdentity(product Product, index int) error {
 			return fmt.Errorf("%s.markup_percent must be a non-negative decimal", path)
 		}
 	}
+	roundingDigitsPresent := product.PriceRoundingDigits != nil ||
+		product.presence("price_rounding_digits") != fieldAbsent
+	roundingModePresent := product.PriceRoundingMode != "" ||
+		product.presence("price_rounding_mode") != fieldAbsent
+	if product.presence("price_rounding_digits") == fieldNull {
+		if roundingModePresent {
+			return fmt.Errorf("%s.price_rounding_mode must be omitted when price_rounding_digits is null", path)
+		}
+	} else if roundingDigitsPresent {
+		if product.PriceRoundingDigits == nil ||
+			*product.PriceRoundingDigits < pricingcatalog.MinimumRoundDigits ||
+			*product.PriceRoundingDigits > pricingcatalog.MaximumRoundDigits {
+			return fmt.Errorf("%s.price_rounding_digits must be an integer from %d through %d or explicit null", path, pricingcatalog.MinimumRoundDigits, pricingcatalog.MaximumRoundDigits)
+		}
+		if product.PriceRoundingMode != pricingcatalog.RoundingModeHalfUp ||
+			product.presence("price_rounding_mode") == fieldNull {
+			return fmt.Errorf("%s.price_rounding_mode must be nearest_half_up when rounding digits are present", path)
+		}
+	} else if roundingModePresent {
+		return fmt.Errorf("%s.price_rounding_mode requires price_rounding_digits", path)
+	}
 	if product.presence("final_price") == fieldNull {
 		return fmt.Errorf("%s.final_price must be omitted when unavailable, not null", path)
 	}
 	if product.FinalPrice != nil && *product.FinalPrice < 0 {
 		return fmt.Errorf("%s.final_price must be a non-negative integer", path)
+	}
+	if product.FinalPrice != nil && (product.PriceRoundingDigits == nil ||
+		product.PriceRoundingMode != pricingcatalog.RoundingModeHalfUp) {
+		return fmt.Errorf("%s.final_price requires rounding provenance", path)
+	}
+	if product.FinalPrice != nil &&
+		product.ForeignPrice != nil &&
+		product.WeightGrams != nil &&
+		product.ShippingPricePerKg != nil &&
+		product.MarkupPercent != nil &&
+		product.IRTPerCNY != nil &&
+		product.PriceRoundingDigits != nil {
+		expected, err := LandedPrice(
+			product.WeightGrams.String(),
+			product.ShippingPricePerKg.String(),
+			product.ShippingPricePerKgCurrency,
+			product.ForeignPrice.String(),
+			product.MarkupPercent.String(),
+			product.IRTPerCNY.String(),
+			*product.PriceRoundingDigits,
+		)
+		if err != nil {
+			return fmt.Errorf("%s.final_price cannot be recomputed: %w", path, err)
+		}
+		if *product.FinalPrice != expected {
+			return fmt.Errorf("%s.final_price mismatch: expected %d", path, expected)
+		}
 	}
 	if !validSHA256Identity(product.RecordHash) {
 		return fmt.Errorf("%s.record_hash must be a lowercase sha256 identity", path)

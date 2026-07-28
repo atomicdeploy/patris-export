@@ -50,6 +50,8 @@ var canonicalXLSXFields = []string{
 	"pricing_catalog_revision",
 	"pricing_catalog_status",
 	"currency_effective_date",
+	"price_rounding_digits",
+	"price_rounding_mode",
 	"final_price",
 	"source_updated_at",
 	"warnings",
@@ -448,7 +450,11 @@ func xlsxColumnValue(row map[string]interface{}, column xlsxColumn) interface{} 
 }
 
 func xlsxPriceFormula(row int, fieldColumns map[string]int) (string, bool) {
-	required := []string{"foreign_price", "weight_grams", "shipping_price_per_kg", "shipping_price_per_kg_currency", "markup_percent", "irt_per_cny"}
+	required := []string{
+		"foreign_price", "weight_grams", "shipping_price_per_kg",
+		"shipping_price_per_kg_currency", "markup_percent", "irt_per_cny",
+		"price_rounding_digits",
+	}
 	references := make(map[string]string, len(required))
 	for _, field := range required {
 		column, exists := fieldColumns[field]
@@ -467,9 +473,10 @@ func xlsxPriceFormula(row int, fieldColumns map[string]int) (string, bool) {
 		references["shipping_price_per_kg"],
 		references["markup_percent"],
 		references["irt_per_cny"],
+		references["price_rounding_digits"],
 	}
 	return fmt.Sprintf(
-		`=IF(AND(COUNT(%s)=5,OR(%s="CNY",%s="IRR")),ROUND((%s*%s+%s/1000*IF(%s="CNY",%s*%s,%s/10))*(1+%s/100),0),"")`,
+		`=IF(AND(COUNT(%s)=6,OR(%s="CNY",%s="IRR")),ROUND((%s*%s+%s/1000*IF(%s="CNY",%s*%s,%s/10))*(1+%s/100),-%s),"")`,
 		strings.Join(numericReferences, ","),
 		references["shipping_price_per_kg_currency"],
 		references["shipping_price_per_kg_currency"],
@@ -481,6 +488,7 @@ func xlsxPriceFormula(row int, fieldColumns map[string]int) (string, bool) {
 		references["irt_per_cny"],
 		references["shipping_price_per_kg"],
 		references["markup_percent"],
+		references["price_rounding_digits"],
 	), true
 }
 

@@ -21,6 +21,7 @@ Private Const PRICING_CONTRACT_CHANNEL As String = "excel-workbook"
 Private Const PRICING_CSRF_HEADER As String = "X-Patris-Excel-CSRF-Token"
 Private Const PRICING_REQUEST_SCHEMA As String = "patris.excel-pricing-companion-request/v1"
 Private Const PRICING_SESSION_SCHEMA As String = "patris.excel-pricing-companion-session/v1"
+Private Const PRICE_ROUNDING_MODE As String = "nearest_half_up"
 Private Const LOOPBACK_PREFIX As String = "http://127.0.0.1:18080/"
 Private Const RECONCILED_COLUMN_KEYS As String = _
     "sync_key,reconciliation_status,patris_code,woocommerce_id,parent_id," & _
@@ -46,6 +47,7 @@ Private mLastPreviewSettings As String
 Private mLastApplyRequestID As String
 Private mProposalSyncActive As Boolean
 Private mLastRefreshSucceeded As Boolean
+Private mSaveFlowActive As Boolean
 
 #If VBA7 Then
 Private Declare PtrSafe Function MessageBoxW Lib "user32" ( _
@@ -68,6 +70,7 @@ Public Sub ValidateWorkbook()
     ValidateUnicodeRuntime
     ValidateProposalDateNormalization
     ValidateProjectionIntegrityGuard
+    ValidateRoundingRuntime
     Set table = PriceSheet().ListObjects(PRODUCTS_TABLE)
     Set syncTable = SyncSheet().ListObjects(SYNC_TABLE)
 
@@ -86,6 +89,131 @@ Public Function RefreshAllDataForValidation() As Boolean
     RefreshAllData True
     RefreshAllDataForValidation = mLastRefreshSucceeded
 End Function
+
+Public Sub HandleWorkbookBeforeSave(ByVal saveAsUI As Boolean, _
+                                    ByRef cancel As Boolean)
+    Dim selectedPath As Variant
+    Dim outputPath As String
+    Dim extension As String
+    Dim fileSystem As Object
+    Dim answer As Long
+
+    If mSaveFlowActive Or Not saveAsUI Then Exit Sub
+    cancel = True
+    selectedPath = Application.GetSaveAsFilename( _
+        InitialFileName:=Application.DefaultFilePath & _
+            Application.PathSeparator & _
+            U("064406CC0633062A0020064206CC0645062A0020062F06CC062C06CC062A062706440627062C06CC06A9") & _
+            ".xlsx", _
+        FileFilter:=T("xlsx_filter") & ",*.xlsx," & _
+            T("xlsm_filter") & ",*.xlsm", _
+        FilterIndex:=1, _
+        Title:=T("save_title"))
+    If VarType(selectedPath) = vbBoolean Then Exit Sub
+
+    outputPath = Trim$(CStr(selectedPath))
+    extension = LCase$(Mid$(outputPath, InStrRev(outputPath, ".")))
+    If extension = vbNullString Then
+        outputPath = outputPath & ".xlsx"
+        extension = ".xlsx"
+    End If
+    If extension <> ".xlsx" And extension <> ".xlsm" Then
+        ShowUnicodeMessage T("save_extension"), vbExclamation, T("save_title")
+        Exit Sub
+    End If
+
+    Set fileSystem = CreateObject("Scripting.FileSystemObject")
+    If fileSystem.FileExists(outputPath) Then
+        answer = ShowUnicodeMessage( _
+            T("save_overwrite"), vbQuestion Or vbYesNo, T("save_title"))
+        If answer <> vbYes Then Exit Sub
+    End If
+
+    If extension = ".xlsx" Then
+        ExportMacroFreeCopy outputPath
+        ShowUnicodeMessage T("save_nomacro_done"), vbInformation, T("save_title")
+    Else
+        mSaveFlowActive = True
+        On Error GoTo SaveFailed
+        ThisWorkbook.SaveAs Filename:=outputPath, _
+            FileFormat:=xlOpenXMLWorkbookMacroEnabled
+        mSaveFlowActive = False
+    End If
+    Exit Sub
+
+SaveFailed:
+    mSaveFlowActive = False
+    Err.Raise Err.Number, "HandleWorkbookBeforeSave", Err.Description
+End Sub
+
+Private Sub ExportMacroFreeCopy(ByVal outputPath As String)
+    Dim copyBook As Workbook
+    Dim previousAlerts As Boolean
+    Dim previousEvents As Boolean
+    Dim previousScreenUpdating As Boolean
+    Dim savedErrorNumber As Long
+    Dim savedErrorDescription As String
+
+    On Error GoTo Failed
+    previousAlerts = Application.DisplayAlerts
+    previousEvents = Application.EnableEvents
+    previousScreenUpdating = Application.ScreenUpdating
+    Application.DisplayAlerts = False
+    Application.EnableEvents = False
+    Application.ScreenUpdating = False
+
+    ThisWorkbook.Worksheets.Copy
+    Set copyBook = ActiveWorkbook
+    RemoveMacroOnlyUI copyBook
+    copyBook.SaveAs Filename:=outputPath, FileFormat:=xlOpenXMLWorkbook
+    copyBook.Close SaveChanges:=False
+    Set copyBook = Nothing
+
+CleanExit:
+    Application.DisplayAlerts = previousAlerts
+    Application.EnableEvents = previousEvents
+    Application.ScreenUpdating = previousScreenUpdating
+    If savedErrorNumber <> 0 Then
+        Err.Raise savedErrorNumber, "ExportMacroFreeCopy", _
+                  savedErrorDescription
+    End If
+    Exit Sub
+
+Failed:
+    savedErrorNumber = Err.Number
+    savedErrorDescription = Err.Description
+    On Error Resume Next
+    If Not copyBook Is Nothing Then copyBook.Close SaveChanges:=False
+    Set copyBook = Nothing
+    On Error GoTo 0
+    Resume CleanExit
+End Sub
+
+Private Sub RemoveMacroOnlyUI(ByVal book As Workbook)
+    Dim sheet As Worksheet
+    Dim shapeIndex As Long
+    Dim macroName As String
+
+    For Each sheet In book.Worksheets
+        For shapeIndex = sheet.Shapes.Count To 1 Step -1
+            macroName = vbNullString
+            On Error Resume Next
+            macroName = CStr(sheet.Shapes(shapeIndex).OnAction)
+            On Error GoTo 0
+            If Len(Trim$(macroName)) > 0 Then
+                sheet.Shapes(shapeIndex).Delete
+            End If
+        Next shapeIndex
+    Next sheet
+
+    On Error Resume Next
+    book.Worksheets(1).Range("B3:K3").ClearContents
+    book.Worksheets(1).ListObjects(PRODUCTS_TABLE). _
+        DataBodyRange.FormatConditions.Delete
+    book.Names("ProductSearchQuery").Delete
+    book.Names("SelectedProductRow").Delete
+    On Error GoTo 0
+End Sub
 
 Public Sub RefreshAllData(Optional ByVal silent As Boolean = False)
     Dim previousCalculation As XlCalculation
@@ -185,16 +313,43 @@ Public Sub RefreshOnOpen()
     End If
 End Sub
 
+Public Sub RegisterSearchHotkey()
+    Dim workbookMacro As String
+
+    workbookMacro = "'" & Replace(ThisWorkbook.Name, "'", "''") & _
+        "'!ProductCatalogSync.FocusProductSearch"
+    Application.OnKey "{F2}", workbookMacro
+End Sub
+
+Public Sub UnregisterSearchHotkey()
+    Application.OnKey "{F2}"
+End Sub
+
+Public Sub FocusProductSearch()
+    Dim searchInput As Range
+    Dim table As ListObject
+
+    On Error GoTo CleanExit
+    PriceSheet().Activate
+    Set searchInput = ThisWorkbook.Names("ProductSearchQuery").RefersToRange
+    Set table = PriceSheet().ListObjects(PRODUCTS_TABLE)
+    searchInput.Select
+    ActiveWindow.ScrollColumn = table.Range.Column
+CleanExit:
+End Sub
+
 Public Sub SearchProducts()
     Dim table As ListObject
     Dim query As String
     Dim found As Range
+    Dim anchor As Range
+    Dim rowIndex As Long
 
     Set table = PriceSheet().ListObjects(PRODUCTS_TABLE)
     query = Trim$(CStr( _
         ThisWorkbook.Names("ProductSearchQuery").RefersToRange.Value2))
     If Len(query) = 0 Then
-        ThisWorkbook.Names("ProductSearchQuery").RefersToRange.Select
+        FocusProductSearch
         Exit Sub
     End If
     If table.DataBodyRange Is Nothing Then Exit Sub
@@ -210,7 +365,13 @@ Public Sub SearchProducts()
     If found Is Nothing Then
         ShowUnicodeMessage T("search_missing"), vbInformation, T("search_title")
     Else
-        Application.Goto found, True
+        rowIndex = found.Row - table.DataBodyRange.Row + 1
+        Set anchor = table.DataBodyRange.Cells(rowIndex, 1)
+        PriceSheet().Activate
+        Application.Goto anchor, False
+        HighlightSelectedProductRow anchor
+        ActiveWindow.ScrollColumn = table.Range.Column
+        ActiveWindow.ScrollRow = Application.Max(1, anchor.Row - 3)
     End If
 End Sub
 
@@ -221,7 +382,7 @@ Public Sub ClearProductSearch()
     ThisWorkbook.Names("ProductSearchQuery").RefersToRange.ClearContents
     Set table = PriceSheet().ListObjects(PRODUCTS_TABLE)
     If table.AutoFilter.FilterMode Then table.AutoFilter.ShowAllData
-    ThisWorkbook.Names("ProductSearchQuery").RefersToRange.Select
+    FocusProductSearch
     On Error GoTo 0
 End Sub
 
@@ -430,10 +591,10 @@ End Sub
 
 Private Function PricingStateAddresses() As Variant
     PricingStateAddresses = Split( _
-        "B10|B11|B12|B13|B14|B15|B18|B19|B20|B21|B22|" & _
+        "B10|B11|B12|B13|B14|B15|B18|B19|B20|B21|B22|B26|" & _
         "G14|G15|G18|G19|G20|G21|G22|G31|G32|G33|G34|G35|G36|" & _
         "G37|G38|G39|G40|G41|G42|G43|G44|G45|G46|G47|" & _
-        "H14|H15|H16|H17", _
+        "H14|H15|H16|H17|H18|H19", _
         "|")
 End Function
 
@@ -478,6 +639,7 @@ Private Function PricingSettingsCanonical() As String
         CanonicalDateText(settings.Range("B20").Value2) & "|" & _
         CanonicalCellText(settings.Range("B21").Value2) & "|" & _
         CanonicalCellText(settings.Range("B22").Value2) & "|" & _
+        CanonicalCellText(settings.Range("B26").Value2) & "|" & _
         CanonicalCellText(settings.Range("H14").Value2) & "|" & _
         CanonicalCellText(settings.Range("H15").Value2) & "|" & _
         CanonicalDateText(settings.Range("H16").Value2)
@@ -1049,11 +1211,14 @@ Private Sub ApplyGlobalState(ByVal state As JsonValue)
     Dim shippingState As JsonValue
     Dim profitMargin As JsonValue
     Dim markup As JsonValue
+    Dim priceRounding As JsonValue
     Dim remoteCNY As Variant
     Dim remoteUSD As Variant
     Dim remoteDate As Variant
     Dim remoteProfit As Variant
     Dim remoteShipping As Variant
+    Dim remoteRounding As Variant
+    Dim remoteRoundingMode As String
     Dim shippingCurrency As String
     Dim shippingRevision As String
     Dim remoteUSDDate As Variant
@@ -1067,6 +1232,7 @@ Private Sub ApplyGlobalState(ByVal state As JsonValue)
     Set shippingState = JsonRuntime.JsonMember(state, "shipping")
     Set profitMargin = JsonRuntime.JsonMember(state, "profit_margin")
     Set markup = JsonRuntime.JsonMember(state, "default_markup")
+    Set priceRounding = JsonRuntime.JsonMember(state, "price_rounding")
 
     If Not primarySettings Is Nothing Then
         remoteCNY = PositiveNumericOrBlank( _
@@ -1086,6 +1252,10 @@ Private Sub ApplyGlobalState(ByVal state As JsonValue)
         If Not IsEmpty(remoteProfit) Then remoteProfit = CDbl(remoteProfit) / 100#
         remoteShipping = PositiveNumericOrBlank( _
             JsonRuntime.JsonText(primarySettings, "air_express_price_per_kg"))
+        remoteRounding = NumericOrBlank( _
+            JsonRuntime.JsonText(primarySettings, "price_rounding_digits"))
+        remoteRoundingMode = Trim$(CStr(BlankIfNull( _
+            JsonRuntime.JsonText(primarySettings, "price_rounding_mode"))))
         shippingCurrency = UCase$(Trim$(CStr(BlankIfNull( _
             JsonRuntime.JsonText(primarySettings, "air_express_currency")))))
         shippingRevision = Trim$(CStr(BlankIfNull( _
@@ -1120,6 +1290,21 @@ Private Sub ApplyGlobalState(ByVal state As JsonValue)
         If Not IsEmpty(remoteProfit) Then remoteProfit = CDbl(remoteProfit) / 100#
     End If
 
+    If IsEmpty(remoteRounding) And Not priceRounding Is Nothing Then
+        remoteRounding = NumericOrBlank( _
+            JsonRuntime.JsonText(priceRounding, "rounding_digits"))
+    End If
+    If Len(remoteRoundingMode) = 0 And Not priceRounding Is Nothing Then
+        remoteRoundingMode = Trim$(CStr(BlankIfNull( _
+            JsonRuntime.JsonText(priceRounding, "rounding_mode"))))
+    End If
+    If IsEmpty(remoteRounding) Or CDbl(remoteRounding) < 0 Or _
+       CDbl(remoteRounding) > 9 Or _
+       CDbl(remoteRounding) <> Fix(CDbl(remoteRounding)) Or _
+       remoteRoundingMode <> PRICE_ROUNDING_MODE Then
+        Err.Raise vbObjectError + 207, "ApplyGlobalState", T("rounding_required")
+    End If
+
     If (IsEmpty(remoteShipping) Or Len(shippingCurrency) = 0 Or _
         Len(shippingRevision) = 0) And Not shippingState Is Nothing Then
         remoteShipping = PositiveNumericOrBlank( _
@@ -1148,8 +1333,7 @@ Private Sub ApplyGlobalState(ByVal state As JsonValue)
     settings.Range("B12").Value2 = CanonicalDateText(remoteDate)
     settings.Range("B13").Value = remoteProfit
     settings.Range("B14").Value = remoteShipping
-    settings.Range("B15").Value = BlankIfNull( _
-        JsonRuntime.JsonText(state, "generated_at"))
+    settings.Range("B15").Value = CLng(remoteRounding)
     settings.Range("G14").Value = BlankIfNull( _
         JsonRuntime.JsonText(state, "state_revision"))
     settings.Range("G15").Value = stale
@@ -1157,6 +1341,8 @@ Private Sub ApplyGlobalState(ByVal state As JsonValue)
     settings.Range("H15").Value = shippingRevision
     settings.Range("H16").Value2 = CanonicalDateText(remoteUSDDate)
     settings.Range("H17").Value2 = CanonicalDateText(remoteCNYDate)
+    settings.Range("H18").Value = CLng(remoteRounding)
+    settings.Range("H19").Value2 = remoteRoundingMode
 
     UpdateProposalCell settings.Range("B18"), settings.Range("G18"), remoteCNY
     UpdateProposalCell settings.Range("B19"), settings.Range("G19"), remoteUSD
@@ -1164,8 +1350,10 @@ Private Sub ApplyGlobalState(ByVal state As JsonValue)
         remoteDate
     UpdateProposalCell settings.Range("B21"), settings.Range("G21"), remoteProfit
     UpdateProposalCell settings.Range("B22"), settings.Range("G22"), remoteShipping
+    UpdateProposalCell settings.Range("B26"), settings.Range("H18"), _
+        CLng(remoteRounding)
     UpdateProposalDriftFlags settings, remoteCNY, remoteUSD, remoteDate, _
-        remoteProfit, remoteShipping
+        remoteProfit, remoteShipping, CLng(remoteRounding)
 End Sub
 
 Private Sub UpdateProposalCell(ByVal proposal As Range, _
@@ -1204,7 +1392,8 @@ Private Sub UpdateProposalDriftFlags(ByVal settings As Worksheet, _
                                      ByVal remoteUSD As Variant, _
                                      ByVal remoteDate As Variant, _
                                      ByVal remoteProfit As Variant, _
-                                     ByVal remoteShipping As Variant)
+                                     ByVal remoteShipping As Variant, _
+                                     ByVal remoteRounding As Variant)
     Dim threshold As Double
     Dim mismatch As Boolean
     Dim critical As Boolean
@@ -1218,10 +1407,37 @@ Private Sub UpdateProposalDriftFlags(ByVal settings As Worksheet, _
         threshold, mismatch, critical
     CompareProposalNumber settings.Range("B22").Value2, remoteShipping, _
         threshold, mismatch, critical
+    CompareProposalInteger settings.Range("B26").Value2, remoteRounding, _
+        mismatch, critical
     If Not CanonicalDateValuesEqual( _
         settings.Range("B20").Value2, remoteDate) Then mismatch = True
     settings.Range("G39").Value2 = mismatch
     settings.Range("G40").Value2 = critical
+End Sub
+
+Private Sub CompareProposalInteger(ByVal proposalValue As Variant, _
+                                   ByVal remoteValue As Variant, _
+                                   ByRef mismatch As Boolean, _
+                                   ByRef critical As Boolean)
+    Dim proposalNumber As Variant
+    Dim remoteNumber As Variant
+
+    proposalNumber = NumericOrBlank(proposalValue)
+    remoteNumber = NumericOrBlank(remoteValue)
+    If IsEmpty(proposalNumber) Or IsEmpty(remoteNumber) Then
+        If IsEmpty(proposalNumber) Xor IsEmpty(remoteNumber) Then
+            mismatch = True
+            critical = True
+        End If
+        Exit Sub
+    End If
+    If CDbl(proposalNumber) <> Fix(CDbl(proposalNumber)) Or _
+       CDbl(proposalNumber) < 0 Or CDbl(proposalNumber) > 9 Then
+        mismatch = True
+        critical = True
+        Exit Sub
+    End If
+    If CLng(proposalNumber) <> CLng(remoteNumber) Then mismatch = True
 End Sub
 
 Private Sub CompareProposalNumber(ByVal proposalValue As Variant, _
@@ -1572,7 +1788,9 @@ Private Sub ApplyProductTableFormulas(ByVal table As ListObject)
         lookupExpression & ",SyncData,7,FALSE),IF(VLOOKUP(" & _
         lookupExpression & ",SyncData,4,FALSE)=""IRR"",0.1,IF(VLOOKUP(" & _
         lookupExpression & ",SyncData,4,FALSE)=""IRT"",1,NA()))))))" & _
-        "*(1+VLOOKUP(" & lookupExpression & ",SyncData,5,FALSE)/100),0)," & _
+        "*(1+VLOOKUP(" & lookupExpression & _
+        ",SyncData,5,FALSE)/100),-'" & _
+        U("062A0646063806CC06450627062A") & "'!R15C2)," & _
         fallbackFormula & ")," & fallbackFormula & ")"
     table.ListColumns(1).DataBodyRange.FormulaR1C1 = priceFormula
 End Sub
@@ -1799,7 +2017,9 @@ Private Function BuildPricingRequest(ByVal operationName As String, _
         """profit_margin_percent"":" & JsonNumberOrNull(profitPercent) & "," & _
         """air_express_price_per_kg"":" & JsonNumberOrNull(settings.Range("B22").Value2) & "," & _
         """air_express_currency"":" & JsonString(shippingCurrency) & "," & _
-        """shipping_catalog_revision"":" & JsonString(shippingRevision) & "}," & _
+        """shipping_catalog_revision"":" & JsonString(shippingRevision) & "," & _
+        """price_rounding_digits"":" & JsonNumberOrNull(settings.Range("B26").Value2) & "," & _
+        """price_rounding_mode"":" & JsonString(PRICE_ROUNDING_MODE) & "}," & _
         """product_changes"":[]"
     If Len(previewDigest) > 0 Then
         body = body & ",""preview_digest"":" & JsonString(previewDigest)
@@ -1835,6 +2055,11 @@ Private Sub ValidatePricingSettings(ByVal settings As Worksheet, _
     If CDbl(profitPercent) < 0 Or CDbl(profitPercent) > 1000 Then GoTo InvalidSettings
     If Not IsNumeric(settings.Range("B22").Value2) Then GoTo InvalidSettings
     If CDbl(settings.Range("B22").Value2) <= 0 Then GoTo InvalidSettings
+    If Not IsNumeric(settings.Range("B26").Value2) Then GoTo InvalidSettings
+    If CDbl(settings.Range("B26").Value2) < 0 Or _
+       CDbl(settings.Range("B26").Value2) > 9 Then GoTo InvalidSettings
+    If CDbl(settings.Range("B26").Value2) <> _
+       Fix(CDbl(settings.Range("B26").Value2)) Then GoTo InvalidSettings
     If shippingCurrency <> "CNY" And shippingCurrency <> "IRR" Then GoTo InvalidSettings
     If Len(shippingRevision) <> 71 Then GoTo InvalidSettings
     If Left$(shippingRevision, 7) <> "sha256:" Then GoTo InvalidSettings
@@ -2304,9 +2529,10 @@ Private Sub ValidateProposalDateNormalization()
     settings.Range("B20").Value2 = CDbl(sampleDate)
     settings.Range("B21").Value2 = 0.3
     settings.Range("B22").Value2 = 120#
+    settings.Range("B26").Value2 = 2#
     settings.Range("B24").Value2 = 0.07
     UpdateProposalDriftFlags settings, 29500#, 187891#, expectedDate, _
-        0.3, 120#
+        0.3, 120#, 2#
     If BooleanValue(settings.Range("G39").Value2) Or _
        BooleanValue(settings.Range("G40").Value2) Then
         Err.Raise vbObjectError + 205, _
@@ -2316,7 +2542,7 @@ Private Sub ValidateProposalDateNormalization()
 
     settings.Range("B20").Value2 = CDbl(sampleDate) + 1#
     UpdateProposalDriftFlags settings, 29500#, 187891#, expectedDate, _
-        0.3, 120#
+        0.3, 120#, 2#
     If Not BooleanValue(settings.Range("G39").Value2) Then
         Err.Raise vbObjectError + 206, _
                   "ValidateProposalDateNormalization", _
@@ -2382,6 +2608,15 @@ Private Sub ValidateUnicodeRuntime()
     If Len(expected) <> 5 Or AscW(Left$(expected, 1)) <> &H647 Then
         Err.Raise vbObjectError + 190, "ValidateUnicodeRuntime", _
                   "Unicode runtime validation failed."
+    End If
+End Sub
+
+Private Sub ValidateRoundingRuntime()
+    If Application.WorksheetFunction.Round(123449#, -2) <> 123400# Or _
+       Application.WorksheetFunction.Round(123450#, -2) <> 123500# Or _
+       Application.WorksheetFunction.Round(123456#, -2) <> 123500# Then
+        Err.Raise vbObjectError + 208, "ValidateRoundingRuntime", _
+                  "Excel ROUND does not implement the required half-up policy."
     End If
 End Sub
 
@@ -2483,6 +2718,20 @@ Private Function T(ByVal key As String) As String
             T = U("0645062806470645")
         Case "settings_required"
             T = U("0647064506470020064506420627062F06CC06310020064206CC0645062A200C06AF06300627063106CC00200628062706CC062F002006450639062A0628063100200648002006A906270645064400200628062706340646062F002E")
+        Case "rounding_required"
+            T = U("062A0639062F0627062F0020063106420645002006AF0631062F06A90631062F06460020064206CC0645062A00200628062706CC062F00200639062F062F06CC00200635064106310020062A0627002006F90020062806270634062F002E")
+        Case "xlsx_filter"
+            T = U("06460633062E064700200628062F0648064600200645062706A90631064800200028002A002E0078006C007300780029")
+        Case "xlsm_filter"
+            T = U("06460633062E06470020062F06270631062706CC00200645062706A90631064800200028002A002E0078006C0073006D0029")
+        Case "save_title"
+            T = U("0630062E06CC06310647002006460633062E0647")
+        Case "save_nomacro_done"
+            T = U("06460633062E064700200628062F0648064600200645062706A90631064800200630062E06CC0631064700200634062F002E")
+        Case "save_extension"
+            T = U("067E063306480646062F00200641062706CC064400200628062706CC062F00200078006C00730078002006CC062700200078006C0073006D0020062806270634062F002E")
+        Case "save_overwrite"
+            T = U("0641062706CC0644002006450648062C0648062F002006270633062A002E0020062C062706CC06AF063206CC0646002006340648062F061F")
         Case Else
             T = key
     End Select

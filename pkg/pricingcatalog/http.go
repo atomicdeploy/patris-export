@@ -23,6 +23,7 @@ type catalogSnapshot struct {
 	currencyEffectiveDate string
 	selectedWarehouses    []string
 	irtPerCNY             *Decimal
+	roundingDigits        *int
 	methods               map[string]Method
 	explicitNulls         map[string]bool
 	methodPriceNulls      map[string]bool
@@ -521,6 +522,10 @@ func (p *httpProvider) resolve(ctx context.Context, code string, run *prefetchRu
 	resolution.CurrencyEffectiveDate = catalog.currencyEffectiveDate
 	resolution.SelectedWarehouses = append([]string(nil), catalog.selectedWarehouses...)
 	resolution.IRTPerCNY = cloneDecimal(catalog.irtPerCNY)
+	if catalog.roundingDigits != nil {
+		digits := *catalog.roundingDigits
+		resolution.RoundingDigits = &digits
+	}
 	resolution.ExplicitNulls = cloneBoolMap(catalog.explicitNulls)
 	resolution.Warnings = append(resolution.Warnings, catalog.warnings...)
 
@@ -899,7 +904,8 @@ func (p *httpProvider) fetchCatalog(ctx context.Context) (*catalogSnapshot, erro
 			Warnings      []string `json:"warnings"`
 		} `json:"currency"`
 		Pricing struct {
-			FormulaID string `json:"formula_id"`
+			FormulaID      string `json:"formula_id"`
+			RoundingDigits *int   `json:"rounding_digits"`
 		} `json:"pricing"`
 		Methods []Method `json:"shipping_methods"`
 	}
@@ -914,6 +920,7 @@ func (p *httpProvider) fetchCatalog(ctx context.Context) (*catalogSnapshot, erro
 	}
 	var rawCatalog struct {
 		Currency json.RawMessage   `json:"currency"`
+		Pricing  json.RawMessage   `json:"pricing"`
 		Methods  []json.RawMessage `json:"shipping_methods"`
 	}
 	_ = json.Unmarshal(raw, &rawCatalog)
@@ -926,6 +933,10 @@ func (p *httpProvider) fetchCatalog(ctx context.Context) (*catalogSnapshot, erro
 				explicitNulls["currency_effective_date"] = true
 			}
 		}
+	}
+	pricingNulls := explicitJSONNulls(rawCatalog.Pricing, "rounding_digits")
+	if pricingNulls["rounding_digits"] {
+		explicitNulls["price_rounding_digits"] = true
 	}
 	warnings := append([]string(nil), wire.Currency.Warnings...)
 	schemaCompatible := wire.Schema == "digitalogic.integration-catalog"
@@ -956,6 +967,20 @@ func (p *httpProvider) fetchCatalog(ctx context.Context) (*catalogSnapshot, erro
 	if !schemaCompatible || !revisionCompatible || !formulaCompatible || !localIsIRT || !validPositive(irtPerCNY) || !fxContractCompatible {
 		irtPerCNY = nil
 	}
+	var roundingDigits *int
+	if pricingNulls["rounding_digits"] {
+		warnings = append(warnings, "price_rounding_digits_explicit_null")
+	} else if !schemaCompatible || !revisionCompatible || !formulaCompatible || !localIsIRT {
+		// Withhold rounding provenance when the catalog contract is invalid.
+	} else if wire.Pricing.RoundingDigits == nil {
+		digits := MinimumRoundDigits
+		roundingDigits = &digits
+	} else if *wire.Pricing.RoundingDigits < MinimumRoundDigits || *wire.Pricing.RoundingDigits > MaximumRoundDigits {
+		warnings = append(warnings, "price_rounding_digits_invalid")
+	} else {
+		digits := *wire.Pricing.RoundingDigits
+		roundingDigits = &digits
+	}
 	methods := make(map[string]Method, len(wire.Methods))
 	methodPriceNulls := make(map[string]bool)
 	methodCurrencyNulls := make(map[string]bool)
@@ -984,6 +1009,7 @@ func (p *httpProvider) fetchCatalog(ctx context.Context) (*catalogSnapshot, erro
 		currencyEffectiveDate: strings.TrimSpace(wire.Currency.EffectiveDate),
 		selectedWarehouses:    normalizedStrings(wire.SelectedWarehouses),
 		irtPerCNY:             irtPerCNY,
+		roundingDigits:        roundingDigits,
 		methods:               methods,
 		explicitNulls:         explicitNulls,
 		methodPriceNulls:      methodPriceNulls,
@@ -1398,6 +1424,10 @@ func cloneCatalog(value *catalogSnapshot) *catalogSnapshot {
 	copy := *value
 	copy.selectedWarehouses = append([]string(nil), value.selectedWarehouses...)
 	copy.irtPerCNY = cloneDecimal(value.irtPerCNY)
+	if value.roundingDigits != nil {
+		digits := *value.roundingDigits
+		copy.roundingDigits = &digits
+	}
 	copy.warnings = append([]string(nil), value.warnings...)
 	copy.explicitNulls = cloneBoolMap(value.explicitNulls)
 	copy.methodPriceNulls = cloneBoolMap(value.methodPriceNulls)

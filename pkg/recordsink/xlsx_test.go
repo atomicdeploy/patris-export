@@ -25,6 +25,8 @@ func TestCanonicalXLSXRoundTripPreservesTypesLayoutAndMetadata(t *testing.T) {
 			"shipping_price_per_kg_currency": "CNY",
 			"markup_percent":                 json.Number("30"),
 			"irt_per_cny":                    json.Number("29000"),
+			"price_rounding_digits":          0,
+			"price_rounding_mode":            "nearest_half_up",
 			"final_price":                    int64(2009410),
 			"warnings":                       []string{"price_verified"},
 		},
@@ -59,7 +61,7 @@ func TestCanonicalXLSXRoundTripPreservesTypesLayoutAndMetadata(t *testing.T) {
 	if err != nil || len(recordRows) != 2 {
 		t.Fatalf("records rows = %#v, err=%v", recordRows, err)
 	}
-	wantHeaders := []string{"Product Code", "Name", "Foreign Price", "Weight (g)", "Shipping Price/kg", "Shipping Currency", "Profit Margin (%)", "IRT per CNY", "Final Price (IRT)", "Warnings"}
+	wantHeaders := []string{"Product Code", "Name", "Foreign Price", "Weight (g)", "Shipping Price/kg", "Shipping Currency", "Profit Margin (%)", "IRT per CNY", "Price Rounding Digits", "Price Rounding Mode", "Final Price (IRT)", "Warnings"}
 	if strings.Join(recordRows[0], "|") != strings.Join(wantHeaders, "|") {
 		t.Fatalf("canonical column order = %v, want %v", recordRows[0], wantHeaders)
 	}
@@ -125,7 +127,7 @@ func TestCanonicalXLSXRoundTripPreservesTypesLayoutAndMetadata(t *testing.T) {
 	}
 
 	worksheetXML := zipEntry(t, path, "xl/worksheets/sheet1.xml")
-	if !strings.Contains(worksheetXML, `<autoFilter ref="$A$1:$J$2"`) {
+	if !strings.Contains(worksheetXML, `<autoFilter ref="$A$1:$L$2"`) {
 		t.Fatalf("autofilter missing from Records sheet: %s", worksheetXML)
 	}
 }
@@ -144,6 +146,8 @@ func TestFormulaXLSXLocalizesHeadersSplitsWarehousesAndCalculates(t *testing.T) 
 			"shipping_price_per_kg_currency": "CNY",
 			"markup_percent":                 json.Number("30"),
 			"irt_per_cny":                    json.Number("29000"),
+			"price_rounding_digits":          0,
+			"price_rounding_mode":            "nearest_half_up",
 			"final_price":                    json.Number("2009410"),
 		},
 		{
@@ -155,6 +159,8 @@ func TestFormulaXLSXLocalizesHeadersSplitsWarehousesAndCalculates(t *testing.T) 
 			"shipping_price_per_kg_currency": "CNY",
 			"markup_percent":                 json.Number("30"),
 			"irt_per_cny":                    json.Number("29000"),
+			"price_rounding_digits":          0,
+			"price_rounding_mode":            "nearest_half_up",
 			"final_price":                    nil,
 		},
 	}
@@ -177,7 +183,8 @@ func TestFormulaXLSXLocalizesHeadersSplitsWarehousesAndCalculates(t *testing.T) 
 	}
 	wantHeaders := []string{
 		"کد کالا", "نام", "موجودی انبار ۲", "موجودی انبار ۱۰", "قیمت ارزی", "وزن (گرم)",
-		"هزینه حمل/کیلوگرم", "ارز هزینه حمل", "حاشیه سود (%)", "نرخ ریال به یوان", "قیمت نهایی (ریال)",
+		"هزینه حمل/کیلوگرم", "ارز هزینه حمل", "حاشیه سود (%)", "نرخ ریال به یوان",
+		"تعداد رقم گردکردن قیمت", "روش گردکردن قیمت", "قیمت نهایی (تومان)",
 	}
 	if strings.Join(recordRows[0], "|") != strings.Join(wantHeaders, "|") {
 		t.Fatalf("localized columns = %v, want %v", recordRows[0], wantHeaders)
@@ -187,15 +194,15 @@ func TestFormulaXLSXLocalizesHeadersSplitsWarehousesAndCalculates(t *testing.T) 
 	assertXLSXCell(t, book, "Records", cellAt(columns, "موجودی انبار ۲", 2), "1", excelize.CellTypeNumber)
 	assertXLSXCell(t, book, "Records", cellAt(columns, "موجودی انبار ۱۰", 2), "3", excelize.CellTypeNumber)
 
-	finalCell := cellAt(columns, "قیمت نهایی (ریال)", 2)
-	wantFormula := `=IF(AND(COUNT(E2,F2,G2,I2,J2)=5,OR(H2="CNY",H2="IRR")),ROUND((E2*J2+F2/1000*IF(H2="CNY",G2*J2,G2/10))*(1+I2/100),0),"")`
+	finalCell := cellAt(columns, "قیمت نهایی (تومان)", 2)
+	wantFormula := `=IF(AND(COUNT(E2,F2,G2,I2,J2,K2)=6,OR(H2="CNY",H2="IRR")),ROUND((E2*J2+F2/1000*IF(H2="CNY",G2*J2,G2/10))*(1+I2/100),-K2),"")`
 	if formula, err := book.GetCellFormula("Records", finalCell); err != nil || formula != wantFormula {
 		t.Fatalf("formula = %q, want %q, err=%v", formula, wantFormula, err)
 	}
 	if calculated, err := book.CalcCellValue("Records", finalCell, excelize.Options{RawCellValue: true}); err != nil || calculated != "2009410" {
 		t.Fatalf("calculated final price = %q, want 2009410, err=%v", calculated, err)
 	}
-	missingCell := cellAt(columns, "قیمت نهایی (ریال)", 3)
+	missingCell := cellAt(columns, "قیمت نهایی (تومان)", 3)
 	if calculated, err := book.CalcCellValue("Records", missingCell, excelize.Options{RawCellValue: true}); err != nil || calculated != "" {
 		t.Fatalf("missing-input formula result = %q, want blank, err=%v", calculated, err)
 	}
@@ -227,6 +234,8 @@ func TestFormulaXLSXSupportsCNYAndIRRFreightAndRejectsInvalidCurrency(t *testing
 			"shipping_price_per_kg_currency": "CNY",
 			"markup_percent":                 json.Number("30"),
 			"irt_per_cny":                    json.Number("30000"),
+			"price_rounding_digits":          0,
+			"price_rounding_mode":            "nearest_half_up",
 			"final_price":                    json.Number("4290000"),
 		},
 		{
@@ -237,6 +246,8 @@ func TestFormulaXLSXSupportsCNYAndIRRFreightAndRejectsInvalidCurrency(t *testing
 			"shipping_price_per_kg_currency": "IRR",
 			"markup_percent":                 json.Number("30"),
 			"irt_per_cny":                    json.Number("30000"),
+			"price_rounding_digits":          0,
+			"price_rounding_mode":            "nearest_half_up",
 			"final_price":                    json.Number("4290000"),
 		},
 		{
@@ -247,6 +258,8 @@ func TestFormulaXLSXSupportsCNYAndIRRFreightAndRejectsInvalidCurrency(t *testing
 			"shipping_price_per_kg_currency": "USD",
 			"markup_percent":                 json.Number("30"),
 			"irt_per_cny":                    json.Number("30000"),
+			"price_rounding_digits":          0,
+			"price_rounding_mode":            "nearest_half_up",
 			"final_price":                    nil,
 		},
 	}
@@ -863,6 +876,8 @@ func TestDynamicCalculatorVBASourceGuardsLivePricingBeforeMutation(t *testing.T)
 		`"""cny_effective_date"":" & JsonString(cnyEffectiveDate)`,
 		`"""profit_margin_percent"":" & JsonNumberOrNull(profitPercent)`,
 		`"""air_express_price_per_kg"":" & JsonNumberOrNull(settings.Range("B22").Value2)`,
+		`"""price_rounding_digits"":" & JsonNumberOrNull(settings.Range("B26").Value2)`,
+		`"""price_rounding_mode"":" & JsonString(PRICE_ROUNDING_MODE)`,
 		`"""air_express_currency"":" & JsonString(shippingCurrency)`,
 		`"""shipping_catalog_revision"":" & JsonString(shippingRevision)`,
 		`http.setRequestHeader "If-Match", _`,
@@ -900,6 +915,7 @@ func TestDynamicCalculatorVBASourceGuardsLivePricingBeforeMutation(t *testing.T)
 		`fallbackFormula = _`,
 		`readyFormula = _`,
 		"ROUND(",
+		`U("062A0646063806CC06450627062A") & "'!R15C2`,
 		",SyncData,20,FALSE)",
 		",SyncData,10,FALSE)",
 		`=""CNY""`,
@@ -917,6 +933,12 @@ func TestDynamicCalculatorVBASourceGuardsLivePricingBeforeMutation(t *testing.T)
 		"Public Sub SearchProducts()",
 		"Public Sub ClearProductSearch()",
 		"Public Sub HighlightSelectedProductRow",
+		"ValidateRoundingRuntime",
+		"Application.WorksheetFunction.Round(123450#, -2) <> 123500#",
+		"Public Sub HandleWorkbookBeforeSave",
+		"Private Sub ExportMacroFreeCopy",
+		"Private Sub RemoveMacroOnlyUI",
+		"FileFormat:=xlOpenXMLWorkbook",
 	} {
 		if !strings.Contains(source, required) {
 			t.Fatalf("VBA source is missing validation: %s", required)
@@ -953,8 +975,11 @@ func TestDynamicCalculatorVBASourceGuardsLivePricingBeforeMutation(t *testing.T)
 		t.Fatal(err)
 	}
 	for _, required := range []string{
+		"Private Sub Workbook_BeforeSave",
+		"ProductCatalogSync.HandleWorkbookBeforeSave SaveAsUI, Cancel",
 		"Private Sub Workbook_SheetChange",
-		`Intersect(Target, Sh.Range("B18:B22"))`,
+		`Union(Sh.Range("B18:B22"), _`,
+		`Sh.Range("B26"))`,
 		"ProductCatalogSync.HandlePricingProposalChanged",
 		"Private Sub Workbook_SheetSelectionChange",
 		"ProductCatalogSync.HighlightSelectedProductRow Target",
@@ -972,6 +997,29 @@ func TestDynamicCalculatorVBASourceGuardsLivePricingBeforeMutation(t *testing.T)
 	for _, required := range []string{"Private Function ParseObject", "Private Function ParseArray", "Duplicate JSON object member"} {
 		if !strings.Contains(string(jsonContent), required) {
 			t.Fatalf("JSON runtime is missing validation: %s", required)
+		}
+	}
+}
+
+func TestDynamicCalculatorBuilderStylesPersianButtonsAndChartText(t *testing.T) {
+	path := filepath.Join("..", "..", "scripts", "windows", "Build-ExcelDashboard.ps1")
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := string(content)
+	for _, required := range []string{
+		"function Set-OfficeTextFont",
+		"NameComplexScript = 'Yekan Bakh'",
+		"NameFarEast = 'Yekan Bakh'",
+		"$shape.TextFrame.Characters().Font.Name = 'Yekan Bakh'",
+		"Set-OfficeTextFont $chart.ChartTitle.Format.TextFrame2.TextRange",
+		"Set-OfficeTextFont $chart.Legend.Format.TextFrame2.TextRange",
+		"'تعداد رقم گردکردن قیمت'",
+		"'تعداد رقم گردکردن قیمت پیشنهادی'",
+	} {
+		if !strings.Contains(source, required) {
+			t.Fatalf("canonical builder is missing Persian font/rounding guard: %s", required)
 		}
 	}
 }

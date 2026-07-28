@@ -67,6 +67,8 @@ type Product struct {
 	PricingCatalogRevision     string                  `json:"pricing_catalog_revision"`
 	PricingCatalogStatus       string                  `json:"pricing_catalog_status"`
 	CurrencyEffectiveDate      string                  `json:"currency_effective_date"`
+	PriceRoundingDigits        *int                    `json:"price_rounding_digits"`
+	PriceRoundingMode          string                  `json:"price_rounding_mode"`
 	FinalPrice                 *int64                  `json:"final_price"`
 	SourceUpdatedAt            string                  `json:"source_updated_at"`
 	Warnings                   []string                `json:"warnings"`
@@ -618,8 +620,8 @@ func parseKalaProduct(ctx context.Context, row map[string]interface{}, provider 
 	totalStock := totalStock(row, warehouseStock, resolution.SelectedWarehouses, &warnings)
 
 	var finalPrice *int64
-	if foreignPrice != nil && weight != nil && resolution.ShippingPricePerKg != nil && resolution.ShippingPricePerKgCurrency != "" && resolution.MarkupPercent != nil && resolution.IRTPerCNY != nil {
-		value, err := LandedPrice(weight.String(), resolution.ShippingPricePerKg.String(), resolution.ShippingPricePerKgCurrency, foreignPrice.String(), resolution.MarkupPercent.String(), resolution.IRTPerCNY.String())
+	if foreignPrice != nil && weight != nil && resolution.ShippingPricePerKg != nil && resolution.ShippingPricePerKgCurrency != "" && resolution.MarkupPercent != nil && resolution.IRTPerCNY != nil && resolution.RoundingDigits != nil {
+		value, err := LandedPrice(weight.String(), resolution.ShippingPricePerKg.String(), resolution.ShippingPricePerKgCurrency, foreignPrice.String(), resolution.MarkupPercent.String(), resolution.IRTPerCNY.String(), *resolution.RoundingDigits)
 		if err != nil {
 			warnings = append(warnings, "landed_price_calculation_failed")
 		} else {
@@ -650,6 +652,10 @@ func parseKalaProduct(ctx context.Context, row map[string]interface{}, provider 
 	if finalPrice != nil {
 		presence["final_price"] = fieldValue
 	}
+	if resolution.RoundingDigits != nil {
+		presence["price_rounding_digits"] = fieldValue
+		presence["price_rounding_mode"] = fieldValue
+	}
 	for field, isNull := range resolution.ExplicitNulls {
 		if isNull {
 			presence[field] = fieldNull
@@ -678,12 +684,19 @@ func parseKalaProduct(ctx context.Context, row map[string]interface{}, provider 
 		PricingCatalogRevision:     resolution.CatalogRevision,
 		PricingCatalogStatus:       resolution.CatalogStatus,
 		CurrencyEffectiveDate:      resolution.CurrencyEffectiveDate,
-		FinalPrice:                 finalPrice,
-		SourceUpdatedAt:            normalizeText(firstValue(row, "source_updated_at", "updated_at", "Dates")),
-		Warnings:                   normalizedWarnings(warnings),
-		fieldPresence:              presence,
-		warehouseNulls:             warehouseNulls,
-		integrationActive:          integrationActive,
+		PriceRoundingDigits:        resolution.RoundingDigits,
+		PriceRoundingMode: func() string {
+			if resolution.RoundingDigits != nil {
+				return pricingcatalog.RoundingModeHalfUp
+			}
+			return ""
+		}(),
+		FinalPrice:        finalPrice,
+		SourceUpdatedAt:   normalizeText(firstValue(row, "source_updated_at", "updated_at", "Dates")),
+		Warnings:          normalizedWarnings(warnings),
+		fieldPresence:     presence,
+		warehouseNulls:    warehouseNulls,
+		integrationActive: integrationActive,
 	}
 }
 
@@ -715,6 +728,8 @@ func (product Product) Map() map[string]interface{} {
 		putString(row, "pricing_catalog_revision", product.PricingCatalogRevision, product.presence("pricing_catalog_revision"))
 		putString(row, "pricing_catalog_status", product.PricingCatalogStatus, product.presence("pricing_catalog_status"))
 		putString(row, "currency_effective_date", product.CurrencyEffectiveDate, product.presence("currency_effective_date"))
+		putPointer(row, "price_rounding_digits", pointerIntValueFromInt(product.PriceRoundingDigits), product.presence("price_rounding_digits"))
+		putString(row, "price_rounding_mode", product.PriceRoundingMode, product.presence("price_rounding_mode"))
 		putPointer(row, "final_price", pointerIntValue(product.FinalPrice), product.presence("final_price"))
 	}
 	putString(row, "source_updated_at", product.SourceUpdatedAt, product.presence("source_updated_at"))
@@ -740,7 +755,8 @@ func (product *Product) UnmarshalJSON(data []byte) error {
 		"purchase_price_source", "warehouse_stock", "total_stock", "minimum_stock",
 		"foreign_currency", "foreign_price", "weight_grams", "location", "shipping_method_id",
 		"shipping_price_per_kg", "shipping_price_per_kg_currency", "markup_percent", "irt_per_cny", "pricing_catalog_revision",
-		"pricing_catalog_status", "currency_effective_date", "final_price", "source_updated_at",
+		"pricing_catalog_status", "currency_effective_date", "price_rounding_digits",
+		"price_rounding_mode", "final_price", "source_updated_at",
 		"warnings", "record_hash",
 	}); err != nil {
 		return err
@@ -759,7 +775,7 @@ func (product *Product) UnmarshalJSON(data []byte) error {
 		"weight_grams", "location", "source_updated_at", "shipping_method_id",
 		"shipping_price_per_kg", "shipping_price_per_kg_currency", "markup_percent", "irt_per_cny",
 		"pricing_catalog_revision", "pricing_catalog_status", "currency_effective_date",
-		"final_price",
+		"price_rounding_digits", "price_rounding_mode", "final_price",
 	} {
 		if value, exists := raw[field]; exists {
 			if bytes.Equal(bytes.TrimSpace(value), []byte("null")) {
@@ -779,7 +795,7 @@ func (product *Product) UnmarshalJSON(data []byte) error {
 			return fmt.Errorf("product shipping_price_per_kg_currency must be CNY or IRR")
 		}
 	}
-	for _, field := range []string{"foreign_price", "weight_grams", "shipping_price_per_kg", "markup_percent", "irt_per_cny"} {
+	for _, field := range []string{"foreign_price", "weight_grams", "shipping_price_per_kg", "markup_percent", "irt_per_cny", "price_rounding_digits"} {
 		if value, exists := raw[field]; exists {
 			value = bytes.TrimSpace(value)
 			if len(value) > 0 && value[0] == '"' {
@@ -802,7 +818,8 @@ func (product *Product) UnmarshalJSON(data []byte) error {
 
 	for _, field := range []string{
 		"shipping_method_id", "shipping_price_per_kg", "shipping_price_per_kg_currency", "markup_percent", "irt_per_cny",
-		"pricing_catalog_revision", "pricing_catalog_status", "currency_effective_date", "final_price",
+		"pricing_catalog_revision", "pricing_catalog_status", "currency_effective_date",
+		"price_rounding_digits", "price_rounding_mode", "final_price",
 	} {
 		if _, exists := raw[field]; exists {
 			product.integrationActive = true
@@ -1523,6 +1540,13 @@ func pointerDecimalValue(value *pricingcatalog.Decimal) interface{} {
 }
 
 func pointerIntValue(value *int64) interface{} {
+	if value == nil {
+		return nil
+	}
+	return *value
+}
+
+func pointerIntValueFromInt(value *int) interface{} {
 	if value == nil {
 		return nil
 	}

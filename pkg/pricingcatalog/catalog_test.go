@@ -19,6 +19,7 @@ import (
 
 func floatPointer(value float64) *Decimal { return DecimalFromFloat(value) }
 func boolPointer(value bool) *bool        { return &value }
+func intPointer(value int) *int           { return &value }
 
 func decimalText(value *Decimal) string {
 	if value == nil {
@@ -39,6 +40,39 @@ func TestConfiguredDistinguishesStandaloneFromActivePricing(t *testing.T) {
 	}
 	if !Configured(Config{Mode: ModeStatic, Static: StaticConfig{Methods: []Method{{ID: "air"}}}}) {
 		t.Fatal("explicit static shipping data was not treated as active")
+	}
+}
+
+func TestStaticRoundingDigitsDefaultValidateAndResolve(t *testing.T) {
+	base := StaticConfig{
+		CNYToIRT:          floatPointer(1),
+		Methods:           []Method{{ID: "air", PricePerKg: floatPointer(1), Currency: CurrencyCNY}},
+		DefaultAssignment: &Assignment{MethodID: "air", ProfitPercent: floatPointer(0)},
+	}
+	for name, test := range map[string]struct {
+		digits      *int
+		want        *int
+		wantWarning string
+	}{
+		"default": {want: intPointer(0)},
+		"two":     {digits: intPointer(2), want: intPointer(2)},
+		"invalid": {digits: intPointer(10), wantWarning: "price_rounding_digits_invalid"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			cfg := base
+			cfg.RoundingDigits = test.digits
+			resolution := NewProvider(Config{Mode: ModeStatic, Static: cfg}).Resolve(context.Background(), "A")
+			if test.want == nil {
+				if resolution.RoundingDigits != nil {
+					t.Fatalf("rounding digits = %v, want nil", *resolution.RoundingDigits)
+				}
+			} else if resolution.RoundingDigits == nil || *resolution.RoundingDigits != *test.want {
+				t.Fatalf("rounding digits = %v, want %d", resolution.RoundingDigits, *test.want)
+			}
+			if test.wantWarning != "" && !contains(resolution.Warnings, test.wantWarning) {
+				t.Fatalf("missing warning %q in %v", test.wantWarning, resolution.Warnings)
+			}
+		})
 	}
 }
 

@@ -61,15 +61,33 @@ function Set-SectionStyle($Range, [string]$Fill, [string]$FontColor = 'FFFFFF', 
     $Range.VerticalAlignment = -4108
 }
 
+function Set-OfficeTextFont(
+    $TextRange,
+    [double]$Size,
+    [bool]$Bold = $false,
+    [string]$Color = ''
+) {
+    $TextRange.Font.Name = 'Yekan Bakh'
+    # Office keeps separate Latin, Far East, and complex-script font slots.
+    # Persian shapes and chart labels use the complex-script slot, so setting
+    # only Font.Name can silently fall back to Calibri/Aptos.
+    try { $TextRange.Font.NameComplexScript = 'Yekan Bakh' } catch {}
+    try { $TextRange.Font.NameFarEast = 'Yekan Bakh' } catch {}
+    $TextRange.Font.Size = $Size
+    $TextRange.Font.Bold = $Bold
+    if (-not [string]::IsNullOrWhiteSpace($Color)) {
+        $TextRange.Font.Fill.ForeColor.RGB = ConvertTo-OleColor $Color
+    }
+}
+
 function Add-ActionButton($Sheet, [string]$Text, [string]$Macro, $Anchor, [double]$Width = 112, [double]$Height = 30) {
     $shape = $Sheet.Shapes.AddShape(5, $Anchor.Left, $Anchor.Top, $Width, $Height)
     $shape.Fill.ForeColor.RGB = ConvertTo-OleColor '0168CD'
     $shape.Line.ForeColor.RGB = ConvertTo-OleColor '0059B0'
     $shape.TextFrame2.TextRange.Text = $Text
-    $shape.TextFrame2.TextRange.Font.Name = 'Yekan Bakh'
-    $shape.TextFrame2.TextRange.Font.Size = 11
-    $shape.TextFrame2.TextRange.Font.Bold = $true
-    $shape.TextFrame2.TextRange.Font.Fill.ForeColor.RGB = ConvertTo-OleColor 'FFFFFF'
+    Set-OfficeTextFont $shape.TextFrame2.TextRange 11 $true 'FFFFFF'
+    # Older Excel rendering paths still consult the legacy TextFrame slot.
+    try { $shape.TextFrame.Characters().Font.Name = 'Yekan Bakh' } catch {}
     $shape.TextFrame2.VerticalAnchor = 3
     $shape.TextFrame2.TextRange.ParagraphFormat.Alignment = 2
     $shape.OnAction = $Macro
@@ -270,13 +288,27 @@ try {
     $priceList.Range('E1').VerticalAlignment = -4108
     [void](Add-BrandLogo $priceList $LogoPath $priceList.Range('B1') 190 43)
 
-    $priceList.Range('B3').Value2 = 'جست‌وجوی کالا'
+    $priceList.Rows(3).RowHeight = 32
+    $priceList.Range('B3').Value2 = 'جست‌وجوی کالا (F2)'
     $priceList.Range('B3').Font.Bold = $true
+    $priceList.Range('B3').Font.Color = ConvertTo-OleColor '0168CD'
+    $priceList.Range('B3').VerticalAlignment = -4108
     $priceList.Range('C3:E3').Merge()
-    $priceList.Range('C3').Interior.Color = ConvertTo-OleColor 'F4F8FB'
-    $priceList.Range('C3:E3').Borders.Color = ConvertTo-OleColor 'A9CFE4'
+    $priceList.Range('C3').Interior.Color = ConvertTo-OleColor 'FFFFFF'
+    $priceList.Range('C3:E3').Borders.Color = ConvertTo-OleColor '0168CD'
+    $priceList.Range('C3:E3').Borders.Weight = 2
+    $priceList.Range('C3').Font.Name = 'Yekan Bakh'
+    $priceList.Range('C3').Font.Size = 12
+    $priceList.Range('C3').Font.Bold = $true
+    $priceList.Range('C3').Font.Color = ConvertTo-OleColor '2F414B'
     $priceList.Range('C3').HorizontalAlignment = -4152
+    $priceList.Range('C3').VerticalAlignment = -4108
     $priceList.Range('C3').ReadingOrder = -5004
+    $priceList.Range('C3').Validation.Delete()
+    $priceList.Range('C3').Validation.Add(0)
+    $priceList.Range('C3').Validation.InputTitle = 'جست‌وجوی کالا'
+    $priceList.Range('C3').Validation.InputMessage = 'نام، کد کالا یا شناسه ووکامرس را وارد کنید و Enter یا دکمه پیدا کردن را بزنید.'
+    $priceList.Range('C3').Validation.ShowInput = $true
     [void]$workbook.Names.Add('ProductSearchQuery', $priceList.Range('C3'))
     [void](Add-ActionButton $priceList 'پیدا کردن' 'ProductCatalogSync.SearchProducts' $priceList.Range('F3') $priceList.Range('F3').Width 27)
     [void](Add-ActionButton $priceList 'پاک کردن' 'ProductCatalogSync.ClearProductSearch' $priceList.Range('G3') $priceList.Range('G3').Width 27)
@@ -568,6 +600,15 @@ try {
     $chart.ChartTitle.Text = 'وضعیت انتشار ووکامرس'
     $chart.HasLegend = $true
     $chart.Legend.Position = -4107
+    try { $chart.ChartArea.Font.Name = 'Yekan Bakh' } catch {}
+    try { $chart.ChartTitle.Font.Name = 'Yekan Bakh' } catch {}
+    try {
+        Set-OfficeTextFont $chart.ChartTitle.Format.TextFrame2.TextRange 14 $true '2F414B'
+    } catch {}
+    try { $chart.Legend.Font.Name = 'Yekan Bakh' } catch {}
+    try {
+        Set-OfficeTextFont $chart.Legend.Format.TextFrame2.TextRange 10 $false '2F414B'
+    } catch {}
     $excel.ActiveWindow.Zoom = 90
 
     # Settings stays because it is useful, but every visible label is Persian.
@@ -617,7 +658,7 @@ try {
     $settings.Range('A9:F9').Merge()
     $settings.Range('A9').Value2 = 'مقادیر زنده سایت'
     Set-SectionStyle $settings.Range('A9:F9') 'DDE8FC' '242424' 12
-    $liveLabels = @('بهای یوآن سایت', 'بهای دلار سایت', 'تاریخ مؤثر یوآن', 'حاشیه سود سایت', 'نرخ حمل هوایی سایت (یوآن/کیلوگرم)', 'زمان دریافت وضعیت')
+    $liveLabels = @('بهای یوآن سایت', 'بهای دلار سایت', 'تاریخ مؤثر یوآن', 'حاشیه سود سایت', 'نرخ حمل هوایی سایت (یوآن/کیلوگرم)', 'تعداد رقم گردکردن قیمت')
     for ($rowOffset = 0; $rowOffset -lt $liveLabels.Count; $rowOffset++) {
         $row = 10 + $rowOffset
         $settings.Cells.Item($row, 1).Value2 = $liveLabels[$rowOffset]
@@ -628,6 +669,7 @@ try {
     }
     $settings.Range('B13').NumberFormat = '0%'
     $settings.Range('B14').NumberFormat = 'General'
+    $settings.Range('B15').NumberFormat = '0'
     $settings.Range('A10:A15').Font.Bold = $true
     $settings.Range('A10:F15').Borders.Color = ConvertTo-OleColor 'B9CCF4'
     $settings.Range('B10:F15').Interior.Color = ConvertTo-OleColor 'F6F6F6'
@@ -673,12 +715,24 @@ try {
     $settings.Range('A24:A25').Font.Bold = $true
     $settings.Range('A24:F25').Borders.Color = ConvertTo-OleColor 'D9D9D9'
     $settings.Range('B24:F25').Interior.Color = ConvertTo-OleColor 'F6F6F6'
-    $settings.Range('A3:A25').WrapText = $true
+    $settings.Range('A26').Value2 = 'تعداد رقم گردکردن قیمت پیشنهادی'
+    $settings.Range('B26:F26').Merge()
+    $settings.Range('B26').NumberFormat = '0'
+    $settings.Range('B26').Interior.Color = ConvertTo-OleColor 'FFF8E7'
+    $settings.Range('B26').HorizontalAlignment = -4108
+    $settings.Range('A26').Font.Bold = $true
+    $settings.Range('A26:F26').Borders.Color = ConvertTo-OleColor 'B9CCF4'
+    $settings.Range('B26').Validation.Delete()
+    $settings.Range('B26').Validation.Add(1, 1, 1, '0', '9')
+    $settings.Range('B26').Validation.ErrorTitle = 'تعداد رقم نامعتبر'
+    $settings.Range('B26').Validation.ErrorMessage = 'تعداد رقم گردکردن باید عددی صحیح از صفر تا ۹ باشد.'
+    $settings.Range('B26').Validation.ShowError = $true
+    $settings.Range('A3:A26').WrapText = $true
     $settings.Rows.Item(14).RowHeight = 30
     $settings.Rows.Item(22).RowHeight = 30
 
-    [void](Add-ActionButton $settings 'پیش‌نمایش تغییرات' 'ProductCatalogSync.PreviewPricingChanges' $settings.Range('A27') $settings.Range('A27:C28').Width $settings.Range('A27:C28').Height)
-    [void](Add-ActionButton $settings 'اعمال تغییرات تأییدشده' 'ProductCatalogSync.ApplyPricingChanges' $settings.Range('D27') $settings.Range('D27:F28').Width $settings.Range('D27:F28').Height)
+    [void](Add-ActionButton $settings 'پیش‌نمایش تغییرات' 'ProductCatalogSync.PreviewPricingChanges' $settings.Range('A28') $settings.Range('A28:C29').Width $settings.Range('A28:C29').Height)
+    [void](Add-ActionButton $settings 'اعمال تغییرات تأییدشده' 'ProductCatalogSync.ApplyPricingChanges' $settings.Range('D28') $settings.Range('D28:F29').Width $settings.Range('D28:F29').Height)
 
     # Hidden base values, state/shipping revisions, and preview metadata are
     # runtime-only conflict guards. The template itself persists no live values.
@@ -695,7 +749,7 @@ try {
     # Never format only the first column of several adjacent merged rows.
     # Excel silently coalesces those rows into one large MergeArea, which
     # makes every setting except the first one inaccessible to VBA.
-    foreach ($row in @((10..15) + (18..23))) {
+    foreach ($row in @((10..15) + (18..23) + 26)) {
         $mergeCell = $settings.Range("B${row}")
         $mergeArea = $mergeCell.MergeArea
         try {
@@ -716,7 +770,7 @@ try {
     $priceList.PageSetup.Zoom = $false
     $priceList.PageSetup.FitToPagesWide = 1
     $priceList.PageSetup.FitToPagesTall = 1
-    $settings.PageSetup.PrintArea = '$A$1:$F$28'
+    $settings.PageSetup.PrintArea = '$A$1:$F$29'
     $settings.PageSetup.Zoom = $false
     $settings.PageSetup.FitToPagesWide = 1
     $settings.PageSetup.FitToPagesTall = 1

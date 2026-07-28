@@ -17,6 +17,9 @@ const (
 	ModeDigitalogic     = "digitalogic"
 	CurrencyCNY         = "CNY"
 	CurrencyIRR         = "IRR"
+	RoundingModeHalfUp  = "nearest_half_up"
+	MinimumRoundDigits  = 0
+	MaximumRoundDigits  = 9
 	defaultFreshFor     = 5 * time.Minute
 	defaultMaxStale     = time.Hour
 	defaultTimeout      = 60 * time.Second
@@ -43,6 +46,7 @@ type Config struct {
 type StaticConfig struct {
 	Revision              string                `json:"revision,omitempty" yaml:"revision,omitempty" toml:"revision,omitempty"`
 	CNYToIRT              *Decimal              `json:"cny_to_irt,omitempty" yaml:"cny_to_irt,omitempty" toml:"cny_to_irt,omitempty"`
+	RoundingDigits        *int                  `json:"rounding_digits,omitempty" yaml:"rounding_digits,omitempty" toml:"rounding_digits,omitempty"`
 	CurrencyEffectiveDate string                `json:"currency_effective_date,omitempty" yaml:"currency_effective_date,omitempty" toml:"currency_effective_date,omitempty"`
 	SelectedWarehouses    []string              `json:"selected_warehouses,omitempty" yaml:"selected_warehouses,omitempty" toml:"selected_warehouses,omitempty"`
 	Methods               []Method              `json:"shipping_methods,omitempty" yaml:"shipping_methods,omitempty" toml:"shipping_methods,omitempty"`
@@ -100,6 +104,7 @@ type Resolution struct {
 	MarkupPercent              *Decimal
 	MarkupPercentSource        string
 	IRTPerCNY                  *Decimal
+	RoundingDigits             *int
 	ExplicitNulls              map[string]bool
 	ShippingPricePairPresent   bool
 	Warnings                   []string
@@ -206,7 +211,7 @@ func Configured(cfg Config) bool {
 		return strings.TrimSpace(cfg.Digitalogic.BaseURL) != ""
 	case ModeStatic:
 		static := cfg.Static
-		return static.CNYToIRT != nil || strings.TrimSpace(static.CurrencyEffectiveDate) != "" || len(static.SelectedWarehouses) > 0 || len(static.Methods) > 0 || len(static.Assignments) > 0 || static.DefaultAssignment != nil
+		return static.CNYToIRT != nil || static.RoundingDigits != nil || strings.TrimSpace(static.CurrencyEffectiveDate) != "" || len(static.SelectedWarehouses) > 0 || len(static.Methods) > 0 || len(static.Assignments) > 0 || static.DefaultAssignment != nil
 	default:
 		return false
 	}
@@ -268,6 +273,13 @@ func (p *staticProvider) Resolve(_ context.Context, code string) Resolution {
 		CurrencyEffectiveDate: p.config.CurrencyEffectiveDate,
 		SelectedWarehouses:    append([]string(nil), p.config.SelectedWarehouses...),
 		IRTPerCNY:             cloneDecimal(p.config.CNYToIRT),
+	}
+	if p.config.RoundingDigits == nil {
+		digits := MinimumRoundDigits
+		resolution.RoundingDigits = &digits
+	} else {
+		digits := *p.config.RoundingDigits
+		resolution.RoundingDigits = &digits
 	}
 	if !ok || strings.TrimSpace(assignment.MethodID) == "" {
 		resolution.Warnings = append(resolution.Warnings, "shipping_method_missing")
@@ -345,6 +357,12 @@ func finishResolution(value Resolution) Resolution {
 	if !validPositive(value.IRTPerCNY) {
 		value.IRTPerCNY = nil
 		value.Warnings = append(value.Warnings, "fx_rate_missing")
+	}
+	if value.RoundingDigits != nil {
+		if *value.RoundingDigits < MinimumRoundDigits || *value.RoundingDigits > MaximumRoundDigits {
+			value.RoundingDigits = nil
+			value.Warnings = append(value.Warnings, "price_rounding_digits_invalid")
+		}
 	}
 	value.Warnings = normalizedStrings(value.Warnings)
 	return value
