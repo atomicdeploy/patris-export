@@ -62,6 +62,8 @@ type excelPricingSettings struct {
 	AirExpressPricePerKG    json.Number `json:"air_express_price_per_kg"`
 	AirExpressCurrency      string      `json:"air_express_currency"`
 	ShippingCatalogRevision string      `json:"shipping_catalog_revision"`
+	PriceRoundingDigits     json.Number `json:"price_rounding_digits"`
+	PriceRoundingMode       string      `json:"price_rounding_mode"`
 }
 
 type excelPricingLocalRequest struct {
@@ -608,6 +610,15 @@ func validateExcelPricingSettings(settings excelPricingSettings) error {
 	}
 	if !isSHA256Revision(settings.ShippingCatalogRevision) {
 		return errors.New("shipping catalog revision is invalid")
+	}
+	roundingText := settings.PriceRoundingDigits.String()
+	roundingDigits, err := strconv.Atoi(roundingText)
+	if err != nil || strconv.Itoa(roundingDigits) != roundingText ||
+		roundingDigits < 0 || roundingDigits > 9 {
+		return errors.New("price rounding digits are invalid")
+	}
+	if settings.PriceRoundingMode != "nearest_half_up" {
+		return errors.New("price rounding mode is invalid")
 	}
 	return nil
 }

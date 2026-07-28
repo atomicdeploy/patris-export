@@ -251,6 +251,8 @@ func TestExcelPricingPreviewPreservesOptimisticHeadersAndRejectsDrift(t *testing
 				"air_express_price_per_kg":  float64(120),
 				"air_express_currency":      "CNY",
 				"shipping_catalog_revision": excelPricingRevisionForTest("shipping-catalog"),
+				"price_rounding_digits":     float64(2),
+				"price_rounding_mode":       "nearest_half_up",
 			},
 			"product_changes": []interface{}{},
 		}
@@ -382,6 +384,18 @@ func TestExcelPricingMutationRequiresCompleteAtomicSettingsAndClientContext(t *t
 		"missing shipping revision": func(payload map[string]interface{}) {
 			delete(payload["settings"].(map[string]interface{}), "shipping_catalog_revision")
 		},
+		"missing price rounding digits": func(payload map[string]interface{}) {
+			delete(payload["settings"].(map[string]interface{}), "price_rounding_digits")
+		},
+		"fractional price rounding digits": func(payload map[string]interface{}) {
+			payload["settings"].(map[string]interface{})["price_rounding_digits"] = 2.5
+		},
+		"out of range price rounding digits": func(payload map[string]interface{}) {
+			payload["settings"].(map[string]interface{})["price_rounding_digits"] = 10
+		},
+		"wrong price rounding mode": func(payload map[string]interface{}) {
+			payload["settings"].(map[string]interface{})["price_rounding_mode"] = "bankers"
+		},
 		"invalid shipping currency": func(payload map[string]interface{}) {
 			payload["settings"].(map[string]interface{})["air_express_currency"] = "USD"
 		},
@@ -440,6 +454,8 @@ func TestValidateExcelPricingSettingsUsesUniversalShippingRange(t *testing.T) {
 		AirExpressPricePerKG:    json.Number("123456789012345678.123456789012"),
 		AirExpressCurrency:      "CNY",
 		ShippingCatalogRevision: excelPricingRevisionForTest("shipping-catalog"),
+		PriceRoundingDigits:     json.Number("2"),
+		PriceRoundingMode:       "nearest_half_up",
 	}
 	if err := validateExcelPricingSettings(settings); err != nil {
 		t.Fatalf("universal shipping range was rejected: %v", err)
@@ -852,6 +868,8 @@ func validExcelPricingMutationBody(operation, idempotency, stateRevision, previe
 			"air_express_price_per_kg":  120,
 			"air_express_currency":      "CNY",
 			"shipping_catalog_revision": excelPricingRevisionForTest("shipping-catalog"),
+			"price_rounding_digits":     2,
+			"price_rounding_mode":       "nearest_half_up",
 		},
 		"product_changes": []interface{}{},
 	}

@@ -54,7 +54,7 @@ const SYNC_DATA_HEADERS = Object.freeze([
 
 const REGRESSION_ACCEPTANCE = Object.freeze({
   relayProductCode: '109032',
-  relayPrice: 554541,
+  relayPrice: 554500,
   relayCategory: 'رله‌ها',
   wooFallbackProductCode: '109001',
   wooFallbackPrice: 1150000,
