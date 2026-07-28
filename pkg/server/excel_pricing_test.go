@@ -701,7 +701,8 @@ func TestExcelPricingBoundsTimeoutsAndMessageSizes(t *testing.T) {
 	for value, want := range map[string]time.Duration{
 		"invalid": 10 * time.Second,
 		"1ms":     time.Second,
-		"2m":      30 * time.Second,
+		"2m":      2 * time.Minute,
+		"5m":      2 * time.Minute,
 		"15s":     15 * time.Second,
 	} {
 		if got := excelPricingRemoteTimeout(value); got != want {

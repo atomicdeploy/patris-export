@@ -694,8 +694,8 @@ func excelPricingRemoteTimeout(value string) time.Duration {
 	if timeout < time.Second {
 		timeout = time.Second
 	}
-	if timeout > 30*time.Second {
-		timeout = 30 * time.Second
+	if timeout > 2*time.Minute {
+		timeout = 2 * time.Minute
 	}
 	return timeout
 }
