@@ -66,6 +66,7 @@ Public Sub ValidateWorkbook()
     Dim syncTable As ListObject
 
     ValidateUnicodeRuntime
+    ValidateProjectionIntegrityGuard
     Set table = PriceSheet().ListObjects(PRODUCTS_TABLE)
     Set syncTable = SyncSheet().ListObjects(SYNC_TABLE)
 
@@ -80,6 +81,11 @@ Public Sub ValidateWorkbook()
     End If
 End Sub
 
+Public Function RefreshAllDataForValidation() As Boolean
+    RefreshAllData True
+    RefreshAllDataForValidation = mLastRefreshSucceeded
+End Function
+
 Public Sub RefreshAllData(Optional ByVal silent As Boolean = False)
     Dim previousCalculation As XlCalculation
     Dim contract As JsonValue
@@ -90,6 +96,9 @@ Public Sub RefreshAllData(Optional ByVal silent As Boolean = False)
     Dim parity As Variant
     Dim statusText As String
     Dim settings As Worksheet
+    Dim pricingStateSnapshot As Variant
+    Dim pricingStateSnapshotCaptured As Boolean
+    Dim savedErrorDescription As String
 
     On Error GoTo Failed
     mLastRefreshSucceeded = False
@@ -99,6 +108,8 @@ Public Sub RefreshAllData(Optional ByVal silent As Boolean = False)
     Application.Calculation = xlCalculationManual
 
     Set settings = ConfigSheet()
+    pricingStateSnapshot = CapturePricingStateSnapshot(settings)
+    pricingStateSnapshotCaptured = True
     InvalidatePricingPreview
     settings.Range("G31:G47").ClearContents
     settings.Range("G31").Value2 = False
@@ -152,8 +163,13 @@ CleanExit:
 
 Failed:
     mLastRefreshSucceeded = False
-    statusText = T("sync_failed") & " " & SafeStatusError(Err.Description)
+    savedErrorDescription = Err.Description
+    statusText = T("sync_failed") & " " & _
+        SafeStatusError(savedErrorDescription)
     On Error Resume Next
+    If pricingStateSnapshotCaptured Then
+        RestorePricingStateSnapshot settings, pricingStateSnapshot
+    End If
     If Not settings Is Nothing Then settings.Range("B6").Value = statusText
     On Error GoTo 0
     If Not silent Then
@@ -411,6 +427,46 @@ Private Sub InvalidatePricingPreview()
     On Error GoTo 0
 End Sub
 
+Private Function PricingStateAddresses() As Variant
+    PricingStateAddresses = Split( _
+        "B10|B11|B12|B13|B14|B15|B18|B19|B20|B21|B22|" & _
+        "G14|G15|G18|G19|G20|G21|G22|G31|G32|G33|G34|G35|G36|" & _
+        "G37|G38|G39|G40|G41|G42|G43|G44|G45|G46|G47|" & _
+        "H14|H15|H16|H17", _
+        "|")
+End Function
+
+Private Function CapturePricingStateSnapshot( _
+    ByVal settings As Worksheet) As Variant
+    Dim addresses As Variant
+    Dim values() As Variant
+    Dim index As Long
+
+    addresses = PricingStateAddresses()
+    ReDim values(LBound(addresses) To UBound(addresses))
+    For index = LBound(addresses) To UBound(addresses)
+        values(index) = settings.Range(CStr(addresses(index))).Value2
+    Next index
+    CapturePricingStateSnapshot = values
+End Function
+
+Private Sub RestorePricingStateSnapshot(ByVal settings As Worksheet, _
+                                        ByVal values As Variant)
+    Dim addresses As Variant
+    Dim index As Long
+
+    addresses = PricingStateAddresses()
+    If LBound(values) <> LBound(addresses) Or _
+       UBound(values) <> UBound(addresses) Then
+        Err.Raise vbObjectError + 199, _
+                  "RestorePricingStateSnapshot", _
+                  T("invalid_workbook")
+    End If
+    For index = LBound(addresses) To UBound(addresses)
+        settings.Range(CStr(addresses(index))).Value2 = values(index)
+    Next index
+End Sub
+
 Private Function PricingSettingsCanonical() As String
     Dim settings As Worksheet
 
@@ -498,10 +554,14 @@ Private Function RefreshPricingState(ByVal siteRows As Object) As Long
     Dim fetchedRows As Long
     Dim savedErrorNumber As Long
     Dim savedErrorDescription As String
+    Dim settings As Worksheet
+    Dim retryStateSnapshot As Variant
 
+    Set settings = ConfigSheet()
+    retryStateSnapshot = CapturePricingStateSnapshot(settings)
     For attempt = 1 To STATE_SNAPSHOT_RETRIES
         siteRows.RemoveAll
-        ConfigSheet().Range("G34:G47").ClearContents
+        settings.Range("G34:G47").ClearContents
         Err.Clear
         On Error Resume Next
         fetchedRows = RefreshPricingStateOnce(siteRows)
@@ -513,6 +573,7 @@ Private Function RefreshPricingState(ByVal siteRows As Object) As Long
             RefreshPricingState = fetchedRows
             Exit Function
         End If
+        RestorePricingStateSnapshot settings, retryStateSnapshot
     Next attempt
 
     If savedErrorNumber = 0 Then savedErrorNumber = vbObjectError + 130
@@ -557,6 +618,7 @@ Private Function RefreshPricingStateOnce(ByVal siteRows As Object) As Long
         responseText = HttpJson(PricingEndpoint("state"), requestBody)
         Set root = JsonRuntime.ParseJson(responseText)
         Set state = ResponseData(root)
+        RejectProjectionIntegrityWarnings state
         If page = 1 Then ApplyGlobalState state
 
         Set catalog = JsonRuntime.JsonMember(state, "catalog")
@@ -577,7 +639,7 @@ Private Function RefreshPricingStateOnce(ByVal siteRows As Object) As Long
             Err.Raise vbObjectError + 120, "RefreshPricingState", _
                       T("invalid_workbook")
         End If
-        sourceRevision = StateSourceRevision(state)
+        sourceRevision = StateSourceRevision(state, catalog)
         If Not IsSHA256RevisionText(sourceRevision) Then
             Err.Raise vbObjectError + 121, "RefreshPricingState", _
                       T("invalid_workbook")
@@ -725,12 +787,162 @@ Private Sub ApplyReconciliationCounts(ByVal catalog As JsonValue)
     settings.Range("G43").Value2 = CLng(excludedParents)
 End Sub
 
-Private Function StateSourceRevision(ByVal state As JsonValue) As String
+Private Function StateSourceRevision(ByVal state As JsonValue, _
+                                     ByVal catalog As JsonValue) As String
     Dim sourceValue As JsonValue
+    Dim reconciliation As JsonValue
+    Dim reconciliationSource As JsonValue
+    Dim currentRevision As String
+    Dim submittedRevision As String
+    Dim reconciledRevision As String
+    Dim matchesCurrentValue As Variant
 
     Set sourceValue = JsonRuntime.JsonMember(state, "source")
     If sourceValue Is Nothing Or sourceValue.Kind <> "object" Then Exit Function
-    StateSourceRevision = SiteText(sourceValue, "revision")
+    currentRevision = SiteText(sourceValue, "current_revision")
+    submittedRevision = SiteText(sourceValue, "submitted_revision")
+    matchesCurrentValue = JsonRuntime.JsonText( _
+        sourceValue, "revision_matches_current")
+
+    Set reconciliation = JsonRuntime.JsonMember(catalog, "reconciliation")
+    If Not reconciliation Is Nothing Then
+        Set reconciliationSource = JsonRuntime.JsonMember( _
+            reconciliation, "source")
+    End If
+    If Not reconciliationSource Is Nothing Then
+        reconciledRevision = SiteText(reconciliationSource, "revision")
+    End If
+
+    If Len(currentRevision) = 0 Then currentRevision = reconciledRevision
+    If Len(currentRevision) = 0 Then
+        currentRevision = SiteText(sourceValue, "revision")
+    End If
+    If Not IsSHA256RevisionText(currentRevision) Or _
+       currentRevision <> mSourceRevision Then Exit Function
+    If Len(submittedRevision) > 0 And _
+       submittedRevision <> currentRevision Then Exit Function
+    If Len(reconciledRevision) > 0 And _
+       reconciledRevision <> currentRevision Then Exit Function
+    If Not IsEmpty(matchesCurrentValue) Then
+        If VarType(matchesCurrentValue) <> vbBoolean Then Exit Function
+        If Not CBool(matchesCurrentValue) Then Exit Function
+    End If
+    StateSourceRevision = currentRevision
+End Function
+
+Private Sub RejectProjectionIntegrityWarnings(ByVal state As JsonValue)
+    If HasProjectionIntegrityWarning(state, 0) Then
+        Err.Raise vbObjectError + 192, _
+                  "RejectProjectionIntegrityWarnings", _
+                  T("projection_integrity_warning")
+    End If
+End Sub
+
+Private Function HasProjectionIntegrityWarning(ByVal value As JsonValue, _
+                                               ByVal depth As Long) As Boolean
+    Dim memberName As Variant
+    Dim child As JsonValue
+    Dim itemIndex As Long
+    Dim warningCode As String
+
+    If value Is Nothing Then Exit Function
+    If depth > 64 Then
+        Err.Raise vbObjectError + 193, _
+                  "HasProjectionIntegrityWarning", _
+                  T("invalid_workbook")
+    End If
+
+    Select Case value.Kind
+        Case "string"
+            warningCode = LCase$(Trim$(CStr(value.Scalar)))
+            HasProjectionIntegrityWarning = _
+                Left$(warningCode, Len("product_type_cache_drift")) = _
+                    "product_type_cache_drift" Or _
+                Left$(warningCode, Len("projection_integrity")) = _
+                    "projection_integrity"
+        Case "object"
+            For Each memberName In value.ObjectItems.Keys
+                ' Product rows have their own price/data warnings. Integrity
+                ' warnings belong to state/catalog metadata, so skip the large
+                ' row payload while scanning every metadata object and array.
+                If LCase$(CStr(memberName)) <> "rows" Then
+                    Set child = value.ObjectItems(CStr(memberName))
+                    If HasProjectionIntegrityWarning(child, depth + 1) Then
+                        HasProjectionIntegrityWarning = True
+                        Exit Function
+                    End If
+                End If
+            Next memberName
+        Case "array"
+            For itemIndex = 1 To value.ArrayItems.Count
+                Set child = value.ArrayItems(itemIndex)
+                If HasProjectionIntegrityWarning(child, depth + 1) Then
+                    HasProjectionIntegrityWarning = True
+                    Exit Function
+                End If
+            Next itemIndex
+    End Select
+End Function
+
+Private Sub ValidateProjectionIntegrityGuard()
+    If Not ProjectionIntegrityFixtureRejected( _
+        "{""integrity"":{""warnings"":[{""code"":" & _
+        """product_type_cache_drift""}]}}") Then
+        Err.Raise vbObjectError + 194, _
+                  "ValidateProjectionIntegrityGuard", _
+                  "Exact product-type drift warning was not rejected."
+    End If
+    If Not ProjectionIntegrityFixtureRejected( _
+        "{""metadata"":{""warnings"":[{""code"":" & _
+        """product_type_cache_drift_term_changed""}]}}") Then
+        Err.Raise vbObjectError + 195, _
+                  "ValidateProjectionIntegrityGuard", _
+                  "Prefixed product-type drift warning was not rejected."
+    End If
+    If Not ProjectionIntegrityFixtureRejected( _
+        "{""warnings"":[{""code"":""projection_integrity""}]}") Then
+        Err.Raise vbObjectError + 196, _
+                  "ValidateProjectionIntegrityGuard", _
+                  "Exact projection-integrity warning was not rejected."
+    End If
+    If Not ProjectionIntegrityFixtureRejected( _
+        "{""catalog"":{""integrity"":{""warnings"":[{""code"":" & _
+        """projection_integrity_product_type_readback_failed""}]}}}") Then
+        Err.Raise vbObjectError + 197, _
+                  "ValidateProjectionIntegrityGuard", _
+                  "Prefixed projection-integrity warning was not rejected."
+    End If
+    If ProjectionIntegrityFixtureRejected( _
+        "{""integrity"":{""warnings"":[{""code"":" & _
+        """price_input_missing""}]}}") Then
+        Err.Raise vbObjectError + 198, _
+                  "ValidateProjectionIntegrityGuard", _
+                  "A benign warning was incorrectly rejected."
+    End If
+End Sub
+
+Private Function ProjectionIntegrityFixtureRejected( _
+    ByVal fixtureJson As String) As Boolean
+    Dim fixture As JsonValue
+    Dim savedErrorNumber As Long
+    Dim savedErrorDescription As String
+
+    On Error GoTo Rejected
+    Set fixture = JsonRuntime.ParseJson(fixtureJson)
+    RejectProjectionIntegrityWarnings fixture
+    Exit Function
+
+Rejected:
+    savedErrorNumber = Err.Number
+    savedErrorDescription = Err.Description
+    Err.Clear
+    On Error GoTo 0
+    If savedErrorNumber <> vbObjectError + 192 Then
+        Err.Raise savedErrorNumber, _
+                  "ProjectionIntegrityFixtureRejected", _
+                  savedErrorDescription
+    End If
+    ProjectionIntegrityFixtureRejected = True
 End Function
 
 Private Function CatalogColumnSignature(ByVal catalog As JsonValue) As String
@@ -2097,6 +2309,8 @@ Private Function T(ByVal key As String) As String
             T = U("06470634062F06270631003A0020064506420627062F06CC06310020067E06CC0634064606470627062F06CC0020062706CC064600200641062706CC064400200628062700200633062706CC062A002006CC06A90633062706460020064606CC0633062A002E")
         Case "proposal_drift_critical"
             T = U("06470634062F0627063100200628062D06310627064606CC003A00200627062E062A064406270641002006CC06A906CC002006270632002006460631062E200C06470627060C0020062D06450644002006CC06270020062D0627063406CC0647002006330648062F0020062806CC0634002006270632002006F7066A002006270633062A002E")
+        Case "projection_integrity_warning"
+            T = U("0647064506AF06270645200C06330627063206CC00200645062A06480642064100200634062F003A002006CC06A9067E06270631068606AF06CC002006460648063900200645062D0635064806440627062A00200648064806A906270645063106330020062A062306CC06CC062F002006460634062F002E")
         Case "row_kind_matched"
             T = U("0647064506270647064606AF")
         Case "row_kind_source_only"

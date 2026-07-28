@@ -3,6 +3,7 @@ package recordsink
 import (
 	"archive/zip"
 	"encoding/json"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -644,6 +645,27 @@ func TestDynamicCalculatorTemplatesPreservePersianPriceListContracts(t *testing.
 					t.Fatalf("%s!%s persisted runtime pricing state %q, err=%v", settingsSheet, cell, value, valueErr)
 				}
 			}
+			settingsMergeCells, mergeErr := book.GetMergeCells(settingsSheet, true)
+			if mergeErr != nil {
+				t.Fatal(mergeErr)
+			}
+			settingsMerges := make(map[string]bool, len(settingsMergeCells))
+			for index := range settingsMergeCells {
+				settingsMerges[settingsMergeCells[index].GetStartAxis()+":"+
+					settingsMergeCells[index].GetEndAxis()] = true
+			}
+			for _, row := range []int{
+				10, 11, 12, 13, 14, 15,
+				18, 19, 20, 21, 22, 23,
+			} {
+				wantMerge := fmt.Sprintf("B%d:F%d", row, row)
+				if !settingsMerges[wantMerge] {
+					t.Fatalf(
+						"%s settings row %d does not preserve its independent merge %s; merges=%v",
+						settingsSheet, row, wantMerge, settingsMerges,
+					)
+				}
+			}
 			if value, valueErr := book.GetCellValue(
 				settingsSheet, "A27", excelize.Options{RawCellValue: true},
 			); valueErr != nil || value != "" {
@@ -793,7 +815,24 @@ func TestDynamicCalculatorVBASourceGuardsLivePricingBeforeMutation(t *testing.T)
 		"Private Const HTTP_TIMEOUT_MS As Long = 150000",
 		"Private Function StateRequestJson",
 		"Private Function RefreshPricingStateOnce",
+		"Public Function RefreshAllDataForValidation() As Boolean",
+		"RefreshAllDataForValidation = mLastRefreshSucceeded",
+		"ValidateProjectionIntegrityGuard",
+		"ProjectionIntegrityFixtureRejected",
+		"pricingStateSnapshot = CapturePricingStateSnapshot(settings)",
+		"RestorePricingStateSnapshot settings, pricingStateSnapshot",
+		"RestorePricingStateSnapshot settings, retryStateSnapshot",
+		`"product_type_cache_drift_term_changed"`,
+		`"projection_integrity_product_type_readback_failed"`,
 		`datasetRevision = SiteText(catalog, "dataset_revision")`,
+		`currentRevision = SiteText(sourceValue, "current_revision")`,
+		`submittedRevision = SiteText(sourceValue, "submitted_revision")`,
+		`reconciledRevision = SiteText(reconciliationSource, "revision")`,
+		"currentRevision <> mSourceRevision",
+		"RejectProjectionIntegrityWarnings state",
+		`Left$(warningCode, Len("product_type_cache_drift"))`,
+		`Left$(warningCode, Len("projection_integrity"))`,
+		`If LCase$(CStr(memberName)) <> "rows" Then`,
 		"Private Function CatalogColumnSignature",
 		"Private Function CatalogCountSignature",
 		"paginationTotal <> firstPaginationTotal",

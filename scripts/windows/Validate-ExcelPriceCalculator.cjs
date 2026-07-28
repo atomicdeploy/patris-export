@@ -52,16 +52,7 @@ const SYNC_DATA_HEADERS = Object.freeze([
   'نوع ردیف',
 ]);
 
-const CURRENT_ACCEPTANCE = Object.freeze({
-  rows: 1084,
-  patrisRows: 939,
-  fullWooRows: 965,
-  wooLeafRows: 964,
-  matchedRows: 819,
-  sourceOnlyRows: 120,
-  wooOnlyRows: 145,
-  ambiguousRows: 0,
-  excludedWooParentRows: 1,
+const REGRESSION_ACCEPTANCE = Object.freeze({
   relayProductCode: '109032',
   relayPrice: 554541,
   relayCategory: 'رله‌ها',
@@ -82,7 +73,7 @@ const defaultReference = path.join(
   'Excel',
   'Archive',
   'Price Calculator',
-  'ماشین حساب قیمت - مرجع ایستا.xlsb',
+  'ماشین حساب قیمت - مرجع ایستا - 1405-05-03.xlsb',
 );
 
 function usage() {
@@ -196,12 +187,26 @@ function isSHA256Revision(value) {
   return /^sha256:[0-9a-f]{64}$/u.test(String(value || ''));
 }
 
+function sameFiniteNumber(left, right, tolerance = 1e-9) {
+  return typeof left === 'number'
+    && Number.isFinite(left)
+    && typeof right === 'number'
+    && Number.isFinite(right)
+    && Math.abs(left - right) <= tolerance;
+}
+
 function buildFailures(report, options) {
   const failures = [];
   const failUnless = (condition, message) => {
     if (!condition) failures.push(message);
   };
 
+  if (options.sync) {
+    failUnless(
+      report.sync.requested && report.sync.ran && report.sync.succeeded,
+      `the requested native Excel synchronization did not succeed: ${report.candidate.syncStatus}`,
+    );
+  }
   failUnless(
     sameArray(report.reference.headers, REFERENCE_HEADERS),
     `archived headers changed: ${JSON.stringify(report.reference.headers)}`,
@@ -266,26 +271,34 @@ function buildFailures(report, options) {
     'the repeated reconciliation-count signature was not persisted after a complete snapshot read',
   );
   failUnless(
-    report.candidate.rowsWithCode === CURRENT_ACCEPTANCE.rows
-      && report.candidate.patrisRows === CURRENT_ACCEPTANCE.patrisRows
-      && report.candidate.fullWooRows === CURRENT_ACCEPTANCE.fullWooRows
-      && report.candidate.wooLeafRows === CURRENT_ACCEPTANCE.wooLeafRows
-      && report.candidate.matchedRows === CURRENT_ACCEPTANCE.matchedRows
-      && report.candidate.sourceOnlyRows === CURRENT_ACCEPTANCE.sourceOnlyRows
-      && report.candidate.wooOnlyRows === CURRENT_ACCEPTANCE.wooOnlyRows
-      && report.candidate.ambiguousRows === CURRENT_ACCEPTANCE.ambiguousRows
-      && report.candidate.excludedWooParentRows === CURRENT_ACCEPTANCE.excludedWooParentRows,
-    `current catalog snapshot differs from the accepted reconciled projection: ${JSON.stringify({
-      rows: report.candidate.rowsWithCode,
-      patrisRows: report.candidate.patrisRows,
-      fullWooRows: report.candidate.fullWooRows,
-      wooLeafRows: report.candidate.wooLeafRows,
-      matchedRows: report.candidate.matchedRows,
-      sourceOnlyRows: report.candidate.sourceOnlyRows,
-      wooOnlyRows: report.candidate.wooOnlyRows,
-      ambiguousRows: report.candidate.ambiguousRows,
-      excludedWooParentRows: report.candidate.excludedWooParentRows,
-    })}`,
+    report.candidate.patrisRows
+      === report.candidate.matchedRows + report.candidate.sourceOnlyRows,
+    `Patris count does not equal matched + Patris-only (${report.candidate.patrisRows} != ${report.candidate.matchedRows} + ${report.candidate.sourceOnlyRows})`,
+  );
+  failUnless(
+    report.candidate.wooLeafRows
+      === report.candidate.matchedRows + report.candidate.wooOnlyRows,
+    `Woo leaf count does not equal matched + Woo-only (${report.candidate.wooLeafRows} != ${report.candidate.matchedRows} + ${report.candidate.wooOnlyRows})`,
+  );
+  failUnless(
+    report.candidate.fullWooRows
+      === report.candidate.wooLeafRows + report.candidate.excludedWooParentRows,
+    `raw Woo count does not equal leaves + excluded variable parents (${report.candidate.fullWooRows} != ${report.candidate.wooLeafRows} + ${report.candidate.excludedWooParentRows})`,
+  );
+  const expectedCountSignature = [
+    `patris_products=${report.candidate.patrisRows}`,
+    `woocommerce_raw=${report.candidate.fullWooRows}`,
+    `woocommerce_leaves=${report.candidate.wooLeafRows}`,
+    `union_rows=${report.candidate.rowsWithCode}`,
+    `matched=${report.candidate.matchedRows}`,
+    `patris_only=${report.candidate.sourceOnlyRows}`,
+    `woo_only=${report.candidate.wooOnlyRows}`,
+    `ambiguous_codes=${report.candidate.ambiguousRows}`,
+    `variable_parents_excluded=${report.candidate.excludedWooParentRows}`,
+  ].join('|');
+  failUnless(
+    report.candidate.countSignature === expectedCountSignature,
+    `persisted reconciliation signature differs from the imported rows: ${report.candidate.countSignature}`,
   );
   failUnless(
     report.candidate.duplicateCodes === 0,
@@ -306,6 +319,12 @@ function buildFailures(report, options) {
     `live Yuan_Price must be a positive number; got ${report.candidate.config.yuan}`,
   );
   failUnless(
+    typeof report.candidate.config.usd === 'number'
+      && Number.isFinite(report.candidate.config.usd)
+      && report.candidate.config.usd > 0,
+    `live USD price must be a positive number; got ${report.candidate.config.usd}`,
+  );
+  failUnless(
     typeof report.candidate.config.shipping === 'number'
       && Number.isFinite(report.candidate.config.shipping)
       && report.candidate.config.shipping >= 0,
@@ -316,6 +335,27 @@ function buildFailures(report, options) {
       && Number.isFinite(report.candidate.config.profit)
       && report.candidate.config.profit >= 0,
     `live Profit must be a non-negative decimal; got ${report.candidate.config.profit}`,
+  );
+  failUnless(
+    sameFiniteNumber(
+      report.candidate.config.yuan,
+      report.candidate.config.cardYuan,
+    ),
+    `the visible Yuan card differs from Settings (${report.candidate.config.cardYuan}/${report.candidate.config.yuan})`,
+  );
+  failUnless(
+    sameFiniteNumber(
+      report.candidate.config.shipping,
+      report.candidate.config.cardShipping,
+    ),
+    `the visible shipping card differs from Settings (${report.candidate.config.cardShipping}/${report.candidate.config.shipping})`,
+  );
+  failUnless(
+    sameFiniteNumber(
+      report.candidate.config.profit,
+      report.candidate.config.cardProfit,
+    ),
+    `the visible profit card differs from Settings (${report.candidate.config.cardProfit}/${report.candidate.config.profit})`,
   );
   failUnless(
     report.syncData.rowsWithCode === report.candidate.rowsWithCode,
@@ -385,16 +425,16 @@ function buildFailures(report, options) {
   );
   failUnless(
     report.regressions.relay109032.present
-      && report.regressions.relay109032.price === CURRENT_ACCEPTANCE.relayPrice
-      && report.regressions.relay109032.category === CURRENT_ACCEPTANCE.relayCategory,
-    `${CURRENT_ACCEPTANCE.relayProductCode} regression failed: ${JSON.stringify(report.regressions.relay109032)}`,
+      && report.regressions.relay109032.price === REGRESSION_ACCEPTANCE.relayPrice
+      && report.regressions.relay109032.category === REGRESSION_ACCEPTANCE.relayCategory,
+    `${REGRESSION_ACCEPTANCE.relayProductCode} regression failed: ${JSON.stringify(report.regressions.relay109032)}`,
   );
   failUnless(
     report.regressions.wooFallback109001.present
-      && report.regressions.wooFallback109001.price === CURRENT_ACCEPTANCE.wooFallbackPrice
-      && report.regressions.wooFallback109001.wooEffectivePrice === CURRENT_ACCEPTANCE.wooFallbackPrice
+      && report.regressions.wooFallback109001.price === REGRESSION_ACCEPTANCE.wooFallbackPrice
+      && report.regressions.wooFallback109001.wooEffectivePrice === REGRESSION_ACCEPTANCE.wooFallbackPrice
       && report.regressions.wooFallback109001.warning.length > 0,
-    `${CURRENT_ACCEPTANCE.wooFallbackProductCode} Woo fallback regression failed: ${JSON.stringify(report.regressions.wooFallback109001)}`,
+    `${REGRESSION_ACCEPTANCE.wooFallbackProductCode} Woo fallback regression failed: ${JSON.stringify(report.regressions.wooFallback109001)}`,
   );
   failUnless(
     report.errors.naCount === 0,
@@ -439,7 +479,12 @@ function buildFailures(report, options) {
 function printHumanReport(report) {
   const status = report.passed ? 'PASS' : 'FAIL';
   console.log(`${status}: ${report.candidate.path}`);
-  console.log(`  Sync: ${report.sync.requested ? 'requested' : 'skipped'}${report.sync.ran ? ', completed' : ''}`);
+  const syncStatus = report.sync.requested
+    ? (report.sync.ran
+      ? (report.sync.succeeded ? 'requested, succeeded' : 'requested, failed')
+      : 'requested, not run')
+    : 'skipped';
+  console.log(`  Sync: ${syncStatus}`);
   console.log(`  Edition: ${report.candidate.edition}`);
   console.log(`  Headers: ${report.candidate.headers.join(' | ')}`);
   console.log(`  Product rows: ${report.candidate.rowsWithCode}`);
@@ -453,7 +498,7 @@ function printHumanReport(report) {
     `  Snapshot: dataset=${report.candidate.datasetRevision}, source=${report.candidate.sourceRevision}, total=${report.candidate.paginationTotal}`,
   );
   console.log(
-    `  Live config: yuan=${report.candidate.config.yuan}, shipping=${report.candidate.config.shipping}, profit=${report.candidate.config.profit}`,
+    `  Live config: yuan=${report.candidate.config.yuan}, usd=${report.candidate.config.usd}, shipping=${report.candidate.config.shipping}, profit=${report.candidate.config.profit}; cards=${report.candidate.config.cardYuan}/${report.candidate.config.cardShipping}/${report.candidate.config.cardProfit}`,
   );
   console.log(
     `  SyncData: rows=${report.syncData.rowsWithCode}, hidden=${report.syncData.sheetVisibility === 2}, missing=${report.syncData.missingProductCodes}, extra=${report.syncData.extraCodes}`,
@@ -854,6 +899,7 @@ $excel = $null
 $candidateBook = $null
 $referenceBook = $null
 $syncRan = $false
+$syncSucceeded = $false
 try {
     $excel = New-Object -ComObject Excel.Application
     $excel.Visible = $false
@@ -875,7 +921,9 @@ try {
 
     if ($runSync) {
         $macroBookName = ([string]$candidateBook.Name).Replace("'", "''")
-        [void]$excel.Run("'$macroBookName'!ProductCatalogSync.RefreshAllData", $true)
+        $syncSucceeded = [bool]$excel.Run(
+            "'$macroBookName'!ProductCatalogSync.RefreshAllDataForValidation"
+        )
         $syncRan = $true
     }
     $excel.CalculateFullRebuild()
@@ -891,9 +939,13 @@ try {
     $candidateProducts = Read-Products $candidateBook
     $candidateSyncData = Read-SyncData $candidateBook
     $candidateConfig = [pscustomobject]@{
-        yuan = Numeric-Or-Null (Table-Scalar $candidateBook 'Yuan_Price')
-        shipping = Numeric-Or-Null (Table-Scalar $candidateBook 'Shipping')
-        profit = Numeric-Or-Null (Table-Scalar $candidateBook 'Profit')
+        yuan = Numeric-Or-Null (Sheet-Scalar $candidateBook 3 'B10')
+        usd = Numeric-Or-Null (Sheet-Scalar $candidateBook 3 'B11')
+        shipping = Numeric-Or-Null (Sheet-Scalar $candidateBook 3 'B14')
+        profit = Numeric-Or-Null (Sheet-Scalar $candidateBook 3 'B13')
+        cardYuan = Numeric-Or-Null (Table-Scalar $candidateBook 'Yuan_Price')
+        cardShipping = Numeric-Or-Null (Table-Scalar $candidateBook 'Shipping')
+        cardProfit = Numeric-Or-Null (Table-Scalar $candidateBook 'Profit')
     }
     $errors = Workbook-Errors $candidateBook
 
@@ -1184,6 +1236,7 @@ try {
         sync = [pscustomobject]@{
             requested = $runSync
             ran = $syncRan
+            succeeded = $syncSucceeded
         }
         candidate = [pscustomobject]@{
             path = $candidatePath
@@ -1319,24 +1372,46 @@ function main() {
     }
   }
 
-  const result = spawnSync(
-    'powershell.exe',
-    ['-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', '-'],
-    {
-      cwd: repoRoot,
-      encoding: 'utf8',
-      env: {
-        ...process.env,
-        PATRIS_VALIDATOR_CANDIDATE: options.candidate,
-        PATRIS_VALIDATOR_REFERENCE: options.reference,
-        PATRIS_VALIDATOR_SYNC: options.sync ? '1' : '0',
+  const tempDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'patris-excel-validator-'));
+  const powershellPath = path.join(tempDirectory, 'validate.ps1');
+  let result;
+  try {
+    // Windows PowerShell 5.1 treats a BOM-less script as the active ANSI code
+    // page. A UTF-8 BOM keeps the Persian literals used by the validator exact.
+    fs.writeFileSync(powershellPath, `\uFEFF${powershell}\n`, 'utf8');
+    result = spawnSync(
+      'powershell.exe',
+      [
+        '-NoLogo',
+        '-NoProfile',
+        '-NonInteractive',
+        '-ExecutionPolicy',
+        'Bypass',
+        '-File',
+        powershellPath,
+      ],
+      {
+        cwd: repoRoot,
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          PATRIS_VALIDATOR_CANDIDATE: options.candidate,
+          PATRIS_VALIDATOR_REFERENCE: options.reference,
+          PATRIS_VALIDATOR_SYNC: options.sync ? '1' : '0',
+        },
+        maxBuffer: 16 * 1024 * 1024,
+        timeout: options.timeoutMs,
+        windowsHide: true,
       },
-      input: `${powershell}\n`,
-      maxBuffer: 16 * 1024 * 1024,
-      timeout: options.timeoutMs,
-      windowsHide: true,
-    },
-  );
+    );
+  } finally {
+    try {
+      fs.unlinkSync(powershellPath);
+    } catch {}
+    try {
+      fs.rmdirSync(tempDirectory);
+    } catch {}
+  }
 
   if (result.error) {
     const suffix = result.error.code === 'ETIMEDOUT'

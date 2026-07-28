@@ -623,7 +623,9 @@ try {
         $settings.Cells.Item($row, 1).Value2 = $liveLabels[$rowOffset]
         $settings.Range("B${row}:F${row}").Merge()
     }
-    $settings.Range('B10:B11').NumberFormat = '#,##0'
+    foreach ($row in @(10, 11)) {
+        $settings.Range("B${row}:F${row}").NumberFormat = '#,##0'
+    }
     $settings.Range('B13').NumberFormat = '0%'
     $settings.Range('B14').NumberFormat = 'General'
     $settings.Range('A10:A15').Font.Bold = $true
@@ -640,7 +642,9 @@ try {
         $settings.Cells.Item($row, 1).Value2 = $proposalLabels[$rowOffset]
         $settings.Range("B${row}:F${row}").Merge()
     }
-    $settings.Range('B18:B19').NumberFormat = '#,##0'
+    foreach ($row in @(18, 19)) {
+        $settings.Range("B${row}:F${row}").NumberFormat = '#,##0'
+    }
     $settings.Range('B21').NumberFormat = '0%'
     $settings.Range('B22').NumberFormat = 'General'
     $settings.Range('A18:A23').Font.Bold = $true
@@ -652,10 +656,14 @@ try {
     $settings.Range('B22').Validation.ErrorTitle = 'نرخ حمل نامعتبر'
     $settings.Range('B22').Validation.ErrorMessage = 'نرخ حمل باید عددی بزرگ‌تر از صفر باشد.'
     $settings.Range('B22').Validation.ShowError = $true
-    $settings.Range('B10:B14').ReadingOrder = -5003
-    $settings.Range('B18:B22').ReadingOrder = -5003
-    $settings.Range('B10:B14').Font.Name = 'Yekan Bakh'
-    $settings.Range('B18:B22').Font.Name = 'Yekan Bakh'
+    foreach ($row in (10..14)) {
+        $settings.Range("B${row}:F${row}").ReadingOrder = -5003
+        $settings.Range("B${row}:F${row}").Font.Name = 'Yekan Bakh'
+    }
+    foreach ($row in (18..22)) {
+        $settings.Range("B${row}:F${row}").ReadingOrder = -5003
+        $settings.Range("B${row}:F${row}").Font.Name = 'Yekan Bakh'
+    }
 
     $settings.Range('A24').Value2 = 'حد هشدار اختلاف قیمت'
     $settings.Range('B24').Value2 = 0.07
@@ -683,6 +691,25 @@ try {
     [void]$workbook.Names.Add('SelectedProductRow', $settings.Range('G30'))
     $settings.Columns('G').Hidden = $true
     $settings.Columns('H').Hidden = $true
+
+    # Never format only the first column of several adjacent merged rows.
+    # Excel silently coalesces those rows into one large MergeArea, which
+    # makes every setting except the first one inaccessible to VBA.
+    foreach ($row in @((10..15) + (18..23))) {
+        $mergeCell = $settings.Range("B${row}")
+        $mergeArea = $mergeCell.MergeArea
+        try {
+            $expectedMergeAddress = "B${row}:F${row}"
+            $actualMergeAddress = $mergeArea.Address($false, $false)
+            if ($actualMergeAddress -cne $expectedMergeAddress) {
+                throw "Settings row $row has MergeArea $actualMergeAddress; expected $expectedMergeAddress."
+            }
+        }
+        finally {
+            Release-ComObject $mergeArea
+            Release-ComObject $mergeCell
+        }
+    }
 
     $priceList.PageSetup.PrintArea = '$B$1:$O$30'
     $priceList.PageSetup.Orientation = 2

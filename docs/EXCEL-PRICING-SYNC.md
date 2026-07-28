@@ -181,7 +181,16 @@ with the returned rows is a hard failure. Across pages it also requires one
 unchanged dataset revision, source revision, ordered column-key list, total,
 page size, page count, and count document. A mismatch discards all fetched
 pages and retries the full snapshot at most three times; no partial catalog is
-imported.
+imported. Every supplied submitted, current, and reconciliation-source revision
+must agree with the local Patris contract; the legacy source revision remains a
+compatibility fallback when the newer current/reconciliation fields are absent.
+Any backend `product_type_cache_drift*` or `projection_integrity*` warning in
+state/catalog metadata aborts the entire import before product rows are used.
+The bounded recursive warning scan covers metadata objects and arrays, including
+`integrity.warnings[].code`, while deliberately excluding the catalog's
+per-product `rows` payload. Live settings, proposal baselines, and reconciliation
+counts are snapshotted before the request and restored if any page, revision,
+pagination, or integrity check rejects the snapshot.
 
 After a successful apply, Patris invalidates its pricing-catalog cache,
 regenerates the canonical product contract, synchronously sends that contract
