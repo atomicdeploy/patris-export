@@ -185,11 +185,19 @@ func TestBrowserConfigRedactsAndPreservesRecentSalesProfile(t *testing.T) {
 
 	clientConfig := browserConfig(manager.Get())
 	clientConfig.UI.Theme = "dark"
-	clientConfig.RecentSales = recentsales.Config{
-		Enabled: true, Source: "C:/attacker/replacement.json",
-		SourceID: "attacker", TokenEnv: "ATTACKER_TOKEN",
-	}
 	body, err := json.Marshal(clientConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var crafted map[string]interface{}
+	if err := json.Unmarshal(body, &crafted); err != nil {
+		t.Fatal(err)
+	}
+	crafted["recent_sales"] = map[string]interface{}{
+		"enabled": true, "source": "C:/attacker/replacement.json",
+		"source_id": "attacker", "token_env": "ATTACKER_TOKEN",
+	}
+	body, err = json.Marshal(crafted)
 	if err != nil {
 		t.Fatal(err)
 	}

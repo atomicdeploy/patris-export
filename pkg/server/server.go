@@ -370,7 +370,7 @@ func (s *Server) Info() (map[string]interface{}, error) {
 	return map[string]interface{}{
 		"success":     true,
 		"file":        sourceBaseName(s.currentDBPath()),
-		"path":        s.currentDBPath(),
+		"path":        browserSafeURL(s.currentDBPath()),
 		"version":     s.version,
 		"num_records": db.GetNumRecords(),
 		"num_fields":  db.GetNumFields(),
@@ -392,14 +392,125 @@ func (s *Server) Config() appconfig.Config {
 	return s.config.Get()
 }
 
+// browserConfigView shadows protected profiles whose concrete structs do not
+// use omitempty. An empty struct intentionally serializes as {}, so the
+// browser learns neither the profile's values nor its field names.
+type browserConfigView struct {
+	appconfig.Config
+	RecentSales struct{} `json:"recent_sales"`
+}
+
 // browserConfig returns the configuration shape that may be sent to the Web
-// UI. Database credentials remain server-side and can only be supplied through
-// protected config files, environment variables, or command-line options.
-func browserConfig(cfg appconfig.Config) appconfig.Config {
+// UI. Connection credentials, integration headers, and tokens remain
+// server-side and can only be supplied through protected config files,
+// environment variables, or command-line options.
+func browserConfig(cfg appconfig.Config) browserConfigView {
+	cfg.Database.Path = browserSafeURL(cfg.Database.Path)
 	cfg.Export.MySQLDSN = ""
 	cfg.Export.MySQLTLSCAFile = ""
 	cfg.Export.MySQLTLSServerName = ""
 	cfg.RecentSales = recentsales.Config{}
+	cfg.Canonical.Pricing.Digitalogic.BaseURL = browserSafeURL(cfg.Canonical.Pricing.Digitalogic.BaseURL)
+	cfg.SendUpdates.URL = browserSafeURL(cfg.SendUpdates.URL)
+	cfg.SendUpdates.Headers = nil
+	cfg.SendUpdates.Command = nil
+	cfg.Edge.TargetURL = browserSafeURL(cfg.Edge.TargetURL)
+	cfg.Edge.Token = ""
+	cfg.Extra = nil
+	return browserConfigView{Config: cfg}
+}
+
+// browserSafeURL removes URL components commonly used to carry credentials
+// while retaining the non-secret scheme, host, and path needed by the UI.
+// Non-HTTP(S) values, including local Windows paths, are returned unchanged.
+func browserSafeURL(value string) string {
+	trimmed := strings.TrimSpace(value)
+	lower := strings.ToLower(trimmed)
+	if !strings.HasPrefix(lower, "http://") && !strings.HasPrefix(lower, "https://") {
+		return value
+	}
+	parsed, err := url.Parse(trimmed)
+	if err != nil || parsed.Host == "" {
+		return ""
+	}
+	parsed.User = nil
+	parsed.RawQuery = ""
+	parsed.ForceQuery = false
+	parsed.Fragment = ""
+	return parsed.String()
+}
+
+func hasBrowserProtectedURLMaterial(value string) bool {
+	trimmed := strings.TrimSpace(value)
+	lower := strings.ToLower(trimmed)
+	if !strings.HasPrefix(lower, "http://") && !strings.HasPrefix(lower, "https://") {
+		return false
+	}
+	parsed, err := url.Parse(trimmed)
+	if err != nil || parsed.Host == "" {
+		return true
+	}
+	return parsed.User != nil || parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != ""
+}
+
+func preserveBrowserURL(candidate, protected string) string {
+	if hasBrowserProtectedURLMaterial(candidate) || hasBrowserProtectedURLMaterial(protected) {
+		return protected
+	}
+	return candidate
+}
+
+func browserSafeErrorMessage(err error, protectedURLs ...string) string {
+	if err == nil {
+		return ""
+	}
+	message := err.Error()
+	for _, value := range protectedURLs {
+		if !hasBrowserProtectedURLMaterial(value) {
+			continue
+		}
+		safe := browserSafeURL(value)
+		message = strings.ReplaceAll(message, value, safe)
+		if parsed, parseErr := url.Parse(strings.TrimSpace(value)); parseErr == nil {
+			message = strings.ReplaceAll(message, parsed.Redacted(), safe)
+		}
+	}
+	return message
+}
+
+func browserSafeProcesses(processes []processmon.ProcessInfo) []processmon.ProcessInfo {
+	safe := make([]processmon.ProcessInfo, len(processes))
+	copy(safe, processes)
+	for index := range safe {
+		// Command lines are not a browser diagnostic: callers routinely pass
+		// bearer tokens, passwords, and signed URLs as process arguments.
+		safe[index].Cmdline = ""
+		for fileIndex := range safe[index].OpenFiles {
+			safe[index].OpenFiles[fileIndex] = browserSafeURL(safe[index].OpenFiles[fileIndex])
+		}
+	}
+	return safe
+}
+
+// preserveBrowserProtectedConfig restores fields that the browser neither
+// receives nor manages. It deliberately ignores both replacement values and
+// redaction placeholders supplied by a client.
+func preserveBrowserProtectedConfig(cfg, protected appconfig.Config) appconfig.Config {
+	cfg.Database.Path = preserveBrowserURL(cfg.Database.Path, protected.Database.Path)
+	cfg.Export.MySQLDSN = protected.Export.MySQLDSN
+	cfg.Export.MySQLTLSCAFile = protected.Export.MySQLTLSCAFile
+	cfg.Export.MySQLTLSServerName = protected.Export.MySQLTLSServerName
+	cfg.RecentSales = protected.RecentSales
+	cfg.Canonical.Pricing.Digitalogic.BaseURL = preserveBrowserURL(
+		cfg.Canonical.Pricing.Digitalogic.BaseURL,
+		protected.Canonical.Pricing.Digitalogic.BaseURL,
+	)
+	cfg.SendUpdates.URL = preserveBrowserURL(cfg.SendUpdates.URL, protected.SendUpdates.URL)
+	cfg.SendUpdates.Headers = protected.SendUpdates.Headers
+	cfg.SendUpdates.Command = protected.SendUpdates.Command
+	cfg.Edge.TargetURL = preserveBrowserURL(cfg.Edge.TargetURL, protected.Edge.TargetURL)
+	cfg.Edge.Token = protected.Edge.Token
+	cfg.Extra = protected.Extra
 	return cfg
 }
 
@@ -631,7 +742,7 @@ func writeHTMLPartial(w http.ResponseWriter, page []byte) {
 func (s *Server) handleGetRecords(w http.ResponseWriter, r *http.Request) {
 	result, err := s.RecordResult()
 	if err != nil {
-		http.Error(w, fmt.Sprintf("Failed to read records: %v", err), http.StatusInternalServerError)
+		http.Error(w, "Failed to read records: "+browserSafeErrorMessage(err, s.currentDBPath()), http.StatusInternalServerError)
 		return
 	}
 
@@ -668,7 +779,7 @@ func (s *Server) handleGetCategories(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, fmt.Sprintf("Canonical categories timed out after %s", timeout), http.StatusServiceUnavailable)
 			return
 		}
-		http.Error(w, fmt.Sprintf("Failed to read records: %v", err), http.StatusInternalServerError)
+		http.Error(w, "Failed to read records: "+browserSafeErrorMessage(err, s.currentDBPath()), http.StatusInternalServerError)
 		return
 	}
 	if result.Contract == nil {
@@ -693,7 +804,7 @@ func (s *Server) handleGetProductSyncContract(w http.ResponseWriter, r *http.Req
 			http.Error(w, fmt.Sprintf("Canonical product-sync timed out after %s", timeout), http.StatusServiceUnavailable)
 			return
 		}
-		http.Error(w, fmt.Sprintf("Failed to read records: %v", err), http.StatusInternalServerError)
+		http.Error(w, "Failed to read records: "+browserSafeErrorMessage(err, s.currentDBPath()), http.StatusInternalServerError)
 		return
 	}
 	if result.Contract == nil {
@@ -900,7 +1011,7 @@ func wantsDownload(r *http.Request) bool {
 func (s *Server) handleGetInfo(w http.ResponseWriter, r *http.Request) {
 	info, err := s.Info()
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		http.Error(w, browserSafeErrorMessage(err, s.currentDBPath()), http.StatusInternalServerError)
 		return
 	}
 
@@ -1042,15 +1153,10 @@ func (s *Server) handlePutConfig(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf("Failed to decode config: %v", err), http.StatusBadRequest)
 		return
 	}
-	// The browser is not a connection-management surface. Preserve protected
-	// server-side connection material even if an old cache or crafted request
-	// includes replacement values.
-	protectedConfig := s.config.Get()
-	protectedExport := protectedConfig.Export
-	cfg.Export.MySQLDSN = protectedExport.MySQLDSN
-	cfg.Export.MySQLTLSCAFile = protectedExport.MySQLTLSCAFile
-	cfg.Export.MySQLTLSServerName = protectedExport.MySQLTLSServerName
-	cfg.RecentSales = protectedConfig.RecentSales
+	// The browser is not a secret-management surface. Preserve protected
+	// server-side material even if an old cache or crafted request includes a
+	// redaction placeholder or replacement value.
+	cfg = preserveBrowserProtectedConfig(cfg, s.config.Get())
 	cfg, err := s.ReplaceConfig(cfg)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("Failed to save config: %v", err), http.StatusInternalServerError)
@@ -1297,7 +1403,7 @@ func (s *Server) handleGetPatris81Processes(w http.ResponseWriter, r *http.Reque
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"success":   true,
 		"count":     len(processes),
-		"processes": processes,
+		"processes": browserSafeProcesses(processes),
 	})
 }
 
@@ -1309,7 +1415,7 @@ func (s *Server) handleGetFileProcesses(w http.ResponseWriter, r *http.Request) 
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"success":   true,
 			"file":      sourceBaseName(dbPath),
-			"path":      dbPath,
+			"path":      browserSafeURL(dbPath),
 			"remote":    true,
 			"count":     0,
 			"in_use":    false,
@@ -1331,7 +1437,7 @@ func (s *Server) handleGetFileProcesses(w http.ResponseWriter, r *http.Request) 
 		"path":      fileInfo.FilePath,
 		"count":     len(fileInfo.Processes),
 		"in_use":    len(fileInfo.Processes) > 0,
-		"processes": fileInfo.Processes,
+		"processes": browserSafeProcesses(fileInfo.Processes),
 	})
 }
 
@@ -1450,7 +1556,7 @@ func (s *Server) initialSnapshotMessage(result recordpipe.Result, dbPath, reason
 		"added":       result.Rows,
 		"total_count": len(result.Rows),
 		"file_name":   sourceBaseName(dbPath),
-		"file_path":   dbPath,
+		"file_path":   browserSafeURL(dbPath),
 		"version":     s.version,
 		"resources":   web.Resources(),
 		"raw":         result.Raw,
@@ -1506,7 +1612,7 @@ func (s *Server) broadcastInitialSnapshot(reason string) {
 	s.dispatchUpdateEvent(updateout.Event{
 		Type:             "initial",
 		Timestamp:        fmt.Sprintf("%v", message["timestamp"]),
-		Source:           dbPath,
+		Source:           browserSafeURL(dbPath),
 		Raw:              result.Raw,
 		Records:          records,
 		KeyField:         result.KeyField,
@@ -1572,7 +1678,7 @@ func (s *Server) broadcastUpdate() {
 		s.dispatchUpdateEvent(updateout.Event{
 			Type:             "update",
 			Timestamp:        changeSet.Timestamp,
-			Source:           s.currentDBPath(),
+			Source:           browserSafeURL(s.currentDBPath()),
 			Raw:              result.Raw,
 			Records:          records,
 			Changes:          &changeSet,
@@ -1600,7 +1706,7 @@ func (s *Server) dispatchInitialUpdate(ctx context.Context) {
 	s.dispatchUpdateEvent(updateout.Event{
 		Type:             "initial",
 		Timestamp:        time.Now().Format(time.RFC3339),
-		Source:           s.currentDBPath(),
+		Source:           browserSafeURL(s.currentDBPath()),
 		Raw:              result.Raw,
 		Records:          result.Rows,
 		KeyField:         result.KeyField,
@@ -2038,11 +2144,11 @@ func (s *Server) processStatus() map[string]interface{} {
 		"patris81": map[string]interface{}{
 			"running":   len(patris81Processes) > 0,
 			"count":     len(patris81Processes),
-			"processes": patris81Processes,
+			"processes": browserSafeProcesses(patris81Processes),
 		},
 		"file_access": map[string]interface{}{
 			"file":      sourceBaseName(dbPath),
-			"path":      dbPath,
+			"path":      browserSafeURL(dbPath),
 			"remote":    filecopy.IsURL(dbPath),
 			"in_use":    fileInfo != nil && len(fileInfo.Processes) > 0,
 			"count":     0,
@@ -2054,7 +2160,7 @@ func (s *Server) processStatus() map[string]interface{} {
 	}
 	if fileInfo != nil {
 		status["file_access"].(map[string]interface{})["count"] = len(fileInfo.Processes)
-		status["file_access"].(map[string]interface{})["processes"] = fileInfo.Processes
+		status["file_access"].(map[string]interface{})["processes"] = browserSafeProcesses(fileInfo.Processes)
 	}
 	if fileErr != nil {
 		status["file_access"].(map[string]interface{})["error"] = fileErr.Error()
@@ -2427,13 +2533,13 @@ func (s *Server) StartWatching(debounceDuration time.Duration) error {
 			pollInterval = 5 * time.Minute
 		}
 		if err := fw.Poll(dbPath, func(path string) {
-			log.Printf("🔄 Remote source changed: %s", path)
+			log.Printf("🔄 Remote source changed: %s", browserSafeURL(path))
 			s.notifyFileUpdated(path)
 			s.broadcastUpdate()
 		}, pollInterval); err != nil {
 			return fmt.Errorf("failed to poll URL: %w", err)
 		}
-		log.Printf("👀 Polling remote source: %s (interval: %v)", dbPath, pollInterval)
+		log.Printf("👀 Polling remote source: %s (interval: %v)", browserSafeURL(dbPath), pollInterval)
 		s.dispatchInitialUpdateAsync()
 		return nil
 	}

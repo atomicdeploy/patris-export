@@ -16,6 +16,7 @@ import (
 
 	"github.com/atomicdeploy/patris-export/pkg/appconfig"
 	"github.com/atomicdeploy/patris-export/pkg/canonical"
+	"github.com/atomicdeploy/patris-export/pkg/processmon"
 	"github.com/atomicdeploy/patris-export/pkg/recordpipe"
 	"github.com/gorilla/websocket"
 	"github.com/xuri/excelize/v2"
@@ -61,6 +62,18 @@ func TestServerJSON(t *testing.T) {
 		t.Fatalf("Failed to create server: %v", err)
 	}
 	defer srv.Close()
+
+	t.Run("405 responses are bodyless", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodPost, "/api/records", nil)
+		w := httptest.NewRecorder()
+		srv.router.ServeHTTP(w, req)
+		if w.Code != http.StatusMethodNotAllowed {
+			t.Fatalf("status = %d, want 405", w.Code)
+		}
+		if w.Body.Len() != 0 || w.Header().Get("Content-Type") != "" || w.Header().Get("Allow") != "" {
+			t.Fatalf("405 response must be bodyless without Content-Type/Allow: headers=%v body=%q", w.Header(), w.Body.String())
+		}
+	})
 
 	t.Run("POST /api/refresh", func(t *testing.T) {
 		req := httptest.NewRequest(http.MethodPost, "/api/refresh", nil)
@@ -544,7 +557,7 @@ func TestServerJSON(t *testing.T) {
 	})
 }
 
-func TestBrowserConfigRedactsAndPreservesProtectedMySQLConnectionConfig(t *testing.T) {
+func TestBrowserConfigRedactsAndPreservesProtectedServerConfig(t *testing.T) {
 	tmpDir := t.TempDir()
 	configPath := filepath.Join(tmpDir, "patris-export.json")
 	manager, err := appconfig.Load(configPath)
@@ -554,12 +567,43 @@ func TestBrowserConfigRedactsAndPreservesProtectedMySQLConnectionConfig(t *testi
 	const protectedDSN = "protected-dsn-test-value"
 	const protectedCAPath = "C:/protected/mysql/private-ca-path.pem"
 	const protectedServerName = "private-db.internal.example"
+	const protectedEdgeToken = "protected-edge-token-test-value"
+	const protectedDatabaseURL = "https://source-user:source-password@source.example.test/catalog/kala.db?signature=protected-source-query#protected-source-fragment"
+	const protectedSendURL = "https://hook-user:hook-password@hooks.example.test/updates?credential=protected-hook-query#protected-hook-fragment"
+	const protectedEdgeURL = "https://edge-user:edge-password@edge.example.test/api/edge/upload?credential=protected-edge-query#protected-edge-fragment"
+	const protectedPricingURL = "https://pricing-user:pricing-password@pricing.example.test/wp-json/digitalogic?credential=protected-pricing-query#protected-pricing-fragment"
+	const protectedCommandSecret = "protected-command-argument-secret"
+	const sendSecretEnv = "PATRIS_BROWSER_CONFIG_SEND_SECRET"
+	const sendSecretValue = "runtime-send-secret-must-never-be-serialized"
+	const pricingTokenEnv = "PATRIS_BROWSER_CONFIG_PRICING_TOKEN"
+	const pricingTokenValue = "runtime-pricing-token-must-never-be-serialized"
+	t.Setenv(sendSecretEnv, sendSecretValue)
+	t.Setenv(pricingTokenEnv, pricingTokenValue)
+	protectedHeaders := map[string]string{
+		"Authorization": "Bearer protected-send-token-test-value",
+		"X-API-Key":     "protected-send-api-key-test-value",
+	}
+	protectedExtra := map[string]interface{}{
+		"future_integration": map[string]interface{}{
+			"credential": "protected-future-extension-secret",
+		},
+	}
 	if err := manager.Update(func(cfg *appconfig.Config) {
+		cfg.Database.Path = protectedDatabaseURL
 		cfg.Export.MySQLDSN = protectedDSN
 		cfg.Export.MySQLTLSCAFile = protectedCAPath
 		cfg.Export.MySQLTLSServerName = protectedServerName
+		cfg.Edge.Token = protectedEdgeToken
+		cfg.Edge.TargetURL = protectedEdgeURL
+		cfg.SendUpdates.URL = protectedSendURL
+		cfg.SendUpdates.Headers = protectedHeaders
+		cfg.SendUpdates.Command = []string{"delivery-helper", "--token", protectedCommandSecret}
+		cfg.SendUpdates.ProductSyncSecretEnv = sendSecretEnv
+		cfg.Canonical.Pricing.Digitalogic.BaseURL = protectedPricingURL
+		cfg.Canonical.Pricing.Digitalogic.BearerTokenEnv = pricingTokenEnv
+		cfg.Extra = protectedExtra
 	}); err != nil {
-		t.Fatalf("store protected MySQL config: %v", err)
+		t.Fatalf("store protected server config: %v", err)
 	}
 
 	jsonPath := filepath.Join(tmpDir, "records.json")
@@ -579,16 +623,72 @@ func TestBrowserConfigRedactsAndPreservesProtectedMySQLConnectionConfig(t *testi
 			t.Fatalf("marshal browser payload: %v", err)
 		}
 		body := string(data)
+		var decoded interface{}
+		if err := json.Unmarshal(data, &decoded); err != nil {
+			t.Fatalf("decode browser payload for shape validation: %v", err)
+		}
+		recentSalesProfiles := 0
+		var checkRecentSales func(interface{})
+		checkRecentSales = func(current interface{}) {
+			switch value := current.(type) {
+			case map[string]interface{}:
+				for key, nested := range value {
+					if key == "recent_sales" {
+						recentSalesProfiles++
+						profile, ok := nested.(map[string]interface{})
+						if !ok || len(profile) != 0 {
+							t.Fatalf("browser recent_sales must be an opaque empty object, got %#v", nested)
+						}
+					}
+					checkRecentSales(nested)
+				}
+			case []interface{}:
+				for _, nested := range value {
+					checkRecentSales(nested)
+				}
+			}
+		}
+		checkRecentSales(decoded)
+		if recentSalesProfiles == 0 {
+			t.Fatalf("browser payload omitted opaque recent_sales boundary: %s", body)
+		}
 		for _, forbidden := range []string{
 			protectedDSN,
 			protectedCAPath,
 			protectedServerName,
+			protectedEdgeToken,
+			protectedHeaders["Authorization"],
+			protectedHeaders["X-API-Key"],
+			"protected-future-extension-secret",
+			"source-user",
+			"source-password",
+			"protected-source-query",
+			"protected-source-fragment",
+			"hook-user",
+			"hook-password",
+			"protected-hook-query",
+			"protected-hook-fragment",
+			"edge-user",
+			"edge-password",
+			"protected-edge-query",
+			"protected-edge-fragment",
+			"pricing-user",
+			"pricing-password",
+			"protected-pricing-query",
+			"protected-pricing-fragment",
+			protectedCommandSecret,
+			sendSecretValue,
+			pricingTokenValue,
 			`"mysql_dsn"`,
 			`"mysql_tls_ca_file"`,
 			`"mysql_tls_server_name"`,
+			`"headers"`,
+			`"command"`,
+			`"token"`,
+			`"extra"`,
 		} {
 			if strings.Contains(body, forbidden) {
-				t.Fatalf("browser payload exposed protected SQL configuration %q: %s", forbidden, body)
+				t.Fatalf("browser payload exposed protected server configuration %q: %s", forbidden, body)
 			}
 		}
 	}
@@ -599,8 +699,23 @@ func TestBrowserConfigRedactsAndPreservesProtectedMySQLConnectionConfig(t *testi
 		t.Fatalf("GET /api/config status = %d: %s", get.Code, get.Body.String())
 	}
 	assertRedacted(t, json.RawMessage(get.Body.Bytes()))
+	for _, safeURL := range []string{
+		"https://source.example.test/catalog/kala.db",
+		"https://hooks.example.test/updates",
+		"https://edge.example.test/api/edge/upload",
+		"https://pricing.example.test/wp-json/digitalogic",
+	} {
+		if !strings.Contains(get.Body.String(), safeURL) {
+			t.Fatalf("browser config omitted sanitized endpoint %q: %s", safeURL, get.Body.String())
+		}
+	}
+	for _, identifier := range []string{sendSecretEnv, pricingTokenEnv} {
+		if !strings.Contains(get.Body.String(), identifier) {
+			t.Fatalf("browser config omitted safe environment-variable identifier %q: %s", identifier, get.Body.String())
+		}
+	}
 
-	initial := srv.initialSnapshotMessage(recordpipe.Result{Rows: []map[string]interface{}{}, KeyField: "Code"}, jsonPath, "")
+	initial := srv.initialSnapshotMessage(recordpipe.Result{Rows: []map[string]interface{}{}, KeyField: "Code"}, protectedDatabaseURL, "")
 	assertRedacted(t, initial)
 
 	events, unsubscribe := srv.SubscribeEvents(1)
@@ -615,27 +730,119 @@ func TestBrowserConfigRedactsAndPreservesProtectedMySQLConnectionConfig(t *testi
 
 	clientConfig := browserConfig(manager.Get())
 	clientConfig.UI.Theme = "dark"
+	putConfig := func(cfg interface{}) {
+		t.Helper()
+		body, err := json.Marshal(cfg)
+		if err != nil {
+			t.Fatalf("marshal browser update: %v", err)
+		}
+		put := httptest.NewRecorder()
+		srv.router.ServeHTTP(put, httptest.NewRequest(http.MethodPut, "/api/config", bytes.NewReader(body)))
+		if put.Code != http.StatusOK {
+			t.Fatalf("PUT /api/config status = %d: %s", put.Code, put.Body.String())
+		}
+		assertRedacted(t, json.RawMessage(put.Body.Bytes()))
+	}
+	assertStoredProtected := func() {
+		t.Helper()
+		got := manager.Get()
+		headersPreserved := len(got.SendUpdates.Headers) == len(protectedHeaders)
+		for key, value := range protectedHeaders {
+			headersPreserved = headersPreserved && got.SendUpdates.Headers[key] == value
+		}
+		extraIntegration, extraOK := got.Extra["future_integration"].(map[string]interface{})
+		extraPreserved := extraOK && extraIntegration["credential"] == "protected-future-extension-secret"
+		if got.Export.MySQLDSN != protectedDSN || got.Export.MySQLTLSCAFile != protectedCAPath ||
+			got.Export.MySQLTLSServerName != protectedServerName || got.Edge.Token != protectedEdgeToken ||
+			got.Database.Path != protectedDatabaseURL || got.SendUpdates.URL != protectedSendURL ||
+			got.Edge.TargetURL != protectedEdgeURL || got.Canonical.Pricing.Digitalogic.BaseURL != protectedPricingURL ||
+			len(got.SendUpdates.Command) != 3 || got.SendUpdates.Command[2] != protectedCommandSecret ||
+			!headersPreserved || !extraPreserved || got.UI.Theme != "dark" {
+			t.Fatalf("browser update did not preserve protected server config and apply UI setting: DSN=%t CA=%t name=%t edge_token=%t database_url=%t send_url=%t edge_url=%t pricing_url=%t command=%t headers=%t extra=%t theme=%q",
+				got.Export.MySQLDSN == protectedDSN,
+				got.Export.MySQLTLSCAFile == protectedCAPath,
+				got.Export.MySQLTLSServerName == protectedServerName,
+				got.Edge.Token == protectedEdgeToken,
+				got.Database.Path == protectedDatabaseURL,
+				got.SendUpdates.URL == protectedSendURL,
+				got.Edge.TargetURL == protectedEdgeURL,
+				got.Canonical.Pricing.Digitalogic.BaseURL == protectedPricingURL,
+				len(got.SendUpdates.Command) == 3 && got.SendUpdates.Command[2] == protectedCommandSecret,
+				headersPreserved,
+				extraPreserved,
+				got.UI.Theme,
+			)
+		}
+	}
+
+	// A normal browser round trip omits all protected fields.
+	putConfig(clientConfig)
+	assertStoredProtected()
+
+	// Crafted replacement and redaction-placeholder values are ignored too.
 	clientConfig.Export.MySQLDSN = "browser-supplied-dsn-must-be-ignored"
 	clientConfig.Export.MySQLTLSCAFile = "browser-supplied-ca-must-be-ignored.pem"
 	clientConfig.Export.MySQLTLSServerName = "browser-supplied-name.invalid"
-	body, err := json.Marshal(clientConfig)
+	clientConfig.Database.Path = "https://replacement-user:replacement-password@replacement.example.test/catalog.db?token=browser-supplied-source-token"
+	clientConfig.Edge.Token = "[REDACTED]"
+	clientConfig.Edge.TargetURL = "https://replacement-user:replacement-password@replacement.example.test/api/edge/upload?token=browser-supplied-edge-token"
+	clientConfig.SendUpdates.URL = "https://replacement-user:replacement-password@replacement.example.test/updates?token=browser-supplied-hook-token"
+	clientConfig.Canonical.Pricing.Digitalogic.BaseURL = "https://replacement-user:replacement-password@replacement.example.test/pricing?token=browser-supplied-pricing-token"
+	clientConfig.SendUpdates.Headers = map[string]string{
+		"Authorization": "Bearer browser-supplied-token-must-be-ignored",
+		"X-API-Key":     "browser-supplied-key-must-be-ignored",
+	}
+	clientConfig.SendUpdates.Command = []string{"replacement-helper", "--token", "browser-supplied-command-token"}
+	clientConfig.Extra = map[string]interface{}{
+		"future_integration": map[string]interface{}{"credential": "[REDACTED]"},
+	}
+	putConfig(clientConfig)
+	assertStoredProtected()
+}
+
+func TestBrowserDiagnosticsRemoveURLCredentialsAndCommandLines(t *testing.T) {
+	const protectedURL = "https://source-user:source-password@source.example.test/catalog/kala.db?signature=protected-query#protected-fragment"
+	const protectedCommand = `patris81.exe --token protected-process-token --source "` + protectedURL + `"`
+
+	if got := browserSafeURL(protectedURL); got != "https://source.example.test/catalog/kala.db" {
+		t.Fatalf("browserSafeURL() = %q", got)
+	}
+	if got := browserSafeURL("https://?credential=malformed-secret"); got != "" {
+		t.Fatalf("browserSafeURL() malformed URL = %q, want fail-closed empty value", got)
+	}
+	err := fmt.Errorf("download failed: Get %q: unavailable", "https://source-user:xxxxx@source.example.test/catalog/kala.db?signature=protected-query#protected-fragment")
+	if got := browserSafeErrorMessage(err, protectedURL); strings.Contains(got, "protected-query") ||
+		strings.Contains(got, "source-user") || got != `download failed: Get "https://source.example.test/catalog/kala.db": unavailable` {
+		t.Fatalf("browserSafeErrorMessage() = %q", got)
+	}
+
+	processes := browserSafeProcesses([]processmon.ProcessInfo{{
+		PID:       42,
+		Name:      "patris81.exe",
+		Cmdline:   protectedCommand,
+		OpenFiles: []string{protectedURL},
+	}})
+	if len(processes) != 1 || processes[0].Cmdline != "" ||
+		len(processes[0].OpenFiles) != 1 || processes[0].OpenFiles[0] != "https://source.example.test/catalog/kala.db" {
+		t.Fatalf("browserSafeProcesses() = %#v", processes)
+	}
+	if empty := browserSafeProcesses(nil); empty == nil || len(empty) != 0 {
+		t.Fatalf("browserSafeProcesses(nil) = %#v, want a non-nil empty array", empty)
+	}
+
+	result := recordpipe.Result{Rows: []map[string]interface{}{}, KeyField: "Code"}
+	srv := &Server{}
+	message, err := json.Marshal(srv.initialSnapshotMessage(result, protectedURL, ""))
 	if err != nil {
-		t.Fatalf("marshal browser update: %v", err)
+		t.Fatalf("marshal initial snapshot: %v", err)
 	}
-	put := httptest.NewRecorder()
-	srv.router.ServeHTTP(put, httptest.NewRequest(http.MethodPut, "/api/config", bytes.NewReader(body)))
-	if put.Code != http.StatusOK {
-		t.Fatalf("PUT /api/config status = %d: %s", put.Code, put.Body.String())
+	for _, forbidden := range []string{"source-user", "source-password", "protected-query", "protected-fragment"} {
+		if strings.Contains(string(message), forbidden) {
+			t.Fatalf("initial snapshot exposed protected URL component %q: %s", forbidden, message)
+		}
 	}
-	assertRedacted(t, json.RawMessage(put.Body.Bytes()))
-	if got := manager.Get(); got.Export.MySQLDSN != protectedDSN || got.Export.MySQLTLSCAFile != protectedCAPath ||
-		got.Export.MySQLTLSServerName != protectedServerName || got.UI.Theme != "dark" {
-		t.Fatalf("browser update did not preserve protected MySQL config and apply UI setting: DSN=%t CA=%t name=%t theme=%q",
-			got.Export.MySQLDSN == protectedDSN,
-			got.Export.MySQLTLSCAFile == protectedCAPath,
-			got.Export.MySQLTLSServerName == protectedServerName,
-			got.UI.Theme,
-		)
+	if !strings.Contains(string(message), "https://source.example.test/catalog/kala.db") {
+		t.Fatalf("initial snapshot omitted sanitized source URL: %s", message)
 	}
 }
 
@@ -1473,6 +1680,22 @@ func TestProcessEndpoints(t *testing.T) {
 		t.Fatalf("Failed to create server: %v", err)
 	}
 	defer srv.Close()
+	assertProcessArray := func(t *testing.T, value interface{}) {
+		t.Helper()
+		processes, ok := value.([]interface{})
+		if !ok {
+			t.Fatalf("Expected processes array, got %T", value)
+		}
+		for _, raw := range processes {
+			process, ok := raw.(map[string]interface{})
+			if !ok {
+				t.Fatalf("Expected process object, got %T", raw)
+			}
+			if process["cmdline"] != "" {
+				t.Fatalf("Process command line was not redacted: %#v", process["cmdline"])
+			}
+		}
+	}
 
 	t.Run("GET /api/processes/patris81", func(t *testing.T) {
 		req := httptest.NewRequest("GET", "/api/processes/patris81", nil)
@@ -1490,9 +1713,7 @@ func TestProcessEndpoints(t *testing.T) {
 		if response["success"] != true {
 			t.Errorf("Expected success=true, got %v", response["success"])
 		}
-		if _, ok := response["processes"].([]interface{}); !ok {
-			t.Errorf("Expected processes array, got %T", response["processes"])
-		}
+		assertProcessArray(t, response["processes"])
 	})
 
 	t.Run("GET /api/processes/file", func(t *testing.T) {
@@ -1514,8 +1735,26 @@ func TestProcessEndpoints(t *testing.T) {
 		if response["path"] == "" {
 			t.Error("Expected full path in response")
 		}
-		if _, ok := response["processes"].([]interface{}); !ok {
-			t.Errorf("Expected processes array, got %T", response["processes"])
+		assertProcessArray(t, response["processes"])
+	})
+
+	t.Run("GET /api/status", func(t *testing.T) {
+		req := httptest.NewRequest("GET", "/api/status", nil)
+		w := httptest.NewRecorder()
+		srv.router.ServeHTTP(w, req)
+		if w.Code != http.StatusOK {
+			t.Fatalf("Expected status 200, got %d: %s", w.Code, w.Body.String())
+		}
+		var response map[string]interface{}
+		if err := json.NewDecoder(w.Body).Decode(&response); err != nil {
+			t.Fatalf("Failed to decode response: %v", err)
+		}
+		for _, groupName := range []string{"patris81", "file_access"} {
+			group, ok := response[groupName].(map[string]interface{})
+			if !ok {
+				t.Fatalf("Expected %s object, got %T", groupName, response[groupName])
+			}
+			assertProcessArray(t, group["processes"])
 		}
 	})
 }
@@ -1552,8 +1791,18 @@ func TestBroadcastProcessInfo(t *testing.T) {
 		if msg["type"] != "process_info" {
 			continue
 		}
-		if _, ok := msg["status"].(map[string]interface{}); !ok {
+		status, ok := msg["status"].(map[string]interface{})
+		if !ok {
 			t.Fatalf("Expected status object in process_info message, got %T", msg["status"])
+		}
+		for _, groupName := range []string{"patris81", "file_access"} {
+			group, ok := status[groupName].(map[string]interface{})
+			if !ok {
+				t.Fatalf("Expected process_info status.%s object, got %T", groupName, status[groupName])
+			}
+			if _, ok := group["processes"].([]interface{}); !ok {
+				t.Fatalf("Expected process_info status.%s.processes array, got %T", groupName, group["processes"])
+			}
 		}
 		return
 	}
