@@ -44,6 +44,12 @@ var reservedNonMerchandiseCodes = map[string]struct{}{
 	"999994": {}, // Legacy placeholder.
 }
 
+const (
+	PriceSourceKindForeign    = "foreign_price"
+	PriceSourceKindPartner    = "partner_price"
+	PriceSourceKindSaleDirect = "sale_price_direct"
+)
+
 type Product struct {
 	ProductCode                string                  `json:"product_code"`
 	CategoryCode               string                  `json:"category_code"`
@@ -51,6 +57,7 @@ type Product struct {
 	Serial                     string                  `json:"serial"`
 	Unit                       string                  `json:"unit"`
 	SalePriceSource            *float64                `json:"sale_price_source"`
+	PartnerPriceSource         *pricingcatalog.Decimal `json:"partner_price_source"`
 	PurchasePriceSource        *float64                `json:"purchase_price_source"`
 	WarehouseStock             map[string]float64      `json:"warehouse_stock"`
 	TotalStock                 *float64                `json:"total_stock"`
@@ -67,6 +74,9 @@ type Product struct {
 	PricingCatalogRevision     string                  `json:"pricing_catalog_revision"`
 	PricingCatalogStatus       string                  `json:"pricing_catalog_status"`
 	CurrencyEffectiveDate      string                  `json:"currency_effective_date"`
+	PriceSourceAmount          *pricingcatalog.Decimal `json:"price_source_amount"`
+	PriceSourceCurrency        string                  `json:"price_source_currency"`
+	PriceSourceKind            string                  `json:"price_source_kind"`
 	PriceRoundingDigits        *int                    `json:"price_rounding_digits"`
 	PriceRoundingMode          string                  `json:"price_rounding_mode"`
 	FinalPrice                 *int64                  `json:"final_price"`
@@ -116,9 +126,10 @@ func TransformContext(ctx context.Context, rows []map[string]interface{}, source
 	if err := ctx.Err(); err != nil {
 		return nil, nil, err
 	}
-	integrationActive := pricingcatalog.Configured(cfg.Pricing)
+	normalizedPricing := pricingcatalog.Normalize(cfg.Pricing)
+	integrationActive := pricingcatalog.Configured(normalizedPricing)
 	if provider == nil {
-		provider = pricingcatalog.NewProvider(cfg.Pricing)
+		provider = pricingcatalog.NewProvider(normalizedPricing)
 	}
 	products := make([]Product, 0, len(rows))
 	codeCounts := make(map[string]int, len(rows))
@@ -186,7 +197,6 @@ func TransformContext(ctx context.Context, rows []map[string]interface{}, source
 	}
 	parsedProducts := make([]Product, len(rows))
 	workers := 1
-	normalizedPricing := pricingcatalog.Normalize(cfg.Pricing)
 	if normalizedPricing.Mode == pricingcatalog.ModeDigitalogic {
 		workers = normalizedPricing.Digitalogic.MaxConcurrency
 		if workers > len(eligible) {
@@ -198,7 +208,7 @@ func TransformContext(ctx context.Context, rows []map[string]interface{}, source
 			if err := ctx.Err(); err != nil {
 				return nil, nil, err
 			}
-			parsedProducts[index] = parseKalaProduct(ctx, rows[index], provider, integrationActive)
+			parsedProducts[index] = parseKalaProduct(ctx, rows[index], provider, integrationActive, normalizedPricing.UseSalePriceDirectFallback)
 			if err := ctx.Err(); err != nil {
 				return nil, nil, err
 			}
@@ -218,7 +228,7 @@ func TransformContext(ctx context.Context, rows []map[string]interface{}, source
 						if !ok {
 							return
 						}
-						product := parseKalaProduct(ctx, rows[index], provider, integrationActive)
+						product := parseKalaProduct(ctx, rows[index], provider, integrationActive, normalizedPricing.UseSalePriceDirectFallback)
 						if ctx.Err() != nil {
 							return
 						}
@@ -571,11 +581,15 @@ func categoryHasStrongProductSignals(row map[string]interface{}) bool {
 			return true
 		}
 	}
+	sourceWarnings := []string{}
+	if partner, _ := extractPartnerPrice(row, &sourceWarnings); decimalStrictlyPositive(partner) {
+		return true
+	}
 	if strings.TrimSpace(normalizeText(firstValue(row, "location", "Location"))) != "" {
 		return true
 	}
 	warnings := []string{}
-	if extractForeignPrice(row, &warnings) != nil {
+	if decimalStrictlyPositive(extractForeignPrice(row, &warnings)) {
 		return true
 	}
 	warnings = nil
@@ -600,13 +614,15 @@ func emptyCategoryHeader(code string, row map[string]interface{}) bool {
 	return name != "" && serial == code
 }
 
-func parseKalaProduct(ctx context.Context, row map[string]interface{}, provider pricingcatalog.Provider, integrationActive bool) Product {
+func parseKalaProduct(ctx context.Context, row map[string]interface{}, provider pricingcatalog.Provider, integrationActive bool, directSaleFallback ...bool) Product {
 	if ctx != nil && ctx.Err() != nil {
 		return Product{}
 	}
 	warnings := naming.Merge(row[naming.InternalWarningsField], naming.Warnings(row))
 	code := codeString(firstValue(row, "product_code", "code", "Code"))
 	foreignPrice := extractForeignPrice(row, &warnings)
+	partnerPrice, partnerPricePresence := extractPartnerPrice(row, &warnings)
+	salePrice, salePricePresence := exactSourceDecimal(row, "sale_price_source", "FOROSH", "fee_kol")
 	weight, location := extractWeightAndLocation(row, &warnings)
 	resolution := pricingcatalog.Resolution{}
 	if integrationActive {
@@ -614,28 +630,154 @@ func parseKalaProduct(ctx context.Context, row map[string]interface{}, provider 
 		if ctx != nil && ctx.Err() != nil {
 			return Product{}
 		}
-		warnings = append(warnings, resolution.Warnings...)
 	}
 	warehouseStock, warehouseNulls := warehouseStock(row)
 	totalStock := totalStock(row, warehouseStock, resolution.SelectedWarehouses, &warnings)
 
-	var finalPrice *int64
-	if foreignPrice != nil && weight != nil && resolution.ShippingPricePerKg != nil && resolution.ShippingPricePerKgCurrency != "" && resolution.MarkupPercent != nil && resolution.IRTPerCNY != nil && resolution.RoundingDigits != nil {
-		value, err := LandedPrice(weight.String(), resolution.ShippingPricePerKg.String(), resolution.ShippingPricePerKgCurrency, foreignPrice.String(), resolution.MarkupPercent.String(), resolution.IRTPerCNY.String(), *resolution.RoundingDigits)
-		if err != nil {
-			warnings = append(warnings, "landed_price_calculation_failed")
-		} else {
-			finalPrice = &value
-		}
+	var (
+		priceSourceAmount   *pricingcatalog.Decimal
+		priceSourceCurrency string
+		priceSourceKind     string
+		finalPrice          *int64
+		shippingMethodID    = resolution.MethodID
+		shippingPricePerKg  = clonePricingDecimal(resolution.ShippingPricePerKg)
+		shippingCurrency    = resolution.ShippingPricePerKgCurrency
+		markupPercent       = clonePricingDecimal(resolution.MarkupPercent)
+		irtPerCNY           = clonePricingDecimal(resolution.IRTPerCNY)
+		currencyDate        = resolution.CurrencyEffectiveDate
+		roundingDigits      = cloneRoundingDigits(resolution.RoundingDigits)
+		roundingMode        string
+		explicitNulls       = cloneExplicitNulls(resolution.ExplicitNulls)
+	)
+	if roundingDigits != nil {
+		roundingMode = pricingcatalog.RoundingModeHalfUp
 	}
-	if integrationActive && finalPrice == nil {
-		warnings = append(warnings, "final_price_unavailable")
+	if integrationActive {
+		foreignPositive := decimalStrictlyPositive(foreignPrice)
+		foreignReady := foreignPositive &&
+			decimalStrictlyPositive(weight) &&
+			strings.TrimSpace(resolution.MethodID) != "" &&
+			resolution.MethodID != pricingcatalog.MethodDomestic &&
+			resolution.ShippingPricePerKg != nil &&
+			resolution.ShippingPricePerKgCurrency != "" &&
+			resolution.MarkupPercent != nil &&
+			resolution.IRTPerCNY != nil &&
+			resolution.RoundingDigits != nil &&
+			!hasAny(resolution.Warnings, "shipping_method_disabled", "shipping_method_unknown")
+		if foreignReady {
+			value, err := LandedPrice(
+				weight.String(), resolution.ShippingPricePerKg.String(),
+				resolution.ShippingPricePerKgCurrency, foreignPrice.String(),
+				resolution.MarkupPercent.String(), resolution.IRTPerCNY.String(),
+				*resolution.RoundingDigits,
+			)
+			if err != nil {
+				warnings = append(warnings, "landed_price_calculation_failed")
+			} else {
+				priceSourceAmount = clonePricingDecimal(foreignPrice)
+				priceSourceCurrency = pricingcatalog.CurrencyCNY
+				priceSourceKind = PriceSourceKindForeign
+				finalPrice = &value
+				warnings = append(warnings, resolution.Warnings...)
+			}
+		}
+		if foreignPositive && priceSourceKind == "" {
+			warnings = append(warnings, "foreign_price_path_unavailable")
+			if weight != nil && !decimalStrictlyPositive(weight) {
+				warnings = append(warnings, "weight_non_positive_for_foreign_price")
+			}
+		} else if foreignPrice != nil && !foreignPositive {
+			warnings = append(warnings, "foreign_price_non_positive")
+		}
+
+		partnerPositive := decimalStrictlyPositive(partnerPrice)
+		if priceSourceKind == "" {
+			switch partnerPricePresence {
+			case fieldAbsent:
+				warnings = append(warnings, "partner_price_missing")
+			case fieldNull:
+				warnings = append(warnings, "partner_price_explicit_null")
+			case fieldValue:
+				if partnerPrice == nil {
+					warnings = append(warnings, "partner_price_invalid")
+				} else if !partnerPositive {
+					warnings = append(warnings, "partner_price_non_positive")
+				}
+			}
+		}
+
+		if priceSourceKind == "" && partnerPositive &&
+			resolution.MarkupPercent != nil && resolution.RoundingDigits != nil {
+			value, err := PartnerPrice(partnerPrice.String(), resolution.MarkupPercent.String(), *resolution.RoundingDigits)
+			if err != nil {
+				warnings = append(warnings, "partner_price_calculation_failed")
+			} else {
+				priceSourceAmount = clonePricingDecimal(partnerPrice)
+				priceSourceCurrency = pricingcatalog.CurrencyIRR
+				priceSourceKind = PriceSourceKindPartner
+				finalPrice = &value
+				shippingMethodID, shippingPricePerKg, shippingCurrency = domesticShipping()
+				irtPerCNY = nil
+				currencyDate = ""
+				delete(explicitNulls, "shipping_price_per_kg")
+				delete(explicitNulls, "shipping_price_per_kg_currency")
+				warnings = append(warnings, warningsForPartnerPrice(resolution.Warnings)...)
+				warnings = append(warnings, "domestic_shipping_method_applied", "partner_price_fallback_used", "freight_not_applied_for_partner_price")
+			}
+		}
+		if priceSourceKind == "" && partnerPositive {
+			warnings = append(warnings, "partner_price_path_unavailable")
+		}
+
+		useDirectSale := len(directSaleFallback) > 0 && directSaleFallback[0]
+		salePositive := decimalStrictlyPositive(salePrice)
+		if priceSourceKind == "" && useDirectSale {
+			switch salePricePresence {
+			case fieldAbsent:
+				warnings = append(warnings, "sale_price_direct_missing")
+			case fieldNull:
+				warnings = append(warnings, "sale_price_direct_explicit_null")
+			case fieldValue:
+				if salePrice == nil {
+					warnings = append(warnings, "sale_price_direct_invalid")
+				} else if !salePositive {
+					warnings = append(warnings, "sale_price_direct_non_positive")
+				}
+			}
+		}
+		if priceSourceKind == "" && salePositive && useDirectSale {
+			value, err := DirectSalePrice(salePrice.String())
+			if err != nil {
+				warnings = append(warnings, "sale_price_direct_calculation_failed")
+			} else {
+				priceSourceAmount = clonePricingDecimal(salePrice)
+				priceSourceCurrency = pricingcatalog.CurrencyIRR
+				priceSourceKind = PriceSourceKindSaleDirect
+				finalPrice = &value
+				shippingMethodID, shippingPricePerKg, shippingCurrency = domesticShipping()
+				markupPercent = nil
+				irtPerCNY = nil
+				currencyDate = ""
+				roundingDigits = nil
+				roundingMode = ""
+				explicitNulls = map[string]bool{}
+				warnings = append(warnings, warningsForPartnerPrice(resolution.Warnings)...)
+				warnings = append(warnings, "domestic_shipping_method_applied", "freight_not_applied_for_sale_price_direct", "sale_price_direct_fallback_used")
+			}
+		}
+		if priceSourceKind == "" {
+			warnings = append(warnings, resolution.Warnings...)
+		}
+		if finalPrice == nil {
+			warnings = append(warnings, "final_price_unavailable")
+		}
 	}
 	presence := map[string]fieldPresence{}
 	markPresence(presence, "name", row, "name", "Name", "part_number")
 	markPresence(presence, "serial", row, "serial", "Serial")
 	markPresence(presence, "unit", row, "unit", "Vahed")
 	markPresence(presence, "sale_price_source", row, "sale_price_source", "FOROSH", "fee_kol")
+	markPresence(presence, "partner_price_source", row, "partner_price_source", "Sharh1", "priceinfo", "Sharh")
 	markPresence(presence, "purchase_price_source", row, "purchase_price_source", "KHARYD", "purchase_price")
 	markPresence(presence, "minimum_stock", row, "minimum_stock", "Sefaresh", "minimum")
 	markPresence(presence, "foreign_price", row, "foreign_price", "yuan_price", "Sharh1", "priceinfo", "Sharh")
@@ -652,11 +794,16 @@ func parseKalaProduct(ctx context.Context, row map[string]interface{}, provider 
 	if finalPrice != nil {
 		presence["final_price"] = fieldValue
 	}
-	if resolution.RoundingDigits != nil {
+	if priceSourceAmount != nil {
+		presence["price_source_amount"] = fieldValue
+		presence["price_source_currency"] = fieldValue
+		presence["price_source_kind"] = fieldValue
+	}
+	if roundingDigits != nil {
 		presence["price_rounding_digits"] = fieldValue
 		presence["price_rounding_mode"] = fieldValue
 	}
-	for field, isNull := range resolution.ExplicitNulls {
+	for field, isNull := range explicitNulls {
 		if isNull {
 			presence[field] = fieldNull
 		}
@@ -668,6 +815,7 @@ func parseKalaProduct(ctx context.Context, row map[string]interface{}, provider 
 		Serial:                     normalizeText(firstValue(row, "serial", "Serial")),
 		Unit:                       normalizeText(firstValue(row, "unit", "Vahed")),
 		SalePriceSource:            nullableNumber(firstValue(row, "sale_price_source", "FOROSH", "fee_kol")),
+		PartnerPriceSource:         partnerPrice,
 		PurchasePriceSource:        nullableNumber(firstValue(row, "purchase_price_source", "KHARYD", "purchase_price")),
 		WarehouseStock:             warehouseStock,
 		TotalStock:                 totalStock,
@@ -676,27 +824,25 @@ func parseKalaProduct(ctx context.Context, row map[string]interface{}, provider 
 		ForeignPrice:               foreignPrice,
 		WeightGrams:                weight,
 		Location:                   location,
-		ShippingMethodID:           resolution.MethodID,
-		ShippingPricePerKg:         resolution.ShippingPricePerKg,
-		ShippingPricePerKgCurrency: resolution.ShippingPricePerKgCurrency,
-		MarkupPercent:              resolution.MarkupPercent,
-		IRTPerCNY:                  resolution.IRTPerCNY,
+		ShippingMethodID:           shippingMethodID,
+		ShippingPricePerKg:         shippingPricePerKg,
+		ShippingPricePerKgCurrency: shippingCurrency,
+		MarkupPercent:              markupPercent,
+		IRTPerCNY:                  irtPerCNY,
 		PricingCatalogRevision:     resolution.CatalogRevision,
 		PricingCatalogStatus:       resolution.CatalogStatus,
-		CurrencyEffectiveDate:      resolution.CurrencyEffectiveDate,
-		PriceRoundingDigits:        resolution.RoundingDigits,
-		PriceRoundingMode: func() string {
-			if resolution.RoundingDigits != nil {
-				return pricingcatalog.RoundingModeHalfUp
-			}
-			return ""
-		}(),
-		FinalPrice:        finalPrice,
-		SourceUpdatedAt:   normalizeText(firstValue(row, "source_updated_at", "updated_at", "Dates")),
-		Warnings:          normalizedWarnings(warnings),
-		fieldPresence:     presence,
-		warehouseNulls:    warehouseNulls,
-		integrationActive: integrationActive,
+		CurrencyEffectiveDate:      currencyDate,
+		PriceSourceAmount:          priceSourceAmount,
+		PriceSourceCurrency:        priceSourceCurrency,
+		PriceSourceKind:            priceSourceKind,
+		PriceRoundingDigits:        roundingDigits,
+		PriceRoundingMode:          roundingMode,
+		FinalPrice:                 finalPrice,
+		SourceUpdatedAt:            normalizeText(firstValue(row, "source_updated_at", "updated_at", "Dates")),
+		Warnings:                   normalizedWarnings(warnings),
+		fieldPresence:              presence,
+		warehouseNulls:             warehouseNulls,
+		integrationActive:          integrationActive,
 	}
 }
 
@@ -709,6 +855,7 @@ func (product Product) Map() map[string]interface{} {
 	putString(row, "serial", product.Serial, product.presence("serial"))
 	putString(row, "unit", product.Unit, product.presence("unit"))
 	putPointer(row, "sale_price_source", pointerFloatValue(product.SalePriceSource), product.presence("sale_price_source"))
+	putPointer(row, "partner_price_source", pointerDecimalValue(product.PartnerPriceSource), product.presence("partner_price_source"))
 	putPointer(row, "purchase_price_source", pointerFloatValue(product.PurchasePriceSource), product.presence("purchase_price_source"))
 	putWarehouses(row, product)
 	putPointer(row, "total_stock", pointerFloatValue(product.TotalStock), product.presence("total_stock"))
@@ -728,6 +875,9 @@ func (product Product) Map() map[string]interface{} {
 		putString(row, "pricing_catalog_revision", product.PricingCatalogRevision, product.presence("pricing_catalog_revision"))
 		putString(row, "pricing_catalog_status", product.PricingCatalogStatus, product.presence("pricing_catalog_status"))
 		putString(row, "currency_effective_date", product.CurrencyEffectiveDate, product.presence("currency_effective_date"))
+		putPointer(row, "price_source_amount", pointerDecimalValue(product.PriceSourceAmount), product.presence("price_source_amount"))
+		putString(row, "price_source_currency", product.PriceSourceCurrency, product.presence("price_source_currency"))
+		putString(row, "price_source_kind", product.PriceSourceKind, product.presence("price_source_kind"))
 		putPointer(row, "price_rounding_digits", pointerIntValueFromInt(product.PriceRoundingDigits), product.presence("price_rounding_digits"))
 		putString(row, "price_rounding_mode", product.PriceRoundingMode, product.presence("price_rounding_mode"))
 		putPointer(row, "final_price", pointerIntValue(product.FinalPrice), product.presence("final_price"))
@@ -751,12 +901,12 @@ func (product *Product) UnmarshalJSON(data []byte) error {
 		return err
 	}
 	if err := rejectUnknownJSONFields(raw, "product", []string{
-		"product_code", "category_code", "name", "serial", "unit", "sale_price_source",
+		"product_code", "category_code", "name", "serial", "unit", "sale_price_source", "partner_price_source",
 		"purchase_price_source", "warehouse_stock", "total_stock", "minimum_stock",
 		"foreign_currency", "foreign_price", "weight_grams", "location", "shipping_method_id",
 		"shipping_price_per_kg", "shipping_price_per_kg_currency", "markup_percent", "irt_per_cny", "pricing_catalog_revision",
-		"pricing_catalog_status", "currency_effective_date", "price_rounding_digits",
-		"price_rounding_mode", "final_price", "source_updated_at",
+		"pricing_catalog_status", "currency_effective_date", "price_source_amount", "price_source_currency",
+		"price_source_kind", "price_rounding_digits", "price_rounding_mode", "final_price", "source_updated_at",
 		"warnings", "record_hash",
 	}); err != nil {
 		return err
@@ -770,11 +920,12 @@ func (product *Product) UnmarshalJSON(data []byte) error {
 
 	product.fieldPresence = map[string]fieldPresence{}
 	for _, field := range []string{
-		"category_code", "name", "serial", "unit", "sale_price_source", "purchase_price_source",
+		"category_code", "name", "serial", "unit", "sale_price_source", "partner_price_source", "purchase_price_source",
 		"warehouse_stock", "total_stock", "minimum_stock", "foreign_currency", "foreign_price",
 		"weight_grams", "location", "source_updated_at", "shipping_method_id",
 		"shipping_price_per_kg", "shipping_price_per_kg_currency", "markup_percent", "irt_per_cny",
 		"pricing_catalog_revision", "pricing_catalog_status", "currency_effective_date",
+		"price_source_amount", "price_source_currency", "price_source_kind",
 		"price_rounding_digits", "price_rounding_mode", "final_price",
 	} {
 		if value, exists := raw[field]; exists {
@@ -795,7 +946,33 @@ func (product *Product) UnmarshalJSON(data []byte) error {
 			return fmt.Errorf("product shipping_price_per_kg_currency must be CNY or IRR")
 		}
 	}
-	for _, field := range []string{"foreign_price", "weight_grams", "shipping_price_per_kg", "markup_percent", "irt_per_cny", "price_rounding_digits"} {
+	priceSourceFields := []string{"price_source_amount", "price_source_currency", "price_source_kind"}
+	priceSourcePresent := 0
+	for _, field := range priceSourceFields {
+		if _, exists := raw[field]; exists {
+			priceSourcePresent++
+		}
+	}
+	if priceSourcePresent != 0 && priceSourcePresent != len(priceSourceFields) {
+		return fmt.Errorf("product price_source_amount, price_source_currency, and price_source_kind must be present together")
+	}
+	if priceSourcePresent == len(priceSourceFields) {
+		for _, field := range priceSourceFields {
+			if product.presence(field) == fieldNull {
+				return fmt.Errorf("product %s must be omitted rather than null", field)
+			}
+		}
+	}
+	_, roundingDigitsPresent := raw["price_rounding_digits"]
+	_, roundingModePresent := raw["price_rounding_mode"]
+	if product.presence("price_rounding_digits") == fieldNull {
+		if roundingModePresent {
+			return fmt.Errorf("product price_rounding_mode must be omitted when price_rounding_digits is null")
+		}
+	} else if roundingDigitsPresent != roundingModePresent {
+		return fmt.Errorf("product price_rounding_digits and price_rounding_mode must be present together")
+	}
+	for _, field := range []string{"partner_price_source", "foreign_price", "weight_grams", "shipping_price_per_kg", "markup_percent", "irt_per_cny", "price_source_amount"} {
 		if value, exists := raw[field]; exists {
 			value = bytes.TrimSpace(value)
 			if len(value) > 0 && value[0] == '"' {
@@ -819,6 +996,7 @@ func (product *Product) UnmarshalJSON(data []byte) error {
 	for _, field := range []string{
 		"shipping_method_id", "shipping_price_per_kg", "shipping_price_per_kg_currency", "markup_percent", "irt_per_cny",
 		"pricing_catalog_revision", "pricing_catalog_status", "currency_effective_date",
+		"price_source_amount", "price_source_currency", "price_source_kind",
 		"price_rounding_digits", "price_rounding_mode", "final_price",
 	} {
 		if _, exists := raw[field]; exists {
@@ -968,11 +1146,78 @@ func categoryRecordHash(category Category) string {
 	return hashBytes(material)
 }
 
+// extractPartnerPrice maps Patris' first Sharh1 numeric slot ("قیمت همکار")
+// independently from FOROSH. FOROSH is the distinct sale-price fact and must
+// never be substituted here.
+func extractPartnerPrice(row map[string]interface{}, warnings *[]string) (*pricingcatalog.Decimal, fieldPresence) {
+	sources := map[string]pricingcatalog.Decimal{}
+	presence := fieldAbsent
+
+	if value, exists := row["partner_price_source"]; exists {
+		if value == nil {
+			return nil, fieldNull
+		}
+		return decimalNumber(value), fieldValue
+	}
+	for _, field := range []string{"Sharh1", "priceinfo", "Sharh"} {
+		value, exists := row[field]
+		if !exists {
+			continue
+		}
+		if presence == fieldAbsent {
+			if value == nil {
+				presence = fieldNull
+			} else {
+				presence = fieldValue
+			}
+		}
+		if value == nil || strings.TrimSpace(fmt.Sprint(value)) == "" {
+			continue
+		}
+		if parsed := partnerPriceFromDescription(value, warnings); parsed != nil {
+			sources[field] = *parsed
+		}
+	}
+	if len(sources) == 0 {
+		return nil, presence
+	}
+	distinct := map[string]pricingcatalog.Decimal{}
+	for _, value := range sources {
+		distinct[decimalIdentity(value)] = value
+	}
+	if len(distinct) != 1 {
+		*warnings = append(*warnings, "partner_price_source_conflict")
+		return nil, fieldValue
+	}
+	for _, value := range distinct {
+		copy := value
+		return &copy, fieldValue
+	}
+	return nil, presence
+}
+
+func partnerPriceFromDescription(value interface{}, warnings *[]string) *pricingcatalog.Decimal {
+	text := normalizeDigits(normalizeText(value))
+	matches := numberPattern.FindAllString(text, -1)
+	if len(matches) == 0 {
+		return nil
+	}
+	if len(matches) > 4 {
+		*warnings = append(*warnings, "partner_price_extra_slots", "partner_price_ambiguous")
+		return nil
+	}
+	parsed := decimalNumber(matches[0])
+	if parsed == nil {
+		*warnings = append(*warnings, "partner_price_invalid")
+	}
+	return parsed
+}
+
 func extractForeignPrice(row map[string]interface{}, warnings *[]string) *pricingcatalog.Decimal {
 	sources := map[string]pricingcatalog.Decimal{}
 	for _, field := range []string{"foreign_price", "yuan_price"} {
 		if value, ok := row[field]; ok {
-			if parsed := positiveDecimal(value); parsed != nil {
+			if parsed := nonNegativeDecimal(value); parsed != nil {
 				sources[field] = *parsed
 			}
 		}
@@ -1019,11 +1264,13 @@ func foreignPriceFromDescription(value interface{}, warnings *[]string) *pricing
 		return nil
 	}
 	if len(numbers) == 4 {
-		if decimalPositive(numbers[3]) {
-			copy := numbers[3]
-			return &copy
+		value, ok := numbers[3].Rat()
+		if !ok || value.Sign() < 0 {
+			*warnings = append(*warnings, "foreign_price_invalid")
+			return nil
 		}
-		return nil
+		copy := numbers[3]
+		return &copy
 	}
 	positive := []pricingcatalog.Decimal{}
 	for _, number := range numbers {
@@ -1047,7 +1294,7 @@ func extractWeightAndLocation(row map[string]interface{}, warnings *[]string) (*
 	locations := map[string]string{}
 	for _, field := range []string{"weight_grams", "Weight"} {
 		if value, ok := row[field]; ok {
-			if parsed := positiveDecimal(value); parsed != nil {
+			if parsed := nonNegativeDecimal(value); parsed != nil {
 				weights[field] = *parsed
 			}
 		}
@@ -1162,7 +1409,7 @@ func weightAndLocationFromDescription(value interface{}) (*pricingcatalog.Decima
 }
 
 func weightInGrams(value, unit string, per *pricingcatalog.Decimal) *pricingcatalog.Decimal {
-	parsed := positiveDecimal(value)
+	parsed := nonNegativeDecimal(value)
 	if parsed == nil || per == nil || !decimalPositive(*per) {
 		return nil
 	}
@@ -1178,7 +1425,7 @@ func weightInGrams(value, unit string, per *pricingcatalog.Decimal) *pricingcata
 		grams.Mul(grams, big.NewRat(1000, 1))
 	}
 	grams.Quo(grams, perRat)
-	if grams.Sign() <= 0 {
+	if grams.Sign() < 0 {
 		return nil
 	}
 	return finiteDecimal(grams)
@@ -1418,7 +1665,37 @@ func decimalNumber(value interface{}) *pricingcatalog.Decimal {
 		copy := *typed
 		return &copy
 	}
-	text := normalizeDigits(fmt.Sprint(value))
+	var text string
+	switch typed := value.(type) {
+	case json.Number:
+		text = typed.String()
+	case float64:
+		text = strconv.FormatFloat(typed, 'f', -1, 64)
+	case float32:
+		text = strconv.FormatFloat(float64(typed), 'f', -1, 32)
+	case int:
+		text = strconv.FormatInt(int64(typed), 10)
+	case int8:
+		text = strconv.FormatInt(int64(typed), 10)
+	case int16:
+		text = strconv.FormatInt(int64(typed), 10)
+	case int32:
+		text = strconv.FormatInt(int64(typed), 10)
+	case int64:
+		text = strconv.FormatInt(typed, 10)
+	case uint:
+		text = strconv.FormatUint(uint64(typed), 10)
+	case uint8:
+		text = strconv.FormatUint(uint64(typed), 10)
+	case uint16:
+		text = strconv.FormatUint(uint64(typed), 10)
+	case uint32:
+		text = strconv.FormatUint(uint64(typed), 10)
+	case uint64:
+		text = strconv.FormatUint(typed, 10)
+	default:
+		text = normalizeDigits(fmt.Sprint(value))
+	}
 	text = strings.TrimSpace(strings.NewReplacer(" ", "", "٬", "", "،", "", "٫", ".").Replace(text))
 	if strings.Count(text, ",") == 1 && !strings.Contains(text, ".") {
 		parts := strings.SplitN(text, ",", 2)
@@ -1437,6 +1714,18 @@ func decimalNumber(value interface{}) *pricingcatalog.Decimal {
 	return parsed
 }
 
+func nonNegativeDecimal(value interface{}) *pricingcatalog.Decimal {
+	parsed := decimalNumber(value)
+	if parsed == nil {
+		return nil
+	}
+	rational, ok := parsed.Rat()
+	if !ok || rational.Sign() < 0 {
+		return nil
+	}
+	return parsed
+}
+
 func positiveDecimal(value interface{}) *pricingcatalog.Decimal {
 	parsed := decimalNumber(value)
 	if parsed == nil || !decimalPositive(*parsed) {
@@ -1448,6 +1737,81 @@ func positiveDecimal(value interface{}) *pricingcatalog.Decimal {
 func decimalPositive(value pricingcatalog.Decimal) bool {
 	parsed, ok := value.Rat()
 	return ok && parsed.Sign() > 0
+}
+
+func decimalStrictlyPositive(value *pricingcatalog.Decimal) bool {
+	if value == nil {
+		return false
+	}
+	return decimalPositive(*value)
+}
+
+func exactSourceDecimal(row map[string]interface{}, fields ...string) (*pricingcatalog.Decimal, fieldPresence) {
+	for _, field := range fields {
+		value, exists := row[field]
+		if !exists {
+			continue
+		}
+		if value == nil {
+			return nil, fieldNull
+		}
+		return decimalNumber(value), fieldValue
+	}
+	return nil, fieldAbsent
+}
+
+func clonePricingDecimal(value *pricingcatalog.Decimal) *pricingcatalog.Decimal {
+	if value == nil {
+		return nil
+	}
+	copy := *value
+	return &copy
+}
+
+func cloneRoundingDigits(value *int) *int {
+	if value == nil {
+		return nil
+	}
+	copy := *value
+	return &copy
+}
+
+func cloneExplicitNulls(value map[string]bool) map[string]bool {
+	result := make(map[string]bool, len(value))
+	for field, isNull := range value {
+		if isNull {
+			result[field] = true
+		}
+	}
+	return result
+}
+
+func domesticShipping() (string, *pricingcatalog.Decimal, string) {
+	zero := pricingcatalog.Decimal("0")
+	return pricingcatalog.MethodDomestic, &zero, pricingcatalog.CurrencyIRR
+}
+
+func warningsForPartnerPrice(values []string) []string {
+	irrelevant := map[string]struct{}{
+		"fx_rate_missing":                        {},
+		"pricing_cny_to_irt_missing_or_invalid":  {},
+		"shipping_method_disabled":               {},
+		"shipping_method_missing":                {},
+		"shipping_method_unknown":                {},
+		"shipping_price_per_kg_currency_invalid": {},
+		"shipping_price_per_kg_currency_missing": {},
+		"shipping_price_per_kg_missing":          {},
+		"shipping_price_per_kg_pair_incomplete":  {},
+		"domestic_shipping_price_must_be_zero":   {},
+		"domestic_shipping_currency_must_be_irr": {},
+	}
+	filtered := make([]string, 0, len(values))
+	for _, value := range values {
+		if _, skip := irrelevant[value]; !skip {
+			filtered = append(filtered, value)
+		}
+	}
+	return filtered
 }
 
 func decimalIdentity(value pricingcatalog.Decimal) string {

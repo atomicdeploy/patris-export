@@ -796,6 +796,9 @@ func ApplyEnv(cfg *Config) {
 	if value := os.Getenv("PATRIS_EXPORT_PRICING_MODE"); strings.TrimSpace(value) != "" {
 		cfg.Canonical.Pricing.Mode = strings.TrimSpace(value)
 	}
+	if value := os.Getenv("PATRIS_EXPORT_USE_SALE_PRICE_DIRECT_FALLBACK"); strings.TrimSpace(value) != "" {
+		cfg.Canonical.Pricing.UseSalePriceDirectFallback = parseBool(value, cfg.Canonical.Pricing.UseSalePriceDirectFallback)
+	}
 	if value := os.Getenv("PATRIS_EXPORT_DIGITALOGIC_URL"); strings.TrimSpace(value) != "" {
 		cfg.Canonical.Pricing.Digitalogic.BaseURL = strings.TrimSpace(value)
 		cfg.Canonical.Pricing.Mode = "digitalogic"

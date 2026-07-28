@@ -9,8 +9,9 @@ import (
 )
 
 // LandedPrice evaluates the CNY pricing path with exact decimal rationals.
-// The result is rounded exactly once to the nearest 10^roundingDigits IRT
-// using deterministic half-up ties.
+// Freight may be quoted in CNY per kilogram or IRR per kilogram; IRR is
+// converted to IRT at ten IRR per IRT. The result is rounded exactly once to
+// the nearest 10^roundingDigits IRT using deterministic half-up ties.
 func LandedPrice(weightGrams, shippingPricePerKg, shippingCurrency, foreignCNY, markupPercent, irtPerCNY string, roundingDigits int) (int64, error) {
 	values := make([]*big.Rat, 0, 5)
 	for _, input := range []string{weightGrams, shippingPricePerKg, foreignCNY, markupPercent, irtPerCNY} {
@@ -38,6 +39,42 @@ func LandedPrice(weightGrams, shippingPricePerKg, shippingCurrency, foreignCNY, 
 	markupMultiplier := new(big.Rat).Add(big.NewRat(1, 1), new(big.Rat).Quo(markup, big.NewRat(100, 1)))
 	result := new(big.Rat).Mul(landed, markupMultiplier)
 	return roundPrice(result, roundingDigits)
+}
+
+// PartnerPrice evaluates the direct Patris partner-price fallback. The source
+// amount is explicitly IRR, so it is converted to IRT before markup and the
+// same single final rounding operation. Freight and FX are deliberately absent
+// from this path.
+func PartnerPrice(partnerIRR, markupPercent string, roundingDigits int) (int64, error) {
+	values := make([]*big.Rat, 0, 2)
+	for _, input := range []string{partnerIRR, markupPercent} {
+		value, ok := new(big.Rat).SetString(strings.TrimSpace(input))
+		if !ok || value.Sign() < 0 {
+			return 0, fmt.Errorf("partner_price inputs must be finite non-negative decimals")
+		}
+		values = append(values, value)
+	}
+	partner, markup := values[0], values[1]
+	goodsIRT := new(big.Rat).Quo(partner, big.NewRat(10, 1))
+	markupMultiplier := new(big.Rat).Add(big.NewRat(1, 1), new(big.Rat).Quo(markup, big.NewRat(100, 1)))
+	return roundPrice(new(big.Rat).Mul(goodsIRT, markupMultiplier), roundingDigits)
+}
+
+// DirectSalePrice uses Patris' sale amount without freight, markup, or
+// commercial rounding. The source amount is IRR while final_price is expressed
+// in the contract's IRT local currency, so the only operation is the exact
+// ten-to-one currency-unit conversion. Values that cannot be represented as a
+// whole IRT integer fail closed instead of being rounded.
+func DirectSalePrice(saleIRR string) (int64, error) {
+	value, ok := new(big.Rat).SetString(strings.TrimSpace(saleIRR))
+	if !ok || value.Sign() <= 0 {
+		return 0, fmt.Errorf("sale_price_direct input must be a finite positive decimal")
+	}
+	value.Quo(value, big.NewRat(10, 1))
+	if !value.IsInt() || !value.Num().IsInt64() {
+		return 0, fmt.Errorf("sale_price_direct must convert exactly to a whole IRT integer")
+	}
+	return value.Num().Int64(), nil
 }
 
 func roundPrice(result *big.Rat, roundingDigits int) (int64, error) {

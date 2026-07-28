@@ -25,6 +25,9 @@ func TestCanonicalXLSXRoundTripPreservesTypesLayoutAndMetadata(t *testing.T) {
 			"shipping_price_per_kg_currency": "CNY",
 			"markup_percent":                 json.Number("30"),
 			"irt_per_cny":                    json.Number("29000"),
+			"price_source_amount":            json.Number("24.5"),
+			"price_source_currency":          "CNY",
+			"price_source_kind":              "foreign_price",
 			"price_rounding_digits":          0,
 			"price_rounding_mode":            "nearest_half_up",
 			"final_price":                    int64(2009410),
@@ -61,7 +64,12 @@ func TestCanonicalXLSXRoundTripPreservesTypesLayoutAndMetadata(t *testing.T) {
 	if err != nil || len(recordRows) != 2 {
 		t.Fatalf("records rows = %#v, err=%v", recordRows, err)
 	}
-	wantHeaders := []string{"Product Code", "Name", "Foreign Price", "Weight (g)", "Shipping Price/kg", "Shipping Currency", "Profit Margin (%)", "IRT per CNY", "Price Rounding Digits", "Price Rounding Mode", "Final Price (IRT)", "Warnings"}
+	wantHeaders := []string{
+		"Product Code", "Name", "Foreign Price", "Weight (g)", "Shipping Price/kg",
+		"Shipping Currency", "Profit Margin (%)", "IRT per CNY", "Selected Price Amount",
+		"Selected Price Currency", "Selected Price Source", "Price Rounding Digits",
+		"Price Rounding Mode", "Final Price (IRT)", "Warnings",
+	}
 	if strings.Join(recordRows[0], "|") != strings.Join(wantHeaders, "|") {
 		t.Fatalf("canonical column order = %v, want %v", recordRows[0], wantHeaders)
 	}
@@ -69,6 +77,7 @@ func TestCanonicalXLSXRoundTripPreservesTypesLayoutAndMetadata(t *testing.T) {
 	assertXLSXCell(t, book, "Records", cellAt(columns, "Product Code", 2), "00113007045", excelize.CellTypeSharedString)
 	assertXLSXCell(t, book, "Records", cellAt(columns, "Name", 2), "ماژول آزمون", excelize.CellTypeSharedString)
 	assertXLSXCell(t, book, "Records", cellAt(columns, "Foreign Price", 2), "24.5", excelize.CellTypeNumber)
+	assertXLSXCell(t, book, "Records", cellAt(columns, "Selected Price Amount", 2), "24.5", excelize.CellTypeNumber)
 	assertXLSXCell(t, book, "Records", cellAt(columns, "Final Price (IRT)", 2), "2009410", excelize.CellTypeNumber)
 
 	codeStyle := styleForCell(t, book, "Records", cellAt(columns, "Product Code", 2))
@@ -127,7 +136,7 @@ func TestCanonicalXLSXRoundTripPreservesTypesLayoutAndMetadata(t *testing.T) {
 	}
 
 	worksheetXML := zipEntry(t, path, "xl/worksheets/sheet1.xml")
-	if !strings.Contains(worksheetXML, `<autoFilter ref="$A$1:$L$2"`) {
+	if !strings.Contains(worksheetXML, `<autoFilter ref="$A$1:$O$2"`) {
 		t.Fatalf("autofilter missing from Records sheet: %s", worksheetXML)
 	}
 }
@@ -146,6 +155,9 @@ func TestFormulaXLSXLocalizesHeadersSplitsWarehousesAndCalculates(t *testing.T) 
 			"shipping_price_per_kg_currency": "CNY",
 			"markup_percent":                 json.Number("30"),
 			"irt_per_cny":                    json.Number("29000"),
+			"price_source_amount":            json.Number("24.5"),
+			"price_source_currency":          "CNY",
+			"price_source_kind":              "foreign_price",
 			"price_rounding_digits":          0,
 			"price_rounding_mode":            "nearest_half_up",
 			"final_price":                    json.Number("2009410"),
@@ -183,8 +195,9 @@ func TestFormulaXLSXLocalizesHeadersSplitsWarehousesAndCalculates(t *testing.T) 
 	}
 	wantHeaders := []string{
 		"کد کالا", "نام", "موجودی انبار ۲", "موجودی انبار ۱۰", "قیمت ارزی", "وزن (گرم)",
-		"هزینه حمل/کیلوگرم", "ارز هزینه حمل", "حاشیه سود (%)", "نرخ ریال به یوان",
-		"تعداد رقم گردکردن قیمت", "روش گردکردن قیمت", "قیمت نهایی (تومان)",
+		"هزینه حمل/کیلوگرم", "ارز هزینه حمل", "حاشیه سود (%)", "نرخ یوان (تومان)",
+		"مبلغ منبع قیمت", "ارز منبع قیمت", "نوع منبع قیمت", "تعداد رقم گردکردن قیمت",
+		"روش گردکردن قیمت", "قیمت نهایی (تومان)",
 	}
 	if strings.Join(recordRows[0], "|") != strings.Join(wantHeaders, "|") {
 		t.Fatalf("localized columns = %v, want %v", recordRows[0], wantHeaders)
@@ -195,9 +208,12 @@ func TestFormulaXLSXLocalizesHeadersSplitsWarehousesAndCalculates(t *testing.T) 
 	assertXLSXCell(t, book, "Records", cellAt(columns, "موجودی انبار ۱۰", 2), "3", excelize.CellTypeNumber)
 
 	finalCell := cellAt(columns, "قیمت نهایی (تومان)", 2)
-	wantFormula := `=IF(AND(COUNT(E2,F2,G2,I2,J2,K2)=6,OR(H2="CNY",H2="IRR")),ROUND((E2*J2+F2/1000*IF(H2="CNY",G2*J2,G2/10))*(1+I2/100),-K2),"")`
-	if formula, err := book.GetCellFormula("Records", finalCell); err != nil || formula != wantFormula {
-		t.Fatalf("formula = %q, want %q, err=%v", formula, wantFormula, err)
+	if formula, err := book.GetCellFormula("Records", finalCell); err != nil ||
+		!strings.Contains(formula, `"foreign_price"`) ||
+		!strings.Contains(formula, `"partner_price"`) ||
+		!strings.Contains(formula, `"sale_price_direct"`) ||
+		!strings.Contains(formula, `ROUND(`) {
+		t.Fatalf("living source-aware formula = %q, err=%v", formula, err)
 	}
 	if calculated, err := book.CalcCellValue("Records", finalCell, excelize.Options{RawCellValue: true}); err != nil || calculated != "2009410" {
 		t.Fatalf("calculated final price = %q, want 2009410, err=%v", calculated, err)
@@ -234,6 +250,9 @@ func TestFormulaXLSXSupportsCNYAndIRRFreightAndRejectsInvalidCurrency(t *testing
 			"shipping_price_per_kg_currency": "CNY",
 			"markup_percent":                 json.Number("30"),
 			"irt_per_cny":                    json.Number("30000"),
+			"price_source_amount":            json.Number("10"),
+			"price_source_currency":          "CNY",
+			"price_source_kind":              "foreign_price",
 			"price_rounding_digits":          0,
 			"price_rounding_mode":            "nearest_half_up",
 			"final_price":                    json.Number("4290000"),
@@ -246,6 +265,9 @@ func TestFormulaXLSXSupportsCNYAndIRRFreightAndRejectsInvalidCurrency(t *testing
 			"shipping_price_per_kg_currency": "IRR",
 			"markup_percent":                 json.Number("30"),
 			"irt_per_cny":                    json.Number("30000"),
+			"price_source_amount":            json.Number("10"),
+			"price_source_currency":          "CNY",
+			"price_source_kind":              "foreign_price",
 			"price_rounding_digits":          0,
 			"price_rounding_mode":            "nearest_half_up",
 			"final_price":                    json.Number("4290000"),
@@ -258,9 +280,29 @@ func TestFormulaXLSXSupportsCNYAndIRRFreightAndRejectsInvalidCurrency(t *testing
 			"shipping_price_per_kg_currency": "USD",
 			"markup_percent":                 json.Number("30"),
 			"irt_per_cny":                    json.Number("30000"),
+			"price_source_amount":            json.Number("10"),
+			"price_source_currency":          "CNY",
+			"price_source_kind":              "foreign_price",
 			"price_rounding_digits":          0,
 			"price_rounding_mode":            "nearest_half_up",
 			"final_price":                    nil,
+		},
+		{
+			"product_code":          "PARTNER-1",
+			"price_source_amount":   json.Number("1234500"),
+			"price_source_currency": "IRR",
+			"price_source_kind":     "partner_price",
+			"markup_percent":        json.Number("0"),
+			"price_rounding_digits": 2,
+			"price_rounding_mode":   "nearest_half_up",
+			"final_price":           json.Number("123500"),
+		},
+		{
+			"product_code":          "DIRECT-1",
+			"price_source_amount":   json.Number("12000"),
+			"price_source_currency": "IRR",
+			"price_source_kind":     "sale_price_direct",
+			"final_price":           json.Number("1200"),
 		},
 	}
 	if err := WriteXLSX(path, rows, "product_code", XLSXOptions{Language: "en", Mode: "formula"}); err != nil {
@@ -273,7 +315,7 @@ func TestFormulaXLSXSupportsCNYAndIRRFreightAndRejectsInvalidCurrency(t *testing
 	defer book.Close()
 	columns := headerColumns(mustXLSXRows(t, book, "Records")[0])
 	finalColumn := columns["Final Price (IRT)"]
-	for row, want := range map[int]string{2: "4290000", 3: "4290000", 4: ""} {
+	for row, want := range map[int]string{2: "4290000", 3: "4290000", 4: "", 5: "123500", 6: "1200"} {
 		cell, _ := excelize.CoordinatesToCellName(finalColumn, row)
 		got, calcErr := book.CalcCellValue("Records", cell, excelize.Options{RawCellValue: true})
 		if calcErr != nil || got != want {
@@ -282,7 +324,9 @@ func TestFormulaXLSXSupportsCNYAndIRRFreightAndRejectsInvalidCurrency(t *testing
 	}
 	formulaCell, _ := excelize.CoordinatesToCellName(finalColumn, 2)
 	formula, err := book.GetCellFormula("Records", formulaCell)
-	if err != nil || !strings.Contains(formula, `="CNY"`) || !strings.Contains(formula, `="IRR"`) || !strings.Contains(formula, "/10") {
+	if err != nil || !strings.Contains(formula, `="CNY"`) || !strings.Contains(formula, `="IRR"`) ||
+		!strings.Contains(formula, `"partner_price"`) || !strings.Contains(formula, `"sale_price_direct"`) ||
+		!strings.Contains(formula, "MOD(") || !strings.Contains(formula, "/10") {
 		t.Fatalf("currency-aware formula = %q, err=%v", formula, err)
 	}
 }

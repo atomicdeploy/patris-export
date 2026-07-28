@@ -43,36 +43,56 @@ func TestConfiguredDistinguishesStandaloneFromActivePricing(t *testing.T) {
 	}
 }
 
-func TestStaticRoundingDigitsDefaultValidateAndResolve(t *testing.T) {
-	base := StaticConfig{
-		CNYToIRT:          floatPointer(1),
-		Methods:           []Method{{ID: "air", PricePerKg: floatPointer(1), Currency: CurrencyCNY}},
-		DefaultAssignment: &Assignment{MethodID: "air", ProfitPercent: floatPointer(0)},
+func TestDirectSaleFallbackFlagIsExplicitAndDisabledByDefault(t *testing.T) {
+	if Configured(Config{Mode: ModeStatic}) {
+		t.Fatal("empty static config unexpectedly enabled pricing")
 	}
-	for name, test := range map[string]struct {
-		digits      *int
-		want        *int
-		wantWarning string
-	}{
-		"default": {want: intPointer(0)},
-		"two":     {digits: intPointer(2), want: intPointer(2)},
-		"invalid": {digits: intPointer(10), wantWarning: "price_rounding_digits_invalid"},
-	} {
-		t.Run(name, func(t *testing.T) {
-			cfg := base
-			cfg.RoundingDigits = test.digits
-			resolution := NewProvider(Config{Mode: ModeStatic, Static: cfg}).Resolve(context.Background(), "A")
-			if test.want == nil {
-				if resolution.RoundingDigits != nil {
-					t.Fatalf("rounding digits = %v, want nil", *resolution.RoundingDigits)
-				}
-			} else if resolution.RoundingDigits == nil || *resolution.RoundingDigits != *test.want {
-				t.Fatalf("rounding digits = %v, want %d", resolution.RoundingDigits, *test.want)
-			}
-			if test.wantWarning != "" && !contains(resolution.Warnings, test.wantWarning) {
-				t.Fatalf("missing warning %q in %v", test.wantWarning, resolution.Warnings)
-			}
-		})
+	var config Config
+	if err := json.Unmarshal([]byte(`{"mode":"static","use_sale_price_direct_fallback":true}`), &config); err != nil {
+		t.Fatal(err)
+	}
+	if !config.UseSalePriceDirectFallback || !Configured(config) {
+		t.Fatalf("direct sale fallback flag was not retained as active: %+v", config)
+	}
+	encoded, err := json.Marshal(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(encoded), `"use_sale_price_direct_fallback":true`) {
+		t.Fatalf("direct fallback flag missing from config JSON: %s", encoded)
+	}
+}
+
+func TestDomesticMethodAcceptsExplicitZeroIRRFreight(t *testing.T) {
+	zero := Decimal("0")
+	enabled := true
+	config := Config{Mode: ModeStatic, Static: StaticConfig{
+		Methods: []Method{{
+			ID: MethodDomestic, Enabled: &enabled, PricePerKg: &zero, Currency: CurrencyIRR,
+		}},
+		DefaultAssignment: &Assignment{MethodID: MethodDomestic},
+	}}
+	resolution := NewProvider(config).Resolve(context.Background(), "A")
+	if resolution.MethodID != MethodDomestic || decimalText(resolution.ShippingPricePerKg) != "0" || resolution.ShippingPricePerKgCurrency != CurrencyIRR {
+		t.Fatalf("domestic zero freight was not retained: %+v", resolution)
+	}
+	for _, warning := range []string{"shipping_price_per_kg_missing", "shipping_price_per_kg_currency_missing"} {
+		if contains(resolution.Warnings, warning) {
+			t.Fatalf("domestic zero freight produced %s: %v", warning, resolution.Warnings)
+		}
+	}
+
+	positive := Decimal("1")
+	config.Static.Methods[0].PricePerKg = &positive
+	config.Static.Methods[0].Currency = CurrencyCNY
+	invalid := NewProvider(config).Resolve(context.Background(), "A")
+	if invalid.ShippingPricePerKg != nil || invalid.ShippingPricePerKgCurrency != "" {
+		t.Fatalf("non-zero/CNY domestic freight was retained: %+v", invalid)
+	}
+	for _, warning := range []string{"domestic_shipping_price_must_be_zero", "domestic_shipping_currency_must_be_irr"} {
+		if !contains(invalid.Warnings, warning) {
+			t.Fatalf("invalid domestic freight missed %s: %v", warning, invalid.Warnings)
+		}
 	}
 }
 
@@ -1193,7 +1213,7 @@ func TestHTTPProviderWithholdsFXForIncompatibleCatalogContracts(t *testing.T) {
 
 			provider := newHTTPProvider(DigitalogicConfig{BaseURL: server.URL}, server.Client(), time.Now)
 			resolution := provider.Resolve(context.Background(), "A")
-			if resolution.IRTPerCNY != nil || !contains(resolution.Warnings, test.expectedWarning) || !contains(resolution.Warnings, "fx_rate_missing") {
+			if resolution.IRTPerCNY != nil || resolution.RoundingDigits != nil || !contains(resolution.Warnings, test.expectedWarning) || !contains(resolution.Warnings, "fx_rate_missing") {
 				t.Fatalf("incompatible catalog was allowed to price: %+v", resolution)
 			}
 			if resolution.ShippingPricePerKg == nil || resolution.ShippingPricePerKgCurrency != CurrencyCNY || resolution.MarkupPercent == nil {
@@ -1226,6 +1246,9 @@ func TestHTTPProviderRequiresConsistentNonNullCNYToIRT(t *testing.T) {
 			resolution := newHTTPProvider(DigitalogicConfig{BaseURL: server.URL}, server.Client(), time.Now).Resolve(context.Background(), "A")
 			if resolution.IRTPerCNY != nil || !contains(resolution.Warnings, "fx_rate_missing") {
 				t.Fatalf("invalid FX contract was used: %+v", resolution)
+			}
+			if resolution.RoundingDigits == nil || *resolution.RoundingDigits != 0 {
+				t.Fatalf("valid base catalog lost partner-price rounding when only FX was invalid: %+v", resolution)
 			}
 			if name == "missing" && !contains(resolution.Warnings, "pricing_cny_to_irt_missing_or_invalid") {
 				t.Fatalf("missing CNY/IRT warning: %+v", resolution)

@@ -311,14 +311,19 @@ test('known column keys use human localized labels and custom labels remain auth
     assert.equal(localizedColumnLabel('shipping_price_per_kg', 'fa'), 'نرخ حمل هر کیلوگرم');
     assert.equal(localizedColumnLabel('shipping_price_per_kg_currency', 'en'), 'Shipping Rate Currency (CNY/IRR)');
     assert.equal(localizedColumnLabel('shipping_price_per_kg_currency', 'fa'), 'ارز نرخ حمل (یوان/ریال)');
+    assert.equal(localizedColumnLabel('price_source_kind', 'en'), 'Selected Price Source');
+    assert.equal(localizedColumnLabel('price_source_kind', 'fa'), 'نوع منبع قیمت');
+    assert.equal(localizedColumnLabel('price_rounding_digits', 'fa'), 'تعداد رقم گردکردن قیمت');
     assert.doesNotMatch(source, /shipping_price_per_kg_cny|freight_cny_per_kg/);
 
     const machineFields = [
-        'product_code', 'category_code', 'part_number', 'sale_price_source',
+        'product_code', 'category_code', 'part_number', 'sale_price_source', 'partner_price_source',
         'purchase_price_source', 'total_stock', 'minimum_stock', 'foreign_currency',
         'foreign_price', 'weight_grams', 'shipping_method_id', 'shipping_price_per_kg',
         'shipping_price_per_kg_currency',
-        'markup_percent', 'irt_per_cny', 'final_price', 'source_updated_at', 'record_hash',
+        'markup_percent', 'irt_per_cny', 'price_source_amount', 'price_source_currency',
+        'price_source_kind', 'price_rounding_digits', 'price_rounding_mode',
+        'final_price', 'source_updated_at', 'record_hash',
         'Dates', 'FOROSH', 'Invahed', 'KHARYD', 'Kharyd_E', 'Sefaresh', 'Tedad_k', 'Vahed'
     ];
     machineFields.forEach(field => {

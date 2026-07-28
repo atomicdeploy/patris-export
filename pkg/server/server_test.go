@@ -802,7 +802,11 @@ func TestCanonicalKalaParityAcrossRESTCSVXLSXAndWebSocket(t *testing.T) {
 	for index, header := range formulaRows[0] {
 		formulaColumns[header] = index + 1
 	}
-	for _, required := range []string{"کد کالا", "قیمت ارزی", "وزن (گرم)", "هزینه حمل/کیلوگرم", "ارز هزینه حمل", "حاشیه سود (%)", "نرخ ریال به یوان", "تعداد رقم گردکردن قیمت", "قیمت نهایی (تومان)"} {
+	for _, required := range []string{
+		"کد کالا", "قیمت ارزی", "وزن (گرم)", "هزینه حمل/کیلوگرم", "ارز هزینه حمل",
+		"حاشیه سود (%)", "نرخ یوان (تومان)", "مبلغ منبع قیمت", "ارز منبع قیمت",
+		"نوع منبع قیمت", "تعداد رقم گردکردن قیمت", "روش گردکردن قیمت", "قیمت نهایی (تومان)",
+	} {
 		if formulaColumns[required] == 0 {
 			t.Fatalf("formula XLSX missing Persian header %q: %v", required, formulaRows[0])
 		}
@@ -819,9 +823,11 @@ func TestCanonicalKalaParityAcrossRESTCSVXLSXAndWebSocket(t *testing.T) {
 		t.Fatal("formula XLSX fixture Code was not found")
 	}
 	formulaCell, _ := excelize.CoordinatesToCellName(formulaColumns["قیمت نهایی (تومان)"], formulaRow)
-	roundingDigitsCell, _ := excelize.CoordinatesToCellName(formulaColumns["تعداد رقم گردکردن قیمت"], formulaRow)
 	formula, err := formulaBook.GetCellFormula("Records", formulaCell)
-	if err != nil || !strings.Contains(formula, "ROUND((") || !strings.Contains(formula, `="CNY"`) || !strings.Contains(formula, `="IRR"`) || !strings.Contains(formula, `/10`) || !strings.Contains(formula, ",-"+roundingDigitsCell+`)`) {
+	if err != nil || !strings.Contains(formula, "ROUND((") || !strings.Contains(formula, `="CNY"`) ||
+		!strings.Contains(formula, `="IRR"`) || !strings.Contains(formula, `"foreign_price"`) ||
+		!strings.Contains(formula, `"partner_price"`) || !strings.Contains(formula, `"sale_price_direct"`) ||
+		!strings.Contains(formula, `MOD(`) || !strings.Contains(formula, `/10`) {
 		t.Fatalf("formula XLSX final price formula = %q, err=%v", formula, err)
 	}
 	formulaView, err := formulaBook.GetSheetView("Records", 0)

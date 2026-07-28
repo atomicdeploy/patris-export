@@ -541,14 +541,18 @@ func (p *httpProvider) resolve(ctx context.Context, code string, run *prefetchRu
 			}
 		}
 	}
-	if assignment == nil || strings.TrimSpace(assignment.assignment.MethodID) == "" {
+	if assignment == nil {
+		resolution.Warnings = append(resolution.Warnings, "pricing_assignment_missing", "shipping_method_missing")
+		return finishResolution(resolution)
+	}
+	resolution.MarkupPercent = cloneDecimal(assignment.assignment.ProfitPercent)
+	resolution.MarkupPercentSource = assignment.profitSource
+	if strings.TrimSpace(assignment.assignment.MethodID) == "" {
 		resolution.Warnings = append(resolution.Warnings, "shipping_method_missing")
 		return finishResolution(resolution)
 	}
 
 	resolution.MethodID = strings.TrimSpace(assignment.assignment.MethodID)
-	resolution.MarkupPercent = cloneDecimal(assignment.assignment.ProfitPercent)
-	resolution.MarkupPercentSource = assignment.profitSource
 	method, exists := catalog.methods[resolution.MethodID]
 	if !exists {
 		resolution.Warnings = append(resolution.Warnings, "shipping_method_unknown")
@@ -964,14 +968,17 @@ func (p *httpProvider) fetchCatalog(ctx context.Context) (*catalogSnapshot, erro
 		warnings = append(warnings, "pricing_fx_contract_conflict")
 		fxContractCompatible = false
 	}
-	if !schemaCompatible || !revisionCompatible || !formulaCompatible || !localIsIRT || !validPositive(irtPerCNY) || !fxContractCompatible {
+	baseContractCompatible := schemaCompatible && revisionCompatible && formulaCompatible && localIsIRT
+	if !baseContractCompatible || !validPositive(irtPerCNY) || !fxContractCompatible {
 		irtPerCNY = nil
 	}
 	var roundingDigits *int
 	if pricingNulls["rounding_digits"] {
 		warnings = append(warnings, "price_rounding_digits_explicit_null")
-	} else if !schemaCompatible || !revisionCompatible || !formulaCompatible || !localIsIRT {
-		// Withhold rounding provenance when the catalog contract is invalid.
+	} else if !baseContractCompatible {
+		// Withhold shared calculation provenance when the catalog document
+		// itself is incompatible. The IRR partner path remains independent of
+		// the optional CNY FX input but not of the catalog contract.
 	} else if wire.Pricing.RoundingDigits == nil {
 		digits := MinimumRoundDigits
 		roundingDigits = &digits
