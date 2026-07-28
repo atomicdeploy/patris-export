@@ -910,6 +910,7 @@ func (p *httpProvider) fetchCatalog(ctx context.Context) (*catalogSnapshot, erro
 		Pricing struct {
 			FormulaID      string `json:"formula_id"`
 			RoundingDigits *int   `json:"rounding_digits"`
+			RoundingMode   string `json:"rounding_mode"`
 		} `json:"pricing"`
 		Methods []Method `json:"shipping_methods"`
 	}
@@ -955,6 +956,11 @@ func (p *httpProvider) fetchCatalog(ctx context.Context) (*catalogSnapshot, erro
 	if !formulaCompatible {
 		warnings = append(warnings, "pricing_formula_incompatible")
 	}
+	roundingMode := strings.TrimSpace(wire.Pricing.RoundingMode)
+	roundingModeCompatible := roundingMode == "" || roundingMode == RoundingModeHalfUp
+	if !roundingModeCompatible {
+		warnings = append(warnings, "price_rounding_mode_invalid")
+	}
 	localIsIRT := strings.EqualFold(strings.TrimSpace(wire.Currency.Local), "IRT")
 	if !localIsIRT {
 		warnings = append(warnings, "pricing_local_currency_not_irt")
@@ -975,7 +981,7 @@ func (p *httpProvider) fetchCatalog(ctx context.Context) (*catalogSnapshot, erro
 	var roundingDigits *int
 	if pricingNulls["rounding_digits"] {
 		warnings = append(warnings, "price_rounding_digits_explicit_null")
-	} else if !baseContractCompatible {
+	} else if !baseContractCompatible || !roundingModeCompatible {
 		// Withhold shared calculation provenance when the catalog document
 		// itself is incompatible. The IRR partner path remains independent of
 		// the optional CNY FX input but not of the catalog contract.
