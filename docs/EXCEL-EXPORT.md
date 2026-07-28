@@ -33,19 +33,25 @@ equivalents), rather than being serialized into one object cell.
 - `formula` writes a recalculating Excel formula in each final-price cell:
 
 ```text
-shipping_irt = IF(shipping_price_per_kg_currency="CNY",
-  weight_grams/1000*shipping_price_per_kg*irt_per_cny,
-  weight_grams/1000*shipping_price_per_kg/10)
-ROUND((foreign_price*irt_per_cny + shipping_irt)*(1+markup_percent/100),0)
+IF price_source_kind="foreign_price" AND price_source_currency="CNY":
+  shipping_irt = IF(shipping_price_per_kg_currency="CNY",
+    weight_grams/1000*shipping_price_per_kg*irt_per_cny,
+    weight_grams/1000*shipping_price_per_kg/10)
+  unrounded = (price_source_amount*irt_per_cny + shipping_irt)
+    * (1+markup_percent/100)
+ELSE IF price_source_kind="partner_price" AND price_source_currency="IRR":
+  unrounded = (price_source_amount/10)*(1+markup_percent/100)
+
+ROUND(unrounded,-price_rounding_digits)
 ```
 
-The generated formula uses `COUNT` plus an exact currency-token guard and
-returns a blank when any numeric input is missing/non-numeric or the shipping
-currency is not uppercase `CNY` or `IRR`. CNY freight is converted through the
-IRT/CNY rate; IRR freight is divided by 10. The workbook applies markup and
-rounds once, at the final whole-IRT result. Excel is instructed to perform a
-full recalculation on open and save. Formula and shipping/profit columns only
-exist when the active integration produced the required amount/currency pair.
+The generated formula uses `COUNT`, exact source-kind/currency guards, and
+returns a blank when a required input is missing or invalid. CNY freight is
+converted through the IRT/CNY rate; IRR freight is divided by 10. Freight is
+never applied to the partner-price path. The workbook applies markup and rounds
+once, at the configured trailing-digit amount. Excel is instructed to perform
+a full recalculation on open and save. Formula and pricing columns only exist
+when the active integration produced the current source and provenance fields.
 
 ## CLI
 

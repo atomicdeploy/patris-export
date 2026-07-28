@@ -1159,7 +1159,7 @@ func TestHTTPProviderWithholdsFXForIncompatibleCatalogContracts(t *testing.T) {
 
 			provider := newHTTPProvider(DigitalogicConfig{BaseURL: server.URL}, server.Client(), time.Now)
 			resolution := provider.Resolve(context.Background(), "A")
-			if resolution.IRTPerCNY != nil || !contains(resolution.Warnings, test.expectedWarning) || !contains(resolution.Warnings, "fx_rate_missing") {
+			if resolution.IRTPerCNY != nil || resolution.RoundingDigits != nil || !contains(resolution.Warnings, test.expectedWarning) || !contains(resolution.Warnings, "fx_rate_missing") {
 				t.Fatalf("incompatible catalog was allowed to price: %+v", resolution)
 			}
 			if resolution.ShippingPricePerKg == nil || resolution.ShippingPricePerKgCurrency != CurrencyCNY || resolution.MarkupPercent == nil {
@@ -1192,6 +1192,9 @@ func TestHTTPProviderRequiresConsistentNonNullCNYToIRT(t *testing.T) {
 			resolution := newHTTPProvider(DigitalogicConfig{BaseURL: server.URL}, server.Client(), time.Now).Resolve(context.Background(), "A")
 			if resolution.IRTPerCNY != nil || !contains(resolution.Warnings, "fx_rate_missing") {
 				t.Fatalf("invalid FX contract was used: %+v", resolution)
+			}
+			if resolution.RoundingDigits == nil || *resolution.RoundingDigits != 0 {
+				t.Fatalf("valid base catalog lost partner-price rounding when only FX was invalid: %+v", resolution)
 			}
 			if name == "missing" && !contains(resolution.Warnings, "pricing_cny_to_irt_missing_or_invalid") {
 				t.Fatalf("missing CNY/IRT warning: %+v", resolution)
