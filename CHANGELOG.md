@@ -9,6 +9,12 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Added
 
+- A complete OpenAPI and AsyncAPI reference now classifies every HTTP,
+  viewer/static, diagnostic, administration, file-transfer, and WebSocket
+  route; documents requests, responses, headers, errors, availability, and
+  security boundaries; validates source-route parity and examples in CI; and
+  builds deterministic public and internal offline documentation ZIPs ready
+  for external tools, AI consumers, and a future public Pages site.
 - Canonical pricing now exposes the first `Sharh1` slot independently as
   `partner_price_source`, supports the `domestic` / `خرید داخلی` route with an
   explicit zero IRR/kg rate, and provides a default-off
@@ -23,6 +29,11 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Fixed
 
+- Browser configuration, HTTP diagnostics, WebSocket snapshots, outbound update
+  metadata, and watcher logs now strip credential-bearing URL userinfo/query/
+  fragments; browser saves preserve protected originals, command delivery
+  arguments remain server-side, and serialized process command lines are blank
+  so tokens cannot leak through the documentation-backed API surface.
 - `FOROSH` is no longer conflated with Patris' partner price. The producer reads
   partner price from the first `Sharh1` slot while retaining `FOROSH` as the
   separate sale-price fact.

@@ -1,0 +1,113 @@
+name: API Documentation
+
+on:
+  workflow_call:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: api-docs-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate-and-package:
+    name: Validate and package API reference
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v7.0.0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v7.0.0
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: docs/api/package-lock.json
+
+      - name: Install locked documentation dependencies
+        run: npm --prefix docs/api ci
+
+      - name: Audit documentation dependencies
+        run: npm --prefix docs/api audit --audit-level=high
+
+      - name: Lint OpenAPI and AsyncAPI contracts
+        run: npm --prefix docs/api run lint
+
+      - name: Verify source route and contract parity
+        run: npm --prefix docs/api run parity
+
+      - name: Test contracts, examples, and packaging
+        run: npm --prefix docs/api test
+
+      - name: Build offline public and internal references
+        run: npm --prefix docs/api run build
+
+      - name: Verify deterministic documentation output
+        run: npm --prefix docs/api run check:determinism
+
+      - name: Verify offline archives and Pages-ready public site
+        shell: bash
+        run: |
+          set -euo pipefail
+          dist="docs/api/dist"
+          public_zip="$dist/patris-export-api-docs-public.zip"
+          internal_zip="$dist/patris-export-api-docs-internal.zip"
+          manifest="$dist/SHA256SUMS"
+
+          for required in \
+            "$public_zip" \
+            "$internal_zip" \
+            "$manifest" \
+            docs/api/build/public/index.html \
+            docs/api/build/internal/index.html
+          do
+            test -f "$required" || {
+              echo "API documentation build is missing $required." >&2
+              exit 1
+            }
+          done
+
+          (
+            cd "$dist"
+            sha256sum -c SHA256SUMS
+            unzip -t "$(basename "$public_zip")"
+            unzip -t "$(basename "$internal_zip")"
+          )
+
+          stage="$RUNNER_TEMP/patris-export-api-docs-public"
+          mkdir -p "$stage"
+          cp "$public_zip" "$stage/"
+          (
+            cd "$stage"
+            sha256sum "$(basename "$public_zip")" > SHA256SUMS
+          )
+
+          echo "The complete internal reference was validated in this job and is intentionally not uploaded from the public repository."
+
+      - name: Resolve artifact names
+        id: artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          short_sha="${GITHUB_SHA:0:12}"
+          {
+            echo "public=patris-export-api-docs-public-$short_sha"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Upload public offline API reference
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: ${{ steps.artifact.outputs.public }}
+          path: ${{ runner.temp }}/patris-export-api-docs-public/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 90

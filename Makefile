@@ -1,8 +1,10 @@
-.PHONY: build build-linux build-windows build-all build-lib build-lib-linux build-lib-windows clean test test-delivery-examples test-js run install install-linux uninstall-linux help deps build-web assets variant-manifest alm-current-guard alm-linux-guard
+.PHONY: build build-linux build-windows build-all build-lib build-lib-linux build-lib-windows clean test test-delivery-examples test-js run install install-linux uninstall-linux help deps build-web assets variant-manifest alm-current-guard alm-linux-guard docs-install docs-lint docs-parity docs-test docs-build docs-determinism docs-verify docs-package
 
 # Binary names
 BINARY_NAME=patris-export
 BUILD_DIR=build
+DOCS_API_DIR=docs/api
+NPM?=npm
 
 # Version information. pkg/version is the canonical source so patch releases do
 # not leave the Makefile build path reporting an older version.
@@ -63,6 +65,31 @@ build-web: ## Build the web frontend
 	@echo "🌐 Building web frontend..."
 	@cd web && npm ci --silent && npm run build
 	@echo "✅ Web frontend built"
+
+docs-install: ## Install the locked API documentation toolchain
+	$(NPM) --prefix $(DOCS_API_DIR) ci
+
+docs-lint: ## Lint the OpenAPI and AsyncAPI contracts
+	$(NPM) --prefix $(DOCS_API_DIR) run lint
+
+docs-parity: ## Verify registered server routes match the API contracts
+	$(NPM) --prefix $(DOCS_API_DIR) run parity
+
+docs-test: ## Test API documentation examples and packaging helpers
+	$(NPM) --prefix $(DOCS_API_DIR) test
+
+docs-build: ## Build public and internal offline API references
+	$(NPM) --prefix $(DOCS_API_DIR) run build
+
+docs-determinism: ## Rebuild and prove deterministic API documentation archives
+	$(NPM) --prefix $(DOCS_API_DIR) run check:determinism
+
+docs-verify: ## Run every API documentation quality gate sequentially
+	$(NPM) --prefix $(DOCS_API_DIR) run verify
+
+docs-package: docs-verify ## Build verified offline API documentation ZIPs
+	@test -f $(DOCS_API_DIR)/dist/patris-export-api-docs-public.zip
+	@test -f $(DOCS_API_DIR)/dist/patris-export-api-docs-internal.zip
 
 variant-manifest:
 	@mkdir -p $(BUILD_DIR)

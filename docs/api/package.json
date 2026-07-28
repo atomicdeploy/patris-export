@@ -1,0 +1,31 @@
+{
+  "name": "@atomicdeploy/patris-export-api-docs",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Reproducible validation and offline packaging for the Patris Export HTTP and real-time API reference.",
+  "license": "MIT",
+  "engines": {
+    "node": ">=22.12.0",
+    "npm": ">=10"
+  },
+  "scripts": {
+    "lint": "node ../../scripts/docs/api-docs.cjs lint",
+    "parity": "node ../../scripts/docs/api-docs.cjs parity",
+    "bundle": "node ../../scripts/docs/api-docs.cjs bundle",
+    "build": "node ../../scripts/docs/api-docs.cjs build",
+    "check:determinism": "node ../../scripts/docs/api-docs.cjs check-determinism",
+    "test": "node --test ../../scripts/docs/api-docs.test.cjs",
+    "verify": "npm run lint && npm run parity && npm test && npm run build && npm run check:determinism"
+  },
+  "devDependencies": {
+    "@asyncapi/parser": "3.6.0",
+    "@redocly/cli": "2.41.0",
+    "@scalar/api-reference": "1.63.0",
+    "archiver": "8.0.0",
+    "yaml": "2.9.0"
+  },
+  "overrides": {
+    "brace-expansion": "5.0.8",
+    "minimatch": "10.2.6"
+  }
+}

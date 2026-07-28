@@ -398,8 +398,10 @@ const ws = new WebSocket('ws://localhost:8080/ws');
 ws.onmessage = (event) => {
     const data = JSON.parse(event.data);
     console.log('Received update:', data);
-    console.log('Record count:', data.count);
-    console.log('Records:', data.records);
+    console.log('Record count:', data.total_count);
+    console.log('Added:', data.added ?? []);
+    console.log('Modified:', data.modified ?? []);
+    console.log('Deleted:', data.deleted ?? []);
 };
 ```
 
@@ -557,138 +559,45 @@ watched file.
 
 ## 🔧 API Reference
 
-### REST Endpoints
-
-#### `GET /`
-Web interface with API documentation.
-
-#### `GET /api/records`
-Returns all database records in JSON format by default. CSV and XLSX are
-available through content negotiation, a query parameter, or a file-style
-route:
+The complete API reference is maintained as
+[OpenAPI and AsyncAPI contracts](docs/api/README.md). It covers every HTTP,
+viewer/static, diagnostic, administration, file-transfer, and WebSocket route,
+including visibility, availability gates, authentication, headers, bodies,
+status responses, side effects, and validated examples. The build produces
+separate offline public and internal ZIPs, bundled machine-readable contracts,
+and a static public site that is ready for a future GitHub Pages deployment.
 
 ```bash
-curl http://localhost:8080/api/records
-curl http://localhost:8080/api/records?format=csv -o kala.csv
-curl http://localhost:8080/api/records.csv -o kala.csv
-curl -H "Accept: text/csv" http://localhost:8080/api/records -o kala.csv
-curl 'http://localhost:8080/api/records.xlsx?download=1' -o kala.xlsx
+make docs-install
+make docs-verify
+make docs-package
 ```
 
-Add `download=1` to ask the API for an attachment filename, for example
-`/api/records.csv?download=1`. The viewer's Excel action calls this same Go
-endpoint rather than rebuilding the workbook in JavaScript. XLSX workbooks keep
-Code as text, preserve safe numeric values as numeric cells, split
-`warehouse_stock` into one column per warehouse, freeze and filter the header,
-and include an allowlisted Metadata sheet with schema, formula, export mode,
-source revision, generated time, and warnings. Headers follow the active UI
-language by default. Use `language=en|fa`, `mode=precalculated|formula`,
-`zebra=0|1`, and `rtl=0|1` on the HTTP route, or the equivalent CLI/config
-settings described in [Excel export](docs/EXCEL-EXPORT.md).
+Generated request samples are available from the same contract for curl,
+HTTPie, JavaScript/Node.js, Go, PHP, Python, C#, and PowerShell clients, avoiding
+parallel handwritten API definitions.
 
-The viewer data grid keeps selection keyed by `Code` across sorting and
-filtering, exposes accessible row and header command menus through right-click,
-keyboard, and ellipsis actions, and supports pointer or keyboard column resizing
-with a full-height guide. Warehouse stock remains a two-row group with one
-independently selectable column per warehouse. Sticky headers and the optional
-sticky first data column keep identifiers visible while scrolling. Language,
-canonical-key conditional row-icon rules, fallback icon metadata, column widths,
-column order, per-warehouse visibility, and the independent row-coloring toggle
-are persisted under `ui` through the normal Patris Export config API rather
-than in a separate table-settings file. Existing browser-only column choices
-are migrated once; `localStorage` remains only a cache and offline fallback.
+### Developer quick start
 
-For a configured canonical dataset, `GET /api/product-sync` returns the full
-current `patris.product-sync` envelope. Missing source/reference values are
-omitted; `null` is reserved for an explicitly supplied upstream null.
-`/api/records` deliberately remains the Code-keyed product-row collection used
-by the viewer and embedded records API. `GET
-/api/categories` returns the Code-keyed hierarchy, and the viewer reuses the
-same table controls through its Products/Categories switch. Products include
-their explicit `category_code`; reserved accounting and service rows appear in
-`excluded_codes` and are never exposed as products.
+Start the service, then use the generated portal for exact route discovery,
+headers, request/response schemas, errors, WebSocket messages, and executable
+client samples:
 
-`GET /api/recent-sales` is a separate authenticated, read-only product-level
-aggregate feed. It requires explicit RFC3339 `from` and `to` bounds, bounded
-paging, a dedicated bearer credential stored only in an environment variable,
-and a separately configured supported sales source. It returns only product
-code, sold quantity, sale frequency, last-sold time, and stable
-source/window/page metadata. It explicitly refuses `kala.db` and the primary
-product database. See [Recent-sales aggregate API](docs/RECENT-SALES-API.md).
-
-The canonical macro workbook uses the loopback-only `POST
-/api/excel/pricing-sync/{session,state,preview,apply}` companion to read,
-preview, and explicitly apply global pricing settings without storing the
-remote credential. Patris injects the protected product-sync credential and
-exact canonical source identity, then regenerates, delivers, and verifies the
-canonical product contract after apply. See [Excel pricing-settings
-companion](docs/EXCEL-PRICING-SYNC.md).
-
-`POST /api/refresh` forces the same source snapshot refresh used by the Web UI,
-WebSocket, IPC, and embedded-library `refresh` command. This gives desktop and
-remote clients one consistent manual-refresh operation.
-
-**JSON response:**
-```json
-{
-  "100": {
-    "Name": "Group",
-    "ALLANBAR": 0
-  },
-  "100200300": {
-    "Name": "Item",
-    "ALLANBAR": 12
-  }
-}
+```bash
+patris-export serve kala.db --addr 127.0.0.1:8080
+make docs-install
+make docs-verify
 ```
 
-**CSV response:**
-```csv
-Code,ALLANBAR,Name
-100,0,Group
-100200300,12,Item
-```
+Open `docs/api/build/public/index.html` for the externally distributable
+reference or `docs/api/build/internal/index.html` for the complete
+operator/private reference. The contracts are the canonical protocol
+definition; this README deliberately does not maintain a second partial route
+catalog.
 
-#### `GET /api/info`
-Returns database schema information.
-
-**Response:**
-```json
-{
-  "success": true,
-  "file": "kala.db",
-  "num_records": 100,
-  "num_fields": 10,
-  "fields": [...]
-}
-```
-
-#### `GET /api/source/manifest`
-Returns metadata for the currently active source file.
-
-#### `GET /api/source/file`
-Downloads the currently active source file with HEAD and range support.
-
-### WebSocket
-
-#### `ws://localhost:8080/ws`
-Connect to receive real-time database updates.
-
-**Message format:**
-```json
-{
-  "type": "update",
-  "timestamp": "2025-12-13T23:45:19Z",
-  "count": 100,
-  "records": [...]
-}
-```
-
-Clients can request an immediate backend reload without waiting for the next file watcher event or URL polling interval:
-
-```json
-{"type":"refresh"}
-```
+Longer workflow guides remain available for [Excel export](docs/EXCEL-EXPORT.md),
+[recent-sales aggregates](docs/RECENT-SALES-API.md), and the
+[Excel pricing companion](docs/EXCEL-PRICING-SYNC.md).
 
 ## 🗺️ TODO
 

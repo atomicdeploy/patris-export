@@ -1,0 +1,22 @@
+extends:
+  - recommended
+
+rules:
+  no-unresolved-refs: error
+  no-ambiguous-paths: error
+  no-invalid-media-type-examples: error
+  no-invalid-parameter-examples: error
+  no-invalid-schema-examples: error
+  operation-operationId: error
+  operation-summary: error
+  operation-description: error
+  operation-2xx-response: error
+  operation-4xx-response: warn
+  operation-tag-defined: error
+  security-defined: error
+  struct: error
+  tags-alphabetical: off
+
+apis:
+  patris-export@v1:
+    root: ./openapi.yaml

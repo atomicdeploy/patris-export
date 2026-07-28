@@ -61,3 +61,5 @@ web/dist/
 !web/package.json
 !web/package-lock.json
 !integrations/javascript/package.json
+!docs/api/package.json
+!docs/api/package-lock.json
