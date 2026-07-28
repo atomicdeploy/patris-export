@@ -179,9 +179,12 @@ function structurallyMatchesDynamicPriceFormula(formula) {
     'SYNCDATA,7,FALSE)',
     'SYNCDATA,10,FALSE)',
     'SYNCDATA,20,FALSE)',
-    "'تنظیمات'!R15C2",
   ];
-  return requiredTokens.every((token) => normalized.includes(token));
+  const settingsSheet = '\u062A\u0646\u0638\u06CC\u0645\u0627\u062A';
+  const hasRoundingReference = normalized.includes(`${settingsSheet}!R15C2`)
+    || normalized.includes(`'${settingsSheet}'!R15C2`);
+  return hasRoundingReference
+    && requiredTokens.every((token) => normalized.includes(token));
 }
 
 function isSHA256Revision(value) {
