@@ -68,7 +68,7 @@ func TestSourceIdentityMatchesCanonicalCrossPlatformNaming(t *testing.T) {
 }
 
 func TestLandedPriceExactWorkbookFixture(t *testing.T) {
-	got, err := LandedPrice("240", "120", pricingcatalog.CurrencyCNY, "24.5", "30", "29000")
+	got, err := LandedPrice("240", "120", pricingcatalog.CurrencyCNY, "24.5", "30", "29000", 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -78,11 +78,11 @@ func TestLandedPriceExactWorkbookFixture(t *testing.T) {
 }
 
 func TestLandedPriceTreatsEquivalentCNYAndIRRFreightEqually(t *testing.T) {
-	cny, err := LandedPrice("1000", "100", pricingcatalog.CurrencyCNY, "10", "30", "30000")
+	cny, err := LandedPrice("1000", "100", pricingcatalog.CurrencyCNY, "10", "30", "30000", 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	irr, err := LandedPrice("1000", "30000000", pricingcatalog.CurrencyIRR, "10", "30", "30000")
+	irr, err := LandedPrice("1000", "30000000", pricingcatalog.CurrencyIRR, "10", "30", "30000", 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -130,20 +130,20 @@ func TestSharh1ExtraNumericSlotsAreAmbiguousAndNull(t *testing.T) {
 }
 
 func TestLandedPriceRoundsOnceHalfUpAndRejectsInvalidInput(t *testing.T) {
-	got, err := LandedPrice("0", "0", pricingcatalog.CurrencyCNY, "0.005", "0", "100")
+	got, err := LandedPrice("0", "0", pricingcatalog.CurrencyCNY, "0.005", "0", "100", 0)
 	if err != nil || got != 1 {
 		t.Fatalf("half-up result = %d, %v; want 1", got, err)
 	}
 	for _, invalid := range []string{"", "NaN", "Inf", "-1", "1e999999"} {
-		if _, err := LandedPrice(invalid, "1", pricingcatalog.CurrencyCNY, "1", "1", "1"); err == nil {
+		if _, err := LandedPrice(invalid, "1", pricingcatalog.CurrencyCNY, "1", "1", "1", 0); err == nil {
 			t.Fatalf("invalid decimal %q was accepted", invalid)
 		}
 	}
-	if _, err := LandedPrice("1", "1", "USD", "1", "1", "1"); err == nil {
+	if _, err := LandedPrice("1", "1", "USD", "1", "1", "1", 0); err == nil {
 		t.Fatal("unsupported shipping currency was accepted")
 	}
 	for _, currency := range []string{" CNY", "CNY ", "\tIRR"} {
-		if _, err := LandedPrice("1", "1", currency, "1", "1", "1"); err == nil {
+		if _, err := LandedPrice("1", "1", currency, "1", "1", "1", 0); err == nil {
 			t.Fatalf("non-lexical shipping currency %q was accepted", currency)
 		}
 	}

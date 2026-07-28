@@ -29,11 +29,13 @@ integration. Delivery never activates pricing and never synthesizes shipping
 data. Pricing/shipping fields are eligible only when an integration provider is
 active and supplied the value. A standalone run without an active provider
 must not gain `shipping_method_id`, `shipping_price_per_kg`,
-`shipping_price_per_kg_currency`, markup, FX, or calculated-price keys merely
-because delivery is enabled. When present, the two shipping-price fields are a
-required pair and currency is exactly `CNY` or `IRR`. The upstream canonical
-pipeline converts CNY freight through the CNY-to-IRT rate and converts IRR to
-IRT by dividing by 10; adapters preserve the resulting envelope unchanged.
+`shipping_price_per_kg_currency`, markup, FX, selected price source, rounding,
+or calculated-price keys merely because delivery is enabled. When present, the
+two shipping-price fields are a required pair and currency is exactly `CNY` or
+`IRR`. Selected price amount/currency/kind are an all-or-omitted trio. The
+upstream canonical pipeline converts CNY freight through the CNY-to-IRT rate
+and converts IRR to IRT by dividing by 10; adapters preserve the resulting
+envelope unchanged.
 
 Sparse payloads have two distinct states:
 
@@ -43,10 +45,7 @@ Sparse payloads have two distinct states:
 The adapters validate identity fields, but forward the original JSON text
 instead of serializing parsed JavaScript numbers. This preserves exact int64
 and decimal tokens, explicit nulls, and absent fields. Automated adapter tests
-cover all three wrappers. Upgrade older binaries that still emit the
-legacy always-present pricing fields to a build containing the sparse export
-work tracked by [issue #171](https://github.com/atomicdeploy/patris-export/issues/171)
-before using these recipes in production.
+cover all three wrappers.
 
 ## Secrets and request identity
 

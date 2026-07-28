@@ -388,7 +388,7 @@ func validateProductIdentity(product Product, index int) error {
 			return fmt.Errorf("%s.warehouse_stock contains an invalid null-valued key", path)
 		}
 	}
-	if err := validatePositiveDecimal(path+".foreign_price", product.ForeignPrice); err != nil {
+	if err := validateNonNegativeDecimal(path+".foreign_price", product.ForeignPrice); err != nil {
 		return err
 	}
 	if err := validatePositiveDecimal(path+".weight_grams", product.WeightGrams); err != nil {
@@ -406,11 +406,59 @@ func validateProductIdentity(product Product, index int) error {
 			return fmt.Errorf("%s.markup_percent must be a non-negative decimal", path)
 		}
 	}
+	priceAmountPresent := product.PriceSourceAmount != nil || product.presence("price_source_amount") != fieldAbsent
+	priceCurrencyPresent := product.PriceSourceCurrency != "" || product.presence("price_source_currency") != fieldAbsent
+	priceKindPresent := product.PriceSourceKind != "" || product.presence("price_source_kind") != fieldAbsent
+	if priceAmountPresent != priceCurrencyPresent || priceAmountPresent != priceKindPresent {
+		return fmt.Errorf("%s price_source_amount, price_source_currency, and price_source_kind must be present together", path)
+	}
+	if priceAmountPresent {
+		for _, field := range []string{"price_source_amount", "price_source_currency", "price_source_kind"} {
+			if product.presence(field) == fieldNull {
+				return fmt.Errorf("%s.%s must be omitted rather than null when no usable source is selected", path, field)
+			}
+		}
+		if err := validatePositiveDecimal(path+".price_source_amount", product.PriceSourceAmount); err != nil {
+			return err
+		}
+		switch product.PriceSourceKind {
+		case PriceSourceKindForeign:
+			if product.PriceSourceCurrency != pricingcatalog.CurrencyCNY {
+				return fmt.Errorf("%s foreign_price source must use CNY", path)
+			}
+		case PriceSourceKindPartner:
+			if product.PriceSourceCurrency != pricingcatalog.CurrencyIRR {
+				return fmt.Errorf("%s partner_price source must use IRR", path)
+			}
+		default:
+			return fmt.Errorf("%s.price_source_kind must be foreign_price or partner_price", path)
+		}
+	}
+
+	roundingDigitsPresent := product.PriceRoundingDigits != nil || product.presence("price_rounding_digits") != fieldAbsent
+	roundingModePresent := product.PriceRoundingMode != "" || product.presence("price_rounding_mode") != fieldAbsent
+	if product.presence("price_rounding_digits") == fieldNull {
+		if roundingModePresent {
+			return fmt.Errorf("%s.price_rounding_mode must be omitted when price_rounding_digits is null", path)
+		}
+	} else if roundingDigitsPresent {
+		if product.PriceRoundingDigits == nil || *product.PriceRoundingDigits < pricingcatalog.MinimumRoundDigits || *product.PriceRoundingDigits > pricingcatalog.MaximumRoundDigits {
+			return fmt.Errorf("%s.price_rounding_digits must be an integer from %d through %d or explicit null", path, pricingcatalog.MinimumRoundDigits, pricingcatalog.MaximumRoundDigits)
+		}
+		if !roundingModePresent || product.PriceRoundingMode != pricingcatalog.RoundingModeHalfUp || product.presence("price_rounding_mode") == fieldNull {
+			return fmt.Errorf("%s.price_rounding_mode must be nearest_half_up when rounding digits are present", path)
+		}
+	} else if roundingModePresent {
+		return fmt.Errorf("%s.price_rounding_mode requires price_rounding_digits", path)
+	}
 	if product.presence("final_price") == fieldNull {
 		return fmt.Errorf("%s.final_price must be omitted when unavailable, not null", path)
 	}
 	if product.FinalPrice != nil && *product.FinalPrice < 0 {
 		return fmt.Errorf("%s.final_price must be a non-negative integer", path)
+	}
+	if product.FinalPrice != nil && (!priceAmountPresent || product.PriceRoundingDigits == nil || product.PriceRoundingMode != pricingcatalog.RoundingModeHalfUp) {
+		return fmt.Errorf("%s.final_price requires a usable selected source and rounding provenance", path)
 	}
 	if !validSHA256Identity(product.RecordHash) {
 		return fmt.Errorf("%s.record_hash must be a lowercase sha256 identity", path)
@@ -503,6 +551,17 @@ func validatePositiveDecimal(path string, value *pricingcatalog.Decimal) error {
 	decimal, ok := value.Rat()
 	if !ok || decimal.Sign() <= 0 {
 		return fmt.Errorf("%s must be a positive decimal", path)
+	}
+	return nil
+}
+
+func validateNonNegativeDecimal(path string, value *pricingcatalog.Decimal) error {
+	if value == nil {
+		return nil
+	}
+	decimal, ok := value.Rat()
+	if !ok || decimal.Sign() < 0 {
+		return fmt.Errorf("%s must be a non-negative decimal", path)
 	}
 	return nil
 }

@@ -12,6 +12,7 @@
       "static": {
         "revision": "testdata-r1",
         "cny_to_irt": 29000,
+        "rounding_digits": 0,
         "currency_effective_date": "2026-07-16",
         "selected_warehouses": ["1"],
         "shipping_methods": [
