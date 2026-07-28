@@ -41,17 +41,24 @@ IF price_source_kind="foreign_price" AND price_source_currency="CNY":
     * (1+markup_percent/100)
 ELSE IF price_source_kind="partner_price" AND price_source_currency="IRR":
   unrounded = (price_source_amount/10)*(1+markup_percent/100)
+ELSE IF price_source_kind="sale_price_direct"
+  AND price_source_currency="IRR"
+  AND MOD(price_source_amount,10)=0:
+  final_price = price_source_amount/10 exactly
 
-ROUND(unrounded,-price_rounding_digits)
+For foreign_price and partner_price:
+  ROUND(unrounded,-price_rounding_digits)
 ```
 
 The generated formula uses `COUNT`, exact source-kind/currency guards, and
 returns a blank when a required input is missing or invalid. CNY freight is
 converted through the IRT/CNY rate; IRR freight is divided by 10. Freight is
-never applied to the partner-price path. The workbook applies markup and rounds
-once, at the configured trailing-digit amount. Excel is instructed to perform
-a full recalculation on open and save. Formula and pricing columns only exist
-when the active integration produced the current source and provenance fields.
+never applied to the partner-price or direct-sale paths. The workbook applies
+markup and rounds once for calculated foreign/partner sources. The explicitly
+enabled direct-sale route applies neither and accepts only an exact whole-IRT
+conversion. Excel is instructed to perform a full recalculation on open and
+save. Formula and pricing columns only exist when the active integration
+produced the current source and provenance fields.
 
 ## CLI
 
@@ -161,9 +168,10 @@ ROUND(
 )
 ```
 
-Missing weight makes only the freight component zero. Missing price, profit,
-required exchange rate, or an unsupported/absent currency fails closed to a
-blank result. `IFERROR` guards lookup failures, so the workbooks do not expose
+Missing or non-positive weight makes the foreign landed-cost route unavailable
+instead of silently treating freight as free. Missing price, profit, required
+exchange rate, or an unsupported/absent currency also fails closed to a blank
+result. `IFERROR` guards lookup failures, so the workbooks do not expose
 `#N/A` or `#VALUE!`.
 
 After an approved settings apply, the companion invalidates its pricing cache,

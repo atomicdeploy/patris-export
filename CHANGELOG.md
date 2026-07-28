@@ -9,10 +9,23 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Added
 
+- Canonical pricing now exposes the first `Sharh1` slot independently as
+  `partner_price_source`, supports the `domestic` / `خرید داخلی` route with an
+  explicit zero IRR/kg rate, and provides a default-off
+  `use_sale_price_direct_fallback` policy for exact unmodified `FOROSH` prices.
+
 ### Changed
+
+- Pricing now falls through only after testing a complete route: foreign CNY
+  requires positive weight and an enabled non-domestic freight assignment;
+  partner price adds margin without freight and forces domestic shipping; the
+  optional direct sale route applies neither margin nor rounding.
 
 ### Fixed
 
+- `FOROSH` is no longer conflated with Patris' partner price. The producer reads
+  partner price from the first `Sharh1` slot while retaining `FOROSH` as the
+  separate sale-price fact.
 ## [1.3.1] - 2026-07-27
 
 ### Fixed

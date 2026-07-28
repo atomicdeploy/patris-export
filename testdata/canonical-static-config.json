@@ -9,6 +9,7 @@
     },
     "pricing": {
       "mode": "static",
+      "use_sale_price_direct_fallback": false,
       "static": {
         "revision": "testdata-r1",
         "cny_to_irt": 29000,

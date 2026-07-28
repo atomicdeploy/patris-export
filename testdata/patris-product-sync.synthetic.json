@@ -1,13 +1,13 @@
 {
   "schema": "patris.product-sync",
   "event_type": "snapshot",
-  "event_id": "sha256:13a262245ced638f561dc39f586dfb49033f3d64385b662f76a69abf2a075c8d",
+  "event_id": "sha256:3f99aa284d4ff116de864f49d813bebdeb51f41e3669c57c035b9deca3e659fd",
   "local_currency": "IRT",
   "formula_id": "landed_price",
   "source": {
     "id": "synthetic-fixture",
     "dataset": "synthetic-kala.db",
-    "revision": "sha256:7a534825d2fa7de1bbc18b336b5e67e5496afa9171d5cbba2f913f7afdde7030"
+    "revision": "sha256:89e83af4bd037b52d820b8fb1358fd95d2d63f9a5ac7af4d46990cc00f36b392"
   },
   "generated_at": "2026-01-02T03:04:05Z",
   "products": [
@@ -22,6 +22,7 @@
       "markup_percent": 30,
       "minimum_stock": 1,
       "name": "Synthetic priced product",
+      "partner_price_source": 1000,
       "price_rounding_digits": 0,
       "price_rounding_mode": "nearest_half_up",
       "price_source_amount": 24.5,
@@ -31,7 +32,7 @@
       "pricing_catalog_status": "static",
       "product_code": "101001001",
       "purchase_price_source": 90000,
-      "record_hash": "sha256:4fc48bcdc6b145dce22b5fca975b99b31b019bf2060aed3b208a331c1a50b931",
+      "record_hash": "sha256:ab5a4f7816603300bbbc5aef9826aa93347ea542b16b57abd7cd940f22cd6c36",
       "sale_price_source": 100000,
       "serial": "SYNTH-PN-001",
       "shipping_method_id": "synthetic-air",
@@ -58,7 +59,7 @@
       "pricing_catalog_revision": "synthetic-catalog",
       "pricing_catalog_status": "static",
       "product_code": "101001002",
-      "record_hash": "sha256:44c64438db17aa9a2af5e3ca44a7acf13b5ed9c10ff29f9267f7c8ebbee28dc5",
+      "record_hash": "sha256:a9b0f28be9b7f884f8c953f75cfbb21055595437d314ff0893e16586a88af39d",
       "serial": "SYNTH-PN-002",
       "total_stock": 0,
       "unit": "unit",
@@ -70,7 +71,7 @@
         "final_price_unavailable",
         "foreign_price_missing",
         "markup_percent_missing",
-        "partner_price_missing",
+        "partner_price_invalid",
         "pricing_assignment_missing",
         "shipping_method_missing",
         "shipping_price_per_kg_currency_missing",
