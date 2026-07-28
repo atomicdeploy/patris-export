@@ -781,6 +781,18 @@ func TestDynamicCalculatorVBASourceGuardsLivePricingBeforeMutation(t *testing.T)
 		wooLinkValuePosition > wooLinkAddPosition {
 		t.Fatal("WooCommerce link text must be written before the optional hyperlink is added")
 	}
+	wooLinkFontAfterAddPosition := strings.Index(
+		wooLinkRowSource[wooLinkAddPosition:],
+		`linkCell.Font.Name = "Yekan Bakh"`,
+	)
+	wooLinkBoldAfterAddPosition := strings.Index(
+		wooLinkRowSource[wooLinkAddPosition:],
+		"linkCell.Font.Bold = True",
+	)
+	if wooLinkFontAfterAddPosition < 0 || wooLinkBoldAfterAddPosition < 0 ||
+		wooLinkFontAfterAddPosition > wooLinkBoldAfterAddPosition {
+		t.Fatal("WooCommerce hyperlink styling must restore Yekan Bakh before emphasis")
+	}
 
 	for _, required := range []string{
 		`Attribute VB_Name = "ProductCatalogSync"`,
@@ -960,6 +972,44 @@ func TestDynamicCalculatorVBASourceGuardsLivePricingBeforeMutation(t *testing.T)
 	for _, required := range []string{"Private Function ParseObject", "Private Function ParseArray", "Duplicate JSON object member"} {
 		if !strings.Contains(string(jsonContent), required) {
 			t.Fatalf("JSON runtime is missing validation: %s", required)
+		}
+	}
+}
+
+func TestDynamicCalculatorVBANormalizesExcelDateSerials(t *testing.T) {
+	path := filepath.Join("..", "..", "docs", "examples", "vba", "ProductCatalogSync.bas")
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := string(content)
+
+	for _, required := range []string{
+		"ValidateProposalDateNormalization",
+		"CanonicalDateText(CDbl(sampleDate)) <> expectedDate",
+		"CanonicalDateValuesEqual(CDbl(sampleDate), expectedDate)",
+		`UpdateProposalDateCell settings.Range("B20"), settings.Range("G20"), _`,
+		`CanonicalDateText(settings.Range("B20").Value2)`,
+		`CanonicalDateText(settings.Range("H16").Value2)`,
+		"proposal.Value2 = remoteText",
+		"baseline.Value2 = remoteText",
+		"UpdateProposalDriftFlags settings, 29500#, 187891#, expectedDate, _",
+		`If BooleanValue(settings.Range("G39").Value2) Or _`,
+		`If Not BooleanValue(settings.Range("G39").Value2) Then`,
+		"RestorePricingStateSnapshot settings, settingsSnapshot",
+	} {
+		if !strings.Contains(source, required) {
+			t.Fatalf("VBA date normalization regression guard is missing: %s", required)
+		}
+	}
+
+	for _, forbidden := range []string{
+		`CanonicalCellText(settings.Range("B20").Value2) <>`,
+		`cnyEffectiveDate = Trim$(CStr(settings.Range("B20").Value2))`,
+		`dateText = Trim$(CStr(settings.Range("B20").Value2))`,
+	} {
+		if strings.Contains(source, forbidden) {
+			t.Fatalf("VBA retains serial-vs-ISO date comparison path: %s", forbidden)
 		}
 	}
 }

@@ -66,6 +66,7 @@ Public Sub ValidateWorkbook()
     Dim syncTable As ListObject
 
     ValidateUnicodeRuntime
+    ValidateProposalDateNormalization
     ValidateProjectionIntegrityGuard
     Set table = PriceSheet().ListObjects(PRODUCTS_TABLE)
     Set syncTable = SyncSheet().ListObjects(SYNC_TABLE)
@@ -474,12 +475,12 @@ Private Function PricingSettingsCanonical() As String
     PricingSettingsCanonical = _
         CanonicalCellText(settings.Range("B18").Value2) & "|" & _
         CanonicalCellText(settings.Range("B19").Value2) & "|" & _
-        CanonicalCellText(settings.Range("B20").Value2) & "|" & _
+        CanonicalDateText(settings.Range("B20").Value2) & "|" & _
         CanonicalCellText(settings.Range("B21").Value2) & "|" & _
         CanonicalCellText(settings.Range("B22").Value2) & "|" & _
         CanonicalCellText(settings.Range("H14").Value2) & "|" & _
         CanonicalCellText(settings.Range("H15").Value2) & "|" & _
-        CanonicalCellText(settings.Range("H16").Value2)
+        CanonicalDateText(settings.Range("H16").Value2)
 End Function
 
 Private Function LoadPatrisContract() As JsonValue
@@ -1144,7 +1145,7 @@ Private Sub ApplyGlobalState(ByVal state As JsonValue)
 
     settings.Range("B10").Value = remoteCNY
     settings.Range("B11").Value = remoteUSD
-    settings.Range("B12").Value = remoteDate
+    settings.Range("B12").Value2 = CanonicalDateText(remoteDate)
     settings.Range("B13").Value = remoteProfit
     settings.Range("B14").Value = remoteShipping
     settings.Range("B15").Value = BlankIfNull( _
@@ -1154,12 +1155,13 @@ Private Sub ApplyGlobalState(ByVal state As JsonValue)
     settings.Range("G15").Value = stale
     settings.Range("H14").Value = shippingCurrency
     settings.Range("H15").Value = shippingRevision
-    settings.Range("H16").Value = remoteUSDDate
-    settings.Range("H17").Value = remoteCNYDate
+    settings.Range("H16").Value2 = CanonicalDateText(remoteUSDDate)
+    settings.Range("H17").Value2 = CanonicalDateText(remoteCNYDate)
 
     UpdateProposalCell settings.Range("B18"), settings.Range("G18"), remoteCNY
     UpdateProposalCell settings.Range("B19"), settings.Range("G19"), remoteUSD
-    UpdateProposalCell settings.Range("B20"), settings.Range("G20"), remoteDate
+    UpdateProposalDateCell settings.Range("B20"), settings.Range("G20"), _
+        remoteDate
     UpdateProposalCell settings.Range("B21"), settings.Range("G21"), remoteProfit
     UpdateProposalCell settings.Range("B22"), settings.Range("G22"), remoteShipping
     UpdateProposalDriftFlags settings, remoteCNY, remoteUSD, remoteDate, _
@@ -1178,6 +1180,23 @@ Private Sub UpdateProposalCell(ByVal proposal As Range, _
         proposal.Value = remoteValue
     End If
     baseline.Value = remoteValue
+End Sub
+
+Private Sub UpdateProposalDateCell(ByVal proposal As Range, _
+                                   ByVal baseline As Range, _
+                                   ByVal remoteValue As Variant)
+    Dim previousBaseline As String
+    Dim proposalText As String
+    Dim remoteText As String
+
+    previousBaseline = CanonicalDateText(baseline.Value2)
+    proposalText = CanonicalDateText(proposal.Value2)
+    remoteText = CanonicalDateText(remoteValue)
+    If Len(CanonicalCellText(proposal.Value2)) = 0 Or _
+       (Len(proposalText) > 0 And proposalText = previousBaseline) Then
+        proposal.Value2 = remoteText
+    End If
+    baseline.Value2 = remoteText
 End Sub
 
 Private Sub UpdateProposalDriftFlags(ByVal settings As Worksheet, _
@@ -1199,8 +1218,8 @@ Private Sub UpdateProposalDriftFlags(ByVal settings As Worksheet, _
         threshold, mismatch, critical
     CompareProposalNumber settings.Range("B22").Value2, remoteShipping, _
         threshold, mismatch, critical
-    If CanonicalCellText(settings.Range("B20").Value2) <> _
-       CanonicalCellText(remoteDate) Then mismatch = True
+    If Not CanonicalDateValuesEqual( _
+        settings.Range("B20").Value2, remoteDate) Then mismatch = True
     settings.Range("G39").Value2 = mismatch
     settings.Range("G40").Value2 = critical
 End Sub
@@ -1645,6 +1664,7 @@ Private Sub ApplyWooLinkRow(ByVal table As ListObject, _
         table.Parent.Hyperlinks.Add _
             Anchor:=linkCell, Address:=permalink, _
             TextToDisplay:=linkText
+        linkCell.Font.Name = "Yekan Bakh"
         linkCell.Font.Bold = True
         Select Case publicationStatus
             Case "publish"
@@ -1665,6 +1685,7 @@ RowFailed:
     End If
     If Not linkCell Is Nothing And Len(linkText) > 0 Then
         linkCell.Value2 = linkText
+        linkCell.Font.Name = "Yekan Bakh"
         linkCell.Font.Bold = True
         linkCell.Font.Color = RGB(164, 40, 40)
     End If
@@ -1755,8 +1776,8 @@ Private Function BuildPricingRequest(ByVal operationName As String, _
     End If
     shippingCurrency = UCase$(Trim$(CStr(settings.Range("H14").Value2)))
     shippingRevision = Trim$(CStr(settings.Range("H15").Value2))
-    usdEffectiveDate = Trim$(CStr(settings.Range("H16").Value2))
-    cnyEffectiveDate = Trim$(CStr(settings.Range("B20").Value2))
+    usdEffectiveDate = CanonicalDateText(settings.Range("H16").Value2)
+    cnyEffectiveDate = CanonicalDateText(settings.Range("B20").Value2)
     ValidatePricingSettings settings, profitPercent, shippingCurrency, _
         shippingRevision, usdEffectiveDate, cnyEffectiveDate
 
@@ -1797,7 +1818,7 @@ Private Sub ValidatePricingSettings(ByVal settings As Worksheet, _
                                     ByVal cnyEffectiveDate As String)
     Dim dateText As String
 
-    dateText = Trim$(CStr(settings.Range("B20").Value2))
+    dateText = CanonicalDateText(settings.Range("B20").Value2)
     If Not IsNumeric(settings.Range("B18").Value2) Then GoTo InvalidSettings
     If CDbl(settings.Range("B18").Value2) <= 0 Then GoTo InvalidSettings
     If Not IsNumeric(settings.Range("B19").Value2) Then GoTo InvalidSettings
@@ -2180,6 +2201,147 @@ Private Function CanonicalCellText(ByVal value As Variant) As String
         CanonicalCellText = Trim$(CStr(value))
     End If
 End Function
+
+Private Function CanonicalDateText(ByVal value As Variant) As String
+    Dim parsedDate As Date
+    Dim normalized As String
+
+    On Error GoTo InvalidDate
+    If IsEmpty(value) Or IsNull(value) Then Exit Function
+    If VarType(value) = vbDate Then
+        parsedDate = CDate(value)
+        CanonicalDateText = ISODateText(parsedDate)
+        Exit Function
+    End If
+    If VarType(value) <> vbString And IsNumeric(value) Then
+        parsedDate = CDate(CDbl(value))
+        CanonicalDateText = ISODateText(parsedDate)
+        Exit Function
+    End If
+
+    normalized = Trim$(CStr(value))
+    If Len(normalized) <> 10 Or Mid$(normalized, 5, 1) <> "-" Or _
+       Mid$(normalized, 8, 1) <> "-" Then GoTo InvalidDate
+    parsedDate = DateSerial( _
+        CLng(Left$(normalized, 4)), _
+        CLng(Mid$(normalized, 6, 2)), _
+        CLng(Right$(normalized, 2)))
+    If ISODateText(parsedDate) <> normalized Then GoTo InvalidDate
+    CanonicalDateText = normalized
+    Exit Function
+
+InvalidDate:
+    CanonicalDateText = vbNullString
+End Function
+
+Private Function ISODateText(ByVal value As Date) As String
+    ISODateText = Right$("0000" & CStr(Year(value)), 4) & "-" & _
+        Right$("00" & CStr(Month(value)), 2) & "-" & _
+        Right$("00" & CStr(Day(value)), 2)
+End Function
+
+Private Function CanonicalDateValuesEqual(ByVal leftValue As Variant, _
+                                          ByVal rightValue As Variant) As Boolean
+    Dim leftText As String
+    Dim rightText As String
+
+    leftText = CanonicalDateText(leftValue)
+    rightText = CanonicalDateText(rightValue)
+    If Len(leftText) = 0 Or Len(rightText) = 0 Then
+        CanonicalDateValuesEqual = _
+            Len(CanonicalCellText(leftValue)) = 0 And _
+            Len(CanonicalCellText(rightValue)) = 0
+    Else
+        CanonicalDateValuesEqual = leftText = rightText
+    End If
+End Function
+
+Private Sub ValidateProposalDateNormalization()
+    Dim settings As Worksheet
+    Dim settingsSnapshot As Variant
+    Dim settingsSnapshotCaptured As Boolean
+    Dim sampleDate As Date
+    Dim expectedDate As String
+    Dim savedThreshold As Variant
+    Dim savedErrorNumber As Long
+    Dim savedErrorDescription As String
+
+    On Error GoTo Failed
+    Set settings = ConfigSheet()
+    settingsSnapshot = CapturePricingStateSnapshot(settings)
+    settingsSnapshotCaptured = True
+    savedThreshold = settings.Range("B24").Value2
+    sampleDate = DateSerial(2026, 7, 27)
+    expectedDate = "2026-07-27"
+    If CanonicalDateText(sampleDate) <> expectedDate Then
+        Err.Raise vbObjectError + 200, _
+                  "ValidateProposalDateNormalization", _
+                  "VBA Date values are not normalized to ISO dates."
+    End If
+    If CanonicalDateText(CDbl(sampleDate)) <> expectedDate Then
+        Err.Raise vbObjectError + 201, _
+                  "ValidateProposalDateNormalization", _
+                  "Excel date serials are not normalized to ISO dates."
+    End If
+    If Not CanonicalDateValuesEqual(CDbl(sampleDate), expectedDate) Then
+        Err.Raise vbObjectError + 202, _
+                  "ValidateProposalDateNormalization", _
+                  "An Excel date serial drifted from its equivalent ISO date."
+    End If
+    If CanonicalDateValuesEqual(CDbl(sampleDate), "2026-07-28") Then
+        Err.Raise vbObjectError + 203, _
+                  "ValidateProposalDateNormalization", _
+                  "Distinct pricing dates were incorrectly treated as equal."
+    End If
+    If Len(CanonicalDateText("2026-02-31")) > 0 Then
+        Err.Raise vbObjectError + 204, _
+                  "ValidateProposalDateNormalization", _
+                  "An invalid ISO date was accepted."
+    End If
+
+    settings.Range("B18").Value2 = 29500#
+    settings.Range("B19").Value2 = 187891#
+    settings.Range("B20").Value2 = CDbl(sampleDate)
+    settings.Range("B21").Value2 = 0.3
+    settings.Range("B22").Value2 = 120#
+    settings.Range("B24").Value2 = 0.07
+    UpdateProposalDriftFlags settings, 29500#, 187891#, expectedDate, _
+        0.3, 120#
+    If BooleanValue(settings.Range("G39").Value2) Or _
+       BooleanValue(settings.Range("G40").Value2) Then
+        Err.Raise vbObjectError + 205, _
+                  "ValidateProposalDateNormalization", _
+                  "An equivalent Excel serial and ISO date set proposal drift."
+    End If
+
+    settings.Range("B20").Value2 = CDbl(sampleDate) + 1#
+    UpdateProposalDriftFlags settings, 29500#, 187891#, expectedDate, _
+        0.3, 120#
+    If Not BooleanValue(settings.Range("G39").Value2) Then
+        Err.Raise vbObjectError + 206, _
+                  "ValidateProposalDateNormalization", _
+                  "A genuinely different pricing date did not set proposal drift."
+    End If
+
+CleanExit:
+    On Error Resume Next
+    If settingsSnapshotCaptured Then
+        RestorePricingStateSnapshot settings, settingsSnapshot
+        settings.Range("B24").Value2 = savedThreshold
+    End If
+    On Error GoTo 0
+    If savedErrorNumber <> 0 Then
+        Err.Raise savedErrorNumber, _
+                  "ValidateProposalDateNormalization", _
+                  savedErrorDescription
+    End If
+    Exit Sub
+
+Failed:
+    savedErrorNumber = Err.Number
+    savedErrorDescription = Err.Description
+    Resume CleanExit
+End Sub
 
 Private Function SafeStatusError(ByVal message As String) As String
     Dim lowered As String
