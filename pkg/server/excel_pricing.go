@@ -438,7 +438,7 @@ func (s *Server) completeExcelPricingApply(
 	event := updateout.Event{
 		Type:             "update",
 		Timestamp:        time.Now().UTC().Format(time.RFC3339),
-		Source:           s.currentDBPath(),
+		Source:           browserSafeURL(s.currentDBPath()),
 		Raw:              false,
 		Contract:         contract,
 		SnapshotContract: contract,

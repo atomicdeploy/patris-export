@@ -43,7 +43,8 @@ Patris Export is a standalone Paradox/BDE extraction, transformation, pricing, i
 | Windows amd64 (recommended) | \`patris-export-${artifact_label}-windows-amd64-setup.exe\` | Branded assisted installer, uninstaller, runtime, optional C SDK, configuration guide, and license |
 | Windows amd64 | \`patris-export-${artifact_label}-windows-amd64.zip\` | Executable, pxlib and MinGW runtime DLLs, C shared library/header, install guide, license, and build manifest |
 | Linux amd64 | \`patris-export-${artifact_label}-linux-amd64.tar.gz\` | Executable, bundled pxlib runtime and launcher, C shared library/header, install guide, license, and build manifest |
-| All | \`SHA256SUMS\` | SHA-256 verification manifest for the installer and both platform archives |
+| API documentation | \`patris-export-${artifact_label}-api-docs-public.zip\` | Offline public Scalar portal, OpenAPI/AsyncAPI contracts, client examples, licenses, and checksums |
+| All | \`SHA256SUMS\` | SHA-256 verification manifest for the installer, platform archives, and public API reference |
 
 ## Install
 
@@ -56,7 +57,7 @@ Configuration and secrets remain external to the release bundle, so upgrading do
 
 ## Verify
 
-Download \`SHA256SUMS\` beside your platform archive. On Linux, run \`grep 'linux-amd64.tar.gz$' SHA256SUMS | sha256sum -c -\`. On Windows, compare \`Get-FileHash <archive> -Algorithm SHA256\` with the matching manifest line. Download both archives before using \`sha256sum -c SHA256SUMS\` for the complete set.
+Download \`SHA256SUMS\` beside the files you use. On Linux, run \`grep 'linux-amd64.tar.gz$' SHA256SUMS | sha256sum -c -\`. On Windows, compare \`Get-FileHash <archive> -Algorithm SHA256\` with the matching manifest line. Download every listed platform and documentation archive before using \`sha256sum -c SHA256SUMS\` for the complete set.
 
 ## Changelog
 
@@ -67,8 +68,8 @@ ${RELEASE_CHANGELOG}
 ${provenance_line}
 - Source commit: \`${source_commit}\`
 ${builder_line}
-- Dependency lock: Go modules, \`web/package-lock.json\`, and pinned pxlib source revision
-- Verification: Go and web tests, dependency audit, Linux source build, native Windows source build and database smoke test, independent Windows cross-build and Wine smoke test, version-resource inspection, required-runtime checks, deterministic archive assembly, and SHA-256 generation
+- Dependency lock: Go modules, \`web/package-lock.json\`, \`docs/api/package-lock.json\`, and pinned pxlib source revision
+- Verification: Go and web tests, dependency audits, OpenAPI/AsyncAPI lint, source-route parity, API documentation tests, deterministic offline documentation packaging, Linux source build, native Windows source build and database smoke test, independent Windows cross-build and Wine smoke test, version-resource inspection, required-runtime checks, deterministic archive assembly, and SHA-256 generation
 ${source_archive_line}
 EOF
 

@@ -11,7 +11,7 @@ $ErrorActionPreference = "Stop"
 
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
 if (-not $SourceImage) {
-    $SourceImage = Join-Path $repoRoot "assets\patris-api-icon.png"
+    $SourceImage = Join-Path $repoRoot "assets\logo.png"
 }
 $SourceImage = (Resolve-Path -LiteralPath $SourceImage).Path
 New-Item -ItemType Directory -Force $OutputDirectory | Out-Null

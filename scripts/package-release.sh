@@ -12,6 +12,12 @@ artifact_root="$(cd -- "$3" && pwd)"
 dist_input="$4"
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 root="$(cd -- "$script_dir/.." && pwd)"
+source_commit="$(git -C "$root" rev-parse --verify "${source_commit}^{commit}" 2>/dev/null || true)"
+if [[ ! "$source_commit" =~ ^[0-9a-fA-F]{40}$ ]]; then
+    printf 'Source commit must resolve to a full Git commit in this checkout.\n' >&2
+    exit 2
+fi
+source_commit="${source_commit,,}"
 # shellcheck source=scripts/release-lib.sh
 source "$script_dir/release-lib.sh"
 release_metadata "$root" "$requested_tag"
@@ -23,7 +29,7 @@ else
     provenance_line="Tag: ${RELEASE_TAG}"
 fi
 
-for tool in install touch zip tar gzip sha256sum sort xargs; do
+for tool in install touch zip tar gzip sha256sum sort xargs node; do
     if ! command -v "$tool" >/dev/null 2>&1; then
         printf 'Required release packaging tool is missing: %s\n' "$tool" >&2
         exit 1
@@ -163,9 +169,79 @@ linux_archive="patris-export-${artifact_label}-linux-amd64.tar.gz"
         gzip -n -9 > "$dist/$linux_archive"
 )
 
+docs_archives=()
+docs_dist="$root/docs/api/dist"
+docs_public_source="$docs_dist/patris-export-api-docs-public.zip"
+docs_internal_source="$docs_dist/patris-export-api-docs-internal.zip"
+docs_manifest_source="$docs_dist/SHA256SUMS"
+docs_metadata_source="$docs_dist/manifest.json"
+docs_inputs=("$docs_public_source" "$docs_internal_source" "$docs_manifest_source" "$docs_metadata_source")
+for file in "${docs_inputs[@]}"; do
+    if [[ ! -f "$file" ]]; then
+        printf 'Verified API documentation output is required; missing %s.\n' "$file" >&2
+        exit 1
+    fi
+done
+(
+    cd "$docs_dist"
+    sha256sum -c SHA256SUMS
+)
+node - "$docs_metadata_source" "$RELEASE_VERSION" "$source_commit" "$docs_public_source" "$docs_internal_source" <<'NODE'
+const crypto = require('node:crypto');
+const fs = require('node:fs');
+const path = require('node:path');
+const [manifestPath, releaseVersion, sourceCommit, publicArchive, internalArchive] = process.argv.slice(2);
+const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+const fail = (message) => {
+  process.stderr.write(`API documentation provenance check failed: ${message}\n`);
+  process.exit(1);
+};
+if (manifest.schema !== 'patris.api-docs-artifacts' || manifest.schema_version !== 2) {
+  fail('unsupported artifact manifest schema');
+}
+if (manifest.api_version !== releaseVersion) {
+  fail(`API version ${manifest.api_version} does not match release ${releaseVersion}`);
+}
+if (manifest.source_commit !== sourceCommit) {
+  fail('documentation source commit does not match the release source commit');
+}
+const expected = new Map([
+  ['public', publicArchive],
+  ['internal', internalArchive],
+]);
+if (!Array.isArray(manifest.packages) || manifest.packages.length !== expected.size) {
+  fail('manifest must contain exactly public and internal packages');
+}
+for (const entry of manifest.packages) {
+  const archive = expected.get(entry.visibility);
+  if (!archive || entry.file !== path.basename(archive)) {
+    fail(`unexpected ${entry.visibility || 'unknown'} package entry`);
+  }
+  const bytes = fs.readFileSync(archive);
+  const digest = crypto.createHash('sha256').update(bytes).digest('hex');
+  if (entry.sha256 !== digest || entry.size !== bytes.length) {
+    fail(`${entry.visibility} package hash or size does not match the manifest`);
+  }
+  expected.delete(entry.visibility);
+}
+if (expected.size) {
+  fail('manifest omitted a required package');
+}
+NODE
+
+docs_public_archive="patris-export-${artifact_label}-api-docs-public.zip"
+install -m 0644 "$docs_public_source" "$dist/$docs_public_archive"
+docs_archives=("$docs_public_archive")
+if [[ "${INCLUDE_INTERNAL_API_DOCS:-0}" == "1" ]]; then
+    docs_internal_archive="patris-export-${artifact_label}-api-docs-internal.zip"
+    install -m 0644 "$docs_internal_source" "$dist/$docs_internal_archive"
+    docs_archives+=("$docs_internal_archive")
+fi
+
 (
     cd "$dist"
-    sha256sum "$windows_archive" "$linux_archive" > SHA256SUMS
+    checksum_files=("$windows_archive" "$linux_archive" "${docs_archives[@]}")
+    sha256sum "${checksum_files[@]}" > SHA256SUMS
 )
 bash "$script_dir/generate-release-notes.sh" "$requested_tag" "$source_commit" "$dist/RELEASE_NOTES.md"
 

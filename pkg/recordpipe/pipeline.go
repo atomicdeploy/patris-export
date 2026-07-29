@@ -25,11 +25,12 @@ type Options struct {
 }
 
 type Result struct {
-	Rows     []map[string]interface{}
-	Payload  interface{}
-	KeyField string
-	Raw      bool
-	Contract *canonical.Envelope
+	Rows                []map[string]interface{}
+	Payload             interface{}
+	KeyField            string
+	Raw                 bool
+	Contract            *canonical.Envelope
+	DisableSyncContract bool
 }
 
 func Build(rawRows []map[string]interface{}, source string, options Options) Result {
@@ -83,12 +84,16 @@ func BuildContext(ctx context.Context, rawRows []map[string]interface{}, source 
 		if err != nil {
 			return Result{}
 		}
+		if !options.Canonical.ExposeRecordHashes() {
+			rows = rowsWithoutRecordHashes(rows)
+		}
 		return Result{
-			Rows:     rows,
-			Payload:  contract,
-			KeyField: "product_code",
-			Raw:      false,
-			Contract: contract,
+			Rows:                rows,
+			Payload:             canonical.OutputEnvelope(contract, options.Canonical),
+			KeyField:            "product_code",
+			Raw:                 false,
+			Contract:            contract,
+			DisableSyncContract: !options.Canonical.HashesEnabled(),
 		}
 	}
 	converted, err := exp.ConvertRecordsContext(ctx, records)
@@ -155,6 +160,14 @@ func copyRowsWithoutSortFields(records []map[string]interface{}) []map[string]in
 	return rows
 }
 
+func rowsWithoutRecordHashes(records []map[string]interface{}) []map[string]interface{} {
+	rows := recordmap.CopyRows(records)
+	for _, row := range rows {
+		delete(row, "record_hash")
+	}
+	return rows
+}
+
 func copyRowsWithoutSortFieldsContext(ctx context.Context, records []map[string]interface{}) ([]map[string]interface{}, error) {
 	rows := make([]map[string]interface{}, 0, len(records))
 	for _, record := range records {
@@ -199,6 +212,9 @@ func paradoxToRowsContext(ctx context.Context, records []paradox.Record) ([]map[
 }
 
 func (result Result) SyncEnvelope(changes *recorddiff.ChangeSet) *canonical.Envelope {
+	if result.DisableSyncContract {
+		return nil
+	}
 	if changes == nil {
 		return canonical.ChangeEnvelope(result.Contract, nil)
 	}

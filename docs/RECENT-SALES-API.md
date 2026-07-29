@@ -1,4 +1,4 @@
-# Privacy-safe recent-sales aggregate API
+# Recent-sales aggregate API
 
 `GET /api/recent-sales` is an authenticated, read-only enrichment feed for
 product-level sales recency and frequency. It never returns source rows or
@@ -154,4 +154,4 @@ only through `PATRIS_EXPORT_RECENT_SALES_TOKEN`.
 The application does not discover or infer a live sales table. An operator must
 configure a separately supported source and its exact field mapping. This is
 intentional: guessing a schema or deriving sales from `kala.db` would violate
-the privacy and product-identity boundary.
+the access and product-identity boundary.

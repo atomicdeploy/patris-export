@@ -83,6 +83,7 @@ type Product struct {
 	SourceUpdatedAt            string                  `json:"source_updated_at"`
 	Warnings                   []string                `json:"warnings"`
 	RecordHash                 string                  `json:"record_hash,omitempty"`
+	Extensions                 *JSONExtensions         `json:"-"`
 	fieldPresence              map[string]fieldPresence
 	warehouseNulls             map[string]bool
 	integrationActive          bool
@@ -101,12 +102,13 @@ const (
 // keeping a separate typed shape prevents zero-stock headers from crossing the
 // product boundary while preserving their names and hierarchy for consumers.
 type Category struct {
-	CategoryCode  string   `json:"category_code"`
-	Name          string   `json:"name"`
-	ParentCode    string   `json:"parent_code"`
-	Depth         int      `json:"depth"`
-	Warnings      []string `json:"warnings"`
-	RecordHash    string   `json:"record_hash,omitempty"`
+	CategoryCode  string          `json:"category_code"`
+	Name          string          `json:"name"`
+	ParentCode    string          `json:"parent_code"`
+	Depth         int             `json:"depth"`
+	Warnings      []string        `json:"warnings"`
+	RecordHash    string          `json:"record_hash,omitempty"`
+	Extensions    *JSONExtensions `json:"-"`
 	fieldPresence map[string]fieldPresence
 }
 
@@ -127,6 +129,7 @@ func TransformContext(ctx context.Context, rows []map[string]interface{}, source
 		return nil, nil, err
 	}
 	normalizedPricing := pricingcatalog.Normalize(cfg.Pricing)
+	hashesEnabled := cfg.HashesEnabled()
 	integrationActive := pricingcatalog.Configured(normalizedPricing)
 	if provider == nil {
 		provider = pricingcatalog.NewProvider(normalizedPricing)
@@ -159,7 +162,7 @@ func TransformContext(ctx context.Context, rows []map[string]interface{}, source
 		return nil, nil, err
 	}
 	quarantined := normalizedWarnings(append(append([]string{}, duplicateCodes...), ambiguousCodes...))
-	categories, err := parseKalaCategoriesContext(ctx, rows, codeCounts, categoryCodes)
+	categories, err := parseKalaCategoriesContextWithHashes(ctx, rows, codeCounts, categoryCodes, hashesEnabled)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -265,7 +268,9 @@ func TransformContext(ctx context.Context, rows []map[string]interface{}, source
 		if err != nil {
 			return nil, nil, err
 		}
-		product.RecordHash = recordHash(product)
+		if hashesEnabled {
+			product.RecordHash = recordHash(product)
+		}
 		products = append(products, product)
 	}
 	sort.SliceStable(products, func(i, j int) bool {
@@ -274,7 +279,7 @@ func TransformContext(ctx context.Context, rows []map[string]interface{}, source
 	if err := ctx.Err(); err != nil {
 		return nil, nil, err
 	}
-	envelope, err := newEnvelopeBaseContext(ctx, products, categories, excludedCodes, source, cfg.SourceID, generatedAt, quarantined...)
+	envelope, err := newEnvelopeBaseContext(ctx, products, categories, excludedCodes, source, cfg.SourceID, generatedAt, hashesEnabled, quarantined...)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -299,9 +304,11 @@ func TransformContext(ctx context.Context, rows []map[string]interface{}, source
 	if err != nil {
 		return nil, nil, err
 	}
-	envelope.EventID, err = eventIDContext(ctx, envelope)
-	if err != nil {
-		return nil, nil, err
+	if hashesEnabled {
+		envelope.EventID, err = eventIDContext(ctx, envelope)
+		if err != nil {
+			return nil, nil, err
+		}
 	}
 	productRows, err := ProductsToRowsContext(ctx, products)
 	if err != nil {
@@ -461,6 +468,10 @@ func parseKalaCategories(rows []map[string]interface{}, codeCounts map[string]in
 }
 
 func parseKalaCategoriesContext(ctx context.Context, rows []map[string]interface{}, codeCounts map[string]int, categoryCodes map[string]bool) ([]Category, error) {
+	return parseKalaCategoriesContextWithHashes(ctx, rows, codeCounts, categoryCodes, true)
+}
+
+func parseKalaCategoriesContextWithHashes(ctx context.Context, rows []map[string]interface{}, codeCounts map[string]int, categoryCodes map[string]bool, hashesEnabled bool) ([]Category, error) {
 	byCode := make(map[string]Category, len(categoryCodes))
 	for _, row := range rows {
 		if err := ctx.Err(); err != nil {
@@ -519,7 +530,9 @@ func parseKalaCategoriesContext(ctx context.Context, rows []map[string]interface
 			}
 			parent = ancestor.ParentCode
 		}
-		category.RecordHash = categoryRecordHash(category)
+		if hashesEnabled {
+			category.RecordHash = categoryRecordHash(category)
+		}
 		byCode[code] = category
 	}
 
@@ -885,6 +898,7 @@ func (product Product) Map() map[string]interface{} {
 	putString(row, "source_updated_at", product.SourceUpdatedAt, product.presence("source_updated_at"))
 	row["warnings"] = append(make([]string, 0, len(product.Warnings)), product.Warnings...)
 	putString(row, "record_hash", product.RecordHash, fieldAbsent)
+	mergeJSONExtensions(row, product.Extensions)
 	return row
 }
 
@@ -900,23 +914,21 @@ func (product *Product) UnmarshalJSON(data []byte) error {
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return err
 	}
-	if err := rejectUnknownJSONFields(raw, "product", []string{
-		"product_code", "category_code", "name", "serial", "unit", "sale_price_source", "partner_price_source",
-		"purchase_price_source", "warehouse_stock", "total_stock", "minimum_stock",
-		"foreign_currency", "foreign_price", "weight_grams", "location", "shipping_method_id",
-		"shipping_price_per_kg", "shipping_price_per_kg_currency", "markup_percent", "irt_per_cny", "pricing_catalog_revision",
-		"pricing_catalog_status", "currency_effective_date", "price_source_amount", "price_source_currency",
-		"price_source_kind", "price_rounding_digits", "price_rounding_mode", "final_price", "source_updated_at",
-		"warnings", "record_hash",
-	}); err != nil {
-		return err
-	}
 	type productAlias Product
 	var decoded productAlias
 	if err := json.Unmarshal(data, &decoded); err != nil {
 		return err
 	}
 	*product = Product(decoded)
+	product.Extensions = captureJSONExtensions(raw,
+		"product_code", "category_code", "name", "serial", "unit", "sale_price_source", "partner_price_source",
+		"purchase_price_source", "warehouse_stock", "total_stock", "minimum_stock",
+		"foreign_currency", "foreign_price", "weight_grams", "location", "shipping_method_id",
+		"shipping_price_per_kg", "shipping_price_per_kg_currency", "markup_percent", "irt_per_cny",
+		"pricing_catalog_revision", "pricing_catalog_status", "currency_effective_date", "price_source_amount",
+		"price_source_currency", "price_source_kind", "price_rounding_digits", "price_rounding_mode",
+		"final_price", "source_updated_at", "warnings", "record_hash",
+	)
 
 	product.fieldPresence = map[string]fieldPresence{}
 	for _, field := range []string{
@@ -1098,6 +1110,7 @@ func (category Category) Map() map[string]interface{} {
 	}
 	putString(row, "name", category.Name, category.fieldPresence["name"])
 	putString(row, "record_hash", category.RecordHash, fieldAbsent)
+	mergeJSONExtensions(row, category.Extensions)
 	return row
 }
 
@@ -1110,17 +1123,15 @@ func (category *Category) UnmarshalJSON(data []byte) error {
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return err
 	}
-	if err := rejectUnknownJSONFields(raw, "category", []string{
-		"category_code", "name", "parent_code", "depth", "warnings", "record_hash",
-	}); err != nil {
-		return err
-	}
 	type categoryAlias Category
 	var decoded categoryAlias
 	if err := json.Unmarshal(data, &decoded); err != nil {
 		return err
 	}
 	*category = Category(decoded)
+	category.Extensions = captureJSONExtensions(raw,
+		"category_code", "name", "parent_code", "depth", "warnings", "record_hash",
+	)
 	category.fieldPresence = map[string]fieldPresence{}
 	if value, exists := raw["name"]; exists {
 		if bytes.Equal(bytes.TrimSpace(value), []byte("null")) {

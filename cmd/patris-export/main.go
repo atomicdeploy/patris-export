@@ -64,6 +64,8 @@ var (
 	directAccess    bool
 	rtlMode         bool
 	rawMode         bool
+	recordHashes    bool
+	exposeHashes    bool
 	mappingFile     string
 	exportTable     string
 	sqlitePath      string
@@ -145,6 +147,8 @@ Supports Persian/Farsi encoding conversion and file watching.
 	rootCmd.PersistentFlags().BoolVarP(&directAccess, "direct-access", "d", false, "Access database file directly without temp copy (may conflict with BDE writes)")
 	rootCmd.PersistentFlags().BoolVarP(&rtlMode, "rtl", "r", false, "Opt in to RTL logical text conversion for mixed Persian/Latin output")
 	rootCmd.PersistentFlags().BoolVar(&rawMode, "raw", false, "Export/serve raw pxlib rows without character conversion, ANBAR compaction, keying, RTL conversion, or mapping")
+	rootCmd.PersistentFlags().BoolVar(&recordHashes, "record-hashes", true, "Publish hash-dependent product-sync identities (disable for flexible collection-only output)")
+	rootCmd.PersistentFlags().BoolVar(&exposeHashes, "expose-record-hashes", true, "Include record_hash in ordinary products, categories, and file/database exports")
 	rootCmd.PersistentFlags().StringVar(&mappingFile, "mapping", "", "Optional JSON transform mapping file for key/value/table-specific output rules")
 
 	// Convert command
@@ -567,6 +571,19 @@ func effectiveConfig(cmd *cobra.Command) (*appconfig.Manager, appconfig.Config) 
 		cfg.Database.Raw = rawMode
 		cfg.Convert.Raw = rawMode
 	}
+	if rootFlags.Changed("record-hashes") {
+		enabled := recordHashes
+		cfg.Canonical.Hashes.Enabled = &enabled
+	} else {
+		recordHashes = cfg.Canonical.HashesEnabled()
+	}
+	if rootFlags.Changed("expose-record-hashes") {
+		expose := exposeHashes
+		cfg.Canonical.Hashes.Expose = &expose
+	} else {
+		exposeHashes = cfg.Canonical.ExposeRecordHashes()
+	}
+	cfg.Canonical = canonical.NormalizeConfig(cfg.Canonical)
 	if rootFlags.Changed("mapping") {
 		cfg.Transform.MappingFile = mappingFile
 		cfg.Transform.Enabled = strings.TrimSpace(mappingFile) != ""

@@ -1,6 +1,7 @@
 package canonical
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -19,10 +20,16 @@ const (
 	LocalCurrency = "IRT"
 )
 
+// JSONExtensions preserves fields introduced by other compatible
+// implementations without forcing this build to understand them first. The
+// pointer form keeps small identity structs comparable for existing Go callers.
+type JSONExtensions map[string]json.RawMessage
+
 type Source struct {
-	ID       string `json:"id"`
-	Dataset  string `json:"dataset"`
-	Revision string `json:"revision"`
+	ID         string          `json:"id"`
+	Dataset    string          `json:"dataset"`
+	Revision   string          `json:"revision,omitempty"`
+	Extensions *JSONExtensions `json:"-"`
 }
 
 // SourceIdentity derives the same stable source ID and dataset used by
@@ -43,29 +50,30 @@ func (source *Source) UnmarshalJSON(data []byte) error {
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return err
 	}
-	if err := rejectUnknownJSONFields(raw, "product-sync source", []string{"id", "dataset", "revision"}); err != nil {
-		return err
-	}
 	type sourceAlias Source
 	var decoded sourceAlias
 	if err := json.Unmarshal(data, &decoded); err != nil {
 		return err
 	}
 	*source = Source(decoded)
+	source.Extensions = captureJSONExtensions(raw, "id", "dataset", "revision")
 	return nil
 }
 
+func (source Source) MarshalJSON() ([]byte, error) {
+	type sourceAlias Source
+	return marshalJSONWithExtensions(sourceAlias(source), source.Extensions)
+}
+
 type Tombstone struct {
-	ProductCode string `json:"product_code"`
-	Deleted     bool   `json:"deleted"`
+	ProductCode string          `json:"product_code"`
+	Deleted     bool            `json:"deleted"`
+	Extensions  *JSONExtensions `json:"-"`
 }
 
 func (tombstone *Tombstone) UnmarshalJSON(data []byte) error {
 	var raw map[string]json.RawMessage
 	if err := json.Unmarshal(data, &raw); err != nil {
-		return err
-	}
-	if err := rejectUnknownJSONFields(raw, "product tombstone", []string{"product_code", "deleted"}); err != nil {
 		return err
 	}
 	type tombstoneAlias Tombstone
@@ -74,23 +82,30 @@ func (tombstone *Tombstone) UnmarshalJSON(data []byte) error {
 		return err
 	}
 	*tombstone = Tombstone(decoded)
+	tombstone.Extensions = captureJSONExtensions(raw, "product_code", "deleted")
 	return nil
 }
 
+func (tombstone Tombstone) MarshalJSON() ([]byte, error) {
+	type tombstoneAlias Tombstone
+	return marshalJSONWithExtensions(tombstoneAlias(tombstone), tombstone.Extensions)
+}
+
 type Envelope struct {
-	Schema           string      `json:"schema"`
-	EventType        string      `json:"event_type"`
-	EventID          string      `json:"event_id"`
-	LocalCurrency    string      `json:"local_currency,omitempty"`
-	FormulaID        string      `json:"formula_id,omitempty"`
-	Source           Source      `json:"source"`
-	GeneratedAt      string      `json:"generated_at"`
-	Products         []Product   `json:"products"`
-	Categories       []Category  `json:"categories"`
-	ExcludedCodes    []string    `json:"excluded_codes"`
-	DeletedCodes     []Tombstone `json:"deleted_codes,omitempty"`
-	QuarantinedCodes []string    `json:"quarantined_codes"`
-	Warnings         []string    `json:"warnings"`
+	Schema           string          `json:"schema"`
+	EventType        string          `json:"event_type"`
+	EventID          string          `json:"event_id,omitempty"`
+	LocalCurrency    string          `json:"local_currency,omitempty"`
+	FormulaID        string          `json:"formula_id,omitempty"`
+	Source           Source          `json:"source"`
+	GeneratedAt      string          `json:"generated_at"`
+	Products         []Product       `json:"products"`
+	Categories       []Category      `json:"categories"`
+	ExcludedCodes    []string        `json:"excluded_codes"`
+	DeletedCodes     []Tombstone     `json:"deleted_codes,omitempty"`
+	QuarantinedCodes []string        `json:"quarantined_codes"`
+	Warnings         []string        `json:"warnings"`
+	Extensions       *JSONExtensions `json:"-"`
 	fieldPresence    map[string]fieldPresence
 }
 
@@ -99,19 +114,17 @@ func (envelope *Envelope) UnmarshalJSON(data []byte) error {
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return err
 	}
-	if err := rejectUnknownJSONFields(raw, "product-sync envelope", []string{
-		"schema", "event_type", "event_id", "local_currency", "formula_id", "source",
-		"generated_at", "products", "categories", "excluded_codes", "deleted_codes",
-		"quarantined_codes", "warnings",
-	}); err != nil {
-		return err
-	}
 	type envelopeAlias Envelope
 	var decoded envelopeAlias
 	if err := json.Unmarshal(data, &decoded); err != nil {
 		return err
 	}
 	*envelope = Envelope(decoded)
+	envelope.Extensions = captureJSONExtensions(raw,
+		"schema", "event_type", "event_id", "local_currency", "formula_id", "source",
+		"generated_at", "products", "categories", "excluded_codes", "deleted_codes",
+		"quarantined_codes", "warnings",
+	)
 	envelope.fieldPresence = make(map[string]fieldPresence, 3)
 	for _, field := range []string{"local_currency", "formula_id", "deleted_codes"} {
 		if value, exists := raw[field]; exists {
@@ -125,17 +138,103 @@ func (envelope *Envelope) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-func rejectUnknownJSONFields(raw map[string]json.RawMessage, kind string, allowed []string) error {
-	known := make(map[string]struct{}, len(allowed))
-	for _, field := range allowed {
-		known[field] = struct{}{}
+func (envelope Envelope) MarshalJSON() ([]byte, error) {
+	type envelopeAlias Envelope
+	return marshalJSONWithExtensions(envelopeAlias(envelope), envelope.Extensions)
+}
+
+func captureJSONExtensions(raw map[string]json.RawMessage, known ...string) *JSONExtensions {
+	if len(raw) == 0 {
+		return nil
 	}
-	for field := range raw {
-		if _, exists := known[field]; !exists {
-			return fmt.Errorf("%s contains unknown field %q", kind, field)
+	knownFields := make(map[string]struct{}, len(known))
+	for _, field := range known {
+		knownFields[field] = struct{}{}
+	}
+	extensions := make(JSONExtensions)
+	for field, value := range raw {
+		if _, exists := knownFields[field]; exists {
+			continue
+		}
+		extensions[field] = append(json.RawMessage(nil), value...)
+	}
+	if len(extensions) == 0 {
+		return nil
+	}
+	return &extensions
+}
+
+func cloneJSONExtensions(values *JSONExtensions) *JSONExtensions {
+	if values == nil || len(*values) == 0 {
+		return nil
+	}
+	copy := make(JSONExtensions, len(*values))
+	for field, value := range *values {
+		copy[field] = append(json.RawMessage(nil), value...)
+	}
+	return &copy
+}
+
+// marshalJSONWithExtensions keeps typed fields in their existing wire order and
+// appends preserved, unknown members deterministically. This makes typed
+// consumers tolerant without silently discarding data added by another
+// implementation.
+func marshalJSONWithExtensions(value interface{}, extensions *JSONExtensions) ([]byte, error) {
+	base, err := json.Marshal(value)
+	if err != nil || extensions == nil || len(*extensions) == 0 {
+		return base, err
+	}
+	base = bytes.TrimSpace(base)
+	if len(base) == 0 || base[len(base)-1] != '}' {
+		return nil, fmt.Errorf("cannot append JSON extensions to a non-object")
+	}
+	var known map[string]json.RawMessage
+	if err := json.Unmarshal(base, &known); err != nil {
+		return nil, err
+	}
+	fields := make([]string, 0, len(*extensions))
+	for field, raw := range *extensions {
+		if _, exists := known[field]; exists {
+			continue
+		}
+		if !json.Valid(raw) {
+			return nil, fmt.Errorf("JSON extension %q is invalid", field)
+		}
+		fields = append(fields, field)
+	}
+	if len(fields) == 0 {
+		return base, nil
+	}
+	sort.Strings(fields)
+	result := append([]byte(nil), base[:len(base)-1]...)
+	for _, field := range fields {
+		if len(result) > 1 {
+			result = append(result, ',')
+		}
+		key, _ := json.Marshal(field)
+		result = append(result, key...)
+		result = append(result, ':')
+		result = append(result, (*extensions)[field]...)
+	}
+	result = append(result, '}')
+	return result, nil
+}
+
+func mergeJSONExtensions(row map[string]interface{}, extensions *JSONExtensions) {
+	if extensions == nil {
+		return
+	}
+	for field, raw := range *extensions {
+		if _, exists := row[field]; exists || !json.Valid(raw) {
+			continue
+		}
+		decoder := json.NewDecoder(bytes.NewReader(raw))
+		decoder.UseNumber()
+		var value interface{}
+		if err := decoder.Decode(&value); err == nil {
+			row[field] = value
 		}
 	}
-	return nil
 }
 
 func NewEnvelope(rows []Product, source, sourceID string, generatedAt time.Time, quarantinedCodes ...string) *Envelope {
@@ -161,7 +260,7 @@ func NewCatalogEnvelopeContext(ctx context.Context, rows []Product, categories [
 }
 
 func newEnvelopeContext(ctx context.Context, rows []Product, categories []Category, excludedCodes []string, source, sourceID string, generatedAt time.Time, quarantinedCodes ...string) (*Envelope, error) {
-	envelope, err := newEnvelopeBaseContext(ctx, rows, categories, excludedCodes, source, sourceID, generatedAt, quarantinedCodes...)
+	envelope, err := newEnvelopeBaseContext(ctx, rows, categories, excludedCodes, source, sourceID, generatedAt, true, quarantinedCodes...)
 	if err != nil {
 		return nil, err
 	}
@@ -172,7 +271,7 @@ func newEnvelopeContext(ctx context.Context, rows []Product, categories []Catego
 	return envelope, nil
 }
 
-func newEnvelopeBaseContext(ctx context.Context, rows []Product, categories []Category, excludedCodes []string, source, sourceID string, generatedAt time.Time, quarantinedCodes ...string) (*Envelope, error) {
+func newEnvelopeBaseContext(ctx context.Context, rows []Product, categories []Category, excludedCodes []string, source, sourceID string, generatedAt time.Time, hashesEnabled bool, quarantinedCodes ...string) (*Envelope, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -208,9 +307,12 @@ func newEnvelopeBaseContext(ctx context.Context, rows []Product, categories []Ca
 	if err != nil {
 		return nil, err
 	}
-	revision, err := sourceRevisionContext(ctx, products, categories, excludedCodes, quarantinedCodes)
-	if err != nil {
-		return nil, err
+	revision := ""
+	if hashesEnabled {
+		revision, err = sourceRevisionContext(ctx, products, categories, excludedCodes, quarantinedCodes)
+		if err != nil {
+			return nil, err
+		}
 	}
 	envelope := &Envelope{
 		Schema:           ContractName,
@@ -513,10 +615,16 @@ func cloneEnvelope(value *Envelope) *Envelope {
 	copy := *value
 	copy.Products = cloneProducts(value.Products)
 	copy.Categories = cloneCategories(value.Categories)
+	copy.Source.Extensions = cloneJSONExtensions(value.Source.Extensions)
+	copy.Extensions = cloneJSONExtensions(value.Extensions)
 	if value.ExcludedCodes != nil {
 		copy.ExcludedCodes = append(make([]string, 0, len(value.ExcludedCodes)), value.ExcludedCodes...)
 	}
-	copy.DeletedCodes = append([]Tombstone(nil), value.DeletedCodes...)
+	copy.DeletedCodes = make([]Tombstone, len(value.DeletedCodes))
+	for index, tombstone := range value.DeletedCodes {
+		copy.DeletedCodes[index] = tombstone
+		copy.DeletedCodes[index].Extensions = cloneJSONExtensions(tombstone.Extensions)
+	}
 	if value.QuarantinedCodes != nil {
 		copy.QuarantinedCodes = append(make([]string, 0, len(value.QuarantinedCodes)), value.QuarantinedCodes...)
 	}
@@ -532,6 +640,28 @@ func cloneEnvelope(value *Envelope) *Envelope {
 	return &copy
 }
 
+// OutputEnvelope returns the representation intended for ordinary exports.
+// The full internal envelope remains available for product-sync compatibility
+// and change detection. Hiding hashes removes only per-record identities;
+// disabling them also omits the hash-derived source and event identities.
+func OutputEnvelope(value *Envelope, cfg Config) *Envelope {
+	copy := cloneEnvelope(value)
+	if copy == nil || cfg.ExposeRecordHashes() {
+		return copy
+	}
+	for index := range copy.Products {
+		copy.Products[index].RecordHash = ""
+	}
+	for index := range copy.Categories {
+		copy.Categories[index].RecordHash = ""
+	}
+	if !cfg.HashesEnabled() {
+		copy.EventID = ""
+		copy.Source.Revision = ""
+	}
+	return copy
+}
+
 func cloneCategories(values []Category) []Category {
 	result, _ := cloneCategoriesContext(context.Background(), values)
 	return result
@@ -544,6 +674,7 @@ func cloneCategoriesContext(ctx context.Context, values []Category) ([]Category,
 			return nil, err
 		}
 		copy := value
+		copy.Extensions = cloneJSONExtensions(value.Extensions)
 		copy.fieldPresence = make(map[string]fieldPresence, len(value.fieldPresence))
 		for key, state := range value.fieldPresence {
 			if err := ctx.Err(); err != nil {
@@ -592,6 +723,7 @@ func cloneProduct(value Product) Product {
 
 func cloneProductContext(ctx context.Context, value Product) (Product, error) {
 	copy := value
+	copy.Extensions = cloneJSONExtensions(value.Extensions)
 	copy.WarehouseStock = make(map[string]float64, len(value.WarehouseStock))
 	for key, stock := range value.WarehouseStock {
 		if err := ctx.Err(); err != nil {

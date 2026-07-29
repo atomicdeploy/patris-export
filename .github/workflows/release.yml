@@ -47,6 +47,7 @@ jobs:
       artifact_label: ${{ steps.metadata.outputs.artifact_label }}
       windows_archive: ${{ steps.metadata.outputs.windows_archive }}
       linux_archive: ${{ steps.metadata.outputs.linux_archive }}
+      public_api_docs_archive: ${{ steps.metadata.outputs.public_api_docs_archive }}
 
     steps:
       - name: Checkout tagged source
@@ -65,6 +66,19 @@ jobs:
         with:
           name: patris-export-windows-mingw-amd64
           path: release-input/windows
+
+      - name: Set up Node.js for API documentation
+        uses: actions/setup-node@v7.0.0
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: docs/api/package-lock.json
+
+      - name: Build and verify offline API documentation
+        run: |
+          npm --prefix docs/api ci
+          npm --prefix docs/api audit --audit-level=high
+          npm --prefix docs/api run verify
 
       - name: Resolve release metadata
         id: metadata
@@ -93,6 +107,7 @@ jobs:
             echo "artifact_label=$artifact_label"
             echo "windows_archive=patris-export-$artifact_label-windows-amd64.zip"
             echo "linux_archive=patris-export-$artifact_label-linux-amd64.tar.gz"
+            echo "public_api_docs_archive=patris-export-$artifact_label-api-docs-public.zip"
           } >> "$GITHUB_OUTPUT"
 
       - name: Build deterministic platform packages
@@ -106,6 +121,7 @@ jobs:
         env:
           WINDOWS_ARCHIVE: ${{ steps.metadata.outputs.windows_archive }}
           LINUX_ARCHIVE: ${{ steps.metadata.outputs.linux_archive }}
+          PUBLIC_API_DOCS_ARCHIVE: ${{ steps.metadata.outputs.public_api_docs_archive }}
         run: |
           set -euo pipefail
           (
@@ -113,6 +129,7 @@ jobs:
             sha256sum -c SHA256SUMS
             unzip -t "$WINDOWS_ARCHIVE"
             tar -tzf "$LINUX_ARCHIVE"
+            unzip -t "$PUBLIC_API_DOCS_ARCHIVE"
           )
           smoke_dir="$(mktemp -d)"
           trap 'rm -rf -- "$smoke_dir"' EXIT
@@ -127,6 +144,7 @@ jobs:
           path: |
             release-package/${{ steps.metadata.outputs.windows_archive }}
             release-package/${{ steps.metadata.outputs.linux_archive }}
+            release-package/${{ steps.metadata.outputs.public_api_docs_archive }}
             release-package/SHA256SUMS
             release-package/RELEASE_NOTES.md
           if-no-files-found: error
@@ -143,6 +161,7 @@ jobs:
           ARTIFACT_NAME: ${{ steps.metadata.outputs.artifact_name }}
           WINDOWS_ARCHIVE: ${{ steps.metadata.outputs.windows_archive }}
           LINUX_ARCHIVE: ${{ steps.metadata.outputs.linux_archive }}
+          PUBLIC_API_DOCS_ARCHIVE: ${{ steps.metadata.outputs.public_api_docs_archive }}
         run: |
           bash .github/scripts/ci-summary.sh build \
             "Release Package Summary" \
@@ -151,6 +170,7 @@ jobs:
             "Installable Windows and Linux release bundle" \
             "release-package/$WINDOWS_ARCHIVE" \
             "release-package/$LINUX_ARCHIVE" \
+            "release-package/$PUBLIC_API_DOCS_ARCHIVE" \
             release-package/SHA256SUMS \
             release-package/RELEASE_NOTES.md
 
@@ -408,6 +428,7 @@ jobs:
           path: |
             release-package/${{ needs.package.outputs.windows_archive }}
             release-package/${{ needs.package.outputs.linux_archive }}
+            release-package/${{ needs.package.outputs.public_api_docs_archive }}
             release-package/${{ steps.installer.outputs.installer_name }}
             release-package/SHA256SUMS
             release-package/RELEASE_NOTES.md
@@ -483,6 +504,7 @@ jobs:
           RELEASE_TAG: ${{ needs.package.outputs.release_tag }}
           WINDOWS_ARCHIVE: ${{ needs.package.outputs.windows_archive }}
           LINUX_ARCHIVE: ${{ needs.package.outputs.linux_archive }}
+          PUBLIC_API_DOCS_ARCHIVE: ${{ needs.package.outputs.public_api_docs_archive }}
           WINDOWS_INSTALLER: ${{ needs.verify_windows_package.outputs.installer_name }}
         run: |
           set -euo pipefail
@@ -498,9 +520,32 @@ jobs:
               echo "Existing $RELEASE_TAG is not a durable published stable release." >&2
               exit 1
             fi
+            expected_title="Patris Export ${RELEASE_TAG#v}"
+            existing_title="$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json name --jq '.name')"
+            if [[ "$existing_title" != "$expected_title" ]]; then
+              echo "Existing immutable release title differs from the verified title." >&2
+              exit 1
+            fi
             existing_body="$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json body --jq '.body')"
-            if ! grep -Fq "$GITHUB_SHA" <<<"$existing_body"; then
-              echo "Existing release $RELEASE_TAG does not identify source commit $GITHUB_SHA." >&2
+            expected_body="$(cat release-package/RELEASE_NOTES.md)"
+            if [[ "$existing_body" != "$expected_body" ]]; then
+              echo "Existing immutable release notes differ from the verified notes." >&2
+              exit 1
+            fi
+            mapfile -t existing_assets < <(gh release view "$RELEASE_TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --json assets \
+              --jq '.assets[].name' | sort)
+            mapfile -t expected_assets < <(printf '%s\n' \
+              "$WINDOWS_ARCHIVE" \
+              "$LINUX_ARCHIVE" \
+              "$PUBLIC_API_DOCS_ARCHIVE" \
+              "$WINDOWS_INSTALLER" \
+              SHA256SUMS | sort)
+            if [[ "$(printf '%s\n' "${existing_assets[@]}")" != "$(printf '%s\n' "${expected_assets[@]}")" ]]; then
+              echo "Existing immutable release has a different asset set." >&2
+              printf 'Existing: %s\n' "${existing_assets[*]}" >&2
+              printf 'Expected: %s\n' "${expected_assets[*]}" >&2
               exit 1
             fi
             gh release download "$RELEASE_TAG" \
@@ -508,9 +553,10 @@ jobs:
               --dir "$existing_dir" \
               --pattern "$WINDOWS_ARCHIVE" \
               --pattern "$LINUX_ARCHIVE" \
+              --pattern "$PUBLIC_API_DOCS_ARCHIVE" \
               --pattern "$WINDOWS_INSTALLER" \
               --pattern SHA256SUMS
-            for file in "$WINDOWS_ARCHIVE" "$LINUX_ARCHIVE" "$WINDOWS_INSTALLER" SHA256SUMS; do
+            for file in "$WINDOWS_ARCHIVE" "$LINUX_ARCHIVE" "$PUBLIC_API_DOCS_ARCHIVE" "$WINDOWS_INSTALLER" SHA256SUMS; do
               if ! cmp -s "release-package/$file" "$existing_dir/$file"; then
                 echo "Existing immutable release asset differs: $file" >&2
                 exit 1
@@ -524,6 +570,7 @@ jobs:
               --notes-file release-package/RELEASE_NOTES.md \
               "release-package/$WINDOWS_ARCHIVE" \
               "release-package/$LINUX_ARCHIVE" \
+              "release-package/$PUBLIC_API_DOCS_ARCHIVE" \
               "release-package/$WINDOWS_INSTALLER" \
               release-package/SHA256SUMS \
               --repo "$GITHUB_REPOSITORY"
@@ -536,6 +583,7 @@ jobs:
           RELEASE_TAG: ${{ needs.package.outputs.release_tag }}
           WINDOWS_ARCHIVE: ${{ needs.package.outputs.windows_archive }}
           LINUX_ARCHIVE: ${{ needs.package.outputs.linux_archive }}
+          PUBLIC_API_DOCS_ARCHIVE: ${{ needs.package.outputs.public_api_docs_archive }}
           WINDOWS_INSTALLER: ${{ needs.verify_windows_package.outputs.installer_name }}
         run: |
           set -euo pipefail
@@ -551,13 +599,43 @@ jobs:
           mapfile -t assets < <(gh release view "$RELEASE_TAG" \
             --repo "$GITHUB_REPOSITORY" \
             --json assets \
-            --jq '.assets[].name')
-          for expected in "$WINDOWS_ARCHIVE" "$LINUX_ARCHIVE" "$WINDOWS_INSTALLER" SHA256SUMS; do
-            if ! printf '%s\n' "${assets[@]}" | grep -Fxq "$expected"; then
-              echo "Published release is missing $expected" >&2
+            --jq '.assets[].name' | sort)
+          mapfile -t expected_assets < <(printf '%s\n' \
+            "$WINDOWS_ARCHIVE" \
+            "$LINUX_ARCHIVE" \
+            "$PUBLIC_API_DOCS_ARCHIVE" \
+            "$WINDOWS_INSTALLER" \
+            SHA256SUMS | sort)
+          if [[ "$(printf '%s\n' "${assets[@]}")" != "$(printf '%s\n' "${expected_assets[@]}")" ]]; then
+            echo "Published release asset set differs from the verified package." >&2
+            printf 'Published: %s\n' "${assets[*]}" >&2
+            printf 'Expected: %s\n' "${expected_assets[*]}" >&2
+            exit 1
+          fi
+          published_dir="$(mktemp -d)"
+          trap 'rm -rf "$published_dir"' EXIT
+          gh release download "$RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --dir "$published_dir" \
+            --pattern "$WINDOWS_ARCHIVE" \
+            --pattern "$LINUX_ARCHIVE" \
+            --pattern "$PUBLIC_API_DOCS_ARCHIVE" \
+            --pattern "$WINDOWS_INSTALLER" \
+            --pattern SHA256SUMS
+          for file in "$WINDOWS_ARCHIVE" "$LINUX_ARCHIVE" "$PUBLIC_API_DOCS_ARCHIVE" "$WINDOWS_INSTALLER" SHA256SUMS; do
+            if ! cmp -s "release-package/$file" "$published_dir/$file"; then
+              echo "Published release asset differs from the verified package: $file" >&2
               exit 1
             fi
           done
+          expected_title="Patris Export ${RELEASE_TAG#v}"
+          release_title="$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json name --jq '.name')"
+          release_body="$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json body --jq '.body')"
+          expected_body="$(cat release-package/RELEASE_NOTES.md)"
+          if [[ "$release_title" != "$expected_title" || "$release_body" != "$expected_body" ]]; then
+            echo "Published release title or notes differ from the verified metadata." >&2
+            exit 1
+          fi
 
       - name: Generate durable release summary
         if: always()
@@ -568,6 +646,7 @@ jobs:
           RELEASE_TAG: ${{ needs.package.outputs.release_tag }}
           WINDOWS_ARCHIVE: ${{ needs.package.outputs.windows_archive }}
           LINUX_ARCHIVE: ${{ needs.package.outputs.linux_archive }}
+          PUBLIC_API_DOCS_ARCHIVE: ${{ needs.package.outputs.public_api_docs_archive }}
           WINDOWS_INSTALLER: ${{ needs.verify_windows_package.outputs.installer_name }}
         run: |
           if [[ "$JOB_STATUS" == "success" ]]; then
@@ -580,5 +659,6 @@ jobs:
             "$description" \
             "release-package/$WINDOWS_ARCHIVE" \
             "release-package/$LINUX_ARCHIVE" \
+            "release-package/$PUBLIC_API_DOCS_ARCHIVE" \
             "release-package/$WINDOWS_INSTALLER" \
             release-package/SHA256SUMS

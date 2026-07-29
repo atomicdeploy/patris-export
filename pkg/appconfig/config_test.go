@@ -383,6 +383,29 @@ func TestCanonicalKalaProfileAndPricingProviderDefaults(t *testing.T) {
 	if cfg.Canonical.Pricing.UseSalePriceDirectFallback {
 		t.Fatal("direct Patris sale-price fallback must be disabled by default")
 	}
+	if !cfg.Canonical.HashesEnabled() || !cfg.Canonical.ExposeRecordHashes() {
+		t.Fatalf("historic hash publication defaults changed: %+v", cfg.Canonical.Hashes)
+	}
+}
+
+func TestEnvironmentCanHideOrDisableCanonicalHashes(t *testing.T) {
+	t.Setenv("PATRIS_EXPORT_RECORD_HASHES", "false")
+	t.Setenv("PATRIS_EXPORT_EXPOSE_RECORD_HASHES", "true")
+	cfg := Default()
+	ApplyEnv(&cfg)
+	normalize(&cfg)
+	if cfg.Canonical.HashesEnabled() || cfg.Canonical.ExposeRecordHashes() {
+		t.Fatalf("disabled hashes were exposed: %+v", cfg.Canonical.Hashes)
+	}
+
+	t.Setenv("PATRIS_EXPORT_RECORD_HASHES", "true")
+	t.Setenv("PATRIS_EXPORT_EXPOSE_RECORD_HASHES", "false")
+	cfg = Default()
+	ApplyEnv(&cfg)
+	normalize(&cfg)
+	if !cfg.Canonical.HashesEnabled() || cfg.Canonical.ExposeRecordHashes() {
+		t.Fatalf("hidden hash policy was not applied: %+v", cfg.Canonical.Hashes)
+	}
 }
 
 func TestApplyEnvCanExplicitlyEnableDirectSaleFallback(t *testing.T) {

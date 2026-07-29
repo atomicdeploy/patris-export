@@ -221,6 +221,8 @@ func (s *Server) setupRoutes() {
 	s.router.HandleFunc("/partials/charmap", s.handleCharmapPartial).Methods("GET")
 	s.router.HandleFunc("/api/records", s.handleGetRecords).Methods("GET")
 	s.router.HandleFunc("/api/records.{format:json|csv|xlsx}", s.handleGetRecords).Methods("GET")
+	s.router.HandleFunc("/api/products", s.handleGetProducts).Methods("GET")
+	s.router.HandleFunc("/api/products.{format:json|csv|xlsx}", s.handleGetProducts).Methods("GET")
 	s.router.HandleFunc("/api/categories", s.handleGetCategories).Methods("GET")
 	s.router.HandleFunc("/api/product-sync", s.handleGetProductSyncContract).Methods("GET")
 	s.router.HandleFunc("/api/recent-sales", s.handleGetRecentSales).Methods("GET")
@@ -252,8 +254,10 @@ func (s *Server) setupRoutes() {
 	s.router.HandleFunc("/api/sql-target/sync", s.handlePostSQLTargetSync).Methods("POST")
 	s.router.HandleFunc("/api/sql-target/last-result", s.handleGetSQLTargetLastResult).Methods("GET")
 	s.router.HandleFunc("/static/notification.ogg", s.handleNotificationAudio).Methods("GET", "HEAD")
-	s.router.HandleFunc("/static/patris-api-icon.png", s.handleAppIcon).Methods("GET", "HEAD")
+	s.router.HandleFunc("/static/logo.png", s.handleAppIcon).Methods("GET", "HEAD")
+	s.router.HandleFunc("/static/patris-api-icon.png", s.handleLegacyAppIcon).Methods("GET", "HEAD")
 	s.router.HandleFunc("/favicon.ico", s.handleFavicon).Methods("GET", "HEAD")
+	s.router.HandleFunc("/robots.txt", s.handleRobots).Methods("GET", "HEAD")
 	s.router.HandleFunc("/ws", s.handleWebSocket)
 }
 
@@ -263,8 +267,9 @@ func (s *Server) Router() http.Handler {
 	return s.router
 }
 
-// Records returns the current records using the same transformed shape served
-// by GET /api/records.
+// Records returns the configured in-process projection used by embedded hosts
+// and WebSocket snapshots. The HTTP /api/records route intentionally uses the
+// separate generalized raw datasource boundary.
 func (s *Server) Records() (map[string]interface{}, error) {
 	result, err := s.RecordResult()
 	if err != nil {
@@ -285,11 +290,15 @@ func recordsPayload(result recordpipe.Result) map[string]interface{} {
 	return recordmap.Keyed(result.Rows, result.KeyField, true)
 }
 
-func categoriesPayload(result recordpipe.Result) map[string]interface{} {
+func categoriesPayload(result recordpipe.Result, includeHashes bool) map[string]interface{} {
 	if result.Contract == nil {
 		return map[string]interface{}{}
 	}
-	return recordmap.Keyed(canonical.CategoriesToRows(result.Contract.Categories), "category_code", true)
+	rows := canonical.CategoriesToRows(result.Contract.Categories)
+	if !includeHashes {
+		rows = omitRecordHashes(rows)
+	}
+	return recordmap.Keyed(rows, "category_code", true)
 }
 
 func (s *Server) RecordResult() (recordpipe.Result, error) {
@@ -311,6 +320,16 @@ func (s *Server) RecordResultContext(ctx context.Context) (recordpipe.Result, er
 func (s *Server) canonicalRecordResultContext(ctx context.Context) (recordpipe.Result, error) {
 	options := s.recordOptions()
 	options.Raw = false
+	return s.recordResultContext(ctx, options)
+}
+
+// rawRecordResultContext returns source records without the kala profile,
+// character conversion, configured field mapping, or pricing enrichment. This
+// is the generalized Paradox datasource boundary used by GET /api/records.
+func (s *Server) rawRecordResultContext(ctx context.Context) (recordpipe.Result, error) {
+	options := s.recordOptions()
+	options.Raw = true
+	options.Mapping = recordmap.Config{}
 	return s.recordResultContext(ctx, options)
 }
 
@@ -370,7 +389,7 @@ func (s *Server) Info() (map[string]interface{}, error) {
 	return map[string]interface{}{
 		"success":     true,
 		"file":        sourceBaseName(s.currentDBPath()),
-		"path":        s.currentDBPath(),
+		"path":        browserSafeURL(s.currentDBPath()),
 		"version":     s.version,
 		"num_records": db.GetNumRecords(),
 		"num_fields":  db.GetNumFields(),
@@ -392,14 +411,125 @@ func (s *Server) Config() appconfig.Config {
 	return s.config.Get()
 }
 
+// browserConfigView shadows protected profiles whose concrete structs do not
+// use omitempty. An empty struct intentionally serializes as {}, so the
+// browser learns neither the profile's values nor its field names.
+type browserConfigView struct {
+	appconfig.Config
+	RecentSales struct{} `json:"recent_sales"`
+}
+
 // browserConfig returns the configuration shape that may be sent to the Web
-// UI. Database credentials remain server-side and can only be supplied through
-// protected config files, environment variables, or command-line options.
-func browserConfig(cfg appconfig.Config) appconfig.Config {
+// UI. Connection credentials, integration headers, and tokens remain
+// server-side and can only be supplied through protected config files,
+// environment variables, or command-line options.
+func browserConfig(cfg appconfig.Config) browserConfigView {
+	cfg.Database.Path = browserSafeURL(cfg.Database.Path)
 	cfg.Export.MySQLDSN = ""
 	cfg.Export.MySQLTLSCAFile = ""
 	cfg.Export.MySQLTLSServerName = ""
 	cfg.RecentSales = recentsales.Config{}
+	cfg.Canonical.Pricing.Digitalogic.BaseURL = browserSafeURL(cfg.Canonical.Pricing.Digitalogic.BaseURL)
+	cfg.SendUpdates.URL = browserSafeURL(cfg.SendUpdates.URL)
+	cfg.SendUpdates.Headers = nil
+	cfg.SendUpdates.Command = nil
+	cfg.Edge.TargetURL = browserSafeURL(cfg.Edge.TargetURL)
+	cfg.Edge.Token = ""
+	cfg.Extra = nil
+	return browserConfigView{Config: cfg}
+}
+
+// browserSafeURL removes URL components commonly used to carry credentials
+// while retaining the non-secret scheme, host, and path needed by the UI.
+// Non-HTTP(S) values, including local Windows paths, are returned unchanged.
+func browserSafeURL(value string) string {
+	trimmed := strings.TrimSpace(value)
+	lower := strings.ToLower(trimmed)
+	if !strings.HasPrefix(lower, "http://") && !strings.HasPrefix(lower, "https://") {
+		return value
+	}
+	parsed, err := url.Parse(trimmed)
+	if err != nil || parsed.Host == "" {
+		return ""
+	}
+	parsed.User = nil
+	parsed.RawQuery = ""
+	parsed.ForceQuery = false
+	parsed.Fragment = ""
+	return parsed.String()
+}
+
+func hasBrowserProtectedURLMaterial(value string) bool {
+	trimmed := strings.TrimSpace(value)
+	lower := strings.ToLower(trimmed)
+	if !strings.HasPrefix(lower, "http://") && !strings.HasPrefix(lower, "https://") {
+		return false
+	}
+	parsed, err := url.Parse(trimmed)
+	if err != nil || parsed.Host == "" {
+		return true
+	}
+	return parsed.User != nil || parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != ""
+}
+
+func preserveBrowserURL(candidate, protected string) string {
+	if hasBrowserProtectedURLMaterial(candidate) || hasBrowserProtectedURLMaterial(protected) {
+		return protected
+	}
+	return candidate
+}
+
+func browserSafeErrorMessage(err error, protectedURLs ...string) string {
+	if err == nil {
+		return ""
+	}
+	message := err.Error()
+	for _, value := range protectedURLs {
+		if !hasBrowserProtectedURLMaterial(value) {
+			continue
+		}
+		safe := browserSafeURL(value)
+		message = strings.ReplaceAll(message, value, safe)
+		if parsed, parseErr := url.Parse(strings.TrimSpace(value)); parseErr == nil {
+			message = strings.ReplaceAll(message, parsed.Redacted(), safe)
+		}
+	}
+	return message
+}
+
+func browserSafeProcesses(processes []processmon.ProcessInfo) []processmon.ProcessInfo {
+	safe := make([]processmon.ProcessInfo, len(processes))
+	copy(safe, processes)
+	for index := range safe {
+		// Command lines are not a browser diagnostic: callers routinely pass
+		// bearer tokens, passwords, and signed URLs as process arguments.
+		safe[index].Cmdline = ""
+		for fileIndex := range safe[index].OpenFiles {
+			safe[index].OpenFiles[fileIndex] = browserSafeURL(safe[index].OpenFiles[fileIndex])
+		}
+	}
+	return safe
+}
+
+// preserveBrowserProtectedConfig restores fields that the browser neither
+// receives nor manages. It deliberately ignores both replacement values and
+// redaction placeholders supplied by a client.
+func preserveBrowserProtectedConfig(cfg, protected appconfig.Config) appconfig.Config {
+	cfg.Database.Path = preserveBrowserURL(cfg.Database.Path, protected.Database.Path)
+	cfg.Export.MySQLDSN = protected.Export.MySQLDSN
+	cfg.Export.MySQLTLSCAFile = protected.Export.MySQLTLSCAFile
+	cfg.Export.MySQLTLSServerName = protected.Export.MySQLTLSServerName
+	cfg.RecentSales = protected.RecentSales
+	cfg.Canonical.Pricing.Digitalogic.BaseURL = preserveBrowserURL(
+		cfg.Canonical.Pricing.Digitalogic.BaseURL,
+		protected.Canonical.Pricing.Digitalogic.BaseURL,
+	)
+	cfg.SendUpdates.URL = preserveBrowserURL(cfg.SendUpdates.URL, protected.SendUpdates.URL)
+	cfg.SendUpdates.Headers = protected.SendUpdates.Headers
+	cfg.SendUpdates.Command = protected.SendUpdates.Command
+	cfg.Edge.TargetURL = preserveBrowserURL(cfg.Edge.TargetURL, protected.Edge.TargetURL)
+	cfg.Edge.Token = protected.Edge.Token
+	cfg.Extra = protected.Extra
 	return cfg
 }
 
@@ -627,11 +757,13 @@ func writeHTMLPartial(w http.ResponseWriter, page []byte) {
 	_, _ = w.Write([]byte(strings.Join(parts, "\n")))
 }
 
-// handleGetRecords returns all database records as JSON, CSV, or XLSX.
+// handleGetRecords returns generalized source records as JSON, CSV, or XLSX.
+// It intentionally bypasses kala-specific conversion and enrichment so other
+// Paradox schemas remain inspectable without a mapping profile.
 func (s *Server) handleGetRecords(w http.ResponseWriter, r *http.Request) {
-	result, err := s.RecordResult()
+	result, err := s.rawRecordResultContext(r.Context())
 	if err != nil {
-		http.Error(w, fmt.Sprintf("Failed to read records: %v", err), http.StatusInternalServerError)
+		http.Error(w, "Failed to read records: "+browserSafeErrorMessage(err, s.currentDBPath()), http.StatusInternalServerError)
 		return
 	}
 
@@ -650,8 +782,42 @@ func (s *Server) handleGetRecords(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	if err := json.NewEncoder(w).Encode(recordsPayload(result)); err != nil {
+	if err := json.NewEncoder(w).Encode(result.Rows); err != nil {
 		http.Error(w, fmt.Sprintf("Failed to encode JSON: %v", err), http.StatusInternalServerError)
+	}
+}
+
+// handleGetProducts exposes the kala product collection without wrapping it in
+// the replication-only product-sync envelope. Generic/noncanonical datasets
+// return 404 while /api/records remains available for their source rows.
+func (s *Server) handleGetProducts(w http.ResponseWriter, r *http.Request) {
+	result, ok := s.canonicalResultForRequest(w, r, "products")
+	if !ok {
+		return
+	}
+	rows := canonical.ProductsToRows(result.Contract.Products)
+	if !s.includeRecordHashes(r) {
+		rows = omitRecordHashes(rows)
+	}
+	result.Rows = rows
+	result.Payload = recordmap.Keyed(rows, "product_code", true)
+	result.KeyField = "product_code"
+
+	format := requestedRecordsFormat(r)
+	if format == "" {
+		http.Error(w, "unsupported products format; use json, csv, or xlsx", http.StatusBadRequest)
+		return
+	}
+	switch format {
+	case "csv":
+		s.writeRecordsCSV(w, r, result.Rows, result.KeyField)
+	case "xlsx":
+		s.writeRecordsXLSX(w, r, result)
+	default:
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		if err := json.NewEncoder(w).Encode(result.Payload); err != nil {
+			http.Error(w, fmt.Sprintf("Failed to encode products: %v", err), http.StatusInternalServerError)
+		}
 	}
 }
 
@@ -659,51 +825,82 @@ func (s *Server) handleGetRecords(w http.ResponseWriter, r *http.Request) {
 // product collection. Generic/noncanonical datasets return 404 rather than an
 // empty shape that could be mistaken for a canonical catalog.
 func (s *Server) handleGetCategories(w http.ResponseWriter, r *http.Request) {
-	timeout := canonicalRequestTimeout(s.Config())
-	ctx, cancel := context.WithTimeout(r.Context(), timeout)
-	defer cancel()
-	result, err := s.canonicalRecordResultContext(ctx)
-	if err != nil {
-		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
-			http.Error(w, fmt.Sprintf("Canonical categories timed out after %s", timeout), http.StatusServiceUnavailable)
-			return
-		}
-		http.Error(w, fmt.Sprintf("Failed to read records: %v", err), http.StatusInternalServerError)
-		return
-	}
-	if result.Contract == nil {
-		http.Error(w, "canonical categories are not available for this dataset", http.StatusNotFound)
+	result, ok := s.canonicalResultForRequest(w, r, "categories")
+	if !ok {
 		return
 	}
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	if err := json.NewEncoder(w).Encode(categoriesPayload(result)); err != nil {
+	if err := json.NewEncoder(w).Encode(categoriesPayload(result, s.includeRecordHashes(r))); err != nil {
 		http.Error(w, fmt.Sprintf("Failed to encode categories: %v", err), http.StatusInternalServerError)
 	}
 }
 
-// handleGetProductSyncContract exposes the living integration envelope
-// without changing the long-standing row collection returned by /api/records.
+// handleGetProductSyncContract exposes the compatibility replication envelope.
+// Ordinary readers should use /api/products and /api/categories; /api/records
+// remains the generalized, minimally transformed datasource boundary.
 func (s *Server) handleGetProductSyncContract(w http.ResponseWriter, r *http.Request) {
-	timeout := canonicalRequestTimeout(s.Config())
-	ctx, cancel := context.WithTimeout(r.Context(), timeout)
-	defer cancel()
-	result, err := s.canonicalRecordResultContext(ctx)
-	if err != nil {
-		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
-			http.Error(w, fmt.Sprintf("Canonical product-sync timed out after %s", timeout), http.StatusServiceUnavailable)
-			return
-		}
-		http.Error(w, fmt.Sprintf("Failed to read records: %v", err), http.StatusInternalServerError)
+	if !s.Config().Canonical.HashesEnabled() {
+		http.Error(w, "canonical product-sync is disabled because record hashes are disabled", http.StatusNotFound)
 		return
 	}
-	if result.Contract == nil {
-		http.Error(w, "canonical product-sync contract is not available for this dataset", http.StatusNotFound)
+	result, ok := s.canonicalResultForRequest(w, r, "product-sync")
+	if !ok {
+		return
+	}
+	if result.DisableSyncContract {
+		http.Error(w, "canonical product-sync is disabled because record hashes are disabled", http.StatusNotFound)
 		return
 	}
 	w.Header().Set("Content-Type", "application/vnd.patris.product-sync+json")
 	if err := json.NewEncoder(w).Encode(result.Contract); err != nil {
 		http.Error(w, fmt.Sprintf("Failed to encode product-sync contract: %v", err), http.StatusInternalServerError)
 	}
+}
+
+func (s *Server) canonicalResultForRequest(w http.ResponseWriter, r *http.Request, resource string) (recordpipe.Result, bool) {
+	timeout := canonicalRequestTimeout(s.Config())
+	ctx, cancel := context.WithTimeout(r.Context(), timeout)
+	defer cancel()
+	result, err := s.canonicalRecordResultContext(ctx)
+	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+			http.Error(w, fmt.Sprintf("Canonical %s timed out after %s", resource, timeout), http.StatusServiceUnavailable)
+			return recordpipe.Result{}, false
+		}
+		http.Error(w, "Failed to read records: "+browserSafeErrorMessage(err, s.currentDBPath()), http.StatusInternalServerError)
+		return recordpipe.Result{}, false
+	}
+	if result.Contract == nil {
+		switch resource {
+		case "products":
+			http.Error(w, "canonical products are not available for this dataset", http.StatusNotFound)
+		case "categories":
+			http.Error(w, "canonical categories are not available for this dataset", http.StatusNotFound)
+		default:
+			http.Error(w, "canonical product-sync contract is not available for this dataset", http.StatusNotFound)
+		}
+		return recordpipe.Result{}, false
+	}
+	return result, true
+}
+
+func (s *Server) includeRecordHashes(r *http.Request) bool {
+	cfg := s.Config().Canonical
+	include := cfg.ExposeRecordHashes()
+	value := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("include_hashes")))
+	switch value {
+	case "0", "false", "no", "off":
+		include = false
+	}
+	return cfg.HashesEnabled() && include
+}
+
+func omitRecordHashes(rows []map[string]interface{}) []map[string]interface{} {
+	copied := recordmap.CopyRows(rows)
+	for _, row := range copied {
+		delete(row, "record_hash")
+	}
+	return copied
 }
 
 func canonicalRequestTimeout(cfg appconfig.Config) time.Duration {
@@ -729,9 +926,9 @@ func canonicalRequestTimeout(cfg appconfig.Config) time.Duration {
 	return timeout
 }
 
-// handleGetRecentSales exposes only a privacy-safe product-level aggregate.
+// handleGetRecentSales exposes the configured product-level sales aggregate.
 // It authenticates before reading the separately configured source and never
-// serializes or returns source rows.
+// serializes source rows that are outside this aggregate representation.
 func (s *Server) handleGetRecentSales(w http.ResponseWriter, r *http.Request) {
 	cfg := recentsales.DefaultConfig()
 	if s.config != nil {
@@ -900,7 +1097,7 @@ func wantsDownload(r *http.Request) bool {
 func (s *Server) handleGetInfo(w http.ResponseWriter, r *http.Request) {
 	info, err := s.Info()
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		http.Error(w, browserSafeErrorMessage(err, s.currentDBPath()), http.StatusInternalServerError)
 		return
 	}
 
@@ -1042,15 +1239,10 @@ func (s *Server) handlePutConfig(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf("Failed to decode config: %v", err), http.StatusBadRequest)
 		return
 	}
-	// The browser is not a connection-management surface. Preserve protected
-	// server-side connection material even if an old cache or crafted request
-	// includes replacement values.
-	protectedConfig := s.config.Get()
-	protectedExport := protectedConfig.Export
-	cfg.Export.MySQLDSN = protectedExport.MySQLDSN
-	cfg.Export.MySQLTLSCAFile = protectedExport.MySQLTLSCAFile
-	cfg.Export.MySQLTLSServerName = protectedExport.MySQLTLSServerName
-	cfg.RecentSales = protectedConfig.RecentSales
+	// The browser is not a secret-management surface. Preserve protected
+	// server-side material even if an old cache or crafted request includes a
+	// redaction placeholder or replacement value.
+	cfg = preserveBrowserProtectedConfig(cfg, s.config.Get())
 	cfg, err := s.ReplaceConfig(cfg)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("Failed to save config: %v", err), http.StatusInternalServerError)
@@ -1297,7 +1489,7 @@ func (s *Server) handleGetPatris81Processes(w http.ResponseWriter, r *http.Reque
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"success":   true,
 		"count":     len(processes),
-		"processes": processes,
+		"processes": browserSafeProcesses(processes),
 	})
 }
 
@@ -1309,7 +1501,7 @@ func (s *Server) handleGetFileProcesses(w http.ResponseWriter, r *http.Request) 
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"success":   true,
 			"file":      sourceBaseName(dbPath),
-			"path":      dbPath,
+			"path":      browserSafeURL(dbPath),
 			"remote":    true,
 			"count":     0,
 			"in_use":    false,
@@ -1331,7 +1523,7 @@ func (s *Server) handleGetFileProcesses(w http.ResponseWriter, r *http.Request) 
 		"path":      fileInfo.FilePath,
 		"count":     len(fileInfo.Processes),
 		"in_use":    len(fileInfo.Processes) > 0,
-		"processes": fileInfo.Processes,
+		"processes": browserSafeProcesses(fileInfo.Processes),
 	})
 }
 
@@ -1347,7 +1539,11 @@ func (s *Server) handleAppIcon(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "image/png")
 	w.Header().Set("Accept-Ranges", "bytes")
 	w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
-	http.ServeContent(w, r, "patris-api-icon.png", time.Time{}, bytes.NewReader(web.AppIconPNG))
+	http.ServeContent(w, r, "logo.png", time.Time{}, bytes.NewReader(web.AppIconPNG))
+}
+
+func (s *Server) handleLegacyAppIcon(w http.ResponseWriter, r *http.Request) {
+	http.Redirect(w, r, "/static/logo.png", http.StatusPermanentRedirect)
 }
 
 // handleFavicon serves the application icon.
@@ -1356,6 +1552,15 @@ func (s *Server) handleFavicon(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Accept-Ranges", "bytes")
 	w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
 	http.ServeContent(w, r, "favicon.ico", time.Time{}, bytes.NewReader(web.FaviconICO))
+}
+
+// handleRobots keeps operator, diagnostic, and dataset routes out of search
+// indexes when a listener is accidentally exposed through a public hostname.
+func (s *Server) handleRobots(w http.ResponseWriter, r *http.Request) {
+	const policy = "User-agent: *\nDisallow: /\n"
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.Header().Set("Cache-Control", "public, max-age=3600")
+	http.ServeContent(w, r, "robots.txt", time.Time{}, strings.NewReader(policy))
 }
 
 // handleWebSocket handles WebSocket connections
@@ -1434,7 +1639,7 @@ func (s *Server) sendRecordsToClient(conn *websocket.Conn, connMu *sync.Mutex) {
 	// Client connections are observational and must not replace a watcher-owned
 	// change baseline.
 	revision := ""
-	if result.Contract != nil {
+	if result.Contract != nil && !result.DisableSyncContract {
 		revision = result.Contract.Source.Revision
 	}
 	s.seedLastSnapshot(records, revision)
@@ -1450,7 +1655,7 @@ func (s *Server) initialSnapshotMessage(result recordpipe.Result, dbPath, reason
 		"added":       result.Rows,
 		"total_count": len(result.Rows),
 		"file_name":   sourceBaseName(dbPath),
-		"file_path":   dbPath,
+		"file_path":   browserSafeURL(dbPath),
 		"version":     s.version,
 		"resources":   web.Resources(),
 		"raw":         result.Raw,
@@ -1463,8 +1668,8 @@ func (s *Server) initialSnapshotMessage(result recordpipe.Result, dbPath, reason
 	if s.config != nil {
 		message["config"] = browserConfig(s.config.Get())
 	}
-	if result.Contract != nil {
-		message["contract"] = result.SyncEnvelope(nil)
+	if contract := result.SyncEnvelope(nil); contract != nil {
+		message["contract"] = contract
 	}
 	return message
 }
@@ -1482,7 +1687,7 @@ func (s *Server) broadcastInitialSnapshot(reason string) {
 	s.lastRecordsMu.Lock()
 	s.lastRecords = records
 	s.lastRecordsReady = true
-	if result.Contract != nil {
+	if result.Contract != nil && !result.DisableSyncContract {
 		s.lastContractRevision = result.Contract.Source.Revision
 	} else {
 		s.lastContractRevision = ""
@@ -1506,7 +1711,7 @@ func (s *Server) broadcastInitialSnapshot(reason string) {
 	s.dispatchUpdateEvent(updateout.Event{
 		Type:             "initial",
 		Timestamp:        fmt.Sprintf("%v", message["timestamp"]),
-		Source:           dbPath,
+		Source:           browserSafeURL(dbPath),
 		Raw:              result.Raw,
 		Records:          records,
 		KeyField:         result.KeyField,
@@ -1572,7 +1777,7 @@ func (s *Server) broadcastUpdate() {
 		s.dispatchUpdateEvent(updateout.Event{
 			Type:             "update",
 			Timestamp:        changeSet.Timestamp,
-			Source:           s.currentDBPath(),
+			Source:           browserSafeURL(s.currentDBPath()),
 			Raw:              result.Raw,
 			Records:          records,
 			Changes:          &changeSet,
@@ -1600,7 +1805,7 @@ func (s *Server) dispatchInitialUpdate(ctx context.Context) {
 	s.dispatchUpdateEvent(updateout.Event{
 		Type:             "initial",
 		Timestamp:        time.Now().Format(time.RFC3339),
-		Source:           s.currentDBPath(),
+		Source:           browserSafeURL(s.currentDBPath()),
 		Raw:              result.Raw,
 		Records:          result.Rows,
 		KeyField:         result.KeyField,
@@ -2038,11 +2243,11 @@ func (s *Server) processStatus() map[string]interface{} {
 		"patris81": map[string]interface{}{
 			"running":   len(patris81Processes) > 0,
 			"count":     len(patris81Processes),
-			"processes": patris81Processes,
+			"processes": browserSafeProcesses(patris81Processes),
 		},
 		"file_access": map[string]interface{}{
 			"file":      sourceBaseName(dbPath),
-			"path":      dbPath,
+			"path":      browserSafeURL(dbPath),
 			"remote":    filecopy.IsURL(dbPath),
 			"in_use":    fileInfo != nil && len(fileInfo.Processes) > 0,
 			"count":     0,
@@ -2054,7 +2259,7 @@ func (s *Server) processStatus() map[string]interface{} {
 	}
 	if fileInfo != nil {
 		status["file_access"].(map[string]interface{})["count"] = len(fileInfo.Processes)
-		status["file_access"].(map[string]interface{})["processes"] = fileInfo.Processes
+		status["file_access"].(map[string]interface{})["processes"] = browserSafeProcesses(fileInfo.Processes)
 	}
 	if fileErr != nil {
 		status["file_access"].(map[string]interface{})["error"] = fileErr.Error()
@@ -2190,7 +2395,7 @@ func (s *Server) updateRecordBaseline(result recordpipe.Result) (recorddiff.Chan
 	defer s.lastRecordsMu.Unlock()
 
 	currentRevision := ""
-	if result.Contract != nil {
+	if result.Contract != nil && !result.DisableSyncContract {
 		currentRevision = result.Contract.Source.Revision
 	}
 	contractChanged := s.lastRecordsReady && currentRevision != s.lastContractRevision
@@ -2427,13 +2632,13 @@ func (s *Server) StartWatching(debounceDuration time.Duration) error {
 			pollInterval = 5 * time.Minute
 		}
 		if err := fw.Poll(dbPath, func(path string) {
-			log.Printf("🔄 Remote source changed: %s", path)
+			log.Printf("🔄 Remote source changed: %s", browserSafeURL(path))
 			s.notifyFileUpdated(path)
 			s.broadcastUpdate()
 		}, pollInterval); err != nil {
 			return fmt.Errorf("failed to poll URL: %w", err)
 		}
-		log.Printf("👀 Polling remote source: %s (interval: %v)", dbPath, pollInterval)
+		log.Printf("👀 Polling remote source: %s (interval: %v)", browserSafeURL(dbPath), pollInterval)
 		s.dispatchInitialUpdateAsync()
 		return nil
 	}

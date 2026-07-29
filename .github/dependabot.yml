@@ -48,6 +48,31 @@ updates:
         patterns:
           - "*"
 
+  - package-ecosystem: "npm"
+    directory: "/docs/api"
+    target-branch: "main"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "08:45"
+      timezone: "Asia/Tehran"
+    open-pull-requests-limit: 5
+    rebase-strategy: "auto"
+    versioning-strategy: "increase"
+    labels:
+      - "📌 source: dependabot"
+      - "📦 area: dependencies"
+      - "📚 type: docs"
+      - "🏗️ area: build-ci"
+    commit-message:
+      prefix: "deps(api-docs)"
+      include: "scope"
+    groups:
+      api-documentation-tooling:
+        dependency-type: "development"
+        patterns:
+          - "*"
+
   - package-ecosystem: "github-actions"
     directory: "/"
     target-branch: "main"

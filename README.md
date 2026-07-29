@@ -1,729 +1,339 @@
-# <img src="assets/patris-api-icon.png" alt="" width="36" height="36" align="absmiddle"> Patris Export
+# <img src="assets/logo.png" alt="" width="36" height="36" align="absmiddle"> Patris Export
 
-A fast and performant application for reading, parsing, and converting Paradox/BDE database files (`*.db`) from Patris81 software.
-
-Product names and descriptions are validated for unsafe surrounding or
-repeated spaces and unseparated Persian/English/digit transitions. The CLI
-prints a value-free summary, exported rows carry stable warning codes, and the
-Web UI highlights every affected row.
+Patris Export reads Paradox/BDE database files, exposes them as a local web
+service, and publishes useful views to files, spreadsheets, SQL databases, or
+other applications. It works as a standalone utility and as a replaceable
+module in a larger catalog/integration system.
 
 [![Build and Release](https://github.com/atomicdeploy/patris-export/actions/workflows/build.yml/badge.svg)](https://github.com/atomicdeploy/patris-export/actions/workflows/build.yml)
 [![Go Version](https://img.shields.io/badge/Go-1.25-blue.svg)](https://go.dev)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
-## ✨ Features
+## What it does
 
-- 🔄 **Convert Paradox DB files** to JSON or CSV formats
-- 🎯 **Persian/Farsi encoding support** - Automatically converts Patris81 proprietary encoding
-- 👀 **File watching** - Automatically converts files when they change
-- 🌐 **REST API** - HTTP JSON API for accessing database records
-- 🔌 **WebSocket support** - Real-time updates when database changes
-- 🔔 **Smart notifications** - Audio alerts, title flashing, and favicon changes on data updates
-- 🔒 **Write-lock prevention** - Copies files to temp location to avoid BDE conflicts
-- 🔐 **File integrity** - CRC32 checksum calculation and verification
-- 🔍 **Process monitoring** - Detect running Patris81 instances and file locks
-- ⚠️ **Conflict detection** - Warns about potential conflicts in direct access mode
-- 🎨 **Beautiful CLI** - Colorful terminal output with emojis
-- 🏢 **Company.inf support** - Parse company information files
-- ⚡ **Fast and lightweight** - Written in Go with native performance
-- 🐧🪟 **Cross-platform** - Supports both Linux and Windows
+- reads local or HTTP(S) Paradox `.db` files through pxlib;
+- returns ordered raw rows for arbitrary Paradox schemas;
+- projects `kala.db` into separate products and categories;
+- converts Patris81 text to Unicode Persian with an embedded character map;
+- exports JSON, CSV, XLSX, SQLite, and MySQL/MariaDB;
+- provides a Web UI, REST API, WebSocket, TUI, local IPC, and one-shot viewer;
+- watches sources and sends full/change updates to HTTP or local commands;
+- supports optional pricing enrichment without coupling the core to
+  Digitalogic or WordPress;
+- preserves missing versus explicit-null values and tolerates extension fields
+  at extensible canonical boundaries;
+- offers dynamic, CGO-shared, and CGO-static pxlib build modes;
+- packages source-built releases, a Windows installer, checksums, manifests,
+  changelog, and offline API documentation.
 
-## 🚀 Installation
+## Start in five minutes
 
-### From Release
+Inspect a table:
 
-Download the latest source-built release for your platform from the
-[Releases page](https://github.com/atomicdeploy/patris-export/releases).
-
-**Windows users:** Run the checksummed assisted setup executable for a normal
-installation with shortcuts, configuration-safe upgrades, and uninstall
-support. The complete Windows ZIP remains available for portable and embedding
-scenarios; keep `libpxlib.dll` beside `patris-export.exe` for `.db` reading.
-If pxlib is missing, the executable still starts and reports an actionable
-native-runtime error instead of letting Windows abort with a loader dialog.
-
-**Linux users:** Extract the Linux tarball and launch it with the included
-`run-patris-export.sh` so the bundled pxlib runtime is loaded. If pxlib is
-missing on Linux, commands that read `.db` files fail with a normal application
-error that lists the checked library names instead of an ELF loader abort.
-
-Every release includes `SHA256SUMS`, an assisted Windows installer, an install guide, a build manifest, a
-curated changelog, and links to the exact tagged source. See
-[binary installation details](docs/INSTALL-BINARIES.md).
-
-### From Source
-
-Requirements:
-- Go 1.25 or later
-- pxlib development library
-  - **Linux:** `sudo apt-get install pxlib-dev pxlib1`
-  - **Windows:** See [docs/WINDOWS_BUILD.md](docs/WINDOWS_BUILD.md) for building pxlib
-
-**On Ubuntu/Debian:**
-```bash
-sudo apt-get install pxlib-dev pxlib1
-go install github.com/atomicdeploy/patris-export/cmd/patris-export@latest
+```powershell
+patris-export info C:\Patris\data4\kala.db
 ```
 
-**Build manually:**
+Open an app-style snapshot:
+
+```powershell
+patris-export C:\Patris\data4\kala.db
+```
+
+Start the local viewer/API:
+
+```powershell
+patris-export serve C:\Patris\data4\kala.db --addr 127.0.0.1:8080
+```
+
+Then open <http://127.0.0.1:8080/viewer>.
+
+Export a Persian formula workbook:
+
+```powershell
+patris-export convert C:\Patris\data4\kala.db --format xlsx `
+  --output .\exports `
+  --xlsx-language fa `
+  --xlsx-mode formula `
+  --xlsx-zebra=true
+```
+
+See [Getting started](docs/GETTING-STARTED.md) for a safe first-run workflow.
+
+## Choose the correct data surface
+
+| Surface | Purpose |
+| --- | --- |
+| `GET /api/records` | Ordered raw rows for any readable Paradox schema |
+| `GET /api/products` | Transformed `kala.db` sellable products |
+| `GET /api/categories` | Transformed `kala.db` category hierarchy |
+| `GET /api/product-sync` | Atomic replication compatibility envelope with products, categories, exclusions, quarantine, tombstones, and identities |
+| `GET /api/info` | Physical table fields and record metadata |
+| `GET /api/source/file` | Active source-file bytes with ETag/range support |
+| `/ws` | Built-in viewer and external live-event stream |
+
+`/api/product-sync` is not a second product-list route. It remains for stateful
+receivers that need an atomic replication event. New list/search/export clients
+should normally use `/api/products` and `/api/categories`; unfamiliar tables
+should use `/api/records`.
+
+Read [Architecture](docs/ARCHITECTURE.md) for the route decision and extension
+policy. Exact HTTP and WebSocket shapes are in the
+[generated API reference](docs/api/README.md).
+
+## Installation
+
+Download a source-built package from the
+[Releases page](https://github.com/atomicdeploy/patris-export/releases).
+
+- **Windows:** use the assisted installer for shortcuts, safe upgrades, and
+  uninstall, or the portable ZIP for embedding. Keep `libpxlib.dll` beside the
+  executable for the default dynamic build.
+- **Linux:** extract the tarball and use `run-patris-export.sh` so the bundled
+  pxlib runtime is discoverable.
+
+Every release includes checksums, a build manifest, changelog, source links,
+and installation notes. See [Binary installation](docs/INSTALL-BINARIES.md)
+and [Windows installer](docs/WINDOWS_INSTALLER.md).
+
+### Build from source
+
+Requirements:
+
+- Go 1.25 or later;
+- a supported pxlib backend;
+- Node.js when rebuilding the Web UI/API documentation;
+- platform C tooling for CGO/Windows resources when that build mode requires
+  it.
+
 ```bash
 git clone https://github.com/atomicdeploy/patris-export.git
 cd patris-export
 ./build.sh --target current
 ```
 
-Windows users can use the batch launcher, which detects Git Bash/MSYS2 and
-calls the same build orchestration:
+Windows:
 
 ```cmd
 build.cmd
 ```
 
-Useful build variants:
+Common variants:
 
 ```bash
 ./build.sh --target linux
 ./build.sh --target windows-cross
 ./build.sh --target all --test
-./build.sh --target linux --skip-pxlib
+./build.sh --target linux --pxlib-backend dynamic
 ./build.sh --target linux --pxlib-backend cgo
 ./build.sh --target linux --pxlib-backend cgo-static
 ```
 
-The scripts check required tools, build or reuse upstream pxlib, rebuild the web
-frontend, compile Win32 icon/version resources for Windows targets, and print an
-artifact summary. Set `PXLIB_ROOT` to use an existing pxlib install, or
-`USE_VCPKG=1` to add optional vcpkg C dependency paths.
+See [Native pxlib backends](docs/NATIVE-PXLIB-BACKENDS.md),
+[Windows build](docs/WINDOWS_BUILD.md), and
+[pxlib FFI](docs/PXLIB-FFI.md).
 
-The pxlib backend defaults to `dynamic`, which discovers and loads pxlib only
-when a Paradox database is opened. `--pxlib-backend cgo` directly links the
-pxlib shared library through CGO, while `--pxlib-backend cgo-static` embeds the
-source-built pxlib objects so a separate pxlib runtime library is not needed.
-All three modes use the same Go reader and return the same records. See
-[native pxlib backend choices](docs/NATIVE-PXLIB-BACKENDS.md) for Windows,
-Linux, native-build, and cross-build commands.
+## CLI overview
 
-In the default `dynamic` build, Patris Export looks for pxlib next to the executable, under
-`PATRIS_EXPORT_PXLIB_ROOT`, under `PXLIB_ROOT`, and finally through the platform
-library search path. Set `PATRIS_EXPORT_PXLIB_LIBRARY` to force one exact DLL or
-shared-object path for troubleshooting. On Windows foreground `.db` read
-failures show a TaskDialog-style message by default; set
-`PATRIS_EXPORT_NO_TASKDIALOG=1` for scripts and services.
+| Command | Purpose |
+| --- | --- |
+| `patris-export <database.db>` | Open a one-shot viewer |
+| `convert <source>` | Write JSON/CSV/XLSX/SQLite/MySQL once or in watch mode |
+| `info <database.db>` | Inspect Paradox fields and record count |
+| `company <company.inf>` | Parse an explicitly supplied company file |
+| `view [source]` | Generate/open a self-contained snapshot |
+| `serve [source]` | Run Web UI, REST, WebSocket, and/or IPC |
+| `stub` / `edge` | Upload one watched source to a central instance |
+| `ipc <method> [params]` | Call the local JSON-lines endpoint |
+| `tui [database.db]` | Open the terminal operations dashboard |
+| `verify <snapshot.json\|->` | Validate a product-sync compatibility snapshot |
+| `update` | Replace the executable from a verified artifact/manifest |
+| `license ...` | Inspect/manage optional build-time licensing |
 
-The native boundary's audited layouts, pointer-lifetime rules, read bounds,
-and backend requirements are documented in [docs/PXLIB-FFI.md](docs/PXLIB-FFI.md).
+The complete flag reference is [CLI reference](docs/CLI-REFERENCE.md). In
+particular, `-d` is `--direct-access`; debounce is the long
+command-specific `--debounce` flag.
 
-## 📖 Usage
+## Conversion examples
 
-### Convert Database to JSON
+Raw source rows, with no significant transformation:
 
 ```bash
-patris-export convert kala.db -f json -o output/
+patris-export --raw convert other.db --format json --output -
 ```
 
-### Convert Database to CSV
+JSON and CSV:
 
 ```bash
-patris-export convert kala.db -f csv -o output/
+patris-export convert kala.db --format json --output ./exports
+patris-export convert kala.db --format csv --output ./exports
 ```
 
-### Raw, Mapped, Excel, SQLite, MySQL, and Send Updates
+SQLite:
 
 ```bash
-# Raw pxlib rows for debugging; no conversion, ANBAR compaction, RTL, or mapping.
-patris-export --raw convert kala.db -f json -o raw-output/
-
-# Persian Excel workbook using live pricing formulas and zebra rows.
-patris-export convert kala.db -f xlsx -o output/ \
-  --xlsx-language fa \
-  --xlsx-mode formula \
-  --xlsx-zebra=true
-
-# SQLite export using the built-in canonical kala profile.
-patris-export convert kala.db \
-  -f sqlite \
-  --sqlite-path output/patris-products.sqlite \
-  --sqlite-table products \
+patris-export convert kala.db --format sqlite \
+  --sqlite-path ./exports/catalog.sqlite \
+  --table products \
   --batch-size 250
+```
 
-# Preview guarded soft deletion; upsert_only is the safe default.
-patris-export convert kala.db \
-  -f sqlite \
-  --sqlite-path output/patris-products.sqlite \
-  --sqlite-table products \
-  --reconciliation soft_delete_missing \
-  --dry-run
+MySQL/MariaDB:
 
-# Apply only the unchanged deletion keyset using the preview's sha256 digest.
-patris-export convert kala.db \
-  -f sqlite \
-  --sqlite-path output/patris-products.sqlite \
-  --sqlite-table products \
-  --reconciliation soft_delete_missing \
-  --reconciliation-token 'sha256:<exact-preview-digest>'
+```bash
+export PATRIS_EXPORT_MYSQL_DSN='user:password@tcp(db.example:3306)/catalog?parseTime=true'
+patris-export convert kala.db --format mysql --table products
+unset PATRIS_EXPORT_MYSQL_DSN
+```
 
-# Watch and send canonical JSON changes to a configured receiver.
-# PATRIS_PRODUCT_SYNC_SECRET is injected into the process environment by
-# the deployment secret manager; only its variable name appears here.
-patris-export convert kala.db -f json -w \
-  --send-url https://receiver.example/wp-json/receiver/patris/product-sync \
+`upsert_only` is the safe SQL default. Review
+[Configuration: SQL destinations](docs/CONFIGURATION.md#sql-destinations)
+before using soft or hard missing-row reconciliation.
+
+Watch and send updates:
+
+```bash
+patris-export convert kala.db --format json --watch \
+  --send-url https://receiver.example/catalog/events \
   --send-mode changes \
-  --send-product-sync-secret-env PATRIS_PRODUCT_SYNC_SECRET \
   --send-retry-attempts 3 \
   --send-retry-backoff 2s
 ```
 
-See [the canonical product-sync contract](docs/CANONICAL-PRODUCT-SYNC.md) and
-[living integration policy](docs/INTEGRATION-STANDARD.md) for
-`kala.db` pricing, Digitalogic, freshness, and payload details. See
-[docs/examples/export-transform-send.md](docs/examples/export-transform-send.md)
-for generic dataset mapping, SQL/MySQL DSN examples, and command delivery mode.
-For copy-paste REST, JSON-RPC, gRPC-gateway, and WordPress AJAX recipes, use
-[Remote Update Delivery](docs/REMOTE-API-EXAMPLES.md).
+See [Remote API examples](docs/REMOTE-API-EXAMPLES.md) for REST, JSON-RPC,
+WordPress AJAX, and gRPC-gateway adapters.
 
-### Output to STDOUT
+## Configuration
 
-You can output directly to stdout by using `-` as the output destination, which allows for piping and redirection:
+Patris Export supports layered JSON, YAML, and TOML files:
 
 ```bash
-# Output JSON to stdout
-patris-export convert kala.db -f json -o -
-
-# Pipe to jq for filtering
-patris-export convert kala.db -f json -o - | jq '.["12345"]'
-
-# Redirect to file
-patris-export convert kala.db -f csv -o - > output.csv
+patris-export \
+  --config ./config/base.yaml \
+  --config ./config/office.yaml \
+  serve
 ```
 
-Note: Watch mode (`-w`) cannot be used with stdout output.
+Effective precedence is defaults, config files in order, environment, then
+explicit CLI flags.
 
-### Watch File for Changes
+Useful controls:
 
-```bash
-patris-export convert kala.db -f json -w
+```yaml
+database:
+  path: C:\Patris\data4\kala.db
+  direct_access: false
+  raw: false
+
+canonical:
+  enabled: true
+  profiles:
+    kala.db:
+      type: kala
+  hashes:
+    enabled: true
+    expose: false
+
+ui:
+  language: fa
+  rtl_text_direction: true
 ```
 
-This will automatically re-convert the file whenever it changes. The convert command uses a 1-second debounce by default, meaning that rapid successive changes to the file will only trigger one conversion after the changes have settled.
+Record hashes are optional change identities, not credentials or signatures.
+See [Configuration](docs/CONFIGURATION.md),
+[Record hashes](docs/RECORD-HASHES.md), and
+[Datasets, mappings, and i18n](docs/DATASETS-MAPPINGS-I18N.md).
 
-You can customize the debounce duration with the `--debounce` flag:
+## Web UI, TUI, and embedding
 
-```bash
-# No debounce (immediate conversion on every change)
-patris-export convert kala.db -f json -w --debounce 0s
+The Web UI provides live search/table views, language/RTL settings, exports,
+event details, source/process status, and bounded SQL operator controls.
 
-# 500ms debounce
-patris-export convert kala.db -f json -w --debounce 500ms
-
-# 5 second debounce
-patris-export convert kala.db -f json -w --debounce 5s
-```
-
-### Show Database Information
-
-```bash
-patris-export info kala.db
-```
-
-### Parse Company Information
-
-```bash
-patris-export company company.inf
-```
-
-### Start REST API Server
-
-```bash
-patris-export serve kala.db -a :8080
-```
-
-### Terminal Dashboard
-
-Run the Bubble Tea terminal dashboard when you want a keyboard-first view of the
-same operational state exposed by the web UI and API:
+The TUI provides source, fields, config, charmap, process/file-lock, tools, and
+version tabs:
 
 ```bash
 patris-export tui kala.db
 ```
 
-The dashboard refreshes live and includes data/source status, field discovery,
-Patris81 process and file-lock visibility, the embedded/default character map,
-API shortcuts, and a WebSocat launcher. Use `tab` or the arrow keys to switch
-views, `1` through `7` to jump to a tab, `r` to refresh, `o` to open the web
-viewer, and `w` to inspect WebSocket updates through WebSocat.
+See [TUI guide](docs/TUI-GUIDE.md).
 
-![Patris Export TUI dashboard](docs/screenshots/tui-dashboard.svg)
+Electron, Tauri, WebView2, native applications, and services can use HTTP,
+WebSocket, IPC, the embeddable Go router, or the C-compatible library build.
+See [Ecosystem and integrations](docs/ECOSYSTEM-AND-INTEGRATIONS.md) and
+[Embedding](docs/EMBEDDING.md).
 
-Terminal WebSocket inspection with WebSocat is documented in [docs/examples/websocat.md](docs/examples/websocat.md).
-Embedding, loadable-library builds, and local IPC are documented in [docs/EMBEDDING.md](docs/EMBEDDING.md). Optional Windows ALM compatibility builds and their security limitations are documented in [docs/LICENSING.md](docs/LICENSING.md).
+## Documentation
 
-Experimental RTL logical text conversion is available as an opt-in backend flag
-and web display setting. See [docs/RTL_CONVERSION.md](docs/RTL_CONVERSION.md).
+[Documentation hub](docs/README.md):
 
-### Edge Stub Upload Mode
+- [Getting started](docs/GETTING-STARTED.md)
+- [CLI reference](docs/CLI-REFERENCE.md)
+- [Configuration](docs/CONFIGURATION.md)
+- [Architecture](docs/ARCHITECTURE.md)
+- [Ecosystem and integrations](docs/ECOSYSTEM-AND-INTEGRATIONS.md)
+- [Datasets, mappings, and i18n](docs/DATASETS-MAPPINGS-I18N.md)
+- [Record hashes](docs/RECORD-HASHES.md)
+- [Glossary](docs/GLOSSARY.md)
+- [API documentation build](docs/api/README.md)
 
-Run the full server on a central machine and let lightweight edge machines push
-raw `.db` snapshots whenever Patris updates the file:
-
-```bash
-# Central receiver
-PATRIS_EXPORT_EDGE_TOKEN=change-me patris-export serve received.db --addr 0.0.0.0:18080
-
-# Edge machine beside Patris81
-patris-export stub C:\Patris\data4\kala.db ^
-  --target-url http://central-server:18080 ^
-  --token change-me ^
-  --source-id branch-a ^
-  --debounce 750ms
-```
-
-The stub streams multipart uploads to `/api/edge/upload`; the receiver stores the
-snapshot, switches its active data source, transforms rows normally, and
-broadcasts updates through the existing WebSocket/API/UI paths.
-
-Config and environment equivalents:
-
-```yaml
-edge:
-  target_url: http://central-server:18080
-  token: change-me
-  source_id: branch-a
-  debounce: 750ms
-  max_upload_mb: 512
-  upload_dir: edge-uploads
-```
+Build and validate static/offline API documentation:
 
 ```bash
-PATRIS_EXPORT_EDGE_TARGET_URL=http://central-server:18080
-PATRIS_EXPORT_EDGE_TOKEN=change-me
-PATRIS_EXPORT_EDGE_SOURCE_ID=branch-a
-PATRIS_EXPORT_EDGE_DEBOUNCE=750ms
-PATRIS_EXPORT_EDGE_MAX_UPLOAD_MB=512
+npm --prefix docs/api ci
+npm --prefix docs/api run lint
+npm --prefix docs/api run parity
+npm --prefix docs/api test
+npm --prefix docs/api run build
+npm --prefix docs/api run check:determinism
 ```
 
-### One-shot Native Viewer
+The public static reference is suitable for a future GitHub Pages deployment.
+The complete internal reference contains operator/private routes and must stay
+inside an authorized boundary.
 
-Open a local snapshot viewer directly from a database file:
+## Current scope and roadmap
+
+The current server owns one active `.db` per process. Automatic `company.inf`
+discovery, full `dataN` multi-database loading/watching, filtered-subset server
+export, TSV/BSON/MessagePack/Protocol Buffers, SQLite API downloads, unified
+OS/API-key ACL, and Windows-only Patris81 UI automation are roadmap work—not
+features claimed by this README.
+
+Track implementation through [GitHub issues](https://github.com/atomicdeploy/patris-export/issues).
+The repository `TODO.md` is a secondary engineering checklist; it must not
+override current code, checked API contracts, or issue status.
+
+## Development
 
 ```bash
-patris-export kala.db
-patris-export --db kala.db
-patris-export view kala.db
+make build
+make test
+go test ./...
 ```
 
-The command safely reads through a temporary copy by default, generates a self-contained HTML snapshot, and opens it in a native app-style window where the platform provides one. On Windows it prefers Microsoft Edge/WebView2 runtime app mode; on Linux it prefers browser app mode and falls back to `xdg-open`.
-
-Generate the snapshot without opening a window:
-
-```bash
-patris-export view kala.db --no-open --html-output output/kala-viewer.html
-```
-
-### Temporary Storage Policy
-
-When no explicit temp directory is configured, Linux builds use `auto` temp storage selection. In that mode Patris Export prefers `/dev/shm/patris-export` for known-size temp copies up to 100 MiB when the tmpfs mount exists and has enough free space, then falls back to the normal system temp directory for larger files, unknown-size downloads, or unsupported platforms.
-
-Explicit temp directories always win:
-
-```bash
-patris-export serve kala.db --temp-dir /var/tmp/patris-export
-PATRIS_EXPORT_TEMP_DIR=/var/tmp/patris-export patris-export convert kala.db
-```
-
-The policy can also be configured:
-
-```bash
-patris-export convert kala.db --temp-strategy system
-patris-export convert kala.db --temp-strategy auto --temp-memory-limit-mb 128
-PATRIS_EXPORT_TEMP_STRATEGY=memory PATRIS_EXPORT_TEMP_MEMORY_LIMIT_MB=64 patris-export serve kala.db
-```
-
-Config file equivalent:
-
-```yaml
-runtime:
-  temp_dir: system
-  temp_strategy: auto
-  temp_memory_limit_mb: 100
-```
-
-Then access:
-- Web interface: http://localhost:8080
-- API records: http://localhost:8080/api/records
-- API info: http://localhost:8080/api/info
-- WebSocket: ws://localhost:8080/ws
-
-The server watches the database file by default and broadcasts updates immediately (no debounce) to all connected WebSocket clients when changes are detected.
-
-#### 🔔 Notification Features
-
-The web viewer includes smart notification features. Visual alerts are always shown for data changes, while audio alerts can be enabled in the Settings panel:
-
-- **🔊 Audio Notifications** - Play a subtle sound when data changes
-- **📋 Title Flashing** - Page title briefly flashes with change count (e.g., "🔔 3 records updated")
-- **🔴 Favicon Alert** - Favicon changes to a red dot indicator during updates
-- **💾 Settings Persistence** - All notification preferences are saved to browser localStorage
-
-These features help you stay aware of database changes even when the browser tab is in the background.
-
-You can customize the debounce duration for the server with the `--debounce` flag:
-
-```bash
-# 500ms debounce for server updates
-patris-export serve kala.db -a :8080 --debounce 500ms
-
-# 1 second debounce
-patris-export serve kala.db -a :8080 --debounce 1s
-```
-
-## 🎯 Using Character Mapping
-
-Patris Export embeds the default Patris81 legacy encoding map, so Persian/Farsi text conversion works without passing an external file. Use `-m/--charmap` only when you want to override the built-in map for custom conversion or debugging.
-
-```bash
-# Uses the embedded Patris81 character map
-patris-export convert kala.db -f json
-
-# Optional override for custom/debug mapping
-patris-export convert kala.db -c custom-farsi-chars.txt -f json
-```
-
-## 🔌 WebSocket Example
-
-Connect to the WebSocket endpoint to receive real-time updates:
-
-```javascript
-const ws = new WebSocket('ws://localhost:8080/ws');
-
-ws.onmessage = (event) => {
-    const data = JSON.parse(event.data);
-    console.log('Received update:', data);
-    console.log('Record count:', data.count);
-    console.log('Records:', data.records);
-};
-```
-
-The server will automatically broadcast updates to all connected clients immediately when the database file changes (no debounce delay for real-time responsiveness).
-
-## 🏗️ Architecture
-
-```
-patris-export/
-├── cmd/
-│   └── patris-export/     # Main CLI application
-├── pkg/
-│   ├── paradox/           # Paradox DB file reader (using pxlib)
-│   ├── converter/         # Patris encoding converter & exporter
-│   ├── watcher/           # File watcher with hash-based change detection
-│   └── server/            # REST API & WebSocket server
-├── testdata/              # Sample database files
-└── docs/                  # Documentation
-```
-
-## 🛠️ Development
-
-### Build Commands
-
-```bash
-make build          # Build for current platform
-make build-linux    # Build for Linux
-make build-windows  # Build for Windows (see docs/WINDOWS_BUILD.md)
-make build-all      # Build for all platforms
-make test          # Run tests
-make clean         # Clean build artifacts
-make install       # Install to GOPATH/bin
-```
-
-### Running Tests
-
-```bash
-go test -v ./...
-```
-
-On Windows, use the CGO helper when running tests against the native pxlib
-reader:
-
-```bat
-test-cgo.cmd
-```
-
-For custom CGO commands, pass the command after the helper script:
+Windows native tests:
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\windows\Invoke-CGO.ps1 go test ./pkg/server
+powershell -NoProfile -ExecutionPolicy Bypass `
+  -File .\scripts\windows\Invoke-CGO.ps1 `
+  go test ./pkg/server
 ```
 
-## 📋 Command Reference
-
-### Global Flags
-
-- `-c, --config` - Path to a patris-export config file. Repeat to layer JSON/YAML/TOML files.
-- `-m, --charmap` - Optional path to a custom character mapping file. If omitted, the embedded Patris81 mapping is used.
-- `-o, --output` - Output directory for converted files, or `-` for stdout (default: current directory)
-- `--temp-dir` - Explicit temp directory for copied/downloaded database files. Overrides automatic temp storage selection.
-- `--temp-strategy` - Temp storage strategy: `auto`, `system`, or `memory`.
-- `--temp-memory-limit-mb` - Maximum known file size for memory-backed temp copies when the strategy allows it.
-- `-v, --verbose` - Enable verbose logging
-- `-r, --rtl` - Opt in to experimental RTL logical text conversion for mixed Persian/Latin output
-
-### Commands
-
-#### `convert [database-file-or-url]`
-Convert a local or HTTP/HTTPS Paradox database file to JSON or CSV. Remote sources are downloaded to a temporary file before reading.
-
-**Flags:**
-- `-f, --format` - Output format: json or csv (default: json)
-- `-w, --watch` - Watch a local file or poll a URL for changes and auto-convert
-- `-d, --debounce` - Debounce duration for local watch mode; polling interval for URLs (default: 1s, examples: 500ms, 5s, 5m)
-
-**URL examples:**
-```bash
-patris-export convert https://example.com/data/kala.db -o ./exports
-patris-export convert https://example.com/data/kala.db --watch --debounce 5m
-```
-
-#### `info [database-file]`
-Display information about a Paradox database file (fields, record count, etc.)
-
-#### `company [company.inf]`
-Parse and display company information from company.inf file.
-
-#### `serve [database-file-or-url]`
-Start the REST API and WebSocket server.
-
-**Flags:**
-- `-a, --addr` - Server address (default: :8080)
-- `-w, --watch` - Watch local files or poll URL sources and broadcast updates (default: true)
-- `-d, --debounce` - Debounce duration for local files; polling interval for URLs (default: 0s for local files, 5m for URLs)
-
-**URL example:**
-```bash
-patris-export serve https://example.com/data/kala.db --host 127.0.0.1 --port 8080 --debounce 5m
-```
-
-#### `update`
-Update the installed executable from the latest successful GitHub Actions build artifact.
-
-**Flags:**
-- `-b, --branch` - Branch to download from (default: main)
-- `--api-url` - Update from a running Patris Export API by fetching `/api/update/manifest`
-- `--manifest-url` - Update from an explicit executable manifest URL
-
-**Examples:**
-```bash
-# Update from main
-patris-export update
-
-# Update from another branch
-patris-export update --branch develop
-
-# Update from another Patris Export instance/API
-patris-export update --api-url http://127.0.0.1:18080
-
-# Update from an explicit manifest endpoint
-patris-export update --manifest-url http://127.0.0.1:18080/api/update/manifest
-```
-
-`GITHUB_TOKEN` is optional for public repositories, but recommended for higher API rate limits. Private repositories require a token that can read the repository and its Actions artifacts, such as a classic token with `repo` access.
-
-Repository lookup defaults to `atomicdeploy/patris-export`. Override it with `PATRIS_EXPORT_REPO_OWNER` and `PATRIS_EXPORT_REPO_NAME` when testing forks or custom deployments.
-
-### Executable Update API
-
-When the server is running, it can publish the exact executable that is serving the API:
-
-- `GET /api/update/manifest` returns version, platform, file name, size, SHA-256, last modified timestamp, and `download_url`.
-- `GET /api/update/executable` streams the executable.
-- `HEAD /api/update/executable` reports static headers without a body.
-
-The executable endpoint uses the real file on disk and supports byte ranges, conditional requests, `Content-Length`, `Last-Modified`, `ETag`, `X-Checksum-SHA256`, and `X-Executable-*` metadata headers. The API updater downloads by streaming to a temp file and only replaces the current executable after the manifest size and SHA-256 match the downloaded bytes.
-
-If the remote update API is protected, set `PATRIS_EXPORT_UPDATE_TOKEN`; this is separate from `GITHUB_TOKEN` so GitHub credentials are not sent to arbitrary update hosts.
-
-### Source Database File API
-
-When the server is watching a local `.db` or has accepted an edge-uploaded
-snapshot, it can also publish that exact active source file:
-
-- `GET /api/source/manifest` returns file name, full active path, size, SHA-256, last modified timestamp, and `download_url`.
-- `GET /api/source/file` streams the active source file.
-- `HEAD /api/source/file` reports static headers without a body.
-
-The source-file endpoint supports byte ranges, conditional requests,
-`Content-Length`, `Last-Modified`, `ETag`, `X-Checksum-SHA256`, and
-`X-Source-*` metadata headers. Remote URL-backed sources cannot be re-served as
-a local static file until they have been materialized as an edge upload or local
-watched file.
-
-## 🔧 API Reference
-
-### REST Endpoints
-
-#### `GET /`
-Web interface with API documentation.
-
-#### `GET /api/records`
-Returns all database records in JSON format by default. CSV and XLSX are
-available through content negotiation, a query parameter, or a file-style
-route:
+API documentation:
 
 ```bash
-curl http://localhost:8080/api/records
-curl http://localhost:8080/api/records?format=csv -o kala.csv
-curl http://localhost:8080/api/records.csv -o kala.csv
-curl -H "Accept: text/csv" http://localhost:8080/api/records -o kala.csv
-curl 'http://localhost:8080/api/records.xlsx?download=1' -o kala.xlsx
+make docs-install
+make docs-verify
+make docs-package
 ```
 
-Add `download=1` to ask the API for an attachment filename, for example
-`/api/records.csv?download=1`. The viewer's Excel action calls this same Go
-endpoint rather than rebuilding the workbook in JavaScript. XLSX workbooks keep
-Code as text, preserve safe numeric values as numeric cells, split
-`warehouse_stock` into one column per warehouse, freeze and filter the header,
-and include an allowlisted Metadata sheet with schema, formula, export mode,
-source revision, generated time, and warnings. Headers follow the active UI
-language by default. Use `language=en|fa`, `mode=precalculated|formula`,
-`zebra=0|1`, and `rtl=0|1` on the HTTP route, or the equivalent CLI/config
-settings described in [Excel export](docs/EXCEL-EXPORT.md).
+## License and support
 
-The viewer data grid keeps selection keyed by `Code` across sorting and
-filtering, exposes accessible row and header command menus through right-click,
-keyboard, and ellipsis actions, and supports pointer or keyboard column resizing
-with a full-height guide. Warehouse stock remains a two-row group with one
-independently selectable column per warehouse. Sticky headers and the optional
-sticky first data column keep identifiers visible while scrolling. Language,
-canonical-key conditional row-icon rules, fallback icon metadata, column widths,
-column order, per-warehouse visibility, and the independent row-coloring toggle
-are persisted under `ui` through the normal Patris Export config API rather
-than in a separate table-settings file. Existing browser-only column choices
-are migrated once; `localStorage` remains only a cache and offline fallback.
+Patris Export is licensed under the [MIT License](LICENSE). See
+[SECURITY.md](SECURITY.md) for security reporting and
+[GitHub Issues](https://github.com/atomicdeploy/patris-export/issues) for
+reproducible bugs and feature tracking.
 
-For a configured canonical dataset, `GET /api/product-sync` returns the full
-current `patris.product-sync` envelope. Missing source/reference values are
-omitted; `null` is reserved for an explicitly supplied upstream null.
-`/api/records` deliberately remains the Code-keyed product-row collection used
-by the viewer and embedded records API. `GET
-/api/categories` returns the Code-keyed hierarchy, and the viewer reuses the
-same table controls through its Products/Categories switch. Products include
-their explicit `category_code`; reserved accounting and service rows appear in
-`excluded_codes` and are never exposed as products.
-
-`GET /api/recent-sales` is a separate authenticated, read-only product-level
-aggregate feed. It requires explicit RFC3339 `from` and `to` bounds, bounded
-paging, a dedicated bearer credential stored only in an environment variable,
-and a separately configured supported sales source. It returns only product
-code, sold quantity, sale frequency, last-sold time, and stable
-source/window/page metadata. It explicitly refuses `kala.db` and the primary
-product database. See [Recent-sales aggregate API](docs/RECENT-SALES-API.md).
-
-The canonical macro workbook uses the loopback-only `POST
-/api/excel/pricing-sync/{session,state,preview,apply}` companion to read,
-preview, and explicitly apply global pricing settings without storing the
-remote credential. Patris injects the protected product-sync credential and
-exact canonical source identity, then regenerates, delivers, and verifies the
-canonical product contract after apply. See [Excel pricing-settings
-companion](docs/EXCEL-PRICING-SYNC.md).
-
-`POST /api/refresh` forces the same source snapshot refresh used by the Web UI,
-WebSocket, IPC, and embedded-library `refresh` command. This gives desktop and
-remote clients one consistent manual-refresh operation.
-
-**JSON response:**
-```json
-{
-  "100": {
-    "Name": "Group",
-    "ALLANBAR": 0
-  },
-  "100200300": {
-    "Name": "Item",
-    "ALLANBAR": 12
-  }
-}
-```
-
-**CSV response:**
-```csv
-Code,ALLANBAR,Name
-100,0,Group
-100200300,12,Item
-```
-
-#### `GET /api/info`
-Returns database schema information.
-
-**Response:**
-```json
-{
-  "success": true,
-  "file": "kala.db",
-  "num_records": 100,
-  "num_fields": 10,
-  "fields": [...]
-}
-```
-
-#### `GET /api/source/manifest`
-Returns metadata for the currently active source file.
-
-#### `GET /api/source/file`
-Downloads the currently active source file with HEAD and range support.
-
-### WebSocket
-
-#### `ws://localhost:8080/ws`
-Connect to receive real-time database updates.
-
-**Message format:**
-```json
-{
-  "type": "update",
-  "timestamp": "2025-12-13T23:45:19Z",
-  "count": 100,
-  "records": [...]
-}
-```
-
-Clients can request an immediate backend reload without waiting for the next file watcher event or URL polling interval:
-
-```json
-{"type":"refresh"}
-```
-
-## 🗺️ TODO
-
-### Planned Features
-- [ ] Support for additional database formats
-- [ ] Batch processing of multiple files
-- [ ] Database diff functionality
-- [ ] Custom field filtering and transformation
-- [ ] GraphQL API support
-- [ ] Docker containerization
-- [ ] Performance benchmarks
-- [ ] Comprehensive test coverage
-- [ ] Advanced WebSocket features (subscribe to specific records, filtering)
-- [ ] Configuration file support (YAML/JSON)
-- [ ] Compression support for large exports
-- [ ] Incremental export (only changed records)
-- [ ] SQL export format support
-- [ ] Data validation and integrity checks
-- [ ] Import capabilities (reverse conversion)
-
-### Known Limitations
-- Currently optimized for Patris81 database format
-- Windows cross-compilation requires mingw-w64
-- Large database files may require significant memory
-
-## 📄 License
-
-MIT License - see LICENSE file for details.
-
-## 🙏 Acknowledgments
-
-- [pxlib](https://pxlib.sourceforge.net/) - Paradox database library
-- Original PHP implementation and character mappings
-- Patris81 software and its database format
-
-## 📞 Support
-
-For issues, questions, or contributions, please visit the [GitHub repository](https://github.com/atomicdeploy/patris-export).
+Patris81 is a product of [Faradadeh](http://www.faradadeh.com). This project is
+an independent export/integration utility.

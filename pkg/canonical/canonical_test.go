@@ -408,24 +408,89 @@ func TestIntegratedProfilePreservesExplicitReferenceNulls(t *testing.T) {
 	}
 }
 
-func TestProductSyncDecoderRejectsUnknownFields(t *testing.T) {
+func TestProductSyncDecoderPreservesUnknownExtensionFields(t *testing.T) {
 	var envelope Envelope
-	if err := json.Unmarshal([]byte(`{"schema":"patris.product-sync","obsolete_field":true}`), &envelope); err == nil {
-		t.Fatal("unknown envelope field was silently accepted")
+	payload := []byte(`{
+		"schema":"patris.product-sync",
+		"future_envelope":{"mode":"flexible"},
+		"source":{"id":"A","dataset":"kala.db","future_source":7},
+		"products":[{"product_code":"A","future_product":["x",2]}],
+		"categories":[{"category_code":"10","future_category":false}],
+		"deleted_codes":[{"product_code":"B","deleted":true,"future_tombstone":"kept"}]
+	}`)
+	if err := json.Unmarshal(payload, &envelope); err != nil {
+		t.Fatalf("decode flexible envelope: %v", err)
 	}
-	var product Product
-	if err := json.Unmarshal([]byte(`{"product_code":"A","obsolete_field":true}`), &product); err == nil {
-		t.Fatal("unknown product field was silently accepted")
+	if envelope.Extensions == nil ||
+		envelope.Source.Extensions == nil ||
+		len(envelope.Products) != 1 || envelope.Products[0].Extensions == nil ||
+		len(envelope.Categories) != 1 || envelope.Categories[0].Extensions == nil ||
+		len(envelope.DeletedCodes) != 1 || envelope.DeletedCodes[0].Extensions == nil {
+		t.Fatalf("unknown extensions were not retained: %#v", envelope)
 	}
-	var category Category
-	if err := json.Unmarshal([]byte(`{"category_code":"A","obsolete_field":true}`), &category); err == nil {
-		t.Fatal("unknown category field was silently accepted")
+	encoded, err := json.Marshal(envelope)
+	if err != nil {
+		t.Fatalf("re-encode flexible envelope: %v", err)
 	}
-	if err := json.Unmarshal([]byte(`{"schema":"patris.product-sync","source":{"id":"A","obsolete_field":true}}`), &envelope); err == nil {
-		t.Fatal("unknown source field was silently accepted")
+	for _, member := range []string{
+		`"future_envelope":{"mode":"flexible"}`,
+		`"future_source":7`,
+		`"future_product":["x",2]`,
+		`"future_category":false`,
+		`"future_tombstone":"kept"`,
+	} {
+		if !strings.Contains(string(encoded), member) {
+			t.Fatalf("extension %s was lost during round trip: %s", member, encoded)
+		}
 	}
-	if err := json.Unmarshal([]byte(`{"schema":"patris.product-sync","deleted_codes":[{"product_code":"A","deleted":true,"obsolete_field":true}]}`), &envelope); err == nil {
-		t.Fatal("unknown tombstone field was silently accepted")
+	rows := ProductsToRows(envelope.Products)
+	if got := rows[0]["future_product"]; !reflect.DeepEqual(got, []interface{}{"x", json.Number("2")}) {
+		t.Fatalf("product row did not expose preserved extension: %#v", got)
+	}
+}
+
+func TestCanonicalHashesCanBeHiddenOrDisabled(t *testing.T) {
+	rows := []map[string]interface{}{{
+		"Code": "123456789", "Name": "Hash fixture",
+	}}
+	cfg := DefaultConfig()
+
+	products, envelope := Transform(
+		context.Background(),
+		rows,
+		"kala.db",
+		cfg,
+		pricingcatalog.NewProvider(pricingcatalog.Config{Mode: pricingcatalog.ModeNone}),
+		time.Unix(1, 0),
+	)
+	if len(products) != 1 || products[0]["record_hash"] == "" ||
+		envelope.Source.Revision == "" || envelope.EventID == "" {
+		t.Fatalf("default hash identities missing: rows=%#v envelope=%+v", products, envelope)
+	}
+
+	expose := false
+	cfg.Hashes.Expose = &expose
+	hidden := OutputEnvelope(envelope, cfg)
+	if hidden.Products[0].RecordHash != "" || hidden.Source.Revision == "" || hidden.EventID == "" {
+		t.Fatalf("hide mode removed internal identities or exposed record hash: %+v", hidden)
+	}
+
+	enabled := false
+	cfg.Hashes.Enabled = &enabled
+	cfg = NormalizeConfig(cfg)
+	products, disabled := Transform(
+		context.Background(),
+		rows,
+		"kala.db",
+		cfg,
+		pricingcatalog.NewProvider(pricingcatalog.Config{Mode: pricingcatalog.ModeNone}),
+		time.Unix(1, 0),
+	)
+	if _, exists := products[0]["record_hash"]; exists {
+		t.Fatalf("disabled hashes still appeared in product rows: %#v", products[0])
+	}
+	if disabled.Products[0].RecordHash != "" || disabled.Source.Revision != "" || disabled.EventID != "" {
+		t.Fatalf("disabled hashes were still materialized: %+v", disabled)
 	}
 }
 

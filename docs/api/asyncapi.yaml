@@ -1,0 +1,522 @@
+asyncapi: 3.0.0
+channels:
+  liveUpdates:
+    address: /ws
+    bindings:
+      ws:
+        bindingVersion: 0.1.0
+        headers:
+          additionalProperties: true
+          properties:
+            Origin:
+              description: |
+                Optional in the implementation. Every value is currently
+                accepted; non-development origins are only logged.
+              format: uri
+              type: string
+            Sec-WebSocket-Protocol:
+              description: No application subprotocol is selected.
+              type: string
+          type: object
+        method: GET
+    description: |
+      A successful upgrade immediately triggers a full initial record snapshot.
+      The same connection then carries server events and accepts client commands.
+      No subprotocol is negotiated.
+    messages:
+      configurationUpdate:
+        $ref: "#/components/messages/ConfigurationUpdate"
+      initialSnapshot:
+        $ref: "#/components/messages/InitialSnapshot"
+      processInformation:
+        $ref: "#/components/messages/ProcessInformation"
+      recordUpdate:
+        $ref: "#/components/messages/RecordUpdate"
+      refreshCommand:
+        $ref: "#/components/messages/RefreshCommand"
+      toastCommand:
+        $ref: "#/components/messages/ToastCommand"
+      toastEvent:
+        $ref: "#/components/messages/ToastEvent"
+    title: Live source updates and commands
+    x-close-behavior: |
+      Upgrade failure produces no WebSocket session. After connection, a client
+      read error or malformed JSON ends the read loop and the server closes the
+      socket. Unknown command types are ignored. The server does not define
+      application-specific close codes.
+    x-code-anchors:
+      - pkg/server/server.go#Server.handleWebSocket
+    x-internal: false
+    x-security-note: |
+      The current implementation performs no WebSocket authentication and
+      accepts every Origin after optionally logging it. Bind only to trusted
+      loopback/protected networks unless an external security boundary exists.
+    x-visibility: public-live-api
+components:
+  messages:
+    ConfigurationUpdate:
+      contentType: application/json
+      description: Emitted after configuration persistence or watched config reload.
+      examples:
+        - name: languageChanged
+          payload:
+            config:
+              recent_sales: {}
+              schema_version: 1
+              ui:
+                language: fa
+                rtl_text_direction: true
+            timestamp: 2026-07-28T12:02:00Z
+            type: config_update
+      name: configurationUpdate
+      payload:
+        $ref: "#/components/schemas/ConfigurationUpdatePayload"
+      summary: Redacted configuration changed
+      title: Browser configuration update
+    InitialSnapshot:
+      contentType: application/json
+      description: |
+        Contains full transformed records in `added`. Configuration is included
+        only when a manager exists and is passed through the browser redaction
+        boundary. A KALA dataset may also include the temporary product-sync
+        compatibility envelope in `contract`; that field is absent when hash
+        identities are disabled or no compatible profile is active.
+      examples:
+        - name: initialCatalog
+          payload:
+            added:
+              - ALLANBAR: 12
+                Code: "113006048"
+                Name: LCD module
+            file_name: catalog.db
+            file_path: C:/example/catalog.db
+            key_field: Code
+            raw: false
+            resources:
+              audio_bytes: 8000
+              charmap_bytes: 18000
+              favicon_bytes: 4000
+              icon_bytes: 16000
+              version: 0123456789abcdef01234567
+              viewer_bytes: 120000
+              welcome_bytes: 24000
+            timestamp: 2026-07-28T12:00:00Z
+            total_count: 1
+            type: initial
+            version:
+              build_date: 2026-07-28T00:00:00Z
+              commit: abcdef123456
+              go_version: go1.24.5
+              platform: windows/amd64
+              version: 1.3.1
+          summary: Sanitized canonical-capable initial snapshot
+      name: initialSnapshot
+      payload:
+        $ref: "#/components/schemas/InitialSnapshotPayload"
+      summary: Full record set sent immediately after connection
+      title: Initial transformed source snapshot
+    ProcessInformation:
+      contentType: application/json
+      description: Emitted after initial and update broadcasts and may contain accessible local process/path details.
+      examples:
+        - name: idle
+          payload:
+            status:
+              file_access:
+                count: 0
+                file: catalog.db
+                in_use: false
+                path: C:/example/catalog.db
+                processes: []
+                remote: false
+              patris81:
+                count: 0
+                processes: []
+                running: false
+              timestamp: 2026-07-28T12:03:00Z
+            timestamp: 2026-07-28T12:03:00Z
+            type: process_info
+      name: processInformation
+      payload:
+        $ref: "#/components/schemas/ProcessInformationPayload"
+      summary: Bounded Patris81 and file-access diagnostics
+      title: Process and source-file status
+    RecordUpdate:
+      contentType: application/json
+      description: |
+        Emitted after source refresh when the shared record diff detects change.
+        Empty change arrays are omitted. A KALA dataset may include the
+        temporary product-sync compatibility envelope in `contract`; that field
+        is absent when hash identities are disabled or no compatible profile is
+        active.
+      examples:
+        - name: oneModifiedRecord
+          payload:
+            key_field: Code
+            modified:
+              - change_type: modified
+                changed_fields:
+                  - ALLANBAR
+                code: "113006048"
+                new_values:
+                  ALLANBAR: 10
+                old_values:
+                  ALLANBAR: 12
+                record:
+                  ALLANBAR: 10
+                  Code: "113006048"
+                  Name: LCD module
+            raw: false
+            timestamp: 2026-07-28T12:01:00Z
+            total_count: 1
+            type: update
+      name: recordUpdate
+      payload:
+        $ref: "#/components/schemas/RecordUpdatePayload"
+      summary: Added, modified, and deleted record differences
+      title: Incremental record update
+    RefreshCommand:
+      contentType: application/json
+      description: Triggers the same broadcast update path as the built-in manual refresh behavior.
+      examples:
+        - name: refresh
+          payload:
+            type: refresh
+      name: refreshCommand
+      payload:
+        $ref: "#/components/schemas/RefreshCommandPayload"
+      summary: Force a full source refresh/broadcast
+      title: Client refresh command
+    ToastCommand:
+      contentType: application/json
+      description: Missing title/message values are replaced with safe defaults by the server.
+      examples:
+        - name: browserOnly
+          payload:
+            broadcast: true
+            message: WebSocket messaging works.
+            native: false
+            title: Integration check
+            type: toast
+      name: toastCommand
+      payload:
+        $ref: "#/components/schemas/ToastCommandPayload"
+      summary: Ask the host and/or connected clients to show a toast
+      title: Client toast command
+    ToastEvent:
+      contentType: application/json
+      description: May be emitted by HTTP, WebSocket, configured notifications, or native-toast fallback reporting.
+      examples:
+        - name: refreshReady
+          payload:
+            message: The local snapshot is ready.
+            source: api
+            timestamp: 2026-07-28T12:04:00Z
+            title: Catalog updated
+            type: toast
+      name: toastEvent
+      payload:
+        $ref: "#/components/schemas/ToastEventPayload"
+      summary: Notification for connected viewer clients
+      title: Browser toast event
+  schemas:
+    BrowserConfig:
+      $ref: ./openapi.yaml#/components/schemas/BrowserConfig
+    CanonicalEnvelope:
+      $ref: ./openapi.yaml#/components/schemas/CanonicalEnvelope
+    ConfigurationUpdatePayload:
+      additionalProperties: false
+      properties:
+        config:
+          $ref: "#/components/schemas/BrowserConfig"
+        timestamp:
+          format: date-time
+          type: string
+        type:
+          const: config_update
+      required:
+        - type
+        - timestamp
+        - config
+      type: object
+    DynamicRecord:
+      $ref: ./openapi.yaml#/components/schemas/DynamicRecord
+    FileAccessStatus:
+      $ref: ./openapi.yaml#/components/schemas/FileAccessStatus
+    InitialSnapshotPayload:
+      additionalProperties: false
+      properties:
+        added:
+          items:
+            $ref: "#/components/schemas/DynamicRecord"
+          type: array
+        config:
+          $ref: "#/components/schemas/BrowserConfig"
+        contract:
+          description: |
+            Optional compatibility replication envelope. It is omitted when
+            server-side hash identities are disabled or a KALA projection is
+            unavailable.
+          $ref: "#/components/schemas/CanonicalEnvelope"
+        file_name:
+          type: string
+        file_path:
+          type: string
+        key_field:
+          type: string
+        raw:
+          type: boolean
+        reason:
+          type: string
+        resources:
+          $ref: "#/components/schemas/ResourceInfo"
+        source_changed:
+          type: boolean
+        timestamp:
+          format: date-time
+          type: string
+        total_count:
+          minimum: 0
+          type: integer
+        type:
+          const: initial
+        version:
+          $ref: "#/components/schemas/VersionInfo"
+      required:
+        - type
+        - timestamp
+        - added
+        - total_count
+        - file_name
+        - file_path
+        - version
+        - resources
+        - raw
+        - key_field
+      type: object
+    ProcessGroup:
+      $ref: ./openapi.yaml#/components/schemas/ProcessGroup
+    ProcessInfo:
+      $ref: ./openapi.yaml#/components/schemas/ProcessInfo
+    ProcessInformationPayload:
+      additionalProperties: false
+      properties:
+        status:
+          $ref: "#/components/schemas/RuntimeStatus"
+        timestamp:
+          format: date-time
+          type: string
+        type:
+          const: process_info
+      required:
+        - type
+        - timestamp
+        - status
+      type: object
+    RecordChange:
+      additionalProperties: false
+      properties:
+        change_type:
+          const: modified
+        changed_fields:
+          items:
+            type: string
+          type: array
+        code:
+          type: string
+        new_values:
+          additionalProperties: true
+          type: object
+        old_values:
+          additionalProperties: true
+          type: object
+        record:
+          $ref: "#/components/schemas/DynamicRecord"
+      required:
+        - code
+        - change_type
+      type: object
+    RecordUpdatePayload:
+      additionalProperties: false
+      properties:
+        added:
+          items:
+            $ref: "#/components/schemas/DynamicRecord"
+          type: array
+        contract:
+          description: |
+            Optional compatibility replication envelope. It is omitted when
+            server-side hash identities are disabled or a KALA projection is
+            unavailable.
+          $ref: "#/components/schemas/CanonicalEnvelope"
+        deleted:
+          items:
+            type: string
+          type: array
+        key_field:
+          type: string
+        modified:
+          items:
+            $ref: "#/components/schemas/RecordChange"
+          type: array
+        raw:
+          type: boolean
+        timestamp:
+          format: date-time
+          type: string
+        total_count:
+          minimum: 0
+          type: integer
+        type:
+          const: update
+      required:
+        - type
+        - timestamp
+        - total_count
+        - key_field
+        - raw
+      type: object
+    RefreshCommandPayload:
+      additionalProperties: true
+      properties:
+        type:
+          const: refresh
+      required:
+        - type
+      type: object
+    ResourceInfo:
+      $ref: ./openapi.yaml#/components/schemas/ResourceInfo
+    RuntimeStatus:
+      $ref: ./openapi.yaml#/components/schemas/RuntimeStatus
+    ToastCommandPayload:
+      additionalProperties: true
+      properties:
+        broadcast:
+          default: true
+          type: boolean
+        icon:
+          type: string
+        message:
+          type: string
+        native:
+          default: true
+          type: boolean
+        source:
+          description: Overwritten with `websocket`.
+          type: string
+        title:
+          type: string
+        type:
+          const: toast
+      required:
+        - type
+      type: object
+    ToastEventPayload:
+      additionalProperties: false
+      properties:
+        icon:
+          type: string
+        message:
+          type: string
+        native_error:
+          type: string
+        source:
+          type: string
+        timestamp:
+          format: date-time
+          type: string
+        title:
+          type: string
+        type:
+          const: toast
+      required:
+        - type
+        - timestamp
+        - title
+        - message
+        - source
+      type: object
+    VersionInfo:
+      $ref: ./openapi.yaml#/components/schemas/VersionInfo
+defaultContentType: application/json
+info:
+  contact:
+    name: AtomicDeploy
+    url: https://github.com/atomicdeploy/patris-export
+  description: |
+    Bidirectional real-time contract for the `/ws` route registered by Patris
+    Export. The server sends a full initial snapshot followed by sparse update,
+    configuration, process-status, and toast events. Clients may send toast and
+    refresh commands.
+
+    The current implementation performs no WebSocket authentication. Its origin
+    callback accepts an empty origin, the development loopback origins, and all
+    other origins after logging a warning. Deployments must therefore keep this
+    channel on trusted loopback or add an external protection boundary.
+  license:
+    name: MIT
+    url: https://opensource.org/license/mit
+  title: Patris Export WebSocket API
+  version: 1.3.1
+operations:
+  receiveClientCommands:
+    action: receive
+    channel:
+      $ref: "#/channels/liveUpdates"
+    description: |
+      The server decodes each JSON frame into the toast request shape. It acts
+      only on `type: toast` and `type: refresh`; unknown types are ignored and a
+      malformed JSON frame closes the read loop/connection.
+    messages:
+      - $ref: "#/channels/liveUpdates/messages/toastCommand"
+      - $ref: "#/channels/liveUpdates/messages/refreshCommand"
+    summary: Send toast or refresh commands
+    title: Receive commands from a connected client
+    x-code-anchors:
+      - pkg/server/server.go#Server.handleWebSocket
+    x-internal: false
+    x-security: []
+    x-visibility: public-live-api
+  sendLiveEvents:
+    action: send
+    channel:
+      $ref: "#/channels/liveUpdates"
+    description: |
+      On connection the server reads the current transformed datasource and
+      sends `initial`. Watcher/manual changes send `update` or a new `initial`;
+      configuration saves, process checks, and toast actions produce their
+      corresponding event types. Event messages are JSON text frames.
+    messages:
+      - $ref: "#/channels/liveUpdates/messages/initialSnapshot"
+      - $ref: "#/channels/liveUpdates/messages/recordUpdate"
+      - $ref: "#/channels/liveUpdates/messages/configurationUpdate"
+      - $ref: "#/channels/liveUpdates/messages/processInformation"
+      - $ref: "#/channels/liveUpdates/messages/toastEvent"
+    summary: Receive initial data and subsequent server events
+    title: Send live events to a connected client
+    x-code-anchors:
+      - pkg/server/server.go#Server.handleWebSocket
+      - pkg/server/server.go#Server.sendRecordsToClient
+      - pkg/server/server.go#Server.broadcastUpdate
+      - pkg/server/server.go#Server.broadcastConfig
+      - pkg/server/server.go#Server.broadcastProcessInfo
+    x-internal: false
+    x-security: []
+    x-visibility: public-live-api
+servers:
+  defaultLoopback:
+    description: Default direct loopback listener.
+    host: 127.0.0.1:8080
+    pathname: /
+    protocol: ws
+    security: []
+    x-security-note: No authentication or effective origin restriction is enforced.
+    x-visibility: public-live-api
+  integrationLoopback:
+    description: Common local integration listener.
+    host: 127.0.0.1:18080
+    pathname: /
+    protocol: ws
+    security: []
+    x-security-note: No authentication or effective origin restriction is enforced.
+    x-visibility: public-live-api

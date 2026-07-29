@@ -17,11 +17,11 @@ if (-not $LogoSource) {
     if (Test-Path $downloadLogo) {
         $LogoSource = $downloadLogo
     } else {
-        $LogoSource = Join-Path $repoRoot "assets\patris-api-icon.png"
+        $LogoSource = Join-Path $repoRoot "assets\logo.png"
     }
 }
 if (-not $IconPng) {
-    $IconPng = Join-Path $repoRoot "assets\patris-api-icon.png"
+    $IconPng = Join-Path $repoRoot "assets\logo.png"
 }
 if (-not $IconIco) {
     $IconIco = Join-Path $repoRoot "assets\windows\patris-api.ico"
