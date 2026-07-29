@@ -130,6 +130,33 @@ type sourceFileManifest struct {
 	GeneratedAt  time.Time `json:"generated_at"`
 }
 
+const (
+	refreshWaitMaxRequestBytes = 1024
+	refreshWaitTimeout         = 8 * time.Minute
+)
+
+type refreshRequest struct {
+	Delivery string `json:"delivery"`
+}
+
+type refreshDeliveryResponse struct {
+	Status            string `json:"status"`
+	EventID           string `json:"event_id"`
+	Attempts          int    `json:"attempts"`
+	PendingProducts   int    `json:"pending_products"`
+	DeferredProducts  int    `json:"deferred_products"`
+	DeferredMissing   int    `json:"deferred_missing"`
+	DeferredAmbiguous int    `json:"deferred_ambiguous"`
+}
+
+type refreshWaitResponse struct {
+	Refreshed      bool                     `json:"refreshed"`
+	Delivered      bool                     `json:"delivered"`
+	SourceRevision string                   `json:"source_revision,omitempty"`
+	Delivery       *refreshDeliveryResponse `json:"delivery,omitempty"`
+	Code           string                   `json:"code,omitempty"`
+}
+
 // NewServer creates a new server instance
 func NewServer(dbPath string, charMap converter.CharMapping, useTempFile ...bool) (*Server, error) {
 	return NewServerWithOptions(dbPath, charMap, Options{}, useTempFile...)
@@ -1067,8 +1094,149 @@ func (s *Server) handleGetStatus(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handlePostRefresh(w http.ResponseWriter, r *http.Request) {
+	if refreshWaitOptedIn(r) {
+		setExcelPricingResponseHeaders(w)
+		if !excelPricingLocalRequestAllowed(r) ||
+			!singleHeaderEquals(r, excelPricingClientHeader, excelPricingClientID) ||
+			!s.excelPricing.authorizedSession(r) {
+			writeRefreshWaitError(w, http.StatusForbidden, false, "", "local_session_required")
+			return
+		}
+		if !singleJSONContentType(r) {
+			writeRefreshWaitError(w, http.StatusUnsupportedMediaType, false, "", "json_required")
+			return
+		}
+		delivery, err := refreshDeliveryMode(w, r)
+		if err != nil {
+			writeRefreshWaitError(w, http.StatusBadRequest, false, "", "invalid_request")
+			return
+		}
+		if delivery == "wait" {
+			s.handlePostRefreshWait(w, r)
+			return
+		}
+	}
 	s.Refresh()
 	writeJSON(w, map[string]interface{}{"refreshed": true})
+}
+
+func refreshWaitOptedIn(r *http.Request) bool {
+	return r.Body != nil &&
+		r.Body != http.NoBody &&
+		r.ContentLength != 0 &&
+		len(r.Header.Values(excelPricingClientHeader)) > 0
+}
+
+func refreshDeliveryMode(w http.ResponseWriter, r *http.Request) (string, error) {
+	if r.Body == nil || r.Body == http.NoBody || r.ContentLength == 0 {
+		return "", nil
+	}
+	var request refreshRequest
+	if err := decodeBoundedJSON(w, r, refreshWaitMaxRequestBytes, &request); err != nil {
+		if errors.Is(err, io.EOF) {
+			return "", nil
+		}
+		return "", err
+	}
+	delivery := strings.ToLower(strings.TrimSpace(request.Delivery))
+	switch delivery {
+	case "", "wait":
+		return delivery, nil
+	default:
+		return "", errors.New("unsupported refresh delivery mode")
+	}
+}
+
+func (s *Server) handlePostRefreshWait(w http.ResponseWriter, r *http.Request) {
+	setExcelPricingResponseHeaders(w)
+	if !excelPricingLocalRequestAllowed(r) ||
+		!singleHeaderEquals(r, excelPricingClientHeader, excelPricingClientID) ||
+		!s.excelPricing.authorizedSession(r) {
+		writeRefreshWaitError(w, http.StatusForbidden, false, "", "local_session_required")
+		return
+	}
+
+	cfg := s.Config()
+	deliveryConfig := updateout.Normalize(cfg.SendUpdates)
+	if !deliveryConfig.Enabled ||
+		deliveryConfig.Format != "json" ||
+		deliveryConfig.Method != http.MethodPost ||
+		strings.TrimSpace(deliveryConfig.URL) == "" ||
+		strings.TrimSpace(deliveryConfig.ProductSyncSecretEnv) == "" {
+		writeRefreshWaitError(w, http.StatusServiceUnavailable, false, "", "delivery_unavailable")
+		return
+	}
+	if _, err := updateout.ResolveProductSyncSecret(deliveryConfig); err != nil {
+		writeRefreshWaitError(w, http.StatusServiceUnavailable, false, "", "delivery_unavailable")
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), refreshWaitTimeout)
+	defer cancel()
+	select {
+	case s.excelPricing.permit <- struct{}{}:
+		defer func() { <-s.excelPricing.permit }()
+	case <-ctx.Done():
+		writeRefreshWaitError(w, http.StatusRequestTimeout, false, "", "request_cancelled")
+		return
+	}
+
+	contract, err := s.excelPricingCanonical(ctx, cfg)
+	if err != nil {
+		status := http.StatusServiceUnavailable
+		code := "canonical_unavailable"
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			status = http.StatusRequestTimeout
+			code = "request_cancelled"
+		}
+		writeRefreshWaitError(w, status, false, "", code)
+		return
+	}
+
+	// The wait extension synchronously delivers this freshly projected canonical
+	// envelope. Calling Refresh here would also enqueue the legacy asynchronous
+	// "initial" delivery and could send the same source revision twice.
+	event := updateout.Event{
+		Type:             "update",
+		Timestamp:        time.Now().UTC().Format(time.RFC3339),
+		Source:           s.currentDBPath(),
+		Raw:              false,
+		Contract:         contract,
+		SnapshotContract: contract,
+	}
+	dispatch := s.excelPricing.dispatch
+	if dispatch == nil {
+		dispatch = updateout.DispatchWithResult
+	}
+	result, err := dispatch(ctx, deliveryConfig, event)
+	if err != nil || !excelPricingDeliveryComplete(result, contract.EventID) {
+		writeRefreshWaitError(w, http.StatusBadGateway, true, contract.Source.Revision, "delivery_failed")
+		return
+	}
+
+	writeJSON(w, refreshWaitResponse{
+		Refreshed:      true,
+		Delivered:      true,
+		SourceRevision: contract.Source.Revision,
+		Delivery: &refreshDeliveryResponse{
+			Status:            result.Status,
+			EventID:           result.EventID,
+			Attempts:          result.Attempts,
+			PendingProducts:   result.PendingProducts,
+			DeferredProducts:  result.DeferredProducts,
+			DeferredMissing:   result.DeferredMissing,
+			DeferredAmbiguous: result.DeferredAmbiguous,
+		},
+	})
+}
+
+func writeRefreshWaitError(w http.ResponseWriter, status int, refreshed bool, sourceRevision, code string) {
+	writeJSONStatus(w, status, refreshWaitResponse{
+		Refreshed:      refreshed,
+		Delivered:      false,
+		SourceRevision: sourceRevision,
+		Code:           code,
+	})
 }
 
 func (s *Server) handleGetSourceManifest(w http.ResponseWriter, r *http.Request) {

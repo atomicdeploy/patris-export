@@ -721,10 +721,13 @@ Private Function RefreshPricingState(ByVal siteRows As Object) As Long
     Dim savedErrorDescription As String
     Dim settings As Worksheet
     Dim retryStateSnapshot As Variant
+    Dim sourceRepairAttempted As Boolean
 
     Set settings = ConfigSheet()
     retryStateSnapshot = CapturePricingStateSnapshot(settings)
-    For attempt = 1 To STATE_SNAPSHOT_RETRIES
+    For attempt = 1 To STATE_SNAPSHOT_RETRIES + 1
+        If attempt > STATE_SNAPSHOT_RETRIES And _
+           Not sourceRepairAttempted Then Exit For
         siteRows.RemoveAll
         settings.Range("G34:G47").ClearContents
         Err.Clear
@@ -739,11 +742,51 @@ Private Function RefreshPricingState(ByVal siteRows As Object) As Long
             Exit Function
         End If
         RestorePricingStateSnapshot settings, retryStateSnapshot
+        If savedErrorNumber = vbObjectError + 121 And _
+           Not sourceRepairAttempted Then
+            sourceRepairAttempted = True
+            RepairCanonicalDelivery
+        End If
     Next attempt
 
     If savedErrorNumber = 0 Then savedErrorNumber = vbObjectError + 130
     Err.Raise savedErrorNumber, "RefreshPricingState", savedErrorDescription
 End Function
+
+Private Sub RepairCanonicalDelivery()
+    Dim responseText As String
+    Dim root As JsonValue
+    Dim contract As JsonValue
+    Dim deliveredRevision As String
+    Dim csrfToken As String
+
+    On Error GoTo RepairFailed
+    csrfToken = PricingSessionToken()
+    responseText = HttpPostJsonRaw( _
+        UniversalRefreshURL(), "{""delivery"":""wait""}", csrfToken, "", "")
+    Set root = JsonRuntime.ParseJson(responseText)
+    If root Is Nothing Or root.Kind <> "object" Then GoTo RepairFailed
+    If Not BooleanValue(JsonRuntime.JsonText(root, "refreshed")) Then _
+        GoTo RepairFailed
+    If Not BooleanValue(JsonRuntime.JsonText(root, "delivered")) Then _
+        GoTo RepairFailed
+    deliveredRevision = Trim$(CStr(BlankIfNull( _
+        JsonRuntime.JsonText(root, "source_revision"))))
+    If Not IsSHA256RevisionText(deliveredRevision) Then GoTo RepairFailed
+
+    mSourceID = vbNullString
+    mSourceDataset = vbNullString
+    mSourceRevision = vbNullString
+    Set contract = LoadPatrisContract()
+    ReadSourceIdentity contract
+    If mSourceRevision <> deliveredRevision Then GoTo RepairFailed
+    Exit Sub
+
+RepairFailed:
+    On Error GoTo 0
+    Err.Raise vbObjectError + 149, "RepairCanonicalDelivery", _
+              T("source_sync_failed")
+End Sub
 
 Private Function RefreshPricingStateOnce(ByVal siteRows As Object) As Long
     Dim page As Long
@@ -2101,27 +2144,44 @@ Private Function HttpJson(ByVal endpoint As String, _
                           ByVal requestBody As String, _
                           Optional ByVal idempotencyKey As String = "", _
                           Optional ByVal expectedRevision As String = "") As String
-    Dim sessionText As String
-    Dim sessionRoot As JsonValue
     Dim csrfToken As String
 
     If Not IsAllowedPricingBridgeUrl(endpoint) Then
         Err.Raise vbObjectError + 143, "HttpJson", T("bridge_missing")
     End If
+    csrfToken = PricingSessionToken()
+    HttpJson = HttpPostJsonRaw( _
+        endpoint, requestBody, csrfToken, idempotencyKey, expectedRevision)
+End Function
+
+Private Function PricingSessionToken() As String
+    Dim sessionText As String
+    Dim sessionRoot As JsonValue
+    Dim csrfToken As String
+
     sessionText = HttpPostJsonRaw( _
         PricingBaseURL() & "/session", "{}", "", "", "")
     Set sessionRoot = JsonRuntime.ParseJson(sessionText)
-    If sessionRoot.Kind <> "object" Or _
-       CStr(JsonRuntime.JsonText(sessionRoot, "schema")) <> PRICING_SESSION_SCHEMA Then
-        Err.Raise vbObjectError + 144, "HttpJson", T("bridge_missing")
+    If sessionRoot Is Nothing Then
+        Err.Raise vbObjectError + 144, "PricingSessionToken", _
+                  T("bridge_missing")
+    End If
+    If sessionRoot.Kind <> "object" Then
+        Err.Raise vbObjectError + 144, "PricingSessionToken", _
+                  T("bridge_missing")
+    End If
+    If CStr(JsonRuntime.JsonText( _
+           sessionRoot, "schema")) <> PRICING_SESSION_SCHEMA Then
+        Err.Raise vbObjectError + 144, "PricingSessionToken", _
+                  T("bridge_missing")
     End If
     csrfToken = Trim$(CStr( _
         JsonRuntime.JsonText(sessionRoot, "csrf_token")))
     If Len(csrfToken) <> 43 Then
-        Err.Raise vbObjectError + 145, "HttpJson", T("bridge_missing")
+        Err.Raise vbObjectError + 145, "PricingSessionToken", _
+                  T("bridge_missing")
     End If
-    HttpJson = HttpPostJsonRaw( _
-        endpoint, requestBody, csrfToken, idempotencyKey, expectedRevision)
+    PricingSessionToken = csrfToken
 End Function
 
 Private Function HttpPostJsonRaw(ByVal endpoint As String, _
@@ -2177,6 +2237,23 @@ Private Function PricingBaseURL() As String
     End If
     PricingBaseURL = Left$(productUrl, Len(productUrl) - Len(suffix)) & _
         "/api/excel/pricing-sync"
+End Function
+
+Private Function UniversalRefreshURL() As String
+    Dim productUrl As String
+    Dim lowerUrl As String
+    Dim suffix As String
+
+    productUrl = Trim$(CStr(ConfigSheet().Range("B3").Value2))
+    lowerUrl = LCase$(productUrl)
+    suffix = "/api/product-sync"
+    If Not IsAllowedPatrisUrl(productUrl) Or _
+       Right$(lowerUrl, Len(suffix)) <> suffix Then
+        Err.Raise vbObjectError + 148, "UniversalRefreshURL", _
+                  T("bridge_missing")
+    End If
+    UniversalRefreshURL = _
+        Left$(productUrl, Len(productUrl) - Len(suffix)) & "/api/refresh"
 End Function
 
 Private Function Utf8Bytes(ByVal value As String) As Variant
@@ -2670,6 +2747,8 @@ Private Function T(ByVal key As String) As String
             T = U("067E064400200627064506460020064206CC0645062A200C06AF06300627063106CC0020062F06310020062F0633062A063106330020064606CC0633062A002E")
         Case "invalid_workbook"
             T = U("064206270644062800200641062706CC0644002006450639062A062806310020064606CC0633062A002E")
+        Case "source_sync_failed"
+            T = U("0647064506AF06270645200C06330627063206CC002006450646062806390020062F0627062F0647002006270646062C06270645002006460634062F002E")
         Case "price_missing"
             T = U("064206CC0645062A00200645062D0627063306280647002006460634062F")
         Case "woo_missing"

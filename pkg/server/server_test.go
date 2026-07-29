@@ -77,6 +77,9 @@ func TestServerJSON(t *testing.T) {
 		if response["refreshed"] != true {
 			t.Fatalf("expected refreshed=true, got %#v", response)
 		}
+		if len(response) != 1 {
+			t.Fatalf("default refresh response changed: %#v", response)
+		}
 	})
 
 	// Test GET /api/records
