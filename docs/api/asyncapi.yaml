@@ -78,7 +78,9 @@ components:
       description: |
         Contains full transformed records in `added`. Configuration is included
         only when a manager exists and is passed through the browser redaction
-        boundary. Canonical datasets may also include a product-sync contract.
+        boundary. A KALA dataset may also include the temporary product-sync
+        compatibility envelope in `contract`; that field is absent when hash
+        identities are disabled or no compatible profile is active.
       examples:
         - name: initialCatalog
           payload:
@@ -143,8 +145,10 @@ components:
       contentType: application/json
       description: |
         Emitted after source refresh when the shared record diff detects change.
-        Empty change arrays are omitted. Canonical datasets may include a
-        matching change contract.
+        Empty change arrays are omitted. A KALA dataset may include the
+        temporary product-sync compatibility envelope in `contract`; that field
+        is absent when hash identities are disabled or no compatible profile is
+        active.
       examples:
         - name: oneModifiedRecord
           payload:
@@ -249,6 +253,10 @@ components:
         config:
           $ref: "#/components/schemas/BrowserConfig"
         contract:
+          description: |
+            Optional compatibility replication envelope. It is omitted when
+            server-side hash identities are disabled or a KALA projection is
+            unavailable.
           $ref: "#/components/schemas/CanonicalEnvelope"
         file_name:
           type: string
@@ -336,6 +344,10 @@ components:
             $ref: "#/components/schemas/DynamicRecord"
           type: array
         contract:
+          description: |
+            Optional compatibility replication envelope. It is omitted when
+            server-side hash identities are disabled or a KALA projection is
+            unavailable.
           $ref: "#/components/schemas/CanonicalEnvelope"
         deleted:
           items:

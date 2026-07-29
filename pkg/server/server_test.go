@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -102,24 +103,19 @@ func TestServerJSON(t *testing.T) {
 			t.Errorf("Expected status 200, got %d", w.Code)
 		}
 
-		// The endpoint returns Code-keyed records (same format as convert command)
-		var response map[string]interface{}
+		// Generalized source access is an array so order, duplicate Codes, and
+		// rows without a Code remain representable.
+		var response []map[string]interface{}
 		if err := json.NewDecoder(w.Body).Decode(&response); err != nil {
 			t.Fatalf("Failed to decode response: %v", err)
 		}
 
-		// Check that we got 2 records (keyed by Code)
+		// Check that we got both source records.
 		if len(response) != 2 {
 			t.Errorf("Expected 2 records, got %d", len(response))
 		}
-
-		// Verify the records have the expected Codes
-		if _, ok := response["101"]; !ok {
-			t.Error("Expected record with Code=101")
-		}
-		if _, ok := response["102"]; !ok {
-			t.Error("Expected record with Code=102")
-		}
+		rawRowByCode(t, response, "101")
+		rawRowByCode(t, response, "102")
 	})
 
 	t.Run("GET /api/records.csv", func(t *testing.T) {
@@ -211,6 +207,15 @@ func TestServerJSON(t *testing.T) {
 		}
 	})
 
+	t.Run("GET /api/products unavailable for generic dataset", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/api/products", nil)
+		w := httptest.NewRecorder()
+		srv.router.ServeHTTP(w, req)
+		if w.Code != http.StatusNotFound {
+			t.Fatalf("Expected status 404, got %d: %s", w.Code, w.Body.String())
+		}
+	})
+
 	// Test GET / (welcome page)
 	t.Run("GET /", func(t *testing.T) {
 		req := httptest.NewRequest("GET", "/", nil)
@@ -271,7 +276,7 @@ func TestServerJSON(t *testing.T) {
 			t.Errorf("Expected Cache-Control no-cache, got %s", cc)
 		}
 		body := w.Body.String()
-		for _, marker := range []string{`id="exportXLSX"`, `role="menuitem"`, `/api/records.xlsx`} {
+		for _, marker := range []string{`id="exportXLSX"`, `role="menuitem"`, `data-export-format="xlsx"`} {
 			if !strings.Contains(body, marker) {
 				t.Errorf("viewer is missing accessible XLSX export marker %q", marker)
 			}
@@ -360,6 +365,30 @@ func TestServerJSON(t *testing.T) {
 
 		if w.Body.Len() == 0 {
 			t.Error("Expected non-empty favicon")
+		}
+	})
+
+	t.Run("GET /static/logo.png and legacy redirect", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/static/logo.png", nil)
+		w := httptest.NewRecorder()
+		srv.router.ServeHTTP(w, req)
+		if w.Code != http.StatusOK || w.Header().Get("Content-Type") != "image/png" || w.Body.Len() == 0 {
+			t.Fatalf("logo response status=%d type=%q bytes=%d", w.Code, w.Header().Get("Content-Type"), w.Body.Len())
+		}
+
+		legacy := httptest.NewRecorder()
+		srv.router.ServeHTTP(legacy, httptest.NewRequest(http.MethodGet, "/static/patris-api-icon.png", nil))
+		if legacy.Code != http.StatusPermanentRedirect || legacy.Header().Get("Location") != "/static/logo.png" {
+			t.Fatalf("legacy logo response status=%d location=%q", legacy.Code, legacy.Header().Get("Location"))
+		}
+	})
+
+	t.Run("GET /robots.txt", func(t *testing.T) {
+		w := httptest.NewRecorder()
+		srv.router.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/robots.txt", nil))
+		if w.Code != http.StatusOK || w.Header().Get("Content-Type") != "text/plain; charset=utf-8" ||
+			w.Body.String() != "User-agent: *\nDisallow: /\n" {
+			t.Fatalf("robots response status=%d type=%q body=%q", w.Code, w.Header().Get("Content-Type"), w.Body.String())
 		}
 	})
 
@@ -547,14 +576,55 @@ func TestServerJSON(t *testing.T) {
 		if w.Code != http.StatusOK {
 			t.Fatalf("Expected records status 200, got %d", w.Code)
 		}
-		var records map[string]interface{}
+		var records []map[string]interface{}
 		if err := json.NewDecoder(w.Body).Decode(&records); err != nil {
 			t.Fatalf("decode records: %v", err)
 		}
-		if _, ok := records["777"]; !ok {
-			t.Fatalf("Expected uploaded record 777, got keys %+v", records)
-		}
+		rawRowByCode(t, records, "777")
 	})
+}
+
+func TestGeneralizedRecordsPreserveOrderDuplicatesAndMissingCodes(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "other-schema.json")
+	rows := []map[string]interface{}{
+		{"Code": "DUP", "Value": "first"},
+		{"Code": "DUP", "Value": "second"},
+		{"Value": "without-code"},
+	}
+	data, err := json.Marshal(rows)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	srv, err := NewServer(path, nil)
+	if err != nil {
+		t.Fatalf("create generalized JSON server: %v", err)
+	}
+	defer srv.Close()
+
+	response := httptest.NewRecorder()
+	srv.router.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/records", nil))
+	if response.Code != http.StatusOK {
+		t.Fatalf("records status=%d: %s", response.Code, response.Body.String())
+	}
+	var decoded []map[string]interface{}
+	if err := json.NewDecoder(response.Body).Decode(&decoded); err != nil {
+		t.Fatalf("decode records: %v", err)
+	}
+	if len(decoded) != 3 ||
+		decoded[0]["Value"] != "first" ||
+		decoded[1]["Value"] != "second" ||
+		decoded[2]["Value"] != "without-code" {
+		t.Fatalf("generalized records were reordered or collapsed: %#v", decoded)
+	}
+	if decoded[0]["Code"] != "DUP" || decoded[1]["Code"] != "DUP" {
+		t.Fatalf("duplicate Codes were not preserved: %#v", decoded)
+	}
+	if _, exists := decoded[2]["Code"]; exists {
+		t.Fatalf("missing Code was synthesized: %#v", decoded[2])
+	}
 }
 
 func TestBrowserConfigRedactsAndPreservesProtectedServerConfig(t *testing.T) {
@@ -852,25 +922,43 @@ func TestCanonicalKalaParityAcrossRESTCSVXLSXAndWebSocket(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load canonical fixture config: %v", err)
 	}
-	dbPath := filepath.Join("..", "..", "testdata", "kala.db")
+	dbPath := isolatedKalaFixture(t)
 	srv, err := NewServerWithOptions(dbPath, nil, Options{Config: manager}, false)
 	if err != nil {
 		t.Fatalf("create canonical server: %v", err)
 	}
 	defer srv.Close()
 
-	request := httptest.NewRequest(http.MethodGet, "/api/records", nil)
+	rawRequest := httptest.NewRequest(http.MethodGet, "/api/records", nil)
+	rawRecorder := httptest.NewRecorder()
+	srv.router.ServeHTTP(rawRecorder, rawRequest)
+	if rawRecorder.Code != http.StatusOK {
+		t.Fatalf("raw records status = %d: %s", rawRecorder.Code, rawRecorder.Body.String())
+	}
+	var rawRecords []map[string]interface{}
+	if err := json.NewDecoder(rawRecorder.Body).Decode(&rawRecords); err != nil {
+		t.Fatalf("decode generalized source records: %v", err)
+	}
+	rawProduct := rawRowByCode(t, rawRecords, "102001011")
+	if _, exists := rawProduct["Sharh1"]; !exists {
+		t.Fatalf("generalized /api/records lost source fields: %#v", rawProduct)
+	}
+	if _, exists := rawProduct["product_code"]; exists {
+		t.Fatalf("generalized /api/records unexpectedly applied the kala projection: %#v", rawProduct)
+	}
+
+	request := httptest.NewRequest(http.MethodGet, "/api/products", nil)
 	recorder := httptest.NewRecorder()
 	srv.router.ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusOK {
-		t.Fatalf("REST status = %d: %s", recorder.Code, recorder.Body.String())
+		t.Fatalf("products status = %d: %s", recorder.Code, recorder.Body.String())
 	}
 	var keyedProducts map[string]map[string]interface{}
 	if err := json.NewDecoder(recorder.Body).Decode(&keyedProducts); err != nil {
-		t.Fatalf("decode canonical REST product rows: %v", err)
+		t.Fatalf("decode canonical products: %v", err)
 	}
 	if len(keyedProducts) != 292 {
-		t.Fatalf("canonical /api/records returned %d top-level entries, want 292 leaf product rows", len(keyedProducts))
+		t.Fatalf("canonical /api/products returned %d top-level entries, want 292 leaf product rows", len(keyedProducts))
 	}
 	for _, metadata := range []string{"schema", "event_id", "products"} {
 		if _, leaked := keyedProducts[metadata]; leaked {
@@ -917,7 +1005,7 @@ func TestCanonicalKalaParityAcrossRESTCSVXLSXAndWebSocket(t *testing.T) {
 		t.Fatalf("canonical /api/categories returned %d entries, want 54", len(keyedCategories))
 	}
 	if _, leakedAsProduct := keyedProducts["101"]; leakedAsProduct {
-		t.Fatalf("root category Code 101 leaked into /api/records")
+		t.Fatalf("root category Code 101 leaked into /api/products")
 	}
 	if category, exists := keyedCategories["101"]; !exists || category["category_code"] != nil || category["depth"] != float64(1) {
 		// Keyed payloads carry the Code in the object key, not redundantly in
@@ -925,7 +1013,7 @@ func TestCanonicalKalaParityAcrossRESTCSVXLSXAndWebSocket(t *testing.T) {
 		t.Fatalf("root category Code 101 missing or malformed: %#v", category)
 	}
 
-	csvRequest := httptest.NewRequest(http.MethodGet, "/api/records.csv", nil)
+	csvRequest := httptest.NewRequest(http.MethodGet, "/api/products.csv", nil)
 	csvRecorder := httptest.NewRecorder()
 	srv.router.ServeHTTP(csvRecorder, csvRequest)
 	csvRows, err := csv.NewReader(strings.NewReader(csvRecorder.Body.String())).ReadAll()
@@ -934,7 +1022,7 @@ func TestCanonicalKalaParityAcrossRESTCSVXLSXAndWebSocket(t *testing.T) {
 	}
 	assertTabularCanonicalFixture(t, "CSV", csvRows)
 
-	xlsxRequest := httptest.NewRequest(http.MethodGet, "/api/records.xlsx?download=1&rtl=1", nil)
+	xlsxRequest := httptest.NewRequest(http.MethodGet, "/api/products.xlsx?download=1&rtl=1", nil)
 	xlsxRecorder := httptest.NewRecorder()
 	srv.router.ServeHTTP(xlsxRecorder, xlsxRequest)
 	if contentDisposition := xlsxRecorder.Header().Get("Content-Disposition"); !strings.Contains(contentDisposition, "kala.xlsx") {
@@ -990,7 +1078,7 @@ func TestCanonicalKalaParityAcrossRESTCSVXLSXAndWebSocket(t *testing.T) {
 	}
 	_ = book.Close()
 
-	formulaRequest := httptest.NewRequest(http.MethodGet, "/api/records.xlsx?language=fa&mode=formula&zebra=0", nil)
+	formulaRequest := httptest.NewRequest(http.MethodGet, "/api/products.xlsx?language=fa&mode=formula&zebra=0", nil)
 	formulaRecorder := httptest.NewRecorder()
 	srv.router.ServeHTTP(formulaRecorder, formulaRequest)
 	if formulaRecorder.Code != http.StatusOK {
@@ -1102,7 +1190,7 @@ func TestCanonicalProductSyncRemainsAvailableWithRawViewerMode(t *testing.T) {
 		t.Fatalf("enable raw viewer mode: %v", err)
 	}
 
-	dbPath := filepath.Join("..", "..", "testdata", "kala.db")
+	dbPath := isolatedKalaFixture(t)
 	srv, err := NewServerWithOptions(dbPath, nil, Options{Config: manager}, false)
 	if err != nil {
 		t.Fatalf("create raw canonical server: %v", err)
@@ -1114,14 +1202,11 @@ func TestCanonicalProductSyncRemainsAvailableWithRawViewerMode(t *testing.T) {
 	if recordsRecorder.Code != http.StatusOK {
 		t.Fatalf("raw records status = %d: %s", recordsRecorder.Code, recordsRecorder.Body.String())
 	}
-	var rawRecords map[string]map[string]interface{}
+	var rawRecords []map[string]interface{}
 	if err := json.NewDecoder(recordsRecorder.Body).Decode(&rawRecords); err != nil {
 		t.Fatalf("decode raw viewer rows: %v", err)
 	}
-	rawProduct, ok := rawRecords["102001011"]
-	if !ok {
-		t.Fatalf("raw viewer did not preserve Code-keyed KALA row")
-	}
+	rawProduct := rawRowByCode(t, rawRecords, "102001011")
 	if _, exists := rawProduct["Sharh1"]; !exists {
 		t.Fatalf("raw viewer row no longer exposes diagnostic source fields: %#v", rawProduct)
 	}
@@ -1146,6 +1231,152 @@ func TestCanonicalProductSyncRemainsAvailableWithRawViewerMode(t *testing.T) {
 	}
 	product := canonicalTypedProductByCode(t, envelope.Products, "102001011")
 	assertCanonicalFixtureValues(t, "raw-mode product-sync", product)
+}
+
+func TestCanonicalHashVisibilityIsBoundedByServerPolicy(t *testing.T) {
+	fixtureConfig := filepath.Join("..", "..", "testdata", "canonical-static-config.json")
+	configData, err := os.ReadFile(fixtureConfig)
+	if err != nil {
+		t.Fatalf("read canonical fixture config: %v", err)
+	}
+	configPath := filepath.Join(t.TempDir(), "hash-policy-config.json")
+	if err := os.WriteFile(configPath, configData, 0600); err != nil {
+		t.Fatalf("copy canonical fixture config: %v", err)
+	}
+	manager, err := appconfig.Load(configPath)
+	if err != nil {
+		t.Fatalf("load canonical fixture config: %v", err)
+	}
+	expose := false
+	if err := manager.Update(func(cfg *appconfig.Config) {
+		cfg.Canonical.Hashes.Expose = &expose
+	}); err != nil {
+		t.Fatalf("hide record hashes: %v", err)
+	}
+
+	dbPath := isolatedKalaFixture(t)
+	srv, err := NewServerWithOptions(dbPath, nil, Options{Config: manager}, false)
+	if err != nil {
+		t.Fatalf("create canonical server: %v", err)
+	}
+	defer srv.Close()
+
+	assertProductsWithoutHashes := func(path string) {
+		t.Helper()
+		response := httptest.NewRecorder()
+		srv.router.ServeHTTP(response, httptest.NewRequest(http.MethodGet, path, nil))
+		if response.Code != http.StatusOK {
+			t.Fatalf("%s status=%d: %s", path, response.Code, response.Body.String())
+		}
+		var products map[string]map[string]interface{}
+		if err := json.NewDecoder(response.Body).Decode(&products); err != nil {
+			t.Fatalf("decode %s: %v", path, err)
+		}
+		if _, exists := products["102001011"]["record_hash"]; exists {
+			t.Fatalf("%s exposed record_hash against policy", path)
+		}
+	}
+
+	// A request can hide data, but cannot reveal data hidden by configuration.
+	assertProductsWithoutHashes("/api/products?include_hashes=true")
+	assertCategoriesWithoutHashes := func(path string) {
+		t.Helper()
+		response := httptest.NewRecorder()
+		srv.router.ServeHTTP(response, httptest.NewRequest(http.MethodGet, path, nil))
+		if response.Code != http.StatusOK {
+			t.Fatalf("%s status=%d: %s", path, response.Code, response.Body.String())
+		}
+		var categories map[string]map[string]interface{}
+		if err := json.NewDecoder(response.Body).Decode(&categories); err != nil {
+			t.Fatalf("decode %s: %v", path, err)
+		}
+		if len(categories) == 0 {
+			t.Fatalf("%s returned no categories", path)
+		}
+		for _, category := range categories {
+			if _, exists := category["record_hash"]; exists {
+				t.Fatalf("%s exposed record_hash against policy", path)
+			}
+			break
+		}
+	}
+	assertCategoriesWithoutHashes("/api/categories?include_hashes=true")
+
+	contract := httptest.NewRecorder()
+	srv.router.ServeHTTP(contract, httptest.NewRequest(http.MethodGet, "/api/product-sync", nil))
+	if contract.Code != http.StatusOK {
+		t.Fatalf("hidden ordinary hashes broke product-sync: %d %s", contract.Code, contract.Body.String())
+	}
+	var envelope canonical.Envelope
+	if err := json.NewDecoder(contract.Body).Decode(&envelope); err != nil ||
+		len(envelope.Products) == 0 || envelope.Products[0].RecordHash == "" ||
+		envelope.Source.Revision == "" || envelope.EventID == "" {
+		t.Fatalf("compatibility identities missing: envelope=%+v err=%v", envelope, err)
+	}
+
+	expose = true
+	if err := manager.Update(func(cfg *appconfig.Config) {
+		cfg.Canonical.Hashes.Expose = &expose
+	}); err != nil {
+		t.Fatalf("enable record hash publication: %v", err)
+	}
+	assertProductsWithoutHashes("/api/products?include_hashes=false")
+
+	enabled := false
+	if err := manager.Update(func(cfg *appconfig.Config) {
+		cfg.Canonical.Hashes.Enabled = &enabled
+	}); err != nil {
+		t.Fatalf("disable record hashes: %v", err)
+	}
+	assertProductsWithoutHashes("/api/products?include_hashes=true")
+	assertCategoriesWithoutHashes("/api/categories?include_hashes=true")
+	disabledContract := httptest.NewRecorder()
+	srv.router.ServeHTTP(disabledContract, httptest.NewRequest(http.MethodGet, "/api/product-sync", nil))
+	if disabledContract.Code != http.StatusNotFound {
+		t.Fatalf("disabled product-sync status=%d, want 404: %s", disabledContract.Code, disabledContract.Body.String())
+	}
+	result, err := srv.RecordResult()
+	if err != nil {
+		t.Fatalf("build disabled-hash result: %v", err)
+	}
+	if _, exists := srv.initialSnapshotMessage(result, dbPath, "")["contract"]; exists {
+		t.Fatal("disabled compatibility contract leaked into WebSocket snapshot")
+	}
+}
+
+func rawRowByCode(t *testing.T, rows []map[string]interface{}, code string) map[string]interface{} {
+	t.Helper()
+	for _, row := range rows {
+		for _, field := range []string{"Code", "code"} {
+			value, exists := row[field]
+			if !exists {
+				continue
+			}
+			actual := fmt.Sprint(value)
+			if numeric, ok := value.(float64); ok {
+				actual = strconv.FormatFloat(numeric, 'f', -1, 64)
+			}
+			if actual == code {
+				return row
+			}
+		}
+	}
+	t.Fatalf("source row %s not found", code)
+	return nil
+}
+
+func isolatedKalaFixture(t *testing.T) string {
+	t.Helper()
+	source := filepath.Join("..", "..", "testdata", "kala.db")
+	data, err := os.ReadFile(source)
+	if err != nil {
+		t.Fatalf("read kala fixture: %v", err)
+	}
+	target := filepath.Join(t.TempDir(), "kala.db")
+	if err := os.WriteFile(target, data, 0600); err != nil {
+		t.Fatalf("copy kala fixture: %v", err)
+	}
+	return target
 }
 
 func TestCanonicalRequestTimeoutBoundsDigitalogicPricing(t *testing.T) {

@@ -40,10 +40,10 @@ type VerificationSummary struct {
 	Warnings         int
 }
 
-// VerifySnapshotJSON decodes a strict product-sync snapshot and verifies every
-// identity that can be derived without receiver state. Unknown fields, malformed
-// sparse records, duplicate Codes, and any record/source/event hash mismatch
-// fail closed.
+// VerifySnapshotJSON decodes a product-sync snapshot and verifies every known
+// identity that can be derived without receiver state. Unknown extension fields
+// are preserved, while malformed sparse records, duplicate Codes, and any
+// record/source/event hash mismatch still fail closed.
 func VerifySnapshotJSON(data []byte) (*Envelope, VerificationSummary, error) {
 	if len(data) > MaxSnapshotBytes {
 		return nil, VerificationSummary{}, fmt.Errorf("canonical snapshot exceeds the %d-byte limit", MaxSnapshotBytes)

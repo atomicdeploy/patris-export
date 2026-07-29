@@ -15,6 +15,14 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   security boundaries; validates source-route parity and examples in CI; and
   builds deterministic public and internal offline documentation ZIPs ready
   for external tools, AI consumers, and a future public Pages site.
+- A Markdown documentation hub now covers first-run setup, every CLI/TUI
+  command, layered configuration, architecture, datasets and mappings,
+  English/Persian labels, ecosystem integrations, record hashes, and a
+  cross-linked glossary.
+- `GET /api/products` now exposes the optional KALA product projection
+  independently from generalized raw source records and structural categories.
+- Record, source, and event hashes can now be hidden from ordinary collections
+  or disabled entirely through config, environment, and CLI controls.
 - Canonical pricing now exposes the first `Sharh1` slot independently as
   `partner_price_source`, supports the `domestic` / `خرید داخلی` route with an
   explicit zero IRR/kg rate, and provides a default-off
@@ -22,6 +30,16 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Changed
 
+- `GET /api/records` now returns minimally transformed source rows as an
+  ordered JSON array, preserving duplicate identifiers and rows without a
+  `Code`; the built-in KALA viewer uses `/api/products` and falls back to
+  `/api/records` only when the product projection is unavailable.
+- Product-sync is documented as a temporary compatibility replication adapter,
+  not a duplicate list API. Typed canonical JSON preserves unknown extension
+  members while continuing to validate known sparse-field and identity rules.
+- The canonical PNG is now `assets/logo.png` and `/static/logo.png`; the old
+  static route redirects permanently, and `/robots.txt` prevents accidental
+  indexing of a listener exposed through a public hostname.
 - Pricing now falls through only after testing a complete route: foreign CNY
   requires positive weight and an enabled non-domestic freight assignment;
   partner price adds margin without freight and forces domestic shipping; the

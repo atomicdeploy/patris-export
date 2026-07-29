@@ -138,7 +138,7 @@ function fixtureOpenAPI() {
           ...operation({
             operationId: 'getRecentSales',
             summary: 'Read aggregate recent sales',
-            description: 'Returns a privacy-safe aggregate recent-sales integration feed.',
+            description: 'Returns a field-minimized aggregate recent-sales integration feed.',
             visibility: 'protected-integration-api',
             security: [{ bearerAuth: [] }],
             example: { products: [{ code: '1001', sold_quantity: 3 }] },
@@ -514,6 +514,41 @@ test('completeness accepts only explicitly bodyless runtime responses without me
   );
 });
 
+test('completeness accepts an explicitly redirect-only compatibility operation', () => {
+  const openapi = fixtureOpenAPI();
+  const asyncapi = fixtureAsyncAPI();
+  openapi.paths['/legacy-icon'] = {
+    get: {
+      operationId: 'redirectLegacyIcon',
+      summary: 'Redirect the legacy icon',
+      description: 'Permanently redirects an old asset path.',
+      responses: {
+        308: {
+          description: 'Permanent redirect.',
+          content: {
+            'text/html': {
+              schema: { type: 'string' },
+              example: '<a href="/icon.png">Permanent Redirect</a>.',
+            },
+          },
+        },
+      },
+      security: [],
+      'x-errors-not-applicable': true,
+      'x-internal': false,
+      'x-redirect-only': true,
+      'x-visibility': 'public-static',
+    },
+  };
+  assert.doesNotThrow(() => assertCompleteness(openapi, asyncapi));
+
+  delete openapi.paths['/legacy-icon'].get['x-redirect-only'];
+  assert.throws(
+    () => assertCompleteness(openapi, asyncapi),
+    /GET \/legacy-icon must document at least one 2xx response/,
+  );
+});
+
 test('synchronized wrapper examples cannot drift from their canonical schema example', () => {
   const openapi = fixtureOpenAPI();
   const asyncapi = fixtureAsyncAPI();
@@ -675,6 +710,122 @@ test('real plain-text http.Error responses declare nosniff and 405 stays bodyles
   assert.equal(methodNotAllowed['x-bodyless'], true);
   assert.equal(methodNotAllowed.content, undefined);
   assert.equal(methodNotAllowed.headers, undefined);
+});
+
+test('real catalog contracts distinguish raw records, KALA collections, and compatibility sync', () => {
+  const openapi = readDocument(path.join(realDocsRoot, 'openapi.yaml'));
+
+  const records = openapi.paths['/api/records'].get;
+  assert.equal(
+    records.responses[200].$ref,
+    '#/components/responses/RecordsExport',
+  );
+  assert.equal(
+    openapi.components.responses.RecordsExport
+      .content['application/json'].schema.$ref,
+    '#/components/schemas/SourceRecordArray',
+  );
+  assert.match(records.description, /ordered source-row array/i);
+  assert.match(records.description, /duplicate key values/i);
+
+  for (const pathName of ['/api/products', '/api/products.{format}']) {
+    const operation = openapi.paths[pathName].get;
+    assert.equal(
+      operation.responses[200].$ref,
+      '#/components/responses/ProductsExport',
+    );
+    assert.ok(
+      operation.parameters.some(
+        (parameter) => parameter.$ref === '#/components/parameters/IncludeHashesQuery',
+      ),
+      `${pathName} must expose the one-way hash visibility control`,
+    );
+  }
+  assert.equal(
+    openapi.components.responses.ProductsExport
+      .content['application/json'].schema.$ref,
+    '#/components/schemas/KeyedProductMap',
+  );
+  assert.ok(
+    openapi.paths['/api/categories'].get.parameters.some(
+      (parameter) => parameter.$ref === '#/components/parameters/IncludeHashesQuery',
+    ),
+  );
+  assert.match(
+    openapi.components.parameters.IncludeHashesQuery.description,
+    /never override/i,
+  );
+
+  const productSync = openapi.paths['/api/product-sync'].get;
+  assert.match(productSync.description, /temporary compatibility adapter/i);
+  assert.match(productSync.description, /hash\s+identities are disabled/i);
+  assert.doesNotMatch(productSync.description, /deterministic snapshot/i);
+
+  assert.equal(
+    openapi.paths['/api/recent-sales'].get.summary,
+    'Read recent-sales aggregates',
+  );
+  assert.doesNotMatch(
+    JSON.stringify(openapi.paths['/api/recent-sales']),
+    /privacy-safe/i,
+  );
+});
+
+test('real canonical schemas retain extensions and document hash publication policy', () => {
+  const openapi = readDocument(path.join(realDocsRoot, 'openapi.yaml'));
+  for (const name of [
+    'CanonicalEnvelope',
+    'CanonicalProduct',
+    'CanonicalSource',
+    'CanonicalTombstone',
+    'Category',
+  ]) {
+    assert.equal(
+      openapi.components.schemas[name].additionalProperties,
+      true,
+      `${name} must preserve independently evolving extension fields`,
+    );
+  }
+  assert.ok(
+    !openapi.components.schemas.CanonicalEnvelope.required.includes('event_id'),
+    'event_id must be optional outside the hash-enabled compatibility adapter',
+  );
+  assert.ok(
+    !openapi.components.schemas.CanonicalSource.required.includes('revision'),
+    'source revision must be optional when hash identities are disabled',
+  );
+  assert.equal(
+    openapi.components.schemas.CanonicalConfig.properties.hashes.$ref,
+    '#/components/schemas/CanonicalHashConfig',
+  );
+  assert.match(
+    openapi.components.schemas.CanonicalConfig.description,
+    /PATRIS_EXPORT_RECORD_HASHES/,
+  );
+  assert.match(
+    openapi.components.schemas.CanonicalConfig.description,
+    /PATRIS_EXPORT_EXPOSE_RECORD_HASHES/,
+  );
+});
+
+test('real static contract exposes logo, legacy redirect, and crawler policy', () => {
+  const openapi = readDocument(path.join(realDocsRoot, 'openapi.yaml'));
+  assert.ok(openapi.paths['/static/logo.png'].get);
+  assert.equal(
+    openapi.paths['/static/patris-api-icon.png'].get.responses[308].$ref,
+    '#/components/responses/LogoRedirect',
+  );
+  assert.equal(
+    openapi.paths['/static/patris-api-icon.png'].get.deprecated,
+    true,
+  );
+  assert.ok(openapi.paths['/robots.txt'].get);
+  assert.ok(openapi.paths['/robots.txt'].head);
+  assert.match(
+    openapi.components.responses.RobotsText
+      .content['text/plain'].example,
+    /Disallow: \//,
+  );
 });
 
 test('AsyncAPI parser accepts the fixture and samples contain no literal credentials', async () => {

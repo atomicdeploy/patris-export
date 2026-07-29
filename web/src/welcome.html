@@ -349,7 +349,7 @@
     <main class="container">
         <header class="topbar">
             <a class="brand" href="/" aria-label="Patris Export">
-                <img src="/static/patris-api-icon.png" alt="">
+                <img src="/static/logo.png" alt="">
                 <span class="brand-name">Patris Export</span>
             </a>
             <div class="page-controls">
@@ -407,8 +407,14 @@
                 <article class="endpoint">
                     <span class="method">GET</span>
                     <code>/api/records</code>
-                    <p data-page-i18n="recordsJSONDescription">Retrieve all database records in JSON format</p>
+                    <p data-page-i18n="recordsJSONDescription">Retrieve minimally transformed source records as a JSON array</p>
                     <a href="/api/records"><span data-page-i18n="tryIt">Try it</span><span data-page-icon="arrowUp" aria-hidden="true"></span></a>
+                </article>
+                <article class="endpoint">
+                    <span class="method">GET</span>
+                    <code>/api/products</code>
+                    <p data-page-i18n="productsJSONDescription">Retrieve the KALA product projection when available</p>
+                    <a href="/api/products"><span data-page-i18n="tryIt">Try it</span><span data-page-icon="arrowUp" aria-hidden="true"></span></a>
                 </article>
                 <article class="endpoint">
                     <span class="method">GET</span>
@@ -419,7 +425,7 @@
                 <article class="endpoint">
                     <span class="method">GET</span>
                     <code>/api/product-sync</code>
-                    <p data-page-i18n="productSyncDescription">Retrieve the current canonical integration envelope when available</p>
+                    <p data-page-i18n="productSyncDescription">Retrieve the compatibility replication envelope when available</p>
                     <a href="/api/product-sync"><span data-page-i18n="tryIt">Try it</span><span data-page-icon="arrowUp" aria-hidden="true"></span></a>
                 </article>
                 <article class="endpoint">

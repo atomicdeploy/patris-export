@@ -91,6 +91,10 @@ components:
       schema:
         format: http-date
         type: string
+    Location:
+      description: Redirect target.
+      schema:
+        type: string
     NoCache:
       description: The response must be revalidated.
       schema:
@@ -237,6 +241,19 @@ components:
       required: false
       schema:
         format: http-date
+        type: string
+    IncludeHashesQuery:
+      description: |
+        Requests omission of per-record `record_hash` values from product and
+        category collection responses. False-like values (`0`, `false`, `no`,
+        or `off`) hide the field. Other values retain the server's configured
+        behavior but never override it: when canonical hash identities or hash
+        exposure are disabled server-side, a client cannot re-enable them.
+      example: "false"
+      in: query
+      name: include_hashes
+      required: false
+      schema:
         type: string
     OptionalOriginHeader:
       description: If present, must exactly match a loopback request origin.
@@ -458,6 +475,28 @@ components:
           schema:
             $ref: "#/components/schemas/PlainError"
       description: Canonical categories are not available for the datasource.
+      headers:
+        X-Content-Type-Options:
+          $ref: "#/components/headers/NoSniff"
+    CanonicalProductsNotAvailable:
+      content:
+        text/plain:
+          example: |
+            canonical products are not available for this dataset
+          schema:
+            $ref: "#/components/schemas/PlainError"
+      description: A KALA product projection is not available for the datasource.
+      headers:
+        X-Content-Type-Options:
+          $ref: "#/components/headers/NoSniff"
+    CanonicalProductsTimedOut:
+      content:
+        text/plain:
+          example: |
+            Canonical products timed out after 30s
+          schema:
+            $ref: "#/components/schemas/PlainError"
+      description: KALA product materialization exceeded its bounded deadline.
       headers:
         X-Content-Type-Options:
           $ref: "#/components/headers/NoSniff"
@@ -1039,11 +1078,19 @@ components:
     ProductSyncNotAvailable:
       content:
         text/plain:
-          example: |
-            canonical product-sync contract is not available for this dataset
+          examples:
+            hashesDisabled:
+              value: |
+                canonical product-sync is disabled because record hashes are disabled
+            profileUnavailable:
+              value: |
+                canonical product-sync contract is not available for this dataset
           schema:
             $ref: "#/components/schemas/PlainError"
-      description: Canonical product-sync is not available for the datasource.
+      description: |
+        The compatibility replication adapter is unavailable because the
+        datasource has no enabled KALA profile or server-side hash identities
+        are disabled. This is an unavailable state, not an empty snapshot.
       headers:
         X-Content-Type-Options:
           $ref: "#/components/headers/NoSniff"
@@ -1058,6 +1105,23 @@ components:
       headers:
         X-Content-Type-Options:
           $ref: "#/components/headers/NoSniff"
+    LogoRedirect:
+      content:
+        text/html:
+          example: |
+            <a href="/static/logo.png">Permanent Redirect</a>.
+          schema:
+            type: string
+      description: Permanent redirect to the stable logo path.
+      headers:
+        Location:
+          $ref: "#/components/headers/Location"
+    LogoRedirectHead:
+      description: Permanent redirect headers without response bytes.
+      headers:
+        Location:
+          $ref: "#/components/headers/Location"
+      x-bodyless: true
     RecentSalesCancelled:
       content:
         application/json:
@@ -1149,12 +1213,11 @@ components:
       content:
         application/json:
           example:
-            "113006048":
-              ALLANBAR: 12
+            - ALLANBAR: 12
               Code: "113006048"
-              Name: LCD module
+              Sharh1: LCD module
           schema:
-            $ref: "#/components/schemas/KeyedRecordMap"
+            $ref: "#/components/schemas/SourceRecordArray"
         application/vnd.openxmlformats-officedocument.spreadsheetml.sheet:
           schema:
             format: binary
@@ -1166,10 +1229,47 @@ components:
           schema:
             type: string
       description: |
-        Requested records representation. `Content-Disposition` is emitted for
-        XLSX and for CSV only when `download` is truthy. `Accept-Ranges`,
-        `Content-Length`, and `Last-Modified` are emitted by
-        `http.ServeContent` only for XLSX.
+        Requested minimally transformed source-row representation. JSON is an
+        ordered array so rows without a key and duplicate key values are not
+        collapsed. `Content-Disposition` is emitted for XLSX and for CSV only
+        when `download` is truthy. `Accept-Ranges`, `Content-Length`, and
+        `Last-Modified` are emitted by `http.ServeContent` only for XLSX.
+      headers:
+        Accept-Ranges:
+          $ref: "#/components/headers/AcceptRanges"
+        Content-Disposition:
+          $ref: "#/components/headers/ContentDisposition"
+        Content-Length:
+          $ref: "#/components/headers/ContentLength"
+        Last-Modified:
+          $ref: "#/components/headers/LastModified"
+    ProductsExport:
+      content:
+        application/json:
+          example:
+            "113006048":
+              category_code: "113006"
+              name: LCD module
+              product_code: "113006048"
+              total_stock: 12
+              warnings: []
+          schema:
+            $ref: "#/components/schemas/KeyedProductMap"
+        application/vnd.openxmlformats-officedocument.spreadsheetml.sheet:
+          schema:
+            format: binary
+            type: string
+        text/csv:
+          example: "product_code,category_code,name,total_stock\r\n113006048,113006,LCD module,12\r\n"
+          schema:
+            type: string
+      description: |
+        Requested KALA product projection. JSON is keyed by `product_code`;
+        CSV and XLSX contain one projected product per row. `record_hash` is
+        omitted when server policy hides hashes or when `include_hashes` is
+        false-like. `Content-Disposition` is emitted for XLSX and for CSV only
+        when `download` is truthy. `Accept-Ranges`, `Content-Length`, and
+        `Last-Modified` are emitted by `http.ServeContent` only for XLSX.
       headers:
         Accept-Ranges:
           $ref: "#/components/headers/AcceptRanges"
@@ -1677,11 +1777,137 @@ components:
           $ref: "#/components/headers/ContentRange"
         X-Content-Type-Options:
           $ref: "#/components/headers/NoSniff"
+    RobotsText:
+      content:
+        text/plain:
+          example: |
+            User-agent: *
+            Disallow: /
+          schema:
+            type: string
+      description: Complete crawler exclusion policy.
+      headers:
+        Accept-Ranges:
+          $ref: "#/components/headers/AcceptRanges"
+        Cache-Control:
+          description: Cache the crawler policy for one hour.
+          schema:
+            const: public, max-age=3600
+            type: string
+        Content-Length:
+          $ref: "#/components/headers/ContentLength"
+    RobotsTextHead:
+      description: Crawler-policy headers without response bytes.
+      headers:
+        Accept-Ranges:
+          $ref: "#/components/headers/AcceptRanges"
+        Cache-Control:
+          description: Cache the crawler policy for one hour.
+          schema:
+            const: public, max-age=3600
+            type: string
+        Content-Length:
+          $ref: "#/components/headers/ContentLength"
+      x-bodyless: true
+    RobotsTextHeadPartial:
+      description: Requested crawler-policy range headers without response bytes.
+      headers:
+        Accept-Ranges:
+          $ref: "#/components/headers/AcceptRanges"
+        Cache-Control:
+          description: Cache the crawler policy for one hour.
+          schema:
+            const: public, max-age=3600
+            type: string
+        Content-Length:
+          $ref: "#/components/headers/ContentLength"
+        Content-Range:
+          $ref: "#/components/headers/ContentRange"
+      x-bodyless: true
+    RobotsTextNotModified:
+      description: |
+        `If-None-Match: *` matched the existence of the crawler policy. No
+        response body is emitted. Ordinary entity tags and date validators
+        cannot match because the handler supplies no ETag or modification time.
+      headers:
+        Accept-Ranges:
+          $ref: "#/components/headers/AcceptRanges"
+        Cache-Control:
+          description: Cache the crawler policy for one hour.
+          schema:
+            const: public, max-age=3600
+            type: string
+      x-bodyless: true
+    RobotsTextPartial:
+      content:
+        text/plain:
+          example: |
+            User-agent: *
+          schema:
+            type: string
+      description: Requested byte range of the crawler exclusion policy.
+      headers:
+        Accept-Ranges:
+          $ref: "#/components/headers/AcceptRanges"
+        Cache-Control:
+          description: Cache the crawler policy for one hour.
+          schema:
+            const: public, max-age=3600
+            type: string
+        Content-Length:
+          $ref: "#/components/headers/ContentLength"
+        Content-Range:
+          $ref: "#/components/headers/ContentRange"
+    RobotsTextPreconditionFailed:
+      content:
+        text/plain:
+          example: ""
+          schema:
+            maxLength: 0
+            type: string
+      description: A nonmatching `If-Match` precondition failed without response bytes.
+      headers:
+        Accept-Ranges:
+          $ref: "#/components/headers/AcceptRanges"
+        Cache-Control:
+          description: Cache the crawler policy for one hour.
+          schema:
+            const: public, max-age=3600
+            type: string
+    RobotsTextRangeNotSatisfiable:
+      content:
+        text/plain:
+          example: |
+            invalid range: failed to overlap
+          schema:
+            $ref: "#/components/schemas/PlainError"
+      description: |
+        The byte range was malformed or did not overlap the crawler policy.
+        `Content-Range` may be absent for malformed syntax; the default Go
+        error path strips the handler-set cache directive.
+      headers:
+        Accept-Ranges:
+          $ref: "#/components/headers/AcceptRanges"
+        Content-Range:
+          $ref: "#/components/headers/ContentRange"
+        X-Content-Type-Options:
+          $ref: "#/components/headers/NoSniff"
     UnsupportedRecordsFormat:
       content:
         text/plain:
           example: |
             unsupported records format; use json, csv, or xlsx
+          schema:
+            $ref: "#/components/schemas/PlainError"
+      description: Query format is not json, csv, or xlsx.
+      headers:
+        X-Content-Type-Options:
+          $ref: "#/components/headers/NoSniff"
+    UnsupportedProductsFormat:
+      content:
+        text/plain:
+          example: |
+            unsupported products format; use json, csv, or xlsx
           schema:
             $ref: "#/components/schemas/PlainError"
       description: Query format is not json, csv, or xlsx.
@@ -1727,6 +1953,9 @@ components:
       example:
         canonical:
           enabled: true
+          hashes:
+            enabled: true
+            expose: true
           pricing:
             digitalogic:
               assignment_path: integration/products/by-code/{code}/pricing
@@ -2021,9 +2250,20 @@ components:
       type: object
     CanonicalConfig:
       additionalProperties: false
+      description: |
+        KALA projection settings. `hashes.enabled` is also configurable through
+        `--record-hashes` or `PATRIS_EXPORT_RECORD_HASHES`; false disables
+        hash-dependent compatibility surfaces such as `/api/product-sync`.
+        `hashes.expose` is also configurable through
+        `--expose-record-hashes` or `PATRIS_EXPORT_EXPOSE_RECORD_HASHES`; false
+        keeps collection and export rows free of `record_hash`. The client
+        `include_hashes` query can only hide hashes and cannot override either
+        server-side policy.
       properties:
         enabled:
           type: boolean
+        hashes:
+          $ref: "#/components/schemas/CanonicalHashConfig"
         pricing:
           $ref: "#/components/schemas/PricingCatalogConfig"
         profiles:
@@ -2036,8 +2276,28 @@ components:
         - enabled
         - pricing
       type: object
-    CanonicalEnvelope:
+    CanonicalHashConfig:
       additionalProperties: false
+      description: |
+        Hash identity publication policy. Missing values preserve the
+        historical enabled/exposed behavior. When `enabled` is false,
+        `expose` is normalized to false.
+      properties:
+        enabled:
+          default: true
+          type: boolean
+        expose:
+          default: true
+          type: boolean
+      type: object
+    CanonicalEnvelope:
+      additionalProperties: true
+      description: |
+        Sparse typed catalog envelope. Recognized fields have the definitions
+        below; unrecognized extension fields are retained when the application
+        decodes and re-encodes the object so independently evolving peers do
+        not lose data. `/api/product-sync` uses this model as a temporary
+        compatibility replication adapter and supplies its hash identities.
       properties:
         categories:
           items:
@@ -2097,7 +2357,6 @@ components:
       required:
         - schema
         - event_type
-        - event_id
         - source
         - generated_at
         - products
@@ -2107,11 +2366,12 @@ components:
         - warnings
       type: object
     CanonicalProduct:
-      additionalProperties: false
+      additionalProperties: true
       description: |
         Sparse canonical product. Only `product_code` and `warnings` are always
         emitted. Other properties may be absent or, when explicitly supplied
-        upstream, null.
+        upstream, null. Unknown extension properties are retained across typed
+        decode/re-encode operations.
       properties:
         category_code:
           type:
@@ -2259,7 +2519,11 @@ components:
         - type
       type: object
     CanonicalSource:
-      additionalProperties: false
+      additionalProperties: true
+      description: |
+        Source identity plus retained implementation-specific extension fields.
+        `revision` is a hash-dependent compatibility identity and may be absent
+        outside a hash-enabled product-sync response.
       properties:
         dataset:
           minLength: 1
@@ -2273,10 +2537,12 @@ components:
       required:
         - id
         - dataset
-        - revision
       type: object
     CanonicalTombstone:
-      additionalProperties: false
+      additionalProperties: true
+      description: |
+        Deleted-product marker. Unknown extension properties are retained when
+        the object is decoded and re-encoded.
       properties:
         deleted:
           const: true
@@ -2287,7 +2553,10 @@ components:
         - deleted
       type: object
     Category:
-      additionalProperties: false
+      additionalProperties: true
+      description: |
+        Sparse structural KALA category. Unknown extension properties are
+        retained across typed decode/re-encode operations.
       properties:
         category_code:
           type: string
@@ -2501,8 +2770,10 @@ components:
     DynamicRecord:
       additionalProperties: true
       description: |
-        One source-dependent transformed record. Keys and scalar/array/object
-        value types depend on datasource and configured transformations.
+        One source-dependent record. Keys and scalar/array/object value types
+        depend on the datasource; individual operations state whether their
+        rows are minimally transformed or passed through configured
+        transformations.
       example:
         ALLANBAR: 12
         Code: "113006048"
@@ -2883,10 +3154,10 @@ components:
       additionalProperties:
         $ref: "#/components/schemas/Category"
       type: object
-    KeyedRecordMap:
+    KeyedProductMap:
       additionalProperties:
-        $ref: "#/components/schemas/DynamicRecord"
-      description: Records keyed by the active key field, normally `Code`.
+        $ref: "#/components/schemas/CanonicalProduct"
+      description: KALA product projections keyed by `product_code`.
       type: object
     NotificationsConfig:
       additionalProperties: false
@@ -3611,6 +3882,27 @@ components:
         - download_url
         - generated_at
       type: object
+    SourceRecord:
+      additionalProperties: true
+      description: |
+        One minimally transformed row from the active datasource. Patris Export
+        bypasses KALA projection, character conversion, configured field
+        mapping, and pricing enrichment for `/api/records`, so field names and
+        value types are source-dependent.
+      allOf:
+        - $ref: "#/components/schemas/DynamicRecord"
+      example:
+        ALLANBAR: 12
+        Code: "113006048"
+        Sharh1: LCD module
+      type: object
+    SourceRecordArray:
+      description: |
+        Ordered source rows. This is intentionally an array rather than a keyed
+        object so rows without `Code` and repeated `Code` values are preserved.
+      items:
+        $ref: "#/components/schemas/SourceRecord"
+      type: array
     SourceInfo:
       additionalProperties: false
       properties:
@@ -3930,9 +4222,12 @@ info:
     audience; it does not add enforcement. Protected operations document the
     exact handler-local bearer, loopback, cookie, CSRF, or operator checks.
 
-    JSON product records are source-dependent. Canonical product contracts are
-    sparse: absent upstream values are omitted, while an explicitly supplied
-    upstream null remains JSON null.
+    `/api/records` is the generalized minimally transformed datasource
+    boundary and returns an ordered array. `/api/products` and
+    `/api/categories` are KALA-specific projections. Canonical objects are
+    sparse: absent upstream values are omitted, an explicitly supplied upstream
+    null remains JSON null, and unknown extension properties are retained so
+    independently evolving integrations can ignore fields they do not use.
   license:
     identifier: MIT
     name: MIT
@@ -4015,10 +4310,14 @@ paths:
   /api/categories:
     get:
       description: |
-        Builds a bounded canonical projection and returns structural categories
-        keyed by category code. A noncanonical datasource returns 404 rather
-        than an empty object.
+        Builds the KALA projection and returns structural categories keyed by
+        category code. A non-KALA datasource returns 404 rather than an empty
+        object. False-like `include_hashes` values may hide `record_hash`;
+        the query cannot override a server policy that already hides or
+        disables hash identities.
       operationId: getCategories
+      parameters:
+        - $ref: "#/components/parameters/IncludeHashesQuery"
       responses:
         "200":
           content:
@@ -4236,6 +4535,9 @@ paths:
                 config:
                   canonical:
                     enabled: true
+                    hashes:
+                      enabled: true
+                      expose: true
                     pricing:
                       digitalogic:
                         assignment_path: integration/products/by-code/{code}/pricing
@@ -4852,8 +5154,15 @@ paths:
   /api/product-sync:
     get:
       description: |
-        Materializes the canonical projection independently of viewer raw mode.
-        The result is a deterministic snapshot for external product consumers.
+        Temporary compatibility adapter for consumers that need one atomic
+        replication envelope containing products, categories, exclusions,
+        quarantine state, tombstones, source revision, and event identity.
+        New collection consumers should use `/api/products` and
+        `/api/categories`; generalized source inspection belongs at
+        `/api/records`. This adapter remains separate because those collection
+        routes do not carry replication state or acknowledgement identities.
+        It returns 404 when no KALA profile is active or when server-side hash
+        identities are disabled.
       operationId: getProductSyncContract
       responses:
         "200":
@@ -4874,13 +5183,130 @@ paths:
         "503":
           $ref: "#/components/responses/ProductSyncTimedOut"
       security: []
-      summary: Read the canonical product-sync envelope
+      summary: Read the compatibility product-replication envelope
       tags:
         - Catalog
       x-code-anchors:
         - pkg/server/server.go#Server.handleGetProductSyncContract
       x-internal: false
       x-visibility: public-integration-api
+  /api/products:
+    get:
+      description: |
+        Builds the KALA product projection without the replication metadata in
+        `/api/product-sync`, then returns JSON keyed by `product_code`, CSV, or
+        XLSX. A non-KALA datasource returns 404 while its source rows remain
+        available from `/api/records`. Format precedence is query `format`,
+        then `Accept`, then JSON. False-like `include_hashes` values may hide
+        `record_hash`; the query cannot override a server policy that already
+        hides or disables hash identities. Only XLSX delegates to
+        `http.ServeContent`, so range and precondition headers apply only to
+        that representation.
+      operationId: getProducts
+      parameters:
+        - $ref: "#/components/parameters/RecordsFormatQuery"
+        - $ref: "#/components/parameters/IncludeHashesQuery"
+        - $ref: "#/components/parameters/DownloadQuery"
+        - $ref: "#/components/parameters/XLSXLanguageQuery"
+        - $ref: "#/components/parameters/XLSXModeQuery"
+        - $ref: "#/components/parameters/XLSXZebraQuery"
+        - $ref: "#/components/parameters/XLSXRTLQuery"
+        - $ref: "#/components/parameters/RecordsAccept"
+        - $ref: "#/components/parameters/Range"
+        - $ref: "#/components/parameters/IfMatch"
+        - $ref: "#/components/parameters/IfUnmodifiedSince"
+        - $ref: "#/components/parameters/IfNoneMatch"
+        - $ref: "#/components/parameters/IfModifiedSince"
+        - $ref: "#/components/parameters/IfRange"
+      responses:
+        "200":
+          $ref: "#/components/responses/ProductsExport"
+        "206":
+          $ref: "#/components/responses/RecordsXLSXPartial"
+        "304":
+          $ref: "#/components/responses/RecordsXLSXNotModified"
+        "400":
+          $ref: "#/components/responses/UnsupportedProductsFormat"
+        "404":
+          $ref: "#/components/responses/CanonicalProductsNotAvailable"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "412":
+          $ref: "#/components/responses/RecordsXLSXPreconditionFailed"
+        "416":
+          $ref: "#/components/responses/RecordsXLSXRangeNotSatisfiable"
+        "500":
+          $ref: "#/components/responses/PlainInternalError"
+        "503":
+          $ref: "#/components/responses/CanonicalProductsTimedOut"
+      security: []
+      summary: Read or export the KALA product projection
+      tags:
+        - Catalog
+      x-code-anchors:
+        - pkg/server/server.go#Server.handleGetProducts
+      x-internal: false
+      x-visibility: public-api
+  /api/products.{format}:
+    get:
+      description: |
+        Performs the same KALA projection as `/api/products` using a file-style
+        JSON, CSV, or XLSX path. The path format takes precedence over query
+        and Accept negotiation. False-like `include_hashes` values may hide
+        `record_hash` but cannot override server policy. Only `.xlsx`
+        delegates to `http.ServeContent`.
+      operationId: getProductsByFileFormat
+      parameters:
+        - description: Output representation selected by the mux route.
+          example: csv
+          in: path
+          name: format
+          required: true
+          schema:
+            enum:
+              - json
+              - csv
+              - xlsx
+            type: string
+        - $ref: "#/components/parameters/IncludeHashesQuery"
+        - $ref: "#/components/parameters/DownloadQuery"
+        - $ref: "#/components/parameters/XLSXLanguageQuery"
+        - $ref: "#/components/parameters/XLSXModeQuery"
+        - $ref: "#/components/parameters/XLSXZebraQuery"
+        - $ref: "#/components/parameters/XLSXRTLQuery"
+        - $ref: "#/components/parameters/Range"
+        - $ref: "#/components/parameters/IfMatch"
+        - $ref: "#/components/parameters/IfUnmodifiedSince"
+        - $ref: "#/components/parameters/IfNoneMatch"
+        - $ref: "#/components/parameters/IfModifiedSince"
+        - $ref: "#/components/parameters/IfRange"
+      responses:
+        "200":
+          $ref: "#/components/responses/ProductsExport"
+        "206":
+          $ref: "#/components/responses/RecordsXLSXPartial"
+        "304":
+          $ref: "#/components/responses/RecordsXLSXNotModified"
+        "404":
+          $ref: "#/components/responses/CanonicalProductsNotAvailable"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "412":
+          $ref: "#/components/responses/RecordsXLSXPreconditionFailed"
+        "416":
+          $ref: "#/components/responses/RecordsXLSXRangeNotSatisfiable"
+        "500":
+          $ref: "#/components/responses/PlainInternalError"
+        "503":
+          $ref: "#/components/responses/CanonicalProductsTimedOut"
+      security: []
+      summary: Export KALA products using a file-style format
+      tags:
+        - Catalog
+      x-code-anchors:
+        - pkg/server/server.go#Server.handleGetProducts
+      x-internal: false
+      x-visibility: public-api
   /api/recent-sales:
     get:
       description: |
@@ -4956,7 +5382,7 @@ paths:
           $ref: "#/components/responses/RecentSalesUnavailable"
       security:
         - recentSalesBearer: []
-      summary: Read privacy-safe recent-sales aggregates
+      summary: Read recent-sales aggregates
       tags:
         - Private integrations
       x-code-anchors:
@@ -4966,15 +5392,15 @@ paths:
   /api/records:
     get:
       description: |
-        Reads the active datasource through the shared transform/canonical
-        pipeline, then returns a keyed JSON object, CSV document, or XLSX
-        workbook. Format precedence is query `format`, then `Accept`, then JSON.
-        Only XLSX generation delegates the response to `http.ServeContent`.
-        Consequently, byte ranges and HTTP preconditions apply only when the
-        resolved format is XLSX; JSON and CSV ignore those headers. Generated
-        XLSX responses have a file modification time but no ETag: date
-        validators and wildcard (`*`) entity-tag preconditions work, while an
-        ordinary entity-tag cannot match.
+        Generalized datasource access for KALA and other Paradox schemas. The
+        read bypasses KALA projection, character conversion, configured field
+        mapping, and pricing enrichment. JSON is an ordered source-row array,
+        preserving rows without a key and duplicate key values; CSV and XLSX
+        use the same minimally transformed rows. Format precedence is query
+        `format`, then `Accept`, then JSON. Only XLSX generation delegates the
+        response to `http.ServeContent`, so byte ranges and HTTP preconditions
+        apply only to XLSX; JSON and CSV ignore those headers. Generated XLSX
+        responses have a modification time but no ETag.
       operationId: getRecords
       parameters:
         - $ref: "#/components/parameters/RecordsFormatQuery"
@@ -5008,7 +5434,7 @@ paths:
         "500":
           $ref: "#/components/responses/PlainInternalError"
       security: []
-      summary: Export current records
+      summary: Read or export minimally transformed source records
       tags:
         - Catalog
       x-code-anchors:
@@ -5018,12 +5444,12 @@ paths:
   /api/records.{format}:
     get:
       description: |
-        Performs the same shared read as `/api/records`. The path format has
-        precedence over query and Accept negotiation. Only the `.xlsx` route
-        delegates to `http.ServeContent`; range and precondition headers are
-        ignored by the `.json` and `.csv` routes. Generated XLSX responses
-        expose a modification time but no ETag, so date validators and
-        wildcard (`*`) entity-tag preconditions work.
+        Performs the same generalized, minimally transformed source read as
+        `/api/records`. The path format has precedence over query and Accept
+        negotiation. Only the `.xlsx` route delegates to
+        `http.ServeContent`; range and precondition headers are ignored by the
+        `.json` and `.csv` routes. Generated XLSX responses expose a
+        modification time but no ETag.
       operationId: getRecordsByFileFormat
       parameters:
         - description: Output representation selected by the mux route.
@@ -5064,7 +5490,7 @@ paths:
         "500":
           $ref: "#/components/responses/PlainInternalError"
       security: []
-      summary: Export current records using a file-style format
+      summary: Export source records using a file-style format
       tags:
         - Catalog
       x-code-anchors:
@@ -5880,6 +6306,72 @@ paths:
       x-errors-not-applicable: true
       x-internal: true
       x-visibility: internal-ui
+  /robots.txt:
+    get:
+      description: |
+        Serves a crawler policy that disallows every path, reducing accidental
+        indexing when a listener is exposed through a public hostname. The
+        embedded text supports byte ranges. It has no ETag or modification
+        time, so only wildcard entity-tag preconditions can match and any
+        `If-Range` value falls back to a complete 200 response.
+      operationId: getRobotsPolicy
+      parameters:
+        - $ref: "#/components/parameters/Range"
+        - $ref: "#/components/parameters/IfMatch"
+        - $ref: "#/components/parameters/IfNoneMatch"
+        - $ref: "#/components/parameters/IfRange"
+      responses:
+        "200":
+          $ref: "#/components/responses/RobotsText"
+        "206":
+          $ref: "#/components/responses/RobotsTextPartial"
+        "304":
+          $ref: "#/components/responses/RobotsTextNotModified"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "412":
+          $ref: "#/components/responses/RobotsTextPreconditionFailed"
+        "416":
+          $ref: "#/components/responses/RobotsTextRangeNotSatisfiable"
+      security: []
+      summary: Read the crawler exclusion policy
+      tags:
+        - Static assets
+      x-code-anchors:
+        - pkg/server/server.go#Server.handleRobots
+      x-errors-not-applicable: true
+      x-internal: false
+      x-visibility: public-static
+    head:
+      description: Returns crawler-policy length, cache, and range metadata without response bytes.
+      operationId: headRobotsPolicy
+      parameters:
+        - $ref: "#/components/parameters/Range"
+        - $ref: "#/components/parameters/IfMatch"
+        - $ref: "#/components/parameters/IfNoneMatch"
+        - $ref: "#/components/parameters/IfRange"
+      responses:
+        "200":
+          $ref: "#/components/responses/RobotsTextHead"
+        "206":
+          $ref: "#/components/responses/RobotsTextHeadPartial"
+        "304":
+          $ref: "#/components/responses/RobotsTextNotModified"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "412":
+          $ref: "#/components/responses/RobotsTextPreconditionFailed"
+        "416":
+          $ref: "#/components/responses/RobotsTextRangeNotSatisfiable"
+      security: []
+      summary: Inspect crawler-policy headers
+      tags:
+        - Static assets
+      x-code-anchors:
+        - pkg/server/server.go#Server.handleRobots
+      x-errors-not-applicable: true
+      x-internal: false
+      x-visibility: public-static
   /static/notification.ogg:
     get:
       description: |
@@ -5948,7 +6440,7 @@ paths:
       x-errors-not-applicable: true
       x-internal: false
       x-visibility: public-static
-  /static/patris-api-icon.png:
+  /static/logo.png:
     get:
       description: |
         Streams the embedded PNG icon with byte-range support. The handler
@@ -6014,6 +6506,47 @@ paths:
         - pkg/server/server.go#Server.handleAppIcon
       x-errors-not-applicable: true
       x-internal: false
+      x-visibility: public-static
+  /static/patris-api-icon.png:
+    get:
+      deprecated: true
+      description: |
+        Legacy icon URL retained for existing clients. It performs no asset
+        read and permanently redirects to `/static/logo.png`.
+      operationId: redirectLegacyApplicationIcon
+      responses:
+        "308":
+          $ref: "#/components/responses/LogoRedirect"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+      security: []
+      summary: Redirect the legacy application-icon path
+      tags:
+        - Static assets
+      x-code-anchors:
+        - pkg/server/server.go#Server.handleLegacyAppIcon
+      x-errors-not-applicable: true
+      x-internal: false
+      x-redirect-only: true
+      x-visibility: public-static
+    head:
+      deprecated: true
+      description: Returns the permanent redirect target without response bytes.
+      operationId: headLegacyApplicationIconRedirect
+      responses:
+        "308":
+          $ref: "#/components/responses/LogoRedirectHead"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+      security: []
+      summary: Inspect the legacy application-icon redirect
+      tags:
+        - Static assets
+      x-code-anchors:
+        - pkg/server/server.go#Server.handleLegacyAppIcon
+      x-errors-not-applicable: true
+      x-internal: false
+      x-redirect-only: true
       x-visibility: public-static
   /viewer:
     get:

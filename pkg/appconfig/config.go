@@ -793,6 +793,14 @@ func ApplyEnv(cfg *Config) {
 	if value := os.Getenv("PATRIS_EXPORT_CANONICAL_SOURCE_ID"); strings.TrimSpace(value) != "" {
 		cfg.Canonical.SourceID = strings.TrimSpace(value)
 	}
+	if value := os.Getenv("PATRIS_EXPORT_RECORD_HASHES"); strings.TrimSpace(value) != "" {
+		enabled := parseBool(value, cfg.Canonical.HashesEnabled())
+		cfg.Canonical.Hashes.Enabled = &enabled
+	}
+	if value := os.Getenv("PATRIS_EXPORT_EXPOSE_RECORD_HASHES"); strings.TrimSpace(value) != "" {
+		expose := parseBool(value, cfg.Canonical.ExposeRecordHashes())
+		cfg.Canonical.Hashes.Expose = &expose
+	}
 	if value := os.Getenv("PATRIS_EXPORT_PRICING_MODE"); strings.TrimSpace(value) != "" {
 		cfg.Canonical.Pricing.Mode = strings.TrimSpace(value)
 	}

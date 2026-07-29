@@ -21,6 +21,25 @@ request and response shapes must not be maintained in a second handwritten
 schema. A code or route change is incomplete until the contracts and examples
 change with it.
 
+## Catalog route model
+
+- `GET /api/records` is the generalized, minimally transformed datasource
+  boundary. JSON is an ordered array so missing or duplicate source keys do not
+  discard rows; CSV and XLSX contain the same source-dependent fields.
+- `GET /api/products` (and its `.json`, `.csv`, and `.xlsx` forms) is the KALA
+  product projection. `GET /api/categories` is the matching structural
+  hierarchy.
+- `GET /api/product-sync` is a temporary compatibility replication adapter for
+  consumers that need one atomic envelope with collections, exclusions,
+  quarantine/tombstone state, source revision, and event identity. It is not a
+  second general query model and can be unavailable when hash identities are
+  disabled.
+
+The `include_hashes` query on product/category collection reads can only hide
+`record_hash`; it never overrides server policy. Canonical typed objects retain
+unknown extension properties, allowing independently evolving peers to ignore
+fields they do not understand while continuing to validate known fields.
+
 Every operation is classified as one of the externally supported,
 integration-authenticated, local-operator, or private/internal surfaces. The
 classification documents current behavior; it must not claim authentication

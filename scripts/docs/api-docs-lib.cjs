@@ -630,8 +630,14 @@ function assertCompleteness(openapi, asyncapi) {
       continue;
     }
     const statuses = responses.map(([status]) => status.toUpperCase());
-    if (!statuses.some((status) => /^2(?:\d\d|XX)$/.test(status))) {
+    const redirectOnly = operation['x-redirect-only'] === true;
+    const hasSuccess = statuses.some((status) => /^2(?:\d\d|XX)$/.test(status));
+    const hasRedirect = statuses.some((status) => /^3(?:\d\d|XX)$/.test(status));
+    if (!hasSuccess && !redirectOnly) {
       errors.push(`${label} must document at least one 2xx response.`);
+    }
+    if (redirectOnly && (hasSuccess || !hasRedirect)) {
+      errors.push(`${label} marked x-redirect-only must document a 3xx response and no 2xx response.`);
     }
     const errorsNotApplicable = operation['x-errors-not-applicable'] === true;
     if (!errorsNotApplicable && !statuses.some((status) => /^4(?:\d\d|XX)$/.test(status))) {

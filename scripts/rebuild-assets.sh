@@ -4,10 +4,10 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DEFAULT_LOGO="$HOME/Downloads/Patris_API_Logo.png"
 if [ ! -f "$DEFAULT_LOGO" ]; then
-    DEFAULT_LOGO="$ROOT_DIR/assets/patris-api-icon.png"
+    DEFAULT_LOGO="$ROOT_DIR/assets/logo.png"
 fi
 LOGO_SOURCE="${1:-${PATRIS_EXPORT_LOGO_SOURCE:-$DEFAULT_LOGO}}"
-ICON_PNG="${PATRIS_EXPORT_ICON_PNG:-$ROOT_DIR/assets/patris-api-icon.png}"
+ICON_PNG="${PATRIS_EXPORT_ICON_PNG:-$ROOT_DIR/assets/logo.png}"
 ICON_ICO="${PATRIS_EXPORT_ICON_ICO:-$ROOT_DIR/assets/windows/patris-api.ico}"
 ICON_SIZES="${PATRIS_EXPORT_ICON_SIZES:-256,128,64,48,32,24,16}"
 WEB_ICON_PNG="${PATRIS_EXPORT_WEB_ICON_PNG:-}"
