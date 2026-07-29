@@ -434,6 +434,36 @@ function buildFailures(report, options) {
     `${report.candidate.wooParityMismatchRows} workbook prices differ from WooCommerce effective customer prices`,
   );
   failUnless(
+    report.search.query.length > 0
+      && report.search.total > 1
+      && report.search.total === report.search.expectedTotal
+      && report.search.firstOrdinal === 1
+      && report.search.secondOrdinal === 2,
+    `product search did not expose and advance through multiple results: ${JSON.stringify(report.search)}`,
+  );
+  failUnless(
+    report.search.firstRow > 0
+      && report.search.secondRow > 0
+      && report.search.firstRow !== report.search.secondRow
+      && report.search.firstRow === report.search.expectedFirstRow
+      && report.search.secondRow === report.search.expectedSecondRow,
+    `repeated product search did not advance to a different record: ${JSON.stringify(report.search)}`,
+  );
+  failUnless(
+    report.search.firstScrollColumn === report.search.expectedScrollColumn
+      && report.search.secondScrollColumn === report.search.expectedScrollColumn,
+    `product search did not preserve the padding column in view: ${JSON.stringify(report.search)}`,
+  );
+  failUnless(
+    report.search.wrapOrdinal === 1
+      && report.search.wrapRow === report.search.firstRow,
+    `product search did not wrap to the first result: ${JSON.stringify(report.search)}`,
+  );
+  failUnless(
+    report.search.clearedCaption === report.search.baseCaption,
+    `clearing product search did not reset the button caption: ${JSON.stringify(report.search)}`,
+  );
+  failUnless(
     report.regressions.relay109032.present
       && report.regressions.relay109032.price === REGRESSION_ACCEPTANCE.relayPrice
       && report.regressions.relay109032.category === REGRESSION_ACCEPTANCE.relayCategory,
@@ -518,6 +548,9 @@ function printHumanReport(report) {
   );
   console.log(
     `  Formula: present=${report.candidate.priceFormulaRows}, structural=${report.candidate.structuralFormulaRows}, mismatches=${report.candidate.priceMismatchRows}, Woo parity=${report.candidate.wooComparableRows - report.candidate.wooParityMismatchRows}/${report.candidate.wooComparableRows}`,
+  );
+  console.log(
+    `  Search: query=${report.search.query}, results=${report.search.total}, rows=${report.search.firstRow}->${report.search.secondRow}->${report.search.wrapRow}, scroll=${report.search.firstScrollColumn}/${report.search.secondScrollColumn}`,
   );
   console.log(
     `  Fail-closed: unsafe source-only=${report.candidate.sourceOnlyUnsafeRows}, incorrectly priced=${report.candidate.sourceOnlyUnsafePricedRows}, missing expected=${report.candidate.missingExpectedPriceRows}`,
@@ -675,6 +708,18 @@ function Read-Products([object]$book) {
                 $wooID = if ($columnCount -ge 9) {
                     Normalized-Code (Matrix-Value $values $rowCount $columnCount $row 9)
                 } else { '' }
+                $productName = if ($columnCount -ge 8) {
+                    [Convert]::ToString(
+                        (Matrix-Value $values $rowCount $columnCount $row 8),
+                        $invariant
+                    ).Trim()
+                } else { '' }
+                $categories = if ($columnCount -ge 10) {
+                    [Convert]::ToString(
+                        (Matrix-Value $values $rowCount $columnCount $row 10),
+                        $invariant
+                    ).Trim()
+                } else { '' }
                 $identityKey = ''
                 if ($wooID.Length -gt 0) {
                     $identityKey = "woo:$wooID"
@@ -686,6 +731,13 @@ function Read-Products([object]$book) {
                     $invariant
                 )
                 if ($identityKey.Length -gt 0) {
+                    $searchValues = @()
+                    for ($searchColumn = 1; $searchColumn -le $columnCount; $searchColumn++) {
+                        $searchValues += [Convert]::ToString(
+                            (Matrix-Value $values $rowCount $columnCount $row $searchColumn),
+                            $invariant
+                        )
+                    }
                     if ($formula.StartsWith('=')) {
                         if (-not $formulaCounts.ContainsKey($formula)) {
                             $formulaCounts[$formula] = 0
@@ -696,7 +748,10 @@ function Read-Products([object]$book) {
                         Row = [int]$table.Range.Row + $row
                         Code = $identityKey
                         ProductCode = $productCode
+                        ProductName = $productName
                         WooID = $wooID
+                        Categories = $categories
+                        SearchText = ($searchValues -join [Environment]::NewLine)
                         Price = $price
                         Weight = $weight
                         Rate = $rate
@@ -722,6 +777,204 @@ function Read-Products([object]$book) {
     } finally {
         Release-ComObject $dataRange
         Release-ComObject $headerRange
+        Release-ComObject $table
+    }
+}
+
+function Search-MatchingRows(
+    [object[]]$productRows,
+    [string]$query
+) {
+    if ([string]::IsNullOrWhiteSpace($query)) {
+        return @()
+    }
+    return @(
+        $productRows |
+            Where-Object {
+                ([string]$_.SearchText).IndexOf(
+                    $query,
+                    [StringComparison]::OrdinalIgnoreCase
+                ) -ge 0
+            }
+    )
+}
+
+function Select-SearchQuery([object[]]$productRows) {
+    for ($prefixLength = 12; $prefixLength -ge 2; $prefixLength--) {
+        $nameGroups = @(
+            $productRows |
+                Where-Object {
+                    ([string]$_.ProductName).Length -ge $prefixLength
+                } |
+                Group-Object -Property {
+                    ([string]$_.ProductName).Substring(
+                        0,
+                        $prefixLength
+                    ).ToUpperInvariant()
+                } |
+                Where-Object { $_.Count -ge 2 -and $_.Count -le 20 } |
+                Sort-Object -Property Count, Name
+        )
+        foreach ($group in $nameGroups) {
+            $query = [string]$group.Name
+            $matchingRows = @(Search-MatchingRows $productRows $query)
+            if ($matchingRows.Count -ge 2 -and $matchingRows.Count -le 20) {
+                return [pscustomobject]@{
+                    Query = $query
+                    Rows = $matchingRows
+                }
+            }
+        }
+    }
+    for ($prefixLength = 8; $prefixLength -ge 2; $prefixLength--) {
+        $groups = @(
+            $productRows |
+                Where-Object {
+                    ([string]$_.ProductCode).Length -ge $prefixLength
+                } |
+                Group-Object -Property {
+                    ([string]$_.ProductCode).Substring(
+                        0,
+                        $prefixLength
+                    ).ToUpperInvariant()
+                } |
+                Where-Object { $_.Count -ge 2 -and $_.Count -le 20 } |
+                Sort-Object -Property Count, Name
+        )
+        foreach ($group in $groups) {
+            $query = [string]$group.Name
+            $matchingRows = @(Search-MatchingRows $productRows $query)
+            if ($matchingRows.Count -ge 2 -and $matchingRows.Count -le 20) {
+                return [pscustomobject]@{
+                    Query = $query
+                    Rows = $matchingRows
+                }
+            }
+        }
+    }
+    return $null
+}
+
+function Read-SearchButtonState(
+    [object]$excel,
+    [object]$searchButton,
+    [int]$expectedScrollColumn
+) {
+    $caption = [Convert]::ToString(
+        $searchButton.TextFrame2.TextRange.Text,
+        $invariant
+    )
+    $captionMatch = [regex]::Match($caption, '\((\d+)/(\d+)\)$')
+    return [pscustomobject]@{
+        Caption = $caption
+        Ordinal = if ($captionMatch.Success) {
+            [int]$captionMatch.Groups[1].Value
+        } else { 0 }
+        Total = if ($captionMatch.Success) {
+            [int]$captionMatch.Groups[2].Value
+        } else { 0 }
+        Row = [int]$excel.ActiveCell.Row
+        ScrollColumn = [int]$excel.ActiveWindow.ScrollColumn
+        ExpectedScrollColumn = $expectedScrollColumn
+    }
+}
+
+function Test-ProductSearch(
+    [object]$excel,
+    [object]$book,
+    [object[]]$productRows
+) {
+    $table = Find-Table $book 'Products'
+    $sheet = $null
+    $queryRange = $null
+    $searchButton = $null
+    try {
+        $selection = Select-SearchQuery $productRows
+        if ($null -eq $selection) {
+            return [pscustomobject]@{
+                query = ''
+                total = 0
+                expectedTotal = 0
+                firstOrdinal = 0
+                secondOrdinal = 0
+                firstRow = 0
+                secondRow = 0
+                expectedFirstRow = 0
+                expectedSecondRow = 0
+                firstScrollColumn = 0
+                secondScrollColumn = 0
+                expectedScrollColumn = [Math]::Max(
+                    1,
+                    [int]$table.Range.Column - 1
+                )
+                wrapOrdinal = 0
+                wrapRow = 0
+                baseCaption = ''
+                clearedCaption = ''
+            }
+        }
+        $query = [string]$selection.Query
+        $expectedRows = @($selection.Rows)
+        $sheet = $table.Parent
+        $queryRange = $book.Names.Item('ProductSearchQuery').RefersToRange
+        $searchButton = $sheet.Shapes.Item('ProductSearchButton')
+        $expectedScrollColumn = [Math]::Max(1, [int]$table.Range.Column - 1)
+        $macroBookName = ([string]$book.Name).Replace("'", "''")
+        $searchMacro = "'$macroBookName'!ProductCatalogSync.SearchProducts"
+        $clearMacro = "'$macroBookName'!ProductCatalogSync.ClearProductSearch"
+        $baseCaption = [Convert]::ToString(
+            $searchButton.TextFrame2.TextRange.Text,
+            $invariant
+        )
+
+        $eventsWereEnabled = [bool]$excel.EnableEvents
+        try {
+            $excel.EnableEvents = $false
+            $queryRange.Value2 = $query
+        } finally {
+            $excel.EnableEvents = $eventsWereEnabled
+        }
+        [void]$excel.Run($searchMacro)
+        $first = Read-SearchButtonState $excel $searchButton $expectedScrollColumn
+        [void]$excel.Run($searchMacro)
+        $second = Read-SearchButtonState $excel $searchButton $expectedScrollColumn
+
+        $wrap = $null
+        if ($first.Total -ge 2 -and $first.Total -le 50) {
+            for ($index = 3; $index -le $first.Total; $index++) {
+                [void]$excel.Run($searchMacro)
+            }
+            [void]$excel.Run($searchMacro)
+            $wrap = Read-SearchButtonState $excel $searchButton $expectedScrollColumn
+        }
+
+        [void]$excel.Run($clearMacro)
+        $clearedCaption = [Convert]::ToString(
+            $searchButton.TextFrame2.TextRange.Text,
+            $invariant
+        )
+        return [pscustomobject]@{
+            query = $query
+            total = $first.Total
+            expectedTotal = $expectedRows.Count
+            firstOrdinal = $first.Ordinal
+            secondOrdinal = $second.Ordinal
+            firstRow = $first.Row
+            secondRow = $second.Row
+            expectedFirstRow = [int]$expectedRows[0].Row
+            expectedSecondRow = [int]$expectedRows[1].Row
+            firstScrollColumn = $first.ScrollColumn
+            secondScrollColumn = $second.ScrollColumn
+            expectedScrollColumn = $expectedScrollColumn
+            wrapOrdinal = if ($null -ne $wrap) { $wrap.Ordinal } else { 0 }
+            wrapRow = if ($null -ne $wrap) { $wrap.Row } else { 0 }
+            baseCaption = $baseCaption
+            clearedCaption = $clearedCaption
+        }
+    } finally {
+        Release-ComObject $searchButton
+        Release-ComObject $queryRange
+        Release-ComObject $sheet
         Release-ComObject $table
     }
 }
@@ -947,6 +1200,7 @@ try {
     )
 
     $candidateProducts = Read-Products $candidateBook
+    $candidateSearch = Test-ProductSearch $excel $candidateBook $candidateProducts.Rows
     $candidateSyncData = Read-SyncData $candidateBook
     $candidateConfig = [pscustomobject]@{
         yuan = Numeric-Or-Null (Sheet-Scalar $candidateBook 3 'B10')
@@ -1320,6 +1574,7 @@ try {
             config = $referenceConfig
         }
         errors = $errors
+        search = $candidateSearch
         comparison = [pscustomobject]@{
             overlapRows = $overlapRows
             weightComparable = $weightComparable

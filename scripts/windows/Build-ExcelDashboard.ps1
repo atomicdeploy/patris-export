@@ -310,7 +310,10 @@ try {
     $priceList.Range('C3').Validation.InputMessage = 'نام، کد کالا یا شناسه ووکامرس را وارد کنید و Enter یا دکمه پیدا کردن را بزنید.'
     $priceList.Range('C3').Validation.ShowInput = $true
     [void]$workbook.Names.Add('ProductSearchQuery', $priceList.Range('C3'))
-    [void](Add-ActionButton $priceList 'پیدا کردن' 'ProductCatalogSync.SearchProducts' $priceList.Range('F3') $priceList.Range('F3').Width 27)
+    $searchButton = Add-ActionButton $priceList 'پیدا کردن' 'ProductCatalogSync.SearchProducts' $priceList.Range('F3') $priceList.Range('F3').Width 27
+    $searchButton.Name = 'ProductSearchButton'
+    $searchButton.AlternativeText = 'جست‌وجوی کالا؛ تعداد نتیجه و جایگاه نتیجه جاری روی همین دکمه نمایش داده می‌شود.'
+    [void]$searchButton
     [void](Add-ActionButton $priceList 'پاک کردن' 'ProductCatalogSync.ClearProductSearch' $priceList.Range('G3') $priceList.Range('G3').Width 27)
     [void](Add-ActionButton $priceList 'همگام‌سازی اکنون' 'ProductCatalogSync.RefreshAllData' $priceList.Range('I3') $priceList.Range('I3:K3').Width 27)
 

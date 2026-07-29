@@ -23,6 +23,7 @@ Private Const PRICING_REQUEST_SCHEMA As String = "patris.excel-pricing-companion
 Private Const PRICING_SESSION_SCHEMA As String = "patris.excel-pricing-companion-session/v1"
 Private Const PRICE_ROUNDING_MODE As String = "nearest_half_up"
 Private Const LOOPBACK_PREFIX As String = "http://127.0.0.1:18080/"
+Private Const SEARCH_BUTTON_SHAPE As String = "ProductSearchButton"
 Private Const RECONCILED_COLUMN_KEYS As String = _
     "sync_key,reconciliation_status,patris_code,woocommerce_id,parent_id," & _
     "product_type,publication_status,name,part_number,sku,categories," & _
@@ -50,6 +51,8 @@ Private mLastApplyRequestID As String
 Private mProposalSyncActive As Boolean
 Private mLastRefreshSucceeded As Boolean
 Private mSaveFlowActive As Boolean
+Private mSearchQuery As String
+Private mSearchCurrentRow As Long
 
 #If VBA7 Then
 Private Declare PtrSafe Function MessageBoxW Lib "user32" ( _
@@ -233,6 +236,7 @@ Public Sub RefreshAllData(Optional ByVal silent As Boolean = False)
 
     On Error GoTo Failed
     mLastRefreshSucceeded = False
+    ResetProductSearchState False
     previousCalculation = Application.Calculation
     Application.ScreenUpdating = False
     Application.EnableEvents = False
@@ -336,43 +340,56 @@ Public Sub FocusProductSearch()
     Set searchInput = ThisWorkbook.Names("ProductSearchQuery").RefersToRange
     Set table = PriceSheet().ListObjects(PRODUCTS_TABLE)
     searchInput.Select
-    ActiveWindow.ScrollColumn = table.Range.Column
+    ActiveWindow.ScrollColumn = ProductViewportColumn(table)
 CleanExit:
 End Sub
 
 Public Sub SearchProducts()
     Dim table As ListObject
     Dim query As String
-    Dim found As Range
+    Dim matches As Collection
     Dim anchor As Range
+    Dim matchIndex As Long
+    Dim matchCount As Long
     Dim rowIndex As Long
 
     Set table = PriceSheet().ListObjects(PRODUCTS_TABLE)
     query = Trim$(CStr( _
         ThisWorkbook.Names("ProductSearchQuery").RefersToRange.Value2))
     If Len(query) = 0 Then
+        ResetProductSearchState False
         FocusProductSearch
         Exit Sub
     End If
-    If table.DataBodyRange Is Nothing Then Exit Sub
+    If table.DataBodyRange Is Nothing Then
+        ResetProductSearchState False
+        SetSearchButtonCaption T("search_button") & " (0)"
+        Exit Sub
+    End If
 
-    Set found = table.DataBodyRange.Find( _
-        What:=query, _
-        After:=table.DataBodyRange.Cells(table.DataBodyRange.Cells.Count), _
-        LookIn:=xlValues, _
-        LookAt:=xlPart, _
-        SearchOrder:=xlByRows, _
-        SearchDirection:=xlNext, _
-        MatchCase:=False)
-    If found Is Nothing Then
+    If StrComp(query, mSearchQuery, vbTextCompare) <> 0 Then
+        mSearchCurrentRow = 0
+    End If
+    Set matches = ProductSearchMatchRows(table, query)
+    matchCount = matches.Count
+    mSearchQuery = query
+
+    If matchCount = 0 Then
+        mSearchCurrentRow = 0
+        SetSearchButtonCaption T("search_button") & " (0)"
         ShowUnicodeMessage T("search_missing"), vbInformation, T("search_title")
     Else
-        rowIndex = found.Row - table.DataBodyRange.Row + 1
+        matchIndex = NextProductSearchMatchIndex( _
+            matches, mSearchCurrentRow)
+        rowIndex = CLng(matches.Item(matchIndex))
+        mSearchCurrentRow = rowIndex
+        SetSearchButtonCaption T("search_button") & " (" & _
+            CStr(matchIndex) & "/" & CStr(matchCount) & ")"
         Set anchor = table.DataBodyRange.Cells(rowIndex, 1)
         PriceSheet().Activate
         Application.Goto anchor, False
         HighlightSelectedProductRow anchor
-        ActiveWindow.ScrollColumn = table.Range.Column
+        ActiveWindow.ScrollColumn = ProductViewportColumn(table)
         ActiveWindow.ScrollRow = Application.Max(1, anchor.Row - 3)
     End If
 End Sub
@@ -381,11 +398,90 @@ Public Sub ClearProductSearch()
     Dim table As ListObject
 
     On Error Resume Next
-    ThisWorkbook.Names("ProductSearchQuery").RefersToRange.ClearContents
+    ResetProductSearchState True
     Set table = PriceSheet().ListObjects(PRODUCTS_TABLE)
     If table.AutoFilter.FilterMode Then table.AutoFilter.ShowAllData
     FocusProductSearch
     On Error GoTo 0
+End Sub
+
+Private Function ProductSearchMatchRows(ByVal table As ListObject, _
+                                        ByVal query As String) As Collection
+    Dim matches As New Collection
+    Dim rowIndex As Long
+
+    If table.DataBodyRange Is Nothing Then
+        Set ProductSearchMatchRows = matches
+        Exit Function
+    End If
+    For rowIndex = 1 To table.DataBodyRange.Rows.Count
+        If ProductRowMatchesQuery( _
+            table.DataBodyRange.Rows(rowIndex), query) Then
+            matches.Add rowIndex
+        End If
+    Next rowIndex
+    Set ProductSearchMatchRows = matches
+End Function
+
+Private Function ProductRowMatchesQuery(ByVal productRow As Range, _
+                                        ByVal query As String) As Boolean
+    Dim cell As Range
+
+    For Each cell In productRow.Cells
+        If Not IsError(cell.Value2) Then
+            If InStr(1, CStr(cell.Value2), query, vbTextCompare) > 0 Then
+                ProductRowMatchesQuery = True
+                Exit Function
+            End If
+        End If
+    Next cell
+End Function
+
+Private Function NextProductSearchMatchIndex(ByVal matches As Collection, _
+                                             ByVal currentRow As Long) As Long
+    Dim matchIndex As Long
+
+    For matchIndex = 1 To matches.Count
+        If CLng(matches.Item(matchIndex)) > currentRow Then
+            NextProductSearchMatchIndex = matchIndex
+            Exit Function
+        End If
+    Next matchIndex
+    NextProductSearchMatchIndex = 1
+End Function
+
+Private Function ProductViewportColumn(ByVal table As ListObject) As Long
+    ProductViewportColumn = Application.Max(1, table.Range.Column - 1)
+End Function
+
+Private Sub ResetProductSearchState( _
+        Optional ByVal clearQuery As Boolean = False)
+    Dim previousEvents As Boolean
+
+    mSearchQuery = vbNullString
+    mSearchCurrentRow = 0
+    If clearQuery Then
+        previousEvents = Application.EnableEvents
+        Application.EnableEvents = False
+        On Error Resume Next
+        ThisWorkbook.Names("ProductSearchQuery").RefersToRange.ClearContents
+        On Error GoTo 0
+        Application.EnableEvents = previousEvents
+    End If
+    SetSearchButtonCaption T("search_button")
+End Sub
+
+Private Sub SetSearchButtonCaption(ByVal caption As String)
+    Dim searchButton As Shape
+
+    On Error GoTo CleanExit
+    Set searchButton = PriceSheet().Shapes(SEARCH_BUTTON_SHAPE)
+    searchButton.TextFrame2.TextRange.Text = caption
+    searchButton.TextFrame2.TextRange.Font.Name = "Yekan Bakh"
+    searchButton.TextFrame2.TextRange.Font.NameComplexScript = "Yekan Bakh"
+    searchButton.TextFrame2.TextRange.Font.NameFarEast = "Yekan Bakh"
+    searchButton.TextFrame.Characters.Font.Name = "Yekan Bakh"
+CleanExit:
 End Sub
 
 Public Sub HighlightSelectedProductRow(ByVal target As Range)
@@ -2765,6 +2861,8 @@ Private Function T(ByVal key As String) As String
             T = U("062C0633062A200C0648062C064806CC00200645062D063506480644")
         Case "search_missing"
             T = U("0645062D06350648064406CC00200628062700200639062806270631062A0020064806270631062F0020067E06CC062F0627002006460634062F002E")
+        Case "search_button"
+            T = U("067E06CC062F0627002006A90631062F0646")
         Case "preserved_price_missing_weight"
             T = U("064806320646002006A906270644062700200646062706450648062C0648062F002006270633062A061B0020064206CC0645062A00200633062706CC062A0020062D0641063800200634062F002E")
         Case "preserved_price_missing_purchase"
