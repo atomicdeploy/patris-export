@@ -509,10 +509,11 @@ func (client *excelPricingRemoteEventsClient) handleExcelPricingRemoteFrame(
 		if err := client.onSource(transition); err != nil {
 			return false, errExcelPricingRemoteRevision
 		}
-		// The source-transition hook durably accepts both the invalidation and
-		// this cursor before it fences the old subscriber generation. Updating
-		// the client copy without invoking OnCursor avoids losing that accepted
-		// cursor after the generation fence has made ordinary callbacks stale.
+		// The source-transition hook synchronously accepts the local invalidation
+		// and remembers this cursor before it fences the old subscriber generation.
+		// Updating the client copy without invoking OnCursor avoids losing that
+		// process-local cursor after the generation fence has made ordinary
+		// callbacks stale.
 		client.replaceCursorLocally(frame.ID)
 		return false, errExcelPricingRemoteSourceChanged
 	case "pricing.state.changed":

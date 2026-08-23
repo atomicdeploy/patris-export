@@ -146,7 +146,7 @@ cancelled, or `outcome_unknown` events never trigger a workbook refresh;
 mutation.
 
 Exact `pricing.source.changed` and `pricing.source.removed` frames are also
-durable lifecycle barriers. The companion validates the source schema,
+synchronous lifecycle barriers. The companion validates the source schema,
 projection, ID/dataset ownership, old/new revision relationship, audience,
 revision route, and idempotency key; synchronously invalidates the old local
 generation; and only then accepts the frame cursor. It immediately
@@ -159,9 +159,19 @@ later local source transition starts another generation.
 WordPress may return `pricing.stream.reset` with reason `invalid_event` when a
 retained event predates the Living stream contract. After validating the reset
 schema, retained window, revision route, and supplied cursor, the companion
-performs one authenticated conditional revision validation, durably replaces
-its cursor, and reconnects. It neither treats the retired frame as a successful
-state change nor replays it indefinitely.
+performs one authenticated conditional revision validation, replaces its
+process-memory cursor, and reconnects. It neither treats the retired frame as a
+successful state change nor replays it indefinitely within that process.
+
+The bridge's `Last-Event-ID` cursor is process-memory state, not a disk-durable
+checkpoint. After a full companion restart it begins at zero. Retained source
+transitions are therefore validated from their intrinsic old/new relationship,
+accepted idempotently, rematerialized, and followed by authenticated conditional
+revision validation. A retained `invalid_event` reset can repeat once after a
+process restart, but it again advances the in-process cursor before reconnect.
+Apply terminal effects use a separate disk-backed event ledger: replaying an
+already completed terminal event from cursor zero returns duplicate acceptance
+and does not restart finalization or canonical delivery.
 
 There is no timer-driven apply-status loop. A single status reconciliation is
 allowed after a lost admission response and on each authenticated stream

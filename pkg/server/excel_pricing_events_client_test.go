@@ -743,7 +743,10 @@ func TestExcelPricingRemoteRetainedSourceTransitionsDoNotReplayLoop(t *testing.T
 			client, err := newExcelPricingRemoteEventsClient(
 				excelPricingRemoteTestConfig(t, "http://127.0.0.1:18080"), fixture.current,
 				excelPricingRemoteEventsOptions{
-					InitialCursor:      20,
+					// The bridge cursor is process-memory only. Starting at zero
+					// models a full companion restart replaying a retained source
+					// transition that was already materialized locally.
+					InitialCursor:      0,
 					OnRevision:         func(excelPricingRemoteRevision) error { return nil },
 					OnSourceTransition: func(excelPricingRemoteSourceTransition) error { return nil },
 				},

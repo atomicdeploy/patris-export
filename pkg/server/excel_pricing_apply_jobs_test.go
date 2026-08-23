@@ -270,6 +270,94 @@ func TestExcelPricingApplyTerminalCursorAdvancesOnlyAfterDurableAcceptance(t *te
 	}
 }
 
+func TestExcelPricingApplyZeroCursorRestartReplayUsesDurableLedger(t *testing.T) {
+	source := excelPricingStateSourceForTest()
+	stateRevision := excelPricingRevisionForTest("zero-cursor-restart-state")
+	previewDigest := excelPricingRevisionForTest("zero-cursor-restart-preview")
+	requestID := "excel-apply-zero-cursor-restart-0001"
+	statePath := t.TempDir() + "/pricing-apply-jobs.json"
+	store := newExcelPricingApplyJobStore(statePath, nil)
+	local := excelPricingLocalRequest{
+		RequestID:             requestID,
+		IdempotencyKey:        requestID,
+		ExpectedStateRevision: stateRevision,
+		PreviewDigest:         previewDigest,
+	}
+	if reservation, _, err := store.reserve(
+		local,
+		source,
+		excelPricingRevisionForTest("zero-cursor-restart-fingerprint"),
+	); err != nil || reservation != excelPricingApplyReservationNew {
+		t.Fatalf("reserve=%v err=%v", reservation, err)
+	}
+	event := excelPricingRemoteApplyTerminalEventForTest(
+		requestID, source, previewDigest, stateRevision, "completed",
+	)
+	event.EventID = 42
+	if _, accepted, err := store.acceptTerminalEvent(event); err != nil || !accepted {
+		t.Fatalf("first terminal acceptance=%v err=%v", accepted, err)
+	}
+	claimed, ok, err := store.claimFinalization(requestID)
+	if err != nil || !ok {
+		t.Fatalf("claim=%#v ok=%v err=%v", claimed, ok, err)
+	}
+	deliveryEventID := excelPricingRevisionForTest("zero-cursor-restart-delivery")
+	if err := store.recordDeliveryEvent(requestID, deliveryEventID); err != nil {
+		t.Fatal(err)
+	}
+	if completed, err := store.completeFinalization(requestID, stateRevision); err != nil ||
+		len(completed) != 1 || !completed[0].Terminal {
+		t.Fatalf("completed=%#v err=%v", completed, err)
+	}
+
+	// A new store and client model a full process restart. Last-Event-ID begins
+	// at zero, so WordPress may replay the already completed terminal frame.
+	restarted := newExcelPricingApplyJobStore(statePath, nil)
+	eventBody, err := json.Marshal(event)
+	if err != nil {
+		t.Fatal(err)
+	}
+	frameBody, err := json.Marshal(excelPricingRemoteWireFrame{
+		Event:   excelPricingApplyEventName,
+		Name:    excelPricingApplyEventName,
+		Success: true,
+		Data:    eventBody,
+		ID:      event.EventID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var callbacks atomic.Int32
+	var repeatedEffects atomic.Int32
+	var rememberedCursor atomic.Uint64
+	client := &excelPricingRemoteEventsClient{
+		source:   source,
+		cursor:   0,
+		onCursor: rememberedCursor.Store,
+		onApply: func(delivered excelPricingRemoteApplyTerminalEvent) error {
+			callbacks.Add(1)
+			_, accepted, acceptErr := restarted.acceptTerminalEvent(delivered)
+			if accepted {
+				repeatedEffects.Add(1)
+			}
+			return acceptErr
+		},
+	}
+	if _, err := client.handleExcelPricingRemoteFrame(context.Background(), frameBody, true); err != nil {
+		t.Fatal(err)
+	}
+	if callbacks.Load() != 1 || repeatedEffects.Load() != 0 ||
+		client.currentCursor() != event.EventID || rememberedCursor.Load() != event.EventID {
+		t.Fatalf("callbacks=%d repeated_effects=%d cursor=%d remembered=%d",
+			callbacks.Load(), repeatedEffects.Load(), client.currentCursor(), rememberedCursor.Load())
+	}
+	recovered, err := restarted.lookup(requestID)
+	if err != nil || recovered == nil || recovered.Status != "completed" ||
+		!recovered.Terminal || recovered.DeliveryEventID != deliveryEventID {
+		t.Fatalf("recovered=%#v err=%v", recovered, err)
+	}
+}
+
 func TestExcelPricingLivingApplyContractsAcceptAdditiveFields(t *testing.T) {
 	source := excelPricingStateSourceForTest()
 	expectedStateRevision := excelPricingRevisionForTest("living-additive-expected-state")

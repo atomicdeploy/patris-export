@@ -542,6 +542,9 @@ func (bridge *excelPricingRemoteEventsBridge) revisionCurrent(
 }
 
 func (bridge *excelPricingRemoteEventsBridge) persistCursor(epoch, cursor uint64) {
+	// This cursor is intentionally process-memory state. A process restart begins
+	// at zero and relies on authenticated replay plus idempotent local acceptance;
+	// apply terminal effects are separately deduplicated by their disk ledger.
 	bridge.mu.Lock()
 	defer bridge.mu.Unlock()
 	if epoch == 0 || bridge.epoch != epoch || !bridge.acknowledged {

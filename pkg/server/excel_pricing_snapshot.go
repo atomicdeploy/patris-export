@@ -1497,7 +1497,8 @@ func (s *Server) notifyExcelPricingRemoteSourceTransition(
 	}
 	// The authenticated remote source lifecycle is authoritative for both the
 	// canonical projection and its pricing assignment cache. Invalidate both
-	// synchronously before the bridge durably accepts the transition cursor.
+	// synchronously before the bridge remembers the transition cursor for this
+	// process lifetime.
 	s.invalidateCanonicalProjection(true)
 	store := s.excelPricing.snapshots
 	store.mu.Lock()
