@@ -1730,12 +1730,44 @@ func TestDynamicCalculatorValidatorHandlesEmptyProductTable(t *testing.T) {
 		`Invoke-ExcelBusyRetry`,
 		`Start-Sleep -Milliseconds 100`,
 		`closing the validator Excel process`,
+		`public static extern uint GetWindowThreadProcessId`,
+		`function Get-ExcelProcessId`,
+		`function Invoke-ComFinalizerBarrier`,
+		`function Wait-ExcelProcessExit`,
+		`$excelProcessId = Get-ExcelProcessId $excel`,
+		`$excelProcessExited = Wait-ExcelProcessExit $excelProcessId`,
+		`validatorExcelProcessId`,
+		`validatorExcelProcessExited`,
 		`PATRIS_VALIDATOR_TIMEOUT_MS`,
 		`foreach ($fixture in @('2.4', '25.40', '12/3', '01.02', '001234'`,
 	} {
 		if !strings.Contains(source, required) {
 			t.Fatalf("native validator is missing the empty-table guard: %s", required)
 		}
+	}
+
+	closeReference := strings.LastIndex(source, `$referenceBook.Close($false)`)
+	releaseReference := strings.LastIndex(source, `Release-ComObject $referenceBook`)
+	closeCandidate := strings.LastIndex(source, `$candidateBook.Close($false)`)
+	releaseCandidate := strings.LastIndex(source, `Release-ComObject $candidateBook`)
+	quitExcel := strings.LastIndex(source, `$excel.Quit()`)
+	releaseExcel := strings.LastIndex(source, `Release-ComObject $excel`)
+	waitForProcess := strings.LastIndex(source, `$excelProcessExited = Wait-ExcelProcessExit $excelProcessId`)
+	writeReport := strings.LastIndex(source, `[Console]::Out.WriteLine(($report | ConvertTo-Json`)
+	if closeReference < 0 || releaseReference < 0 || closeCandidate < 0 || releaseCandidate < 0 ||
+		quitExcel < 0 || releaseExcel < 0 || waitForProcess < 0 || writeReport < 0 {
+		t.Fatal("native validator is missing explicit Excel teardown markers")
+	}
+	if !(closeReference < releaseReference && releaseReference < closeCandidate &&
+		closeCandidate < releaseCandidate && releaseCandidate < quitExcel &&
+		quitExcel < releaseExcel && releaseExcel < waitForProcess && waitForProcess < writeReport) {
+		t.Fatal("native validator must close/release workbooks before Quit, release Excel, wait for exact PID, then report")
+	}
+
+	preQuitBarrier := strings.LastIndex(source[:quitExcel], `Invoke-ComFinalizerBarrier`)
+	postQuitBarrierRelative := strings.Index(source[releaseExcel:], `Invoke-ComFinalizerBarrier`)
+	if preQuitBarrier < releaseCandidate || postQuitBarrierRelative < 0 || releaseExcel+postQuitBarrierRelative > waitForProcess {
+		t.Fatal("native validator must run finalizer barriers after workbook release and after Excel release")
 	}
 }
 

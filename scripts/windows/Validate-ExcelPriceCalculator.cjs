@@ -704,6 +704,49 @@ function Release-ComObject([object]$value) {
     } catch {}
 }
 
+if (-not ('PatrisExcelValidatorNativeMethods' -as [type])) {
+    Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+
+public static class PatrisExcelValidatorNativeMethods {
+    [DllImport("user32.dll")]
+    public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
+}
+'@
+}
+
+function Get-ExcelProcessId([object]$application) {
+    [uint32]$processIdValue = 0
+    [void][PatrisExcelValidatorNativeMethods]::GetWindowThreadProcessId(
+        [IntPtr]([long]$application.Hwnd),
+        [ref]$processIdValue
+    )
+    if ($processIdValue -eq 0) {
+        throw 'Unable to resolve the hidden validator Excel process ID.'
+    }
+    return [int]$processIdValue
+}
+
+function Invoke-ComFinalizerBarrier {
+    [GC]::Collect()
+    [GC]::WaitForPendingFinalizers()
+    [GC]::Collect()
+    [GC]::WaitForPendingFinalizers()
+}
+
+function Wait-ExcelProcessExit([int]$excelProcessId, [int]$timeoutSeconds = 15) {
+    if ($excelProcessId -le 0) { return $true }
+    $deadline = [DateTime]::UtcNow.AddSeconds($timeoutSeconds)
+    while ([DateTime]::UtcNow -lt $deadline) {
+        if ($null -eq (Get-Process -Id $excelProcessId -ErrorAction SilentlyContinue)) {
+            return $true
+        }
+        Start-Sleep -Milliseconds 100
+    }
+    return $null -eq (Get-Process -Id $excelProcessId -ErrorAction SilentlyContinue)
+}
+
 function Test-RetryableExcelComRejection([object]$errorRecord) {
     $exception = if ($null -ne $errorRecord) { $errorRecord.Exception } else { $null }
     while ($null -ne $exception) {
@@ -926,6 +969,7 @@ function Test-SearchLiteralText([object]$excel, [object]$book) {
                 $copyExtension
             )
             $reopenBook = $null
+            $reopenWorkbooks = $null
             $reopenName = $null
             $reopenInput = $null
             $input.NumberFormat = '@'
@@ -933,7 +977,10 @@ function Test-SearchLiteralText([object]$excel, [object]$book) {
             [void]$excel.Run($macro)
             try {
                 $book.SaveCopyAs($reopenPath)
-                $reopenBook = $excel.Workbooks.Open($reopenPath, 0, $true)
+                $reopenWorkbooks = $excel.Workbooks
+                $reopenBook = $reopenWorkbooks.Open($reopenPath, 0, $true)
+                Release-ComObject $reopenWorkbooks
+                $reopenWorkbooks = $null
                 $reopenName = $reopenBook.Names.Item('ProductSearchQuery')
                 $reopenInput = $reopenName.RefersToRange
                 $samples += [pscustomobject]@{
@@ -964,6 +1011,7 @@ function Test-SearchLiteralText([object]$excel, [object]$book) {
                     $reopenBook.Close($false)
                 }
                 Release-ComObject $reopenBook
+                Release-ComObject $reopenWorkbooks
                 Remove-Item -LiteralPath $reopenPath -Force -ErrorAction SilentlyContinue
             }
         }
@@ -2067,14 +2115,19 @@ function ProductCode-Dictionary([object[]]$rows) {
 }
 
 $excel = $null
+$workbooks = $null
 $candidateBook = $null
 $referenceBook = $null
+$excelProcessId = 0
+$excelProcessExited = $false
+$report = $null
 $syncRan = $false
 $syncSucceeded = $false
 $syncOperation = ''
 $syncError = ''
 try {
     $excel = New-Object -ComObject Excel.Application
+    $excelProcessId = Get-ExcelProcessId $excel
     $excel.Visible = $false
     $excel.DisplayAlerts = $false
     $excel.AskToUpdateLinks = $false
@@ -2086,10 +2139,14 @@ try {
     $excel.AutomationSecurity = 1
 
     if ([IO.Path]::GetExtension($candidatePath).ToLowerInvariant() -eq '.xltm') {
-        $candidateBook = $excel.Workbooks.Add($candidatePath)
+        $workbooks = $excel.Workbooks
+        $candidateBook = $workbooks.Add($candidatePath)
     } else {
-        $candidateBook = $excel.Workbooks.Open($candidatePath, 0, $true)
+        $workbooks = $excel.Workbooks
+        $candidateBook = $workbooks.Open($candidatePath, 0, $true)
     }
+    Release-ComObject $workbooks
+    $workbooks = $null
 
     if ($runSync) {
         $macroBookName = ([string]$candidateBook.Name).Replace("'", "''")
@@ -2177,7 +2234,10 @@ try {
     $errors = Workbook-Errors $candidateBook
 
     $excel.AutomationSecurity = 3
-    $referenceBook = $excel.Workbooks.Open($referencePath, 0, $true)
+    $workbooks = $excel.Workbooks
+    $referenceBook = $workbooks.Open($referencePath, 0, $true)
+    Release-ComObject $workbooks
+    $workbooks = $null
     $referenceProducts = Read-Products $referenceBook
     $referenceConfig = [pscustomobject]@{
         yuan = Numeric-Or-Null (Table-Scalar $referenceBook 'Yuan_Price')
@@ -2564,7 +2624,6 @@ try {
             wooFallback109001 = $wooFallbackRegression
         }
     }
-    [Console]::Out.WriteLine(($report | ConvertTo-Json -Depth 10 -Compress))
 } finally {
     if ($null -ne $referenceBook) {
         try {
@@ -2573,6 +2632,8 @@ try {
             } ([DateTime]::UtcNow.AddSeconds(5)) 'closing the reference workbook')
         } catch {}
     }
+    Release-ComObject $referenceBook
+    $referenceBook = $null
     if ($null -ne $candidateBook) {
         try {
             [void](Invoke-ExcelBusyRetry {
@@ -2580,6 +2641,11 @@ try {
             } ([DateTime]::UtcNow.AddSeconds(5)) 'closing the candidate workbook')
         } catch {}
     }
+    Release-ComObject $candidateBook
+    $candidateBook = $null
+    Release-ComObject $workbooks
+    $workbooks = $null
+    Invoke-ComFinalizerBarrier
     if ($null -ne $excel) {
         try { $excel.EnableEvents = $true } catch {}
         try {
@@ -2588,12 +2654,18 @@ try {
             } ([DateTime]::UtcNow.AddSeconds(5)) 'closing the validator Excel process')
         } catch {}
     }
-    Release-ComObject $referenceBook
-    Release-ComObject $candidateBook
     Release-ComObject $excel
-    [GC]::Collect()
-    [GC]::WaitForPendingFinalizers()
+    $excel = $null
+    Invoke-ComFinalizerBarrier
+    $excelProcessExited = Wait-ExcelProcessExit $excelProcessId
+    if (-not $excelProcessExited) {
+        throw "Hidden validator Excel process $excelProcessId did not exit within 15 seconds."
+    }
 }
+
+$report | Add-Member -NotePropertyName validatorExcelProcessId -NotePropertyValue $excelProcessId
+$report | Add-Member -NotePropertyName validatorExcelProcessExited -NotePropertyValue $excelProcessExited
+[Console]::Out.WriteLine(($report | ConvertTo-Json -Depth 10 -Compress))
 `;
 
 function main() {
