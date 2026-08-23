@@ -50,7 +50,7 @@ jobs:
 
     steps:
       - name: Checkout tagged source
-        uses: actions/checkout@v7.0.0
+        uses: actions/checkout@v7.0.1
         with:
           fetch-depth: 0
 
@@ -164,7 +164,7 @@ jobs:
 
     steps:
       - name: Checkout source fixtures
-        uses: actions/checkout@v7.0.0
+        uses: actions/checkout@v7.0.1
 
       - name: Set up Python for DLL smoke test
         uses: actions/setup-python@v7
@@ -444,7 +444,7 @@ jobs:
 
     steps:
       - name: Checkout tagged source
-        uses: actions/checkout@v7.0.0
+        uses: actions/checkout@v7.0.1
         with:
           fetch-depth: 0
 
