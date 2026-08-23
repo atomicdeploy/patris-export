@@ -23,6 +23,7 @@ type excelPricingRemoteBridgeTestRun struct {
 	initialCursor uint64
 	onCursor      func(uint64)
 	onRevision    func(excelPricingRemoteRevision) error
+	onTerminal    func(excelPricingRemoteSnapshotTerminalEvent) error
 	stopped       chan struct{}
 }
 
@@ -56,6 +57,7 @@ func excelPricingRemoteBridgeTestRunner(
 	uint64,
 	func(uint64),
 	func(excelPricingRemoteRevision) error,
+	func(excelPricingRemoteSnapshotTerminalEvent) error,
 ) error {
 	return func(
 		ctx context.Context,
@@ -64,6 +66,7 @@ func excelPricingRemoteBridgeTestRunner(
 		initialCursor uint64,
 		onCursor func(uint64),
 		onRevision func(excelPricingRemoteRevision) error,
+		onTerminal func(excelPricingRemoteSnapshotTerminalEvent) error,
 	) error {
 		call := &excelPricingRemoteBridgeTestRun{
 			config:        cfg,
@@ -71,6 +74,7 @@ func excelPricingRemoteBridgeTestRunner(
 			initialCursor: initialCursor,
 			onCursor:      onCursor,
 			onRevision:    onRevision,
+			onTerminal:    onTerminal,
 			stopped:       make(chan struct{}),
 		}
 		select {
@@ -136,6 +140,7 @@ func TestExcelPricingRemoteEventsBridgeCoalescesRestartToNewestGeneration(t *tes
 		initialCursor uint64,
 		onCursor func(uint64),
 		onRevision func(excelPricingRemoteRevision) error,
+		onTerminal func(excelPricingRemoteSnapshotTerminalEvent) error,
 	) error {
 		call := &excelPricingRemoteBridgeTestRun{
 			config:        cfg,
@@ -143,6 +148,7 @@ func TestExcelPricingRemoteEventsBridgeCoalescesRestartToNewestGeneration(t *tes
 			initialCursor: initialCursor,
 			onCursor:      onCursor,
 			onRevision:    onRevision,
+			onTerminal:    onTerminal,
 			stopped:       make(chan struct{}),
 		}
 		runMu.Lock()
@@ -416,6 +422,86 @@ func TestExcelPricingRemoteEventsBridgeConfigRestartAndCursorOrdering(t *testing
 	waitExcelPricingRemoteBridgeTestSignal(t, callTwo.stopped, "replacement generation cancellation")
 }
 
+func TestExcelPricingRemoteEventsBridgeRetainsSnapshotTerminalBeforeCursorAck(t *testing.T) {
+	cfg := excelPricingRemoteBridgeTestConfig("generation-terminal")
+	source := excelPricingRemoteTestSource()
+	runs := make(chan *excelPricingRemoteBridgeTestRun, 1)
+	bridge := newExcelPricingRemoteEventsBridgeWithDependencies(excelPricingRemoteBridgeDependencies{
+		config:      func() appconfig.Config { return cfg },
+		resolve:     excelPricingRemoteBridgeTestResolve,
+		materialize: func(context.Context) (canonical.Source, error) { return source, nil },
+		run:         excelPricingRemoteBridgeTestRunner(runs),
+		apply:       func(excelPricingRemoteRevision) error { return nil },
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	var waitGroup sync.WaitGroup
+	bridge.start(ctx, &waitGroup)
+	call := nextExcelPricingRemoteBridgeTestRun(t, runs)
+	stateRevision := excelPricingRemoteTestRevision("b")
+	catalogRevision := excelPricingRemoteTestRevision("c")
+	revision := excelPricingRemoteRevision{
+		Source:                source,
+		StateRevision:         stateRevision,
+		CatalogRevision:       catalogRevision,
+		PricingStateRevision:  excelPricingRemoteTestRevision("d"),
+		PricingPolicyRevision: excelPricingRemoteTestRevision("e"),
+		ETag:                  `"` + stateRevision + `"`,
+	}
+	if err := call.onRevision(revision); err != nil {
+		cancel()
+		waitExcelPricingRemoteBridgeTestGroup(t, &waitGroup)
+		t.Fatalf("accept revision: %v", err)
+	}
+	const requestID = "snapshot-terminal-request-0001"
+	subscription, err := bridge.snapshotTerminals().Subscribe(requestID, source, stateRevision)
+	if err != nil {
+		cancel()
+		waitExcelPricingRemoteBridgeTestGroup(t, &waitGroup)
+		t.Fatalf("subscribe: %v", err)
+	}
+	defer subscription.Close()
+	snapshotRevision := excelPricingRemoteTestRevision("f")
+	event := excelPricingRemoteSnapshotTerminalEvent{
+		Schema:               excelPricingRemoteSnapshotEventSchema,
+		SchemaVersion:        1,
+		BuildID:              "snapshot-terminal-build-0001",
+		RequestID:            requestID,
+		Status:               "ready",
+		Source:               source,
+		StateRevision:        stateRevision,
+		PricingStateRevision: revision.PricingStateRevision,
+		CatalogRevision:      catalogRevision,
+		SnapshotToken:        "snapshot-terminal-token-0001",
+		SnapshotRevision:     snapshotRevision,
+		Digest:               snapshotRevision,
+		SnapshotPath:         "/wp-json/digitalogic/pricing/sync/snapshots/snapshot-terminal-token-0001",
+		IdempotencyKey:       excelPricingRemoteTestRevision("0"),
+		EventID:              19,
+	}
+	if err := call.onTerminal(event); err != nil {
+		cancel()
+		waitExcelPricingRemoteBridgeTestGroup(t, &waitGroup)
+		t.Fatalf("retain terminal: %v", err)
+	}
+	call.onCursor(event.EventID)
+	received, err := subscription.Wait(t.Context())
+	if err != nil || received != event {
+		cancel()
+		waitExcelPricingRemoteBridgeTestGroup(t, &waitGroup)
+		t.Fatalf("terminal received=%+v err=%v", received, err)
+	}
+	_, cursor, acknowledged := excelPricingRemoteBridgeState(bridge)
+	if cursor != event.EventID || !acknowledged ||
+		!bridge.revisionCurrent(source, stateRevision, catalogRevision) {
+		cancel()
+		waitExcelPricingRemoteBridgeTestGroup(t, &waitGroup)
+		t.Fatalf("terminal cursor=%d acknowledged=%v revision_current=%v",
+			cursor, acknowledged, bridge.revisionCurrent(source, stateRevision, catalogRevision))
+	}
+	cancel()
+	waitExcelPricingRemoteBridgeTestGroup(t, &waitGroup)
+}
+
 func TestExcelPricingRemoteEventsBridgeSourceFenceRemovalAndReset(t *testing.T) {
 	var stateMu sync.RWMutex
 	cfg := excelPricingRemoteBridgeTestConfig("generation-a")
@@ -621,6 +707,7 @@ func TestExcelPricingRemoteEventsBridgeLogsAreSecretSafe(t *testing.T) {
 			uint64,
 			func(uint64),
 			func(excelPricingRemoteRevision) error,
+			func(excelPricingRemoteSnapshotTerminalEvent) error,
 		) error {
 			return fmt.Errorf("transport rejected %s with %s", privateEndpoint, privateSecret)
 		},

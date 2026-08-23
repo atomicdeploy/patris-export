@@ -120,6 +120,9 @@ type excelPricingState struct {
 
 	canonical func(context.Context) (recordpipe.Result, error)
 	dispatch  func(context.Context, updateout.Config, updateout.Event) (updateout.DeliveryResult, error)
+
+	snapshotCollector       excelPricingSnapshotCollector
+	snapshotRevisionCurrent func(canonical.Source, string, string) bool
 }
 
 type excelPricingRemoteResponse struct {
