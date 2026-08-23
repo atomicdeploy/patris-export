@@ -26,3 +26,12 @@ test('workbook URL rejects unknown enum values and keeps safe defaults', () => {
     assert.equal(url.searchParams.get('mode'), 'precalculated');
     assert.equal(url.searchParams.get('zebra'), '1');
 });
+
+test('workbook URL supports normal and macro-enabled download routes', () => {
+    for (const format of ['xlsx', 'xlsm', 'xltm']) {
+        const url = new URL(canonicalWorkbookPath({ format }), 'http://localhost');
+        assert.equal(url.pathname, `/api/records.${format}`);
+    }
+    const fallback = new URL(canonicalWorkbookPath({ format: 'xlsb' }), 'http://localhost');
+    assert.equal(fallback.pathname, '/api/records.xlsx');
+});

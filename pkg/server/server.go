@@ -75,8 +75,10 @@ type Server struct {
 	catalogProvider      pricingcatalog.Provider
 	catalogProviderKey   string
 	catalogProviderMu    sync.Mutex
+	canonicalProjection  *canonicalProjectionCache
 	sqlOperations        *sqlOperationsState
 	excelPricing         *excelPricingState
+	excelPricingRemote   *excelPricingRemoteEventsBridge
 	backgroundCtx        context.Context
 	backgroundCancel     context.CancelFunc
 	backgroundWG         sync.WaitGroup
@@ -130,6 +132,33 @@ type sourceFileManifest struct {
 	GeneratedAt  time.Time `json:"generated_at"`
 }
 
+const (
+	refreshWaitMaxRequestBytes = 1024
+	refreshWaitTimeout         = 8 * time.Minute
+)
+
+type refreshRequest struct {
+	Delivery string `json:"delivery"`
+}
+
+type refreshDeliveryResponse struct {
+	Status            string `json:"status"`
+	EventID           string `json:"event_id"`
+	Attempts          int    `json:"attempts"`
+	PendingProducts   int    `json:"pending_products"`
+	DeferredProducts  int    `json:"deferred_products"`
+	DeferredMissing   int    `json:"deferred_missing"`
+	DeferredAmbiguous int    `json:"deferred_ambiguous"`
+}
+
+type refreshWaitResponse struct {
+	Refreshed      bool                     `json:"refreshed"`
+	Delivered      bool                     `json:"delivered"`
+	SourceRevision string                   `json:"source_revision,omitempty"`
+	Delivery       *refreshDeliveryResponse `json:"delivery,omitempty"`
+	Code           string                   `json:"code,omitempty"`
+}
+
 // NewServer creates a new server instance
 func NewServer(dbPath string, charMap converter.CharMapping, useTempFile ...bool) (*Server, error) {
 	return NewServerWithOptions(dbPath, charMap, Options{}, useTempFile...)
@@ -152,19 +181,20 @@ func NewServerWithOptions(dbPath string, charMap converter.CharMapping, options 
 
 	backgroundCtx, backgroundCancel := context.WithCancel(context.Background())
 	s := &Server{
-		router:           mux.NewRouter(),
-		dbPath:           dbPath,
-		charMap:          charMap,
-		dataSource:       ds,
-		wsClients:        make(map[*websocket.Conn]*sync.Mutex),
-		eventSubscribers: make(map[chan map[string]interface{}]struct{}),
-		sqlOperations:    newSQLOperationsState(),
-		excelPricing:     newExcelPricingState(),
-		backgroundCtx:    backgroundCtx,
-		backgroundCancel: backgroundCancel,
-		useTempFile:      copyBeforeRead,
-		config:           options.Config,
-		version:          options.Version,
+		router:              mux.NewRouter(),
+		dbPath:              dbPath,
+		charMap:             charMap,
+		dataSource:          ds,
+		wsClients:           make(map[*websocket.Conn]*sync.Mutex),
+		eventSubscribers:    make(map[chan map[string]interface{}]struct{}),
+		canonicalProjection: newCanonicalProjectionCache(),
+		sqlOperations:       newSQLOperationsState(),
+		excelPricing:        newExcelPricingState(),
+		backgroundCtx:       backgroundCtx,
+		backgroundCancel:    backgroundCancel,
+		useTempFile:         copyBeforeRead,
+		config:              options.Config,
+		version:             options.Version,
 		upgrader: websocket.Upgrader{
 			// Security: Configure origin checking for production use
 			// Default allows localhost only
@@ -190,6 +220,7 @@ func NewServerWithOptions(dbPath string, charMap converter.CharMapping, options 
 		s.version = version.Current()
 	}
 	s.excelPricing.canonical = s.canonicalRecordResultContext
+	s.excelPricingRemote = newExcelPricingRemoteEventsBridge(s)
 
 	// Set up routes
 	s.setupRoutes()
@@ -198,7 +229,9 @@ func NewServerWithOptions(dbPath string, charMap converter.CharMapping, options 
 		converter.SetRTLConversion(s.config.Get().Database.RTLConversion)
 		w, err := s.config.Watch(func(cfg appconfig.Config) {
 			log.Printf("⚙️ Config reloaded: %s", s.config.Path())
+			s.invalidateCanonicalProjection(false)
 			converter.SetRTLConversion(cfg.Database.RTLConversion)
+			s.excelPricingRemote.configChanged(cfg)
 			s.broadcastConfig(cfg)
 		})
 		if err != nil {
@@ -207,6 +240,7 @@ func NewServerWithOptions(dbPath string, charMap converter.CharMapping, options 
 			return nil, fmt.Errorf("failed to watch config: %w", err)
 		}
 		s.configWatcher = w
+		s.excelPricingRemote.start(s.backgroundCtx, &s.backgroundWG)
 	}
 
 	return s, nil
@@ -220,14 +254,21 @@ func (s *Server) setupRoutes() {
 	s.router.HandleFunc("/partials/welcome", s.handleWelcomePartial).Methods("GET")
 	s.router.HandleFunc("/partials/charmap", s.handleCharmapPartial).Methods("GET")
 	s.router.HandleFunc("/api/records", s.handleGetRecords).Methods("GET")
-	s.router.HandleFunc("/api/records.{format:json|csv|xlsx}", s.handleGetRecords).Methods("GET")
+	s.router.HandleFunc("/api/records.{format:json|csv|xlsx|xlsm|xltm}", s.handleGetRecords).Methods("GET")
 	s.router.HandleFunc("/api/categories", s.handleGetCategories).Methods("GET")
 	s.router.HandleFunc("/api/product-sync", s.handleGetProductSyncContract).Methods("GET")
 	s.router.HandleFunc("/api/recent-sales", s.handleGetRecentSales).Methods("GET")
-	s.router.HandleFunc("/api/excel/pricing-sync/session", s.handlePostExcelPricingSession).Methods("POST")
-	s.router.HandleFunc("/api/excel/pricing-sync/state", s.handlePostExcelPricingState).Methods("POST")
-	s.router.HandleFunc("/api/excel/pricing-sync/preview", s.handlePostExcelPricingPreview).Methods("POST")
-	s.router.HandleFunc("/api/excel/pricing-sync/apply", s.handlePostExcelPricingApply).Methods("POST")
+	// Pricing sync is a general-purpose integration surface. It is deliberately
+	// not named after any one client (Excel, spreadsheet, or otherwise).
+	s.router.HandleFunc("/api/pricing-sync/session", s.handlePostExcelPricingSession).Methods("POST")
+	s.router.HandleFunc("/api/pricing-sync/state", s.handlePostExcelPricingState).Methods("POST")
+	s.router.HandleFunc("/api/pricing-sync/preview", s.handlePostExcelPricingPreview).Methods("POST")
+	s.router.HandleFunc("/api/pricing-sync/apply", s.handlePostExcelPricingApply).Methods("POST")
+	s.router.HandleFunc("/api/pricing-sync/snapshots", s.handlePostExcelPricingSnapshot).Methods("POST")
+	s.router.HandleFunc("/api/pricing-sync/events", s.handleGetExcelPricingEvents).Methods("GET")
+	s.router.HandleFunc("/api/pricing-sync/snapshots/{job_id}", s.handleGetExcelPricingSnapshot).Methods("GET")
+	s.router.HandleFunc("/api/pricing-sync/snapshots/{job_id}/payload", s.handleGetExcelPricingSnapshotPayload).Methods("GET")
+	s.router.HandleFunc("/api/pricing-sync/snapshots/{job_id}", s.handleDeleteExcelPricingSnapshot).Methods("DELETE")
 	s.router.HandleFunc("/api/info", s.handleGetInfo).Methods("GET")
 	s.router.HandleFunc("/api/app", s.handleGetApp).Methods("GET")
 	s.router.HandleFunc("/api/charmap", s.handleGetCharmap).Methods("GET")
@@ -309,9 +350,19 @@ func (s *Server) RecordResultContext(ctx context.Context) (recordpipe.Result, er
 // observational source rows; it must not disable the dedicated integration
 // contract for a dataset with an enabled canonical profile.
 func (s *Server) canonicalRecordResultContext(ctx context.Context) (recordpipe.Result, error) {
-	options := s.recordOptions()
-	options.Raw = false
-	return s.recordResultContext(ctx, options)
+	build := func(buildContext context.Context) (recordpipe.Result, error) {
+		options := s.recordOptions()
+		options.Raw = false
+		return s.recordResultContext(buildContext, options)
+	}
+	if s.canonicalProjection == nil {
+		return build(ctx)
+	}
+	return s.canonicalProjection.get(
+		ctx,
+		func() time.Duration { return canonicalProjectionMaxAge(s.Config()) },
+		build,
+	)
 }
 
 func (s *Server) recordResultContext(ctx context.Context, options recordpipe.Options) (recordpipe.Result, error) {
@@ -399,6 +450,12 @@ func browserConfig(cfg appconfig.Config) appconfig.Config {
 	cfg.Export.MySQLDSN = ""
 	cfg.Export.MySQLTLSCAFile = ""
 	cfg.Export.MySQLTLSServerName = ""
+	cfg.Export.XLSXTemplate = ""
+	cfg.Export.XLSXTarget = ""
+	cfg.Export.XLSMTemplate = ""
+	cfg.Export.XLSMTarget = ""
+	cfg.Export.XLTMTemplate = ""
+	cfg.Export.XLTMTarget = ""
 	cfg.RecentSales = recentsales.Config{}
 	return cfg
 }
@@ -452,6 +509,7 @@ func (s *Server) replaceDataSource(path string, records []map[string]interface{}
 			return err
 		}
 	}
+	sourceEpoch := s.excelPricingRemote.fenceSourceChange()
 
 	s.dataSourceMu.Lock()
 	old := s.dataSource
@@ -466,6 +524,8 @@ func (s *Server) replaceDataSource(path string, records []map[string]interface{}
 	s.lastSourceHashMu.Lock()
 	s.lastSourceHash = ""
 	s.lastSourceHashMu.Unlock()
+	s.notifyExcelPricingSourceChanged("")
+	s.excelPricingRemote.commitSourceChange(sourceEpoch)
 	return nil
 }
 
@@ -478,6 +538,8 @@ func (s *Server) ReplaceConfig(cfg appconfig.Config) (appconfig.Config, error) {
 		return appconfig.Config{}, err
 	}
 	cfg = s.config.Get()
+	s.invalidateCanonicalProjection(false)
+	s.excelPricingRemote.configChanged(cfg)
 	s.broadcastConfig(cfg)
 	return cfg, nil
 }
@@ -497,6 +559,7 @@ func (s *Server) ShowToast(req ToastRequest) error {
 // Refresh forces a data refresh broadcast to browser, IPC, and embedded
 // subscribers.
 func (s *Server) Refresh() {
+	s.invalidateCanonicalProjection(false)
 	s.broadcastInitialSnapshot("source_changed")
 }
 
@@ -627,25 +690,34 @@ func writeHTMLPartial(w http.ResponseWriter, page []byte) {
 	_, _ = w.Write([]byte(strings.Join(parts, "\n")))
 }
 
-// handleGetRecords returns all database records as JSON, CSV, or XLSX.
+// handleGetRecords returns records as JSON/CSV/generated XLSX, populates only
+// the configured trusted XLSM target, or returns only a verified blank XLTM.
 func (s *Server) handleGetRecords(w http.ResponseWriter, r *http.Request) {
+	format := requestedRecordsFormat(r)
+	if format == "" {
+		http.Error(w, "unsupported records format; use json, csv, xlsx, xlsm, or xltm", http.StatusBadRequest)
+		return
+	}
+	if format == "xltm" {
+		s.writeRecordsXLTM(w, r)
+		return
+	}
 	result, err := s.RecordResult()
 	if err != nil {
 		http.Error(w, fmt.Sprintf("Failed to read records: %v", err), http.StatusInternalServerError)
 		return
 	}
 
-	format := requestedRecordsFormat(r)
-	if format == "" {
-		http.Error(w, "unsupported records format; use json, csv, or xlsx", http.StatusBadRequest)
-		return
-	}
 	if format == "csv" {
 		s.writeRecordsCSV(w, r, result.Rows, result.KeyField)
 		return
 	}
 	if format == "xlsx" {
 		s.writeRecordsXLSX(w, r, result)
+		return
+	}
+	if format == "xlsm" {
+		s.writeRecordsXLSM(w, r, result)
 		return
 	}
 
@@ -792,7 +864,7 @@ func requestedRecordsFormat(r *http.Request) string {
 	queryFormat := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("format")))
 	if queryFormat != "" {
 		switch queryFormat {
-		case "json", "csv", "xlsx":
+		case "json", "csv", "xlsx", "xlsm", "xltm":
 			return queryFormat
 		default:
 			return ""
@@ -806,6 +878,160 @@ func requestedRecordsFormat(r *http.Request) string {
 		return "xlsx"
 	}
 	return "json"
+}
+
+func rejectsClientOfficeSource(r *http.Request) bool {
+	for _, key := range []string{"template", "template_path", "path", "source", "source_url", "url"} {
+		if strings.TrimSpace(r.URL.Query().Get(key)) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+func requestWantsBakedTemplateData(r *http.Request) bool {
+	for _, key := range []string{"populate", "bake_data", "include_data"} {
+		switch strings.ToLower(strings.TrimSpace(r.URL.Query().Get(key))) {
+		case "1", "true", "yes", "on":
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Server) trustedOfficeContract(format string) (recordsink.TrustedOfficeContract, bool) {
+	if s.config == nil {
+		return recordsink.TrustedOfficeContract{}, false
+	}
+	cfg := s.config.Get()
+	contract := recordsink.TrustedOfficeContract{}
+	switch format {
+	case "xlsx":
+		contract.TemplatePath = strings.TrimSpace(cfg.Export.XLSXTemplate)
+		contract.Target = strings.TrimSpace(cfg.Export.XLSXTarget)
+	case "xlsm":
+		contract.TemplatePath = strings.TrimSpace(cfg.Export.XLSMTemplate)
+		contract.Target = strings.TrimSpace(cfg.Export.XLSMTarget)
+	case "xltm":
+		contract.TemplatePath = strings.TrimSpace(cfg.Export.XLTMTemplate)
+		contract.Target = strings.TrimSpace(cfg.Export.XLTMTarget)
+	}
+	return contract, contract.TemplatePath != "" && contract.Target != ""
+}
+
+func officeDownloadName(dbPath, extension string) string {
+	name := strings.TrimSuffix(sourceBaseName(dbPath), filepath.Ext(sourceBaseName(dbPath)))
+	if strings.TrimSpace(name) == "" {
+		name = "patris-export"
+	}
+	return name + extension
+}
+
+func freshOfficeOutputPath(extension string) (string, error) {
+	temporary, err := os.CreateTemp("", "patris-records-*"+extension)
+	if err != nil {
+		return "", err
+	}
+	path := temporary.Name()
+	if err := temporary.Close(); err != nil {
+		_ = os.Remove(path)
+		return "", err
+	}
+	if err := os.Remove(path); err != nil {
+		return "", err
+	}
+	return path, nil
+}
+
+func serveVerifiedOfficeArtifact(w http.ResponseWriter, r *http.Request, path, name, contentType string, report recordsink.OfficeArtifactReport) error {
+	file, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	stat, err := file.Stat()
+	if err != nil {
+		return err
+	}
+	w.Header().Set("Cache-Control", "private, no-store")
+	w.Header().Set("Content-Type", contentType)
+	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", name))
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("X-Patris-Office-Source-SHA256", report.SourceSHA256)
+	w.Header().Set("X-Patris-Office-Output-SHA256", report.OutputSHA256)
+	w.Header().Set("X-Patris-Office-Record-Count", strconv.Itoa(report.RecordCount))
+	if report.DataEmpty {
+		w.Header().Set("X-Patris-Template-Data-Empty", "true")
+	}
+	http.ServeContent(w, r, name, stat.ModTime(), file)
+	return nil
+}
+
+func (s *Server) writeRecordsXLSM(w http.ResponseWriter, r *http.Request, result recordpipe.Result) {
+	if rejectsClientOfficeSource(r) {
+		http.Error(w, "client-supplied Office source paths and URLs are not accepted", http.StatusBadRequest)
+		return
+	}
+	contract, configured := s.trustedOfficeContract("xlsm")
+	if !configured {
+		if contract.TemplatePath != "" || contract.Target != "" {
+			http.Error(w, "XLSM trusted template and explicit target must be configured together", http.StatusUnprocessableEntity)
+			return
+		}
+		http.Error(w, "XLSM trusted template and explicit target are not configured", http.StatusNotFound)
+		return
+	}
+	path, err := freshOfficeOutputPath(".xlsm")
+	if err != nil {
+		http.Error(w, "Failed to create temporary XLSM output", http.StatusInternalServerError)
+		return
+	}
+	defer os.Remove(path)
+	report, err := recordsink.PopulateTrustedXLSM(path, result.Rows, result.KeyField, s.recordsXLSXOptions(r, result), contract)
+	if err != nil {
+		http.Error(w, "Configured XLSM package failed population or verification: "+err.Error(), http.StatusUnprocessableEntity)
+		return
+	}
+	name := officeDownloadName(s.currentDBPath(), ".xlsm")
+	if err := serveVerifiedOfficeArtifact(w, r, path, name, "application/vnd.ms-excel.sheet.macroEnabled.12", report); err != nil {
+		http.Error(w, "Failed to serve verified XLSM output", http.StatusInternalServerError)
+	}
+}
+
+func (s *Server) writeRecordsXLTM(w http.ResponseWriter, r *http.Request) {
+	if rejectsClientOfficeSource(r) {
+		http.Error(w, "client-supplied Office source paths and URLs are not accepted", http.StatusBadRequest)
+		return
+	}
+	if requestWantsBakedTemplateData(r) {
+		w.Header().Set("X-Patris-Template-Data-Empty", "required")
+		http.Error(w, "XLTM data population is forbidden; configured templates must remain blank", http.StatusConflict)
+		return
+	}
+	contract, configured := s.trustedOfficeContract("xltm")
+	if !configured {
+		if contract.TemplatePath != "" || contract.Target != "" {
+			http.Error(w, "XLTM trusted template and explicit target must be configured together", http.StatusUnprocessableEntity)
+			return
+		}
+		http.Error(w, "XLTM trusted template and explicit target are not configured", http.StatusNotFound)
+		return
+	}
+	path, err := freshOfficeOutputPath(".xltm")
+	if err != nil {
+		http.Error(w, "Failed to create temporary XLTM output", http.StatusInternalServerError)
+		return
+	}
+	defer os.Remove(path)
+	report, err := recordsink.CopyVerifiedBlankXLTM(path, contract)
+	if err != nil {
+		http.Error(w, "Configured XLTM package failed blank-template verification: "+err.Error(), http.StatusUnprocessableEntity)
+		return
+	}
+	name := officeDownloadName(s.currentDBPath(), ".xltm")
+	if err := serveVerifiedOfficeArtifact(w, r, path, name, "application/vnd.ms-excel.template.macroEnabled.12", report); err != nil {
+		http.Error(w, "Failed to serve verified XLTM output", http.StatusInternalServerError)
+	}
 }
 
 func (s *Server) writeRecordsCSV(w http.ResponseWriter, r *http.Request, records []map[string]interface{}, keyField string) {
@@ -824,6 +1050,33 @@ func (s *Server) writeRecordsCSV(w http.ResponseWriter, r *http.Request, records
 }
 
 func (s *Server) writeRecordsXLSX(w http.ResponseWriter, r *http.Request, result recordpipe.Result) {
+	if rejectsClientOfficeSource(r) {
+		http.Error(w, "client-supplied Office source paths and URLs are not accepted", http.StatusBadRequest)
+		return
+	}
+	contract, configured := s.trustedOfficeContract("xlsx")
+	if configured {
+		path, err := freshOfficeOutputPath(".xlsx")
+		if err != nil {
+			http.Error(w, "Failed to create temporary XLSX output", http.StatusInternalServerError)
+			return
+		}
+		defer os.Remove(path)
+		report, err := recordsink.PopulateTrustedXLSX(path, result.Rows, result.KeyField, s.recordsXLSXOptions(r, result), contract)
+		if err != nil {
+			http.Error(w, "Configured XLSX package failed population or verification: "+err.Error(), http.StatusUnprocessableEntity)
+			return
+		}
+		name := officeDownloadName(s.currentDBPath(), ".xlsx")
+		if err := serveVerifiedOfficeArtifact(w, r, path, name, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", report); err != nil {
+			http.Error(w, "Failed to serve verified XLSX output", http.StatusInternalServerError)
+		}
+		return
+	}
+	if contract.TemplatePath != "" || contract.Target != "" {
+		http.Error(w, "XLSX trusted template and explicit target must be configured together", http.StatusUnprocessableEntity)
+		return
+	}
 	temp, err := os.CreateTemp("", "patris-records-*.xlsx")
 	if err != nil {
 		http.Error(w, fmt.Sprintf("Failed to create XLSX: %v", err), http.StatusInternalServerError)
@@ -832,6 +1085,29 @@ func (s *Server) writeRecordsXLSX(w http.ResponseWriter, r *http.Request, result
 	tempPath := temp.Name()
 	_ = temp.Close()
 	defer os.Remove(tempPath)
+	options := s.recordsXLSXOptions(r, result)
+	if err := recordsink.WriteXLSX(tempPath, result.Rows, result.KeyField, options); err != nil {
+		http.Error(w, fmt.Sprintf("Failed to encode XLSX: %v", err), http.StatusInternalServerError)
+		return
+	}
+	file, err := os.Open(tempPath)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Failed to open XLSX: %v", err), http.StatusInternalServerError)
+		return
+	}
+	defer file.Close()
+	stat, err := file.Stat()
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Failed to stat XLSX: %v", err), http.StatusInternalServerError)
+		return
+	}
+	name := officeDownloadName(s.currentDBPath(), ".xlsx")
+	w.Header().Set("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", name))
+	http.ServeContent(w, r, name, stat.ModTime(), file)
+}
+
+func (s *Server) recordsXLSXOptions(r *http.Request, result recordpipe.Result) recordsink.XLSXOptions {
 	dataset := sourceBaseName(s.currentDBPath())
 	rtl := false
 	preferences := recordsink.XLSXPreferences{Language: "en", Mode: "precalculated", ZebraRows: true}
@@ -867,28 +1143,7 @@ func (s *Server) writeRecordsXLSX(w http.ResponseWriter, r *http.Request, result
 		}
 	}
 	options := result.XLSXOptions(dataset, rtl, preferences)
-	if err := recordsink.WriteXLSX(tempPath, result.Rows, result.KeyField, options); err != nil {
-		http.Error(w, fmt.Sprintf("Failed to encode XLSX: %v", err), http.StatusInternalServerError)
-		return
-	}
-	file, err := os.Open(tempPath)
-	if err != nil {
-		http.Error(w, fmt.Sprintf("Failed to open XLSX: %v", err), http.StatusInternalServerError)
-		return
-	}
-	defer file.Close()
-	stat, err := file.Stat()
-	if err != nil {
-		http.Error(w, fmt.Sprintf("Failed to stat XLSX: %v", err), http.StatusInternalServerError)
-		return
-	}
-	name := strings.TrimSuffix(sourceBaseName(s.currentDBPath()), filepath.Ext(sourceBaseName(s.currentDBPath())))
-	if strings.TrimSpace(name) == "" {
-		name = "patris-export"
-	}
-	w.Header().Set("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", name+".xlsx"))
-	http.ServeContent(w, r, name+".xlsx", stat.ModTime(), file)
+	return options
 }
 
 func wantsDownload(r *http.Request) bool {
@@ -1050,6 +1305,12 @@ func (s *Server) handlePutConfig(w http.ResponseWriter, r *http.Request) {
 	cfg.Export.MySQLDSN = protectedExport.MySQLDSN
 	cfg.Export.MySQLTLSCAFile = protectedExport.MySQLTLSCAFile
 	cfg.Export.MySQLTLSServerName = protectedExport.MySQLTLSServerName
+	cfg.Export.XLSXTemplate = protectedExport.XLSXTemplate
+	cfg.Export.XLSXTarget = protectedExport.XLSXTarget
+	cfg.Export.XLSMTemplate = protectedExport.XLSMTemplate
+	cfg.Export.XLSMTarget = protectedExport.XLSMTarget
+	cfg.Export.XLTMTemplate = protectedExport.XLTMTemplate
+	cfg.Export.XLTMTarget = protectedExport.XLTMTarget
 	cfg.RecentSales = protectedConfig.RecentSales
 	cfg, err := s.ReplaceConfig(cfg)
 	if err != nil {
@@ -1067,8 +1328,149 @@ func (s *Server) handleGetStatus(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handlePostRefresh(w http.ResponseWriter, r *http.Request) {
+	if refreshWaitOptedIn(r) {
+		setExcelPricingResponseHeaders(w)
+		if !excelPricingLocalRequestAllowed(r) ||
+			!singleHeaderEquals(r, excelPricingClientHeader, excelPricingClientID) ||
+			!s.excelPricing.authorizedSession(r) {
+			writeRefreshWaitError(w, http.StatusForbidden, false, "", "local_session_required")
+			return
+		}
+		if !singleJSONContentType(r) {
+			writeRefreshWaitError(w, http.StatusUnsupportedMediaType, false, "", "json_required")
+			return
+		}
+		delivery, err := refreshDeliveryMode(w, r)
+		if err != nil {
+			writeRefreshWaitError(w, http.StatusBadRequest, false, "", "invalid_request")
+			return
+		}
+		if delivery == "wait" {
+			s.handlePostRefreshWait(w, r)
+			return
+		}
+	}
 	s.Refresh()
 	writeJSON(w, map[string]interface{}{"refreshed": true})
+}
+
+func refreshWaitOptedIn(r *http.Request) bool {
+	return r.Body != nil &&
+		r.Body != http.NoBody &&
+		r.ContentLength != 0 &&
+		len(r.Header.Values(excelPricingClientHeader)) > 0
+}
+
+func refreshDeliveryMode(w http.ResponseWriter, r *http.Request) (string, error) {
+	if r.Body == nil || r.Body == http.NoBody || r.ContentLength == 0 {
+		return "", nil
+	}
+	var request refreshRequest
+	if err := decodeBoundedJSON(w, r, refreshWaitMaxRequestBytes, &request); err != nil {
+		if errors.Is(err, io.EOF) {
+			return "", nil
+		}
+		return "", err
+	}
+	delivery := strings.ToLower(strings.TrimSpace(request.Delivery))
+	switch delivery {
+	case "", "wait":
+		return delivery, nil
+	default:
+		return "", errors.New("unsupported refresh delivery mode")
+	}
+}
+
+func (s *Server) handlePostRefreshWait(w http.ResponseWriter, r *http.Request) {
+	setExcelPricingResponseHeaders(w)
+	if !excelPricingLocalRequestAllowed(r) ||
+		!singleHeaderEquals(r, excelPricingClientHeader, excelPricingClientID) ||
+		!s.excelPricing.authorizedSession(r) {
+		writeRefreshWaitError(w, http.StatusForbidden, false, "", "local_session_required")
+		return
+	}
+
+	cfg := s.Config()
+	deliveryConfig := updateout.Normalize(cfg.SendUpdates)
+	if !deliveryConfig.Enabled ||
+		deliveryConfig.Format != "json" ||
+		deliveryConfig.Method != http.MethodPost ||
+		strings.TrimSpace(deliveryConfig.URL) == "" ||
+		strings.TrimSpace(deliveryConfig.ProductSyncSecretEnv) == "" {
+		writeRefreshWaitError(w, http.StatusServiceUnavailable, false, "", "delivery_unavailable")
+		return
+	}
+	if _, err := updateout.ResolveProductSyncSecret(deliveryConfig); err != nil {
+		writeRefreshWaitError(w, http.StatusServiceUnavailable, false, "", "delivery_unavailable")
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), refreshWaitTimeout)
+	defer cancel()
+	select {
+	case s.excelPricing.permit <- struct{}{}:
+		defer func() { <-s.excelPricing.permit }()
+	default:
+		writeExcelPricingBusy(w, "pricing_busy")
+		return
+	}
+
+	contract, err := s.excelPricingCanonical(ctx, cfg)
+	if err != nil {
+		status := http.StatusServiceUnavailable
+		code := "canonical_unavailable"
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			status = http.StatusRequestTimeout
+			code = "request_cancelled"
+		}
+		writeRefreshWaitError(w, status, false, "", code)
+		return
+	}
+
+	// The wait extension synchronously delivers this freshly projected canonical
+	// envelope. Calling Refresh here would also enqueue the legacy asynchronous
+	// "initial" delivery and could send the same source revision twice.
+	event := updateout.Event{
+		Type:             "update",
+		Timestamp:        time.Now().UTC().Format(time.RFC3339),
+		Source:           s.currentDBPath(),
+		Raw:              false,
+		Contract:         contract,
+		SnapshotContract: contract,
+	}
+	dispatch := s.excelPricing.dispatch
+	if dispatch == nil {
+		dispatch = updateout.DispatchWithResult
+	}
+	result, err := dispatch(ctx, deliveryConfig, event)
+	if err != nil || !excelPricingDeliveryComplete(result, contract.EventID) {
+		writeRefreshWaitError(w, http.StatusBadGateway, true, contract.Source.Revision, "delivery_failed")
+		return
+	}
+
+	writeJSON(w, refreshWaitResponse{
+		Refreshed:      true,
+		Delivered:      true,
+		SourceRevision: contract.Source.Revision,
+		Delivery: &refreshDeliveryResponse{
+			Status:            result.Status,
+			EventID:           result.EventID,
+			Attempts:          result.Attempts,
+			PendingProducts:   result.PendingProducts,
+			DeferredProducts:  result.DeferredProducts,
+			DeferredMissing:   result.DeferredMissing,
+			DeferredAmbiguous: result.DeferredAmbiguous,
+		},
+	})
+}
+
+func writeRefreshWaitError(w http.ResponseWriter, status int, refreshed bool, sourceRevision, code string) {
+	writeJSONStatus(w, status, refreshWaitResponse{
+		Refreshed:      refreshed,
+		Delivered:      false,
+		SourceRevision: sourceRevision,
+		Code:           code,
+	})
 }
 
 func (s *Server) handleGetSourceManifest(w http.ResponseWriter, r *http.Request) {
@@ -1882,11 +2284,14 @@ func (s *Server) updateSourceHash() (oldHash, newHash string) {
 }
 
 func (s *Server) notifyFileUpdated(path string) {
+	sourceEpoch := s.excelPricingRemote.fenceSourceChange()
 	oldHash, newHash := s.updateSourceHash()
 	message := fmt.Sprintf("%s changed", sourceBaseName(path))
 	if oldHash != "" || newHash != "" {
 		message = fmt.Sprintf("%s changed (%s -> %s)", sourceBaseName(path), shortHash(oldHash), shortHash(newHash))
 	}
+	s.notifyExcelPricingSourceChanged(newHash)
+	s.excelPricingRemote.commitSourceChange(sourceEpoch)
 	s.notifyConfigured("file_updated", "Patris source file updated", message)
 }
 

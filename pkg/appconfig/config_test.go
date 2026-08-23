@@ -358,9 +358,20 @@ func TestXLSXExportDefaultsConfigAndEnvironment(t *testing.T) {
 	t.Setenv("PATRIS_EXPORT_XLSX_LANGUAGE", "FA")
 	t.Setenv("PATRIS_EXPORT_XLSX_MODE", "FORMULAS")
 	t.Setenv("PATRIS_EXPORT_XLSX_ZEBRA_ROWS", "false")
+	t.Setenv("PATRIS_EXPORT_XLSX_TEMPLATE", ` C:\templates\records.xlsx `)
+	t.Setenv("PATRIS_EXPORT_XLSX_TARGET", ` table:ExportProducts `)
+	t.Setenv("PATRIS_EXPORT_XLSM_TEMPLATE", ` C:\templates\records.xlsm `)
+	t.Setenv("PATRIS_EXPORT_XLSM_TARGET", ` table:ExportProducts `)
+	t.Setenv("PATRIS_EXPORT_XLTM_TEMPLATE", ` C:\templates\records.xltm `)
+	t.Setenv("PATRIS_EXPORT_XLTM_TARGET", ` name:ExportProducts `)
 	ApplyEnv(&cfg)
 	if cfg.Export.XLSXLanguage != "fa" || cfg.Export.XLSXMode != "formula" || cfg.Export.XLSXZebraRows {
 		t.Fatalf("XLSX environment was not normalized: %+v", cfg.Export)
+	}
+	if cfg.Export.XLSXTemplate != `C:\templates\records.xlsx` || cfg.Export.XLSXTarget != `table:ExportProducts` ||
+		cfg.Export.XLSMTemplate != `C:\templates\records.xlsm` || cfg.Export.XLSMTarget != `table:ExportProducts` ||
+		cfg.Export.XLTMTemplate != `C:\templates\records.xltm` || cfg.Export.XLTMTarget != `name:ExportProducts` {
+		t.Fatalf("Office templates were not normalized: %+v", cfg.Export)
 	}
 
 	cfg.Export.XLSXLanguage = "unsupported"

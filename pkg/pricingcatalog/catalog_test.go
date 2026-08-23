@@ -19,6 +19,7 @@ import (
 
 func floatPointer(value float64) *Decimal { return DecimalFromFloat(value) }
 func boolPointer(value bool) *bool        { return &value }
+func intPointer(value int) *int           { return &value }
 
 func decimalText(value *Decimal) string {
 	if value == nil {
@@ -1254,6 +1255,54 @@ func TestHTTPProviderRequiresConsistentNonNullCNYToIRT(t *testing.T) {
 			}
 			if name == "conflict" && !contains(resolution.Warnings, "pricing_fx_contract_conflict") {
 				t.Fatalf("missing FX conflict warning: %+v", resolution)
+			}
+		})
+	}
+}
+
+func TestHTTPProviderAcceptsFixedRoundingModeAndRejectsOtherModes(t *testing.T) {
+	for name, mode := range map[string]string{
+		"fixed mode":       RoundingModeHalfUp,
+		"unsupported mode": "bankers",
+	} {
+		t.Run(name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				if r.URL.Path == "/integration/catalog" {
+					_ = json.NewEncoder(w).Encode(map[string]interface{}{"data": map[string]interface{}{
+						"schema": "digitalogic.integration-catalog", "revision": "r1",
+						"currency": map[string]interface{}{
+							"local": "IRT", "cny_to_local": 29500, "cny_to_irt": 29500,
+						},
+						"pricing": map[string]interface{}{
+							"formula_id": "landed_price", "rounding_digits": 2, "rounding_mode": mode,
+						},
+						"shipping_methods": []map[string]interface{}{{
+							"id": "air", "price_per_kg": 120, "currency": "CNY",
+						}},
+					}})
+					return
+				}
+				fmt.Fprint(w, `{"data":{"shipping_method_id":"air","profit_percent":30}}`)
+			}))
+			defer server.Close()
+
+			resolution := newHTTPProvider(
+				DigitalogicConfig{BaseURL: server.URL},
+				server.Client(),
+				time.Now,
+			).Resolve(context.Background(), "A")
+			if mode == RoundingModeHalfUp {
+				if resolution.RoundingDigits == nil || *resolution.RoundingDigits != 2 {
+					t.Fatalf("fixed rounding mode was not accepted: %+v", resolution)
+				}
+				if contains(resolution.Warnings, "price_rounding_mode_invalid") {
+					t.Fatalf("fixed rounding mode was marked invalid: %+v", resolution)
+				}
+				return
+			}
+			if resolution.RoundingDigits != nil || !contains(resolution.Warnings, "price_rounding_mode_invalid") {
+				t.Fatalf("unsupported rounding mode was not rejected: %+v", resolution)
 			}
 		})
 	}

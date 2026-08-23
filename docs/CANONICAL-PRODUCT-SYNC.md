@@ -68,6 +68,13 @@ or FX values omit `final_price` and add sorted machine-readable warnings. They
 never become a destructive zero or a generated JSON `null`. Duplicate Codes are
 quarantined from the contract.
 
+Stock is not a pricing eligibility gate in the Patris transform. A product with
+valid positive weight and price inputs retains its calculated price and exact
+`total_stock` even when stock is zero or non-positive. The canonical envelope
+carries that state unchanged; receiver-owned creation policy decides whether
+an out-of-stock product is queued and is never encoded as Patris transport
+policy.
+
 Raw `Sharh1`, `Sharh2`, `FOROSH`, `KHARYD`, `Kharyd_E`, `ALLANBAR`, and
 `ANBAR*` keys never cross the `patris.product-sync` boundary. The first
 `Sharh1` slot is exposed independently as `partner_price_source`; `FOROSH`

@@ -149,6 +149,27 @@ func TestLandedPriceRoundsOnceHalfUpAndRejectsInvalidInput(t *testing.T) {
 	}
 }
 
+func TestLandedPriceRoundsToConfiguredIRTDigits(t *testing.T) {
+	for input, want := range map[string]int64{
+		"123449": 123400,
+		"123450": 123500,
+		"123456": 123500,
+	} {
+		got, err := LandedPrice("0", "0", pricingcatalog.CurrencyCNY, input, "0", "1", 2)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != want {
+			t.Fatalf("LandedPrice(%s, digits=2) = %d, want %d", input, got, want)
+		}
+	}
+	for _, digits := range []int{-1, 10} {
+		if _, err := LandedPrice("0", "0", pricingcatalog.CurrencyCNY, "1", "0", "1", digits); err == nil {
+			t.Fatalf("invalid rounding digits %d were accepted", digits)
+		}
+	}
+}
+
 func TestWhitespaceShippingCurrencyNeverProducesFinalPrice(t *testing.T) {
 	staticConfig := pricingcatalog.Config{}
 	if err := json.Unmarshal([]byte(`{"mode":"static","static":{"cny_to_irt":30000,"shipping_methods":[{"id":"air","price_per_kg":120,"currency":" CNY "}],"assignments":{"A":{"shipping_method_id":"air","profit_percent":30}}}}`), &staticConfig); err != nil {
@@ -282,6 +303,27 @@ func TestKalaProfileTransformsPersianFixtureWithoutRawBoundaryFields(t *testing.
 	}
 	if !strings.HasPrefix(product["record_hash"].(string), "sha256:") || !strings.HasPrefix(envelope.Source.Revision, "sha256:") || !strings.HasPrefix(envelope.EventID, "sha256:") {
 		t.Fatalf("hash identities were not generated: product=%v source=%q event=%q", product["record_hash"], envelope.Source.Revision, envelope.EventID)
+	}
+}
+
+func TestKalaProfileKeepsPositiveWeightAndPriceCalculationAtZeroStock(t *testing.T) {
+	code := "ZERO-STOCK-QUALIFIES"
+	cfg, provider := canonicalTestConfig(code)
+	rows := []map[string]interface{}{{
+		"Code": code, "Name": "کالای ناموجود", "Sharh1": "24.5",
+		"Sharh2": "گرم 240", "ALLANBAR": 0, "ANBAR": []interface{}{0, 0},
+	}}
+	products, envelope := Transform(context.Background(), rows, `C:\Patris\kala.db`, cfg, provider, time.Date(2026, 8, 12, 0, 0, 0, 0, time.UTC))
+	if len(products) != 1 || len(envelope.Products) != 1 {
+		t.Fatalf("zero-stock qualified product counts rows=%d envelope=%d", len(products), len(envelope.Products))
+	}
+	product := products[0]
+	if fmt.Sprint(product["total_stock"]) != "0" || fmt.Sprint(product["foreign_price"]) != "24.5" ||
+		fmt.Sprint(product["weight_grams"]) != "240" || fmt.Sprint(product["final_price"]) != "2009410" {
+		t.Fatalf("zero stock suppressed a valid weight/price calculation: %#v", product)
+	}
+	if envelope.Products[0].TotalStock == nil || *envelope.Products[0].TotalStock != 0 || envelope.Products[0].FinalPrice == nil {
+		t.Fatalf("canonical envelope lost qualified zero-stock pricing: %+v", envelope.Products[0])
 	}
 }
 
@@ -592,7 +634,7 @@ func TestDigitalogicProfilePrefetches1002CodesInThreeBatchRequests(t *testing.T)
 	rows := make([]map[string]interface{}, 1002)
 	for index := range rows {
 		rows[index] = map[string]interface{}{
-			"Code": fmt.Sprintf("P-%04d", index), "Sharh1": "0 0 0 24.5", "Sharh2": "240 Ú¯Ø±Ù…", "ALLANBAR": 1,
+			"Code": fmt.Sprintf("P-%04d", index), "Sharh1": "0 0 0 24.5", "Sharh2": "240 گرم", "ALLANBAR": 1,
 		}
 	}
 	products, _ := Transform(context.Background(), rows, "kala.db", cfg, pricingcatalog.NewProvider(cfg.Pricing), time.Now())

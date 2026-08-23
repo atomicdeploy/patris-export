@@ -5007,9 +5007,10 @@ function sortRecords() {
     });
 }
 
-function downloadCanonicalWorkbook() {
+function downloadCanonicalWorkbook(format = 'xlsx') {
 	const exportConfig = state.config?.export || {};
 	const workbookPath = canonicalWorkbookPath({
+		format,
 		language: state.settings.language,
 		rtl: state.settings.rtlTextDirection,
 		mode: exportConfig.xlsx_mode,
@@ -5017,7 +5018,7 @@ function downloadCanonicalWorkbook() {
 	});
 	const link = document.createElement('a');
 	link.href = workbookPath;
-    link.download = 'patris-export.xlsx';
+    link.download = `patris-export.${format}`;
     link.hidden = true;
     document.body.appendChild(link);
     link.click();
@@ -5046,8 +5047,8 @@ function exportData(format) {
         const csv = convertToCSV(data);
         const blob = new Blob([csv], { type: 'text/csv' });
         downloadFile(blob, 'patris-export.csv');
-    } else if (format === 'xlsx') {
-        downloadCanonicalWorkbook();
+    } else if (['xlsx', 'xlsm', 'xltm'].includes(format)) {
+        downloadCanonicalWorkbook(format);
     }
 }
 

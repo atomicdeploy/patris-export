@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/atomicdeploy/patris-export/pkg/canonical"
+	"github.com/atomicdeploy/patris-export/pkg/pricingcatalog"
 	"github.com/atomicdeploy/patris-export/pkg/recorddiff"
 )
 
@@ -191,7 +192,13 @@ func TestDispatchCanonicalContractUsesDirectProductSyncEnvelope(t *testing.T) {
 	}))
 	defer server.Close()
 
-	product := canonical.Product{ProductCode: "113007045", RecordHash: "sha256:record"}
+	zeroStock := 0.0
+	salePrice := 125000.0
+	product := canonical.Product{
+		ProductCode: "113007045", RecordHash: "sha256:record",
+		TotalStock: &zeroStock, WeightGrams: pricingcatalog.DecimalFromFloat(240),
+		SalePriceSource: &salePrice,
+	}
 	contract := canonical.NewEnvelope([]canonical.Product{product}, "kala.db", "patris-office", time.Unix(1, 0))
 	err := Dispatch(t.Context(), Config{Enabled: true, URL: server.URL, Format: "json", Mode: "changes"}, Event{
 		Type: "update", Source: "kala.db", KeyField: "product_code",
@@ -210,6 +217,11 @@ func TestDispatchCanonicalContractUsesDirectProductSyncEnvelope(t *testing.T) {
 	}
 	if decoded.Schema != canonical.ContractName || len(decoded.Products) != 1 || decoded.Products[0].ProductCode != "113007045" {
 		t.Fatalf("unexpected webhook contract: %+v", decoded)
+	}
+	if decoded.Products[0].TotalStock == nil || *decoded.Products[0].TotalStock != 0 ||
+		decoded.Products[0].WeightGrams == nil || decoded.Products[0].WeightGrams.String() != "240" ||
+		decoded.Products[0].SalePriceSource == nil || *decoded.Products[0].SalePriceSource != salePrice {
+		t.Fatalf("canonical transport changed a valid priced zero-stock product: %+v", decoded.Products[0])
 	}
 	text := string(body)
 	for _, forbidden := range []string{"\"records\"", "Sharh1", "must-not-cross", "FOROSH", "KHARYD", "ALLANBAR"} {
@@ -306,10 +318,15 @@ func TestDispatchProductSyncTerminalDeferredProductsDoNotRetry(t *testing.T) {
 	if err != nil {
 		t.Fatalf("terminal deferred reconciliation was rejected: %v", err)
 	}
-	if attempts != 1 || result.Attempts != 1 || result.Retryable || result.PendingProducts != 0 || result.DeferredProducts != 781 {
+	if attempts != 1 || result.Attempts != 1 || result.Retryable ||
+		result.PendingProducts != 0 || result.DeferredProducts != 781 ||
+		result.DeferredMissing != 780 || result.DeferredAmbiguous != 1 {
 		t.Fatalf("terminal deferred reconciliation triggered a retry: attempts=%d result=%+v", attempts, result)
 	}
-	if summary := result.DiagnosticSummary(); !strings.Contains(summary, "deferred_products=781") || strings.Contains(summary, "kala.db") || strings.Contains(summary, "SENSITIVE") {
+	if summary := result.DiagnosticSummary(); !strings.Contains(summary, "deferred_products=781") ||
+		!strings.Contains(summary, "deferred_missing=780") ||
+		!strings.Contains(summary, "deferred_ambiguous=1") ||
+		strings.Contains(summary, "kala.db") || strings.Contains(summary, "SENSITIVE") {
 		t.Fatalf("diagnostic summary was incomplete or exposed source data: %s", summary)
 	}
 }
