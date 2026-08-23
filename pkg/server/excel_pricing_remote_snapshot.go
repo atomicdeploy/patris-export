@@ -21,10 +21,10 @@ import (
 )
 
 const (
-	excelPricingRemoteSnapshotRequestSchema = "digitalogic.pricing-snapshot-request/v1"
-	excelPricingRemoteSnapshotBuildSchema   = "digitalogic.pricing-snapshot-build/v1"
-	excelPricingRemoteSnapshotPayloadSchema = "digitalogic.pricing-snapshot/v1"
-	excelPricingRemoteSnapshotEventSchema   = "digitalogic.pricing-snapshot-build-event/v1"
+	excelPricingRemoteSnapshotRequestSchema = "digitalogic.pricing-snapshot-request"
+	excelPricingRemoteSnapshotBuildSchema   = "digitalogic.pricing-snapshot-build"
+	excelPricingRemoteSnapshotPayloadSchema = "digitalogic.pricing-snapshot"
+	excelPricingRemoteSnapshotEventSchema   = "digitalogic.pricing-snapshot-build-event"
 
 	excelPricingRemoteSnapshotMaxResponseBytes = 32 << 20
 	excelPricingRemoteSnapshotTerminalHistory  = 256
@@ -38,55 +38,6 @@ var (
 
 	excelPricingRemoteSnapshotIdentifierPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$`)
 )
-
-var excelPricingRemoteSnapshotExcelV1Fields = []string{
-	"sync_key",
-	"reconciliation_status",
-	"patris_code",
-	"woocommerce_id",
-	"parent_id",
-	"product_type",
-	"publication_status",
-	"name",
-	"part_number",
-	"sku",
-	"categories",
-	"category_ids",
-	"currency",
-	"regular_price",
-	"sale_price",
-	"effective_price",
-	"patris_final_price",
-	"price_status",
-	"stock_quantity",
-	"stock_status",
-	"patris_total_stock",
-	"patris_minimum_stock",
-	"patris_location",
-	"weight_grams",
-	"woocommerce_weight",
-	"woocommerce_weight_unit",
-	"foreign_price",
-	"foreign_currency",
-	"partner_price_irr",
-	"price_source_amount",
-	"price_source_currency",
-	"price_source_kind",
-	"price_rounding_digits",
-	"price_rounding_mode",
-	"shipping_method_id",
-	"shipping_method_name_en",
-	"shipping_method_name_fa",
-	"shipping_price_per_kg",
-	"shipping_price_per_kg_currency",
-	"profit_margin_percent",
-	"permalink",
-	"image_url",
-	"updated_at",
-	"sync_status",
-	"sync_error",
-	"record_revision",
-}
 
 type excelPricingRemoteSnapshotEndpoints struct {
 	baseURL      *url.URL
@@ -120,7 +71,6 @@ type excelPricingRemoteSnapshotRevision struct {
 
 type excelPricingRemoteSnapshotTerminalEvent struct {
 	Schema               string           `json:"schema"`
-	SchemaVersion        int              `json:"schema_version"`
 	BuildID              string           `json:"build_id"`
 	RequestID            string           `json:"request_id"`
 	Status               string           `json:"status"`
@@ -144,7 +94,7 @@ type excelPricingRemoteSnapshotTerminalSubscription interface {
 }
 
 // excelPricingRemoteSnapshotTerminalSource must be fed only after the
-// digitalogic.pricing.v1 WebSocket handshake and frame validation succeed.
+// digitalogic.pricing WebSocket handshake and frame validation succeed.
 // Keeping this dependency mandatory makes cold snapshot activation fail closed
 // until WordPress publishes a durable, replayable terminal event.
 type excelPricingRemoteSnapshotTerminalSource interface {
@@ -174,7 +124,6 @@ type excelPricingRemoteSnapshotHubSubscription struct {
 
 type excelPricingRemoteSnapshotStartRequest struct {
 	Schema                string           `json:"schema"`
-	SchemaVersion         int              `json:"schema_version"`
 	Operation             string           `json:"operation"`
 	ClientID              string           `json:"client_id"`
 	Channel               string           `json:"channel"`
@@ -189,7 +138,6 @@ type excelPricingRemoteSnapshotStartRequest struct {
 
 type excelPricingRemoteSnapshotBuildResponse struct {
 	Schema               string           `json:"schema"`
-	SchemaVersion        int              `json:"schema_version"`
 	BuildID              string           `json:"build_id"`
 	RequestID            string           `json:"request_id"`
 	Status               string           `json:"status"`
@@ -241,7 +189,6 @@ type excelPricingRemoteSnapshotCatalog struct {
 
 type excelPricingRemoteSnapshotPayload struct {
 	Schema                string                                  `json:"schema"`
-	SchemaVersion         int                                     `json:"schema_version"`
 	Projection            string                                  `json:"projection"`
 	ProjectionSchema      string                                  `json:"projection_schema"`
 	SnapshotToken         string                                  `json:"snapshot_token"`
@@ -407,7 +354,7 @@ func (hub *excelPricingRemoteSnapshotTerminalHub) Subscribe(
 }
 
 // publishAuthenticated accepts only a frame already authenticated by the
-// digitalogic.pricing.v1 transport. No raw WebSocket body or credential enters
+// digitalogic.pricing transport. No raw WebSocket body or credential enters
 // the hub, and the monotonically increasing event ID is enforced here.
 func (hub *excelPricingRemoteSnapshotTerminalHub) publishAuthenticated(
 	event excelPricingRemoteSnapshotTerminalEvent,
@@ -583,8 +530,9 @@ func (client *excelPricingRemoteSnapshotClient) fetchRevision(
 		return excelPricingRemoteSnapshotRevision{}, errExcelPricingRemoteSnapshotProtocol
 	}
 	var payload excelPricingRemoteRevisionResponse
-	if json.Unmarshal(body, &payload) != nil || payload.Schema != excelPricingRemoteRevisionSchema ||
-		payload.SchemaVersion != 1 || payload.Projection != excelPricingRemoteProjection ||
+	if excelPricingEnvelopeHasRemovedSchemaVersion(body) ||
+		json.Unmarshal(body, &payload) != nil || payload.Schema != excelPricingRemoteRevisionSchema ||
+		payload.Projection != excelPricingRemoteProjection ||
 		payload.ProjectionSchema != excelPricingRemoteProjectionSchema || payload.Source != client.source ||
 		payload.Locale != "fa" || payload.PageSize != excelPricingSnapshotPageSize ||
 		!validExcelPricingRemoteRevisionParts(payload.StateRevision, payload.CatalogRevision,
@@ -612,7 +560,6 @@ func (client *excelPricingRemoteSnapshotClient) startSnapshot(
 ) (excelPricingRemoteSnapshotBuildResponse, int, error) {
 	payload := excelPricingRemoteSnapshotStartRequest{
 		Schema:                excelPricingRemoteSnapshotRequestSchema,
-		SchemaVersion:         1,
 		Operation:             "snapshot",
 		ClientID:              "patris-export",
 		Channel:               excelPricingContractChannel,
@@ -655,7 +602,8 @@ func (client *excelPricingRemoteSnapshotClient) startSnapshot(
 		return excelPricingRemoteSnapshotBuildResponse{}, response.StatusCode, errExcelPricingRemoteSnapshotProtocol
 	}
 	var build excelPricingRemoteSnapshotBuildResponse
-	if json.Unmarshal(responseBody, &build) != nil ||
+	if excelPricingEnvelopeHasRemovedSchemaVersion(responseBody) ||
+		json.Unmarshal(responseBody, &build) != nil ||
 		validateExcelPricingRemoteSnapshotBuild(build, response.StatusCode, requestID, client.source, revision) != nil {
 		return excelPricingRemoteSnapshotBuildResponse{}, response.StatusCode, errExcelPricingRemoteSnapshotProtocol
 	}
@@ -705,14 +653,14 @@ func (client *excelPricingRemoteSnapshotClient) fetchSnapshot(
 		return nil, errExcelPricingRemoteSnapshotProtocol
 	}
 	var payload excelPricingRemoteSnapshotPayload
-	if json.Unmarshal(body, &payload) != nil {
+	if excelPricingEnvelopeHasRemovedSchemaVersion(body) || json.Unmarshal(body, &payload) != nil {
 		return nil, errExcelPricingRemoteSnapshotProtocol
 	}
 	etag := strings.TrimSpace(response.Header.Get("ETag"))
 	if err := validateExcelPricingRemoteSnapshotPayload(payload, build, revision, client.source, etag); err != nil {
 		return nil, err
 	}
-	projected, fields, err := projectExcelPricingSnapshotRows(payload.Catalog.Rows, excelPricingSnapshotProjectionExcelV1)
+	projected, fields, err := projectExcelPricingSnapshotRows(payload.Catalog.Rows, excelPricingSnapshotProjectionExcel)
 	if err != nil {
 		return nil, errExcelPricingRemoteSnapshotIntegrity
 	}
@@ -770,7 +718,6 @@ func (client *excelPricingRemoteSnapshotClient) setSourceQuery(query url.Values)
 	query.Set("source_revision", client.source.Revision)
 	query.Set("locale", "fa")
 	query.Set("page_size", strconv.Itoa(excelPricingSnapshotPageSize))
-	query.Set("schema_version", "1")
 }
 
 func (client *excelPricingRemoteSnapshotClient) endpointURL(path string) *url.URL {
@@ -808,7 +755,6 @@ func (client *excelPricingRemoteSnapshotClient) allowedRemoteURL(
 		"source_revision": client.source.Revision,
 		"locale":          "fa",
 		"page_size":       strconv.Itoa(excelPricingSnapshotPageSize),
-		"schema_version":  "1",
 	}
 	for key, values := range query {
 		expected, ok := allowed[key]
@@ -826,7 +772,7 @@ func validateExcelPricingRemoteSnapshotBuild(
 	source canonical.Source,
 	revision excelPricingRemoteSnapshotRevision,
 ) error {
-	if build.Schema != excelPricingRemoteSnapshotBuildSchema || build.SchemaVersion != 1 ||
+	if build.Schema != excelPricingRemoteSnapshotBuildSchema ||
 		!excelPricingRemoteSnapshotIdentifierPattern.MatchString(build.BuildID) ||
 		build.RequestID != requestID || build.Source != source || build.Locale != "fa" ||
 		build.StateRevision != revision.StateRevision ||
@@ -852,7 +798,7 @@ func validateExcelPricingRemoteSnapshotBuild(
 func validateExcelPricingRemoteSnapshotTerminalEvent(
 	event excelPricingRemoteSnapshotTerminalEvent,
 ) error {
-	if event.Schema != excelPricingRemoteSnapshotEventSchema || event.SchemaVersion != 1 ||
+	if event.Schema != excelPricingRemoteSnapshotEventSchema ||
 		event.EventID == 0 || !excelPricingRemoteSnapshotIdentifierPattern.MatchString(event.BuildID) ||
 		!excelPricingRemoteSnapshotIdentifierPattern.MatchString(event.RequestID) ||
 		!validExcelPricingRemoteSource(event.Source) ||
@@ -901,7 +847,7 @@ func validateExcelPricingRemoteSnapshotPayload(
 	source canonical.Source,
 	etag string,
 ) error {
-	if payload.Schema != excelPricingRemoteSnapshotPayloadSchema || payload.SchemaVersion != 1 ||
+	if payload.Schema != excelPricingRemoteSnapshotPayloadSchema ||
 		payload.Projection != excelPricingRemoteProjection ||
 		payload.ProjectionSchema != excelPricingRemoteProjectionSchema ||
 		payload.SnapshotToken != build.SnapshotToken || payload.Source != source ||
@@ -982,10 +928,10 @@ func validateExcelPricingRemoteSnapshotColumns(raw json.RawMessage) error {
 	if len(raw) == 0 || json.Unmarshal(raw, &columns) != nil {
 		return errExcelPricingRemoteSnapshotIntegrity
 	}
-	if len(columns) != len(excelPricingRemoteSnapshotExcelV1Fields) {
+	if len(columns) != len(excelPricingSnapshotExcelRowFields) {
 		return errExcelPricingRemoteSnapshotIntegrity
 	}
-	for index, expected := range excelPricingRemoteSnapshotExcelV1Fields {
+	for index, expected := range excelPricingSnapshotExcelRowFields {
 		if excelPricingSnapshotString(columns[index]["key"]) != expected {
 			return errExcelPricingRemoteSnapshotIntegrity
 		}
@@ -1025,8 +971,8 @@ func validateExcelPricingRemoteSnapshotRows(
 	}
 	seen := make(map[string]struct{}, len(rows))
 	observed := excelPricingRemoteSnapshotReconcileCounts{}
-	expectedFields := make(map[string]struct{}, len(excelPricingRemoteSnapshotExcelV1Fields))
-	for _, field := range excelPricingRemoteSnapshotExcelV1Fields {
+	expectedFields := make(map[string]struct{}, len(excelPricingSnapshotExcelRowFields))
+	for _, field := range excelPricingSnapshotExcelRowFields {
 		expectedFields[field] = struct{}{}
 	}
 	for _, raw := range rows {
@@ -1113,7 +1059,6 @@ func verifyExcelPricingRemoteSnapshotDigests(payload excelPricingRemoteSnapshotP
 		return errExcelPricingRemoteSnapshotIntegrity
 	}
 	snapshotBody, _ := marshalExcelPricingRemoteSnapshotJSON(struct {
-		SchemaVersion         int               `json:"schema_version"`
 		StateRevision         string            `json:"state_revision"`
 		PricingStateRevision  string            `json:"pricing_state_revision"`
 		PricingPolicyRevision string            `json:"pricing_policy_revision"`
@@ -1127,7 +1072,7 @@ func verifyExcelPricingRemoteSnapshotDigests(payload excelPricingRemoteSnapshotP
 		PageDigests           []string          `json:"page_digests"`
 		Rows                  []json.RawMessage `json:"rows"`
 	}{
-		1, payload.StateRevision, payload.PricingStateRevision,
+		payload.StateRevision, payload.PricingStateRevision,
 		payload.PricingPolicyRevision, payload.CatalogRevision, payload.DatasetRevision,
 		payload.Source, payload.Catalog.Locale, payload.Catalog.Columns,
 		payload.Reconciliation, payload.Settings, payload.PageDigests, payload.Catalog.Rows,

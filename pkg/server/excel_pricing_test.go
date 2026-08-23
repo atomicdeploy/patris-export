@@ -178,7 +178,7 @@ func TestExcelPricingStateRequiresExpectedSourceIdentity(t *testing.T) {
 	invalidRevision := excelPricingStateSourceForTest()
 	invalidRevision.Revision = "SHA256:" + strings.Repeat("A", 64)
 	for name, body := range map[string]string{
-		"missing":          `{"schema":"patris.excel-pricing-companion-request/v1","schema_version":1,"operation":"state","page":1,"limit":1,"locale":"fa"}`,
+		"missing":          `{"schema":"patris.excel-pricing-companion-request","operation":"state","page":1,"limit":1,"locale":"fa"}`,
 		"wrong ID":         validExcelPricingStateBody(mismatched, 1, 1),
 		"wrong dataset":    validExcelPricingStateBody(wrongDataset, 1, 1),
 		"invalid revision": validExcelPricingStateBody(invalidRevision, 1, 1),
@@ -263,7 +263,6 @@ func TestExcelPricingPreviewPreservesOptimisticHeadersAndRejectsDrift(t *testing
 		}
 		expected := map[string]interface{}{
 			"schema":                  excelPricingRemoteRequestSchema,
-			"schema_version":          float64(1),
 			"operation":               "preview",
 			"client_id":               excelPricingContractClientID,
 			"channel":                 excelPricingContractChannel,
@@ -779,6 +778,17 @@ func TestExcelPricingRemoteErrorsAndRedirectsAreSecretSafe(t *testing.T) {
 	}
 }
 
+func TestExcelPricingLivingEnvelopeRejectsRemovedSchemaVersionField(t *testing.T) {
+	if excelPricingEnvelopeHasRemovedSchemaVersion([]byte(`{"schema":"digitalogic.pricing-sync-state"}`)) {
+		t.Fatal("Living envelope without the removed field was rejected")
+	}
+	if !excelPricingEnvelopeHasRemovedSchemaVersion(
+		[]byte(`{"schema":"digitalogic.pricing-sync-state","schema_version":1}`),
+	) {
+		t.Fatal("removed schema field was accepted")
+	}
+}
+
 func TestExcelPricingRejectsNonJSONRemoteSuccess(t *testing.T) {
 	remote := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html")
@@ -965,7 +975,6 @@ func authenticatedExcelPricingRequest(method, path, body, token string) *http.Re
 func validExcelPricingMutationBody(operation, idempotency, stateRevision, previewDigest, confirmation string) string {
 	payload := map[string]interface{}{
 		"schema":                  excelPricingLocalRequestSchema,
-		"schema_version":          1,
 		"operation":               operation,
 		"client_id":               excelPricingContractClientID,
 		"channel":                 excelPricingContractChannel,
@@ -1013,16 +1022,15 @@ func bindExcelPricingPreviewForTest(t *testing.T, server *Server, applyBody stri
 
 func validExcelPricingStateBody(source canonical.Source, page, limit int) string {
 	payload := map[string]interface{}{
-		"schema":         excelPricingLocalRequestSchema,
-		"schema_version": 1,
-		"operation":      "state",
-		"client_id":      excelPricingContractClientID,
-		"channel":        excelPricingContractChannel,
-		"request_id":     "excel-state-test-0001",
-		"source":         source,
-		"page":           page,
-		"limit":          limit,
-		"locale":         "fa",
+		"schema":     excelPricingLocalRequestSchema,
+		"operation":  "state",
+		"client_id":  excelPricingContractClientID,
+		"channel":    excelPricingContractChannel,
+		"request_id": "excel-state-test-0001",
+		"source":     source,
+		"page":       page,
+		"limit":      limit,
+		"locale":     "fa",
 	}
 	encoded, _ := json.Marshal(payload)
 	return string(encoded)

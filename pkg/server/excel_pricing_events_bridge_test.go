@@ -463,7 +463,6 @@ func TestExcelPricingRemoteEventsBridgeRetainsSnapshotTerminalBeforeCursorAck(t 
 	snapshotRevision := excelPricingRemoteTestRevision("f")
 	event := excelPricingRemoteSnapshotTerminalEvent{
 		Schema:               excelPricingRemoteSnapshotEventSchema,
-		SchemaVersion:        1,
 		BuildID:              "snapshot-terminal-build-0001",
 		RequestID:            requestID,
 		Status:               "ready",

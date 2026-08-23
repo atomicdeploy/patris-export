@@ -67,7 +67,7 @@ func TestExcelPricingRemoteSnapshotReadyUsesOneBulkFetchWithoutStatusPolling(t *
 		t.Fatal("composite snapshot identity was conflated with the pricing mutation guard")
 	}
 	if len(result.Rows) != 1 || len(result.ProjectedRows) != 1 ||
-		len(result.ProjectedRowFields) != len(excelPricingSnapshotExcelV1RowFields) {
+		len(result.ProjectedRowFields) != len(excelPricingSnapshotExcelRowFields) {
 		t.Fatalf("projection sizes = rows:%d projected:%d fields:%d",
 			len(result.Rows), len(result.ProjectedRows), len(result.ProjectedRowFields))
 	}
@@ -75,12 +75,66 @@ func TestExcelPricingRemoteSnapshotReadyUsesOneBulkFetchWithoutStatusPolling(t *
 	if err := json.Unmarshal(result.ProjectedRows[0], &projected); err != nil {
 		t.Fatalf("projected row: %v", err)
 	}
-	if len(projected) != len(excelPricingSnapshotExcelV1RowFields) ||
+	if len(projected) != len(excelPricingSnapshotExcelRowFields) ||
 		excelPricingSnapshotString(projected[0]) != "woo:101" ||
 		excelPricingSnapshotString(projected[19]) != "محصول آزمایشی" {
 		t.Fatalf("projected row = %s", result.ProjectedRows[0])
 	}
 	fixture.assertCalls(t, 1, 1, 1, 0, 0)
+}
+
+func TestExcelPricingRemoteSnapshotAcceptsReviewed1093RowReconciliationFixture(t *testing.T) {
+	fixture := newExcelPricingRemoteSnapshotFixture(t, "ready")
+	defer fixture.Close()
+
+	const (
+		matched                 = 838
+		patrisOnly              = 124
+		wooOnly                 = 131
+		variableParentsExcluded = 15
+	)
+	rows := make([]json.RawMessage, 0, matched+patrisOnly+wooOnly)
+	for index := 0; index < matched+patrisOnly+wooOnly; index++ {
+		row := make(map[string]interface{}, len(excelPricingSnapshotExcelRowFields))
+		for _, field := range excelPricingSnapshotExcelRowFields {
+			row[field] = nil
+		}
+		switch {
+		case index < matched:
+			row["sync_key"] = "woo:" + strconv.Itoa(index+1)
+			row["reconciliation_status"] = "matched"
+		case index < matched+patrisOnly:
+			row["sync_key"] = "patris:" + strconv.Itoa(index+1)
+			row["reconciliation_status"] = "patris_only"
+		default:
+			row["sync_key"] = "woo:" + strconv.Itoa(index+1)
+			row["reconciliation_status"] = "woo_only"
+		}
+		rows = append(rows, mustMarshalExcelPricingRemoteSnapshotTestJSON(t, row))
+	}
+	fixture.payload.Catalog.Rows = rows
+	reconciliation := fixture.reconciliationBody(matched, patrisOnly, wooOnly, nil)
+	fixture.payload.Reconciliation = reconciliation
+	fixture.payload.Catalog.Reconciliation = reconciliation
+	fixture.setReconciliationCount("woocommerce_raw", matched+wooOnly+variableParentsExcluded)
+	fixture.setReconciliationCount("variable_parents_excluded", variableParentsExcluded)
+	fixture.finalizePayload()
+
+	result, err := fixture.Client(t).Collect(context.Background(), fixture.requestID, 60)
+	if err != nil {
+		t.Fatalf("Collect() error = %v", err)
+	}
+	if len(result.Rows) != 1093 || len(result.ProjectedRows) != 1093 ||
+		len(result.ProjectedRowFields) != 26 {
+		t.Fatalf(
+			"Living fixture rows=%d projected=%d fields=%d",
+			len(result.Rows),
+			len(result.ProjectedRows),
+			len(result.ProjectedRowFields),
+		)
+	}
+	fixture.assertCalls(t, 1, 1, 1, 0, 0)
+	fixture.assertNoLegacyStateCalls(t)
 }
 
 func TestExcelPricingRemoteSnapshotColdTerminalEventCannotRacePOST(t *testing.T) {
@@ -130,7 +184,7 @@ func TestExcelPricingSnapshotProductionCollectorUsesBulkAndPreservesCompositeIde
 				"fa",
 				0,
 				expected,
-				excelPricingSnapshotProjectionExcelV1,
+				excelPricingSnapshotProjectionExcel,
 			),
 			token,
 		)
@@ -174,8 +228,8 @@ func TestExcelPricingSnapshotProductionCollectorUsesBulkAndPreservesCompositeIde
 		t.Fatal(err)
 	}
 	if payload.StateRevision != fixture.revision.StateRevision ||
-		payload.Projection != excelPricingSnapshotProjectionExcelV1 ||
-		len(payload.RowFields) != len(excelPricingSnapshotExcelV1RowFields) ||
+		payload.Projection != excelPricingSnapshotProjectionExcel ||
+		len(payload.RowFields) != len(excelPricingSnapshotExcelRowFields) ||
 		payload.MutationGuard.ExpectedStateRevision != fixture.revision.StateRevision ||
 		adaptedState.StateRevision != fixture.revision.StateRevision ||
 		adaptedState.PricingStateRevision != fixture.revision.PricingStateRevision ||
@@ -534,7 +588,6 @@ func newExcelPricingRemoteSnapshotFixture(t *testing.T, mode string) *excelPrici
 	}
 	fixture.revision = excelPricingRemoteRevisionResponse{
 		Schema:                excelPricingRemoteRevisionSchema,
-		SchemaVersion:         1,
 		Projection:            excelPricingRemoteProjection,
 		ProjectionSchema:      excelPricingRemoteProjectionSchema,
 		StateRevision:         testExcelPricingRevision('2'),
@@ -695,7 +748,7 @@ func (fixture *excelPricingRemoteSnapshotFixture) validSourceQuery(query url.Val
 		query.Get("source_revision") == fixture.source.Revision &&
 		query.Get("locale") == "fa" &&
 		query.Get("page_size") == strconv.Itoa(excelPricingSnapshotPageSize) &&
-		query.Get("schema_version") == "1"
+		query.Get("schema_version") == ""
 }
 
 func (fixture *excelPricingRemoteSnapshotFixture) buildResponse() excelPricingRemoteSnapshotBuildResponse {
@@ -705,7 +758,6 @@ func (fixture *excelPricingRemoteSnapshotFixture) buildResponse() excelPricingRe
 	}
 	return excelPricingRemoteSnapshotBuildResponse{
 		Schema:               excelPricingRemoteSnapshotBuildSchema,
-		SchemaVersion:        1,
 		BuildID:              fixture.buildID,
 		RequestID:            fixture.currentRequestID(),
 		Status:               "ready",
@@ -727,7 +779,6 @@ func (fixture *excelPricingRemoteSnapshotFixture) buildResponse() excelPricingRe
 func (fixture *excelPricingRemoteSnapshotFixture) terminalEvent(eventID uint64) excelPricingRemoteSnapshotTerminalEvent {
 	return excelPricingRemoteSnapshotTerminalEvent{
 		Schema:               excelPricingRemoteSnapshotEventSchema,
-		SchemaVersion:        1,
 		BuildID:              fixture.buildID,
 		RequestID:            fixture.currentRequestID(),
 		Status:               "ready",
@@ -759,9 +810,9 @@ func (fixture *excelPricingRemoteSnapshotFixture) sourceQuery() string {
 }
 
 func (fixture *excelPricingRemoteSnapshotFixture) basePayload() excelPricingRemoteSnapshotPayload {
-	columns := make([]map[string]json.RawMessage, len(excelPricingRemoteSnapshotExcelV1Fields))
-	row := make(map[string]interface{}, len(excelPricingRemoteSnapshotExcelV1Fields))
-	for index, field := range excelPricingRemoteSnapshotExcelV1Fields {
+	columns := make([]map[string]json.RawMessage, len(excelPricingSnapshotExcelRowFields))
+	row := make(map[string]interface{}, len(excelPricingSnapshotExcelRowFields))
+	for index, field := range excelPricingSnapshotExcelRowFields {
 		columns[index] = map[string]json.RawMessage{"key": json.RawMessage(strconv.Quote(field))}
 		row[field] = nil
 	}
@@ -801,7 +852,6 @@ func (fixture *excelPricingRemoteSnapshotFixture) basePayload() excelPricingRemo
 	createdAt := time.Now().UTC().Add(-time.Minute)
 	return excelPricingRemoteSnapshotPayload{
 		Schema:                excelPricingRemoteSnapshotPayloadSchema,
-		SchemaVersion:         1,
 		Projection:            excelPricingRemoteProjection,
 		ProjectionSchema:      excelPricingRemoteProjectionSchema,
 		SnapshotToken:         "snap_0000000000000001",
@@ -903,7 +953,6 @@ func (fixture *excelPricingRemoteSnapshotFixture) finalizePayload() {
 		mustMarshalExcelPricingRemoteSnapshotTestJSON(fixture.t, payload.MutationGuard),
 	})
 	snapshotBody := mustMarshalExcelPricingRemoteSnapshotTestJSON(fixture.t, struct {
-		SchemaVersion         int               `json:"schema_version"`
 		StateRevision         string            `json:"state_revision"`
 		PricingStateRevision  string            `json:"pricing_state_revision"`
 		PricingPolicyRevision string            `json:"pricing_policy_revision"`
@@ -917,7 +966,7 @@ func (fixture *excelPricingRemoteSnapshotFixture) finalizePayload() {
 		PageDigests           []string          `json:"page_digests"`
 		Rows                  []json.RawMessage `json:"rows"`
 	}{
-		1, payload.StateRevision, payload.PricingStateRevision,
+		payload.StateRevision, payload.PricingStateRevision,
 		payload.PricingPolicyRevision, payload.CatalogRevision, payload.DatasetRevision,
 		payload.Source, payload.Catalog.Locale, payload.Catalog.Columns,
 		payload.Reconciliation, payload.Settings, payload.PageDigests, payload.Catalog.Rows,

@@ -7,36 +7,41 @@ credential.
 
 ## Local loopback contract
 
-All routes are `POST` and accept JSON only:
+The Living loopback surface is:
 
 ```text
-/api/pricing-sync/session
-/api/pricing-sync/state
-/api/pricing-sync/preview
-/api/pricing-sync/apply
+POST   /api/pricing-sync/session
+POST   /api/pricing-sync/state
+POST   /api/pricing-sync/preview
+POST   /api/pricing-sync/apply
+POST   /api/pricing-sync/snapshots
+GET    /api/pricing-sync/snapshots/{job_id}?wait=terminal
+GET    /api/pricing-sync/snapshots/{job_id}/payload
+DELETE /api/pricing-sync/snapshots/{job_id}
+GET    /api/pricing-sync/events
 ```
 
-These four generalized routes are the complete local pricing surface. No
-client-specific alias prefix is registered; unknown prefixes return `404`.
+No versioned dialect or client-specific alias is registered. Removed schema,
+projection, and route variants fail closed instead of being translated.
 
 The session route accepts `{}` and returns:
 
 ```json
 {
-  "schema": "patris.excel-pricing-companion-session/v1",
+  "schema": "patris.excel-pricing-companion-session",
   "csrf_token": "opaque-43-character-value",
   "expires_at": "2026-07-26T18:10:00Z"
 }
 ```
 
 Every call sends `X-Patris-Excel-Client:
-digitalogic-price-calculator/v1`. State, preview, and apply also send the
+digitalogic-price-calculator`. State, preview, and apply also send the
 short-lived token in `X-Patris-Excel-CSRF-Token`. The token is stored only as a
 SHA-256 hash in memory, expires after ten minutes, and is never a remote
 credential.
 
-One session/CSRF token and one revision-pinned state snapshot are reused across
-the bounded state pages. A pristine template schedules refresh-on-open after a
+One session/CSRF token and one immutable snapshot are reused for each import.
+A pristine template schedules refresh-on-open after a
 short delay so every normal open becomes populated without blocking cell,
 keyboard, or Esc input. The visible sync button remains available for an
 explicit reload. Network waits are asynchronous and pump the Excel message loop. The workbook
@@ -46,11 +51,10 @@ reconcile, pricing computation, batch table write, hyperlink/formatting, Excel
 calculation, and save. Existing progress messages, request timeouts, and
 no-hard-failure refresh behavior remain in force.
 
-The observed pre-change baseline was 1,092 rows over five state pages with
-about 110 seconds in server fetch. The state route now validates the workbook's
-already-fetched canonical source identity without rebuilding the canonical
-catalog for each page; only the required five paged receiver calls remain.
-Rows are accumulated once in the cached in-memory snapshot, then written to
+The previous paged baseline required repeated full projections. The current
+remote contract computes the reconciled projection once for one exact composite
+revision, caches it immutably, and serves one 26-field `excel` payload. Rows are
+validated once in the cached in-memory snapshot, then written to
 the Products and SyncData tables as arrays before role-level formatting. The
 per-page and total timers make the next controlled run comparable without
 claiming a production improvement before deployment.
@@ -64,15 +68,14 @@ responses to 4 MiB.
 ## Local request schema
 
 The workbook uses the local adapter schema
-`patris.excel-pricing-companion-request/v1`. The adapter validates it and maps
-it to Digitalogic's universal `digitalogic.pricing-sync-request/v1` contract,
+`patris.excel-pricing-companion-request`. The adapter validates it and maps
+it to Digitalogic's Living `digitalogic.pricing-sync-request` contract,
 adding only the protected credential and verified current Patris catalog
 identity. State uses:
 
 ```json
 {
-  "schema": "patris.excel-pricing-companion-request/v1",
-  "schema_version": 1,
+  "schema": "patris.excel-pricing-companion-request",
   "operation": "state",
   "client_id": "digitalogic-price-calculator",
   "channel": "excel-workbook",
@@ -93,8 +96,7 @@ must equal the body value and `If-Match` must contain the quoted body revision.
 
 ```json
 {
-  "schema": "patris.excel-pricing-companion-request/v1",
-  "schema_version": 1,
+  "schema": "patris.excel-pricing-companion-request",
   "operation": "preview",
   "client_id": "digitalogic-price-calculator",
   "channel": "excel-workbook",
@@ -121,8 +123,7 @@ digest plus explicit confirmation:
 
 ```json
 {
-  "schema": "patris.excel-pricing-companion-request/v1",
-  "schema_version": 1,
+  "schema": "patris.excel-pricing-companion-request",
   "operation": "apply",
   "client_id": "digitalogic-price-calculator",
   "channel": "excel-workbook",
@@ -164,11 +165,10 @@ same-origin WordPress routes:
 ```
 
 It reads the credential named by `send_updates.product_sync_secret_env` and
-injects it as `X-Patris-Product-Sync-Secret`. For read-only state paging, the
-workbook forwards the source identity it just fetched from the local
-`/api/product-sync` contract; the companion accepts it only when its ID and
-dataset exactly match the configured local canonical source. This avoids
-rebuilding the full catalog for every state page. Preview and apply never
+injects it as `X-Patris-Product-Sync-Secret`. Snapshot and revision requests
+carry the exact source identity fetched from the local `/api/product-sync`
+contract; the companion accepts it only when its ID, dataset, and revision
+match the configured canonical source. Preview and apply never
 accept a workbook-supplied source: the companion materializes a fresh canonical
 `patris.product-sync` contract and injects its exact `{id,dataset,revision}`.
 The workbook cannot provide or override the remote credential.
@@ -184,11 +184,11 @@ and transport errors are not logged or copied into local errors.
 
 Successful responses preserve Digitalogic's schemas:
 
-- `digitalogic.pricing-sync-state/v1`
-- `digitalogic.pricing-sync-preview/v1`
-- `digitalogic.pricing-sync-apply/v1`
+- `digitalogic.pricing-sync-state`
+- `digitalogic.pricing-sync-preview`
+- `digitalogic.pricing-sync-apply`
 
-For state paging, `state.catalog.dataset` is
+For the immutable snapshot, `state.catalog.dataset` is
 `reconciled_products`. The catalog envelope carries one stable
 `dataset_revision`, a per-page `page_revision`, explicit reconciliation
 counts, and rows from the complete
@@ -200,17 +200,16 @@ with Google Sheets:
 - `matched`, `patris_only`, `woo_only`, or `ambiguous` as
   `reconciliation_status`.
 
-The workbook consumes this projection directly and does not repeat the join.
+The workbook consumes the single `excel` projection directly and does not
+repeat the join. Its rows have exactly the 26 scalar fields declared by
+`row_fields`; no public full projection exists.
 Only global settings are writable from this template. An ambiguous catalog
 identity, an invalid per-page revision, or reconciliation counts that disagree
 with the returned rows is a hard failure. Across pages it also requires one
 unchanged dataset revision, source revision, ordered column-key list, total,
-page size, page count, and count document. A recognized cross-page snapshot
-drift discards all fetched pages and retries the full snapshot once; deterministic
-transport, schema, and integrity failures are not retried. No partial catalog is
-imported. Every supplied submitted, current, and reconciliation-source revision
-must agree with the local Patris contract; the legacy source revision remains a
-compatibility fallback when the newer current/reconciliation fields are absent.
+page size, page count, and count document. Deterministic transport, schema, and
+integrity failures are not imported. Every supplied source, catalog, pricing,
+policy, snapshot, and state revision must agree with the local Patris contract.
 Any backend `product_type_cache_drift*` or `projection_integrity*` warning in
 state/catalog metadata aborts the entire import before product rows are used.
 The bounded recursive warning scan covers metadata objects and arrays, including

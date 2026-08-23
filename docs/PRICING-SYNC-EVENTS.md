@@ -9,7 +9,7 @@ Microsoft Excel.
 All routes are loopback-only and require the existing companion session:
 
 1. `POST /api/pricing-sync/session` with JSON `{}` and
-   `X-Patris-Excel-Client: digitalogic-price-calculator/v1`.
+   `X-Patris-Excel-Client: digitalogic-price-calculator`.
 2. Keep the returned CSRF token only in process memory.
 3. Send the client header and the token in the existing CSRF header on every
    snapshot, wait, payload, cancel, and event request.
@@ -62,7 +62,7 @@ Request:
 ```http
 GET /api/pricing-sync/events HTTP/1.1
 Accept: text/event-stream
-X-Patris-Excel-Client: digitalogic-price-calculator/v1
+X-Patris-Excel-Client: digitalogic-price-calculator
 X-Patris-Excel-CSRF-Token: <in-memory session token>
 Last-Event-ID: <optional unsigned decimal cursor>
 ```
@@ -80,7 +80,7 @@ retry: 1000
 ```
 
 Every data frame has one unique, strictly increasing numeric `id`. The event
-schema is `patris.pricing-state-event/v1`. Internal one-second job heartbeats
+schema is `patris.pricing-state-event`. Internal one-second job heartbeats
 do not create data frames; idle connections receive only a comment keepalive
 every 15 seconds.
 
@@ -125,7 +125,7 @@ source/state identity.
 ## Upstream WordPress delivery status
 
 `pkg/server/excel_pricing_events_client.go` implements the authenticated
-`digitalogic.pricing.v1` WordPress WebSocket consumer, conditional composite
+`digitalogic.pricing` WordPress WebSocket consumer, conditional composite
 revision validation, and the `pricing.snapshot.build.terminal` callback used by
 the remote bulk waiter. The server wiring is active only for a valid protected
 remote configuration. This source contract does not prove that the matching

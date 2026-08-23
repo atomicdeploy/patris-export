@@ -38,7 +38,7 @@ func excelPricingRemoteTestConfig(t *testing.T, baseURL string) updateout.Config
 	t.Setenv("PATRIS_PRICING_EVENTS_TEST_SECRET", excelPricingRemoteTestSecret)
 	return updateout.Config{
 		Enabled:              true,
-		URL:                  baseURL + "/wp-json/digitalogic/receiver/v1/product-sync",
+		URL:                  baseURL + "/wp-json/digitalogic/patris/product-sync",
 		Method:               http.MethodPost,
 		Format:               "json",
 		Timeout:              "2s",
@@ -49,7 +49,6 @@ func excelPricingRemoteTestConfig(t *testing.T, baseURL string) updateout.Config
 func excelPricingRemoteTestRevisionPayload(source canonical.Source, stateRevision string) excelPricingRemoteRevisionResponse {
 	return excelPricingRemoteRevisionResponse{
 		Schema:                excelPricingRemoteRevisionSchema,
-		SchemaVersion:         1,
 		Projection:            excelPricingRemoteProjection,
 		ProjectionSchema:      excelPricingRemoteProjectionSchema,
 		StateRevision:         stateRevision,
@@ -73,7 +72,6 @@ func excelPricingRemoteTestStateFrame(source canonical.Source, eventID uint64, s
 		"id":      eventID,
 		"data": map[string]interface{}{
 			"schema":                  excelPricingRemoteStateEventSchema,
-			"schema_version":          1,
 			"projection":              excelPricingRemoteProjection,
 			"source":                  source,
 			"state_revision":          stateRevision,
@@ -100,7 +98,7 @@ func excelPricingRemoteWriteJSON(t *testing.T, connection *websocket.Conn, value
 
 func TestExcelPricingRemoteEventEndpointsAreSameHostAndSecretFree(t *testing.T) {
 	webSocketURL, revisionURL, revisionPath, err := excelPricingRemoteEventEndpoints(
-		"https://digitalogic.example/wp-json/digitalogic/receiver/v1/product-sync",
+		"https://digitalogic.example/wp-json/digitalogic/patris/product-sync",
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -116,7 +114,7 @@ func TestExcelPricingRemoteEventEndpointsAreSameHostAndSecretFree(t *testing.T) 
 		t.Fatal("credential material crossed into an endpoint")
 	}
 	if _, _, _, err := excelPricingRemoteEventEndpoints(
-		"http://digitalogic.example/wp-json/digitalogic/receiver/v1/product-sync",
+		"http://digitalogic.example/wp-json/digitalogic/patris/product-sync",
 	); err == nil {
 		t.Fatal("remote plaintext destination was accepted")
 	}
@@ -145,7 +143,7 @@ func TestExcelPricingRemoteEventsConnectValidateAndConsumePHPFrame(t *testing.T)
 				r.URL.Query().Get("source_revision") == source.Revision &&
 				r.URL.Query().Get("locale") == "fa" &&
 				r.URL.Query().Get("page_size") == strconv.Itoa(excelPricingSnapshotPageSize) &&
-				r.URL.Query().Get("schema_version") == "1"
+				r.URL.Query().Get("schema_version") == ""
 			if !valid {
 				http.Error(w, "invalid protected request", http.StatusForbidden)
 				return
@@ -386,7 +384,6 @@ func TestExcelPricingRemoteEventsStreamResetTriggersOneConditionalValidation(t *
 				"success": true,
 				"data": map[string]interface{}{
 					"schema":                       excelPricingRemoteStreamResetSchema,
-					"schema_version":               1,
 					"reason":                       "cursor_gap",
 					"cursor":                       20,
 					"oldest_event_id":              15,
@@ -620,7 +617,6 @@ func TestExcelPricingRemoteRevisionURLHasExactBoundedQuery(t *testing.T) {
 	query.Set("source_revision", source.Revision)
 	query.Set("locale", "fa")
 	query.Set("page_size", strconv.Itoa(excelPricingSnapshotPageSize))
-	query.Set("schema_version", "1")
 	parsed.RawQuery = query.Encode()
 	if strings.Contains(parsed.RawQuery, "secret") || len(parsed.RawQuery) > 512 {
 		t.Fatalf("unsafe revision query = %q", parsed.RawQuery)

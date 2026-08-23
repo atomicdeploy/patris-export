@@ -16,6 +16,9 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Changed
 
+- Excel pricing now uses one Living, suffix-free snapshot/event contract with
+  exactly the 26 scalar fields consumed by the workbook. Removed schema,
+  projection, and WebSocket dialects fail closed instead of being translated.
 - Pricing now falls through only after testing a complete route: foreign CNY
   requires positive weight and an enabled non-domestic freight assignment;
   partner price adds margin without freight and forces domestic shipping; the

@@ -19,12 +19,12 @@ import (
 )
 
 const (
-	excelPricingRemoteWebSocketProtocol = "digitalogic.pricing.v1"
-	excelPricingRemoteStateEventSchema  = "digitalogic.pricing-state-change/v1"
-	excelPricingRemoteStreamResetSchema = "digitalogic.pricing-stream-reset/v1"
-	excelPricingRemoteRevisionSchema    = "digitalogic.pricing-sync-revision/v1"
-	excelPricingRemoteProjection        = "excel-v1"
-	excelPricingRemoteProjectionSchema  = "digitalogic.pricing-projection/excel-v1"
+	excelPricingRemoteWebSocketProtocol = "digitalogic.pricing"
+	excelPricingRemoteStateEventSchema  = "digitalogic.pricing-state-change"
+	excelPricingRemoteStreamResetSchema = "digitalogic.pricing-stream-reset"
+	excelPricingRemoteRevisionSchema    = "digitalogic.pricing-sync-revision"
+	excelPricingRemoteProjection        = "excel"
+	excelPricingRemoteProjectionSchema  = "digitalogic.pricing-projection/excel"
 
 	excelPricingRemoteEventsMaxFrameBytes = 64 << 10
 	excelPricingRemoteRevisionMaxBytes    = 64 << 10
@@ -119,7 +119,6 @@ type excelPricingRemoteConnectedData struct {
 
 type excelPricingRemoteStreamResetData struct {
 	Schema                     string `json:"schema"`
-	SchemaVersion              int    `json:"schema_version"`
 	Reason                     string `json:"reason"`
 	Cursor                     uint64 `json:"cursor"`
 	OldestEventID              uint64 `json:"oldest_event_id"`
@@ -130,7 +129,6 @@ type excelPricingRemoteStreamResetData struct {
 
 type excelPricingRemoteStateEventData struct {
 	Schema                string           `json:"schema"`
-	SchemaVersion         int              `json:"schema_version"`
 	Projection            string           `json:"projection"`
 	Source                canonical.Source `json:"source"`
 	StateRevision         string           `json:"state_revision"`
@@ -145,7 +143,6 @@ type excelPricingRemoteStateEventData struct {
 
 type excelPricingRemoteRevisionResponse struct {
 	Schema                string           `json:"schema"`
-	SchemaVersion         int              `json:"schema_version"`
 	Projection            string           `json:"projection"`
 	ProjectionSchema      string           `json:"projection_schema"`
 	StateRevision         string           `json:"state_revision"`
@@ -412,6 +409,9 @@ func (client *excelPricingRemoteEventsClient) handleExcelPricingRemoteFrame(
 	if json.Unmarshal(body, &frame) != nil || !frame.Success || len(frame.Data) == 0 {
 		return false, errExcelPricingRemoteProtocol
 	}
+	if excelPricingEnvelopeHasRemovedSchemaVersion(frame.Data) {
+		return false, errExcelPricingRemoteProtocol
+	}
 	eventName, ok := normalizedExcelPricingRemoteEventName(frame.Event, frame.Name)
 	if !ok {
 		return false, errExcelPricingRemoteProtocol
@@ -443,7 +443,7 @@ func (client *excelPricingRemoteEventsClient) handleExcelPricingRemoteFrame(
 	case "pricing.stream.reset":
 		var data excelPricingRemoteStreamResetData
 		if frame.ID != 0 || json.Unmarshal(frame.Data, &data) != nil ||
-			data.Schema != excelPricingRemoteStreamResetSchema || data.SchemaVersion != 1 ||
+			data.Schema != excelPricingRemoteStreamResetSchema ||
 			data.Reason != "cursor_gap" || !data.RevisionValidationRequired ||
 			data.RevisionPath != client.revisionPath ||
 			!validExcelPricingRemoteWindow(data.Cursor, data.OldestEventID, data.LatestEventID) {
@@ -463,7 +463,7 @@ func (client *excelPricingRemoteEventsClient) handleExcelPricingRemoteFrame(
 		}
 		var data excelPricingRemoteStateEventData
 		if json.Unmarshal(frame.Data, &data) != nil ||
-			data.Schema != excelPricingRemoteStateEventSchema || data.SchemaVersion != 1 ||
+			data.Schema != excelPricingRemoteStateEventSchema ||
 			data.Projection != excelPricingRemoteProjection || data.Source != client.source ||
 			!validExcelPricingRemoteRevisionParts(data.StateRevision, data.CatalogRevision,
 				data.PricingStateRevision, data.PricingPolicyRevision) ||
@@ -561,7 +561,6 @@ func (client *excelPricingRemoteEventsClient) validateExcelPricingRemoteRevision
 	query.Set("source_revision", client.source.Revision)
 	query.Set("locale", "fa")
 	query.Set("page_size", strconv.Itoa(excelPricingSnapshotPageSize))
-	query.Set("schema_version", "1")
 	requestURL.RawQuery = query.Encode()
 
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, requestURL.String(), nil)
@@ -596,8 +595,9 @@ func (client *excelPricingRemoteEventsClient) validateExcelPricingRemoteRevision
 		return errExcelPricingRemoteRevision
 	}
 	var payload excelPricingRemoteRevisionResponse
-	if json.Unmarshal(body, &payload) != nil ||
-		payload.Schema != excelPricingRemoteRevisionSchema || payload.SchemaVersion != 1 ||
+	if excelPricingEnvelopeHasRemovedSchemaVersion(body) ||
+		json.Unmarshal(body, &payload) != nil ||
+		payload.Schema != excelPricingRemoteRevisionSchema ||
 		payload.Projection != excelPricingRemoteProjection ||
 		payload.ProjectionSchema != excelPricingRemoteProjectionSchema ||
 		payload.Source != client.source || payload.Locale != "fa" ||

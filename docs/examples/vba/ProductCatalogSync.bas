@@ -22,18 +22,18 @@ Private Const SSE_RECONNECT_MIN_SECONDS As Long = 1
 Private Const SSE_RECONNECT_MAX_SECONDS As Long = 30
 Private Const SSE_RECEIVE_TIMEOUT_MS As Long = 0
 Private Const PRICING_CLIENT_HEADER As String = "X-Patris-Excel-Client"
-Private Const PRICING_CLIENT_ID As String = "digitalogic-price-calculator/v1"
+Private Const PRICING_CLIENT_ID As String = "digitalogic-price-calculator"
 Private Const PRICING_CONTRACT_CLIENT_ID As String = "digitalogic-price-calculator"
 Private Const PRICING_CONTRACT_CHANNEL As String = "excel-workbook"
 Private Const PRICING_CSRF_HEADER As String = "X-Patris-Excel-CSRF-Token"
-Private Const PRICING_REQUEST_SCHEMA As String = "patris.excel-pricing-companion-request/v1"
-Private Const PRICING_SESSION_SCHEMA As String = "patris.excel-pricing-companion-session/v1"
-Private Const PRICING_STATE_SCHEMA As String = "digitalogic.pricing-sync-state/v1"
-Private Const PRICING_SNAPSHOT_REQUEST_SCHEMA As String = "patris.pricing-snapshot-request/v1"
-Private Const PRICING_SNAPSHOT_JOB_SCHEMA As String = "patris.pricing-snapshot-job/v1"
-Private Const PRICING_SNAPSHOT_PAYLOAD_SCHEMA As String = "patris.pricing-snapshot/v1"
-Private Const PRICING_SNAPSHOT_EVENT_SCHEMA As String = "patris.pricing-state-event/v1"
-Private Const PRICING_SNAPSHOT_PROJECTION As String = "excel-v1"
+Private Const PRICING_REQUEST_SCHEMA As String = "patris.excel-pricing-companion-request"
+Private Const PRICING_SESSION_SCHEMA As String = "patris.excel-pricing-companion-session"
+Private Const PRICING_STATE_SCHEMA As String = "digitalogic.pricing-sync-state"
+Private Const PRICING_SNAPSHOT_REQUEST_SCHEMA As String = "patris.pricing-snapshot-request"
+Private Const PRICING_SNAPSHOT_JOB_SCHEMA As String = "patris.pricing-snapshot-job"
+Private Const PRICING_SNAPSHOT_PAYLOAD_SCHEMA As String = "patris.pricing-snapshot"
+Private Const PRICING_SNAPSHOT_EVENT_SCHEMA As String = "patris.pricing-state-event"
+Private Const PRICING_SNAPSHOT_PROJECTION As String = "excel"
 Private Const PRICING_SNAPSHOT_ROW_FIELD_COUNT As Long = 26
 Private Const PRICING_SNAPSHOT_ROW_FIELDS As String = _
     "sync_key,reconciliation_status,patris_code,woocommerce_id,sku," & _
@@ -3249,7 +3249,6 @@ Private Function PricingSnapshotRequestJson(ByVal requestID As String) As String
     End If
     PricingSnapshotRequestJson = _
         "{""schema"":" & JsonString(PRICING_SNAPSHOT_REQUEST_SCHEMA) & "," & _
-        """schema_version"":1," & _
         """client_id"":" & JsonString(PRICING_CONTRACT_CLIENT_ID) & "," & _
         """channel"":" & JsonString(PRICING_CONTRACT_CHANNEL) & "," & _
         """request_id"":" & JsonString(requestID) & "," & _
@@ -5164,7 +5163,6 @@ Private Function BuildPricingRequest(ByVal operationName As String, _
         shippingRevision, usdEffectiveDate, cnyEffectiveDate
 
     body = "{""schema"":" & JsonString(PRICING_REQUEST_SCHEMA) & "," & _
-        """schema_version"":1," & _
         """operation"":" & JsonString(operationName) & "," & _
         """client_id"":" & JsonString(PRICING_CONTRACT_CLIENT_ID) & "," & _
         """channel"":" & JsonString(PRICING_CONTRACT_CHANNEL) & "," & _

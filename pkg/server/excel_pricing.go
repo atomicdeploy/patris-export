@@ -27,14 +27,14 @@ import (
 )
 
 const (
-	excelPricingLocalRequestSchema  = "patris.excel-pricing-companion-request/v1"
-	excelPricingSessionSchema       = "patris.excel-pricing-companion-session/v1"
-	excelPricingRemoteRequestSchema = "digitalogic.pricing-sync-request/v1"
-	excelPricingStateSchema         = "digitalogic.pricing-sync-state/v1"
-	excelPricingPreviewSchema       = "digitalogic.pricing-sync-preview/v1"
-	excelPricingApplySchema         = "digitalogic.pricing-sync-apply/v1"
+	excelPricingLocalRequestSchema  = "patris.excel-pricing-companion-request"
+	excelPricingSessionSchema       = "patris.excel-pricing-companion-session"
+	excelPricingRemoteRequestSchema = "digitalogic.pricing-sync-request"
+	excelPricingStateSchema         = "digitalogic.pricing-sync-state"
+	excelPricingPreviewSchema       = "digitalogic.pricing-sync-preview"
+	excelPricingApplySchema         = "digitalogic.pricing-sync-apply"
 	excelPricingClientHeader        = "X-Patris-Excel-Client"
-	excelPricingClientID            = "digitalogic-price-calculator/v1"
+	excelPricingClientID            = "digitalogic-price-calculator"
 	excelPricingContractClientID    = "digitalogic-price-calculator"
 	excelPricingContractChannel     = "excel-workbook"
 	excelPricingCSRFHeader          = "X-Patris-Excel-CSRF-Token"
@@ -68,7 +68,6 @@ type excelPricingSettings struct {
 
 type excelPricingLocalRequest struct {
 	Schema                string                `json:"schema"`
-	SchemaVersion         int                   `json:"schema_version"`
 	Operation             string                `json:"operation"`
 	ClientID              string                `json:"client_id"`
 	Channel               string                `json:"channel"`
@@ -87,7 +86,6 @@ type excelPricingLocalRequest struct {
 
 type excelPricingRemoteRequest struct {
 	Schema                string                `json:"schema"`
-	SchemaVersion         int                   `json:"schema_version"`
 	Operation             string                `json:"operation"`
 	ClientID              string                `json:"client_id"`
 	Channel               string                `json:"channel"`
@@ -426,7 +424,6 @@ func (s *Server) excelPricingStateSourceMatches(
 func buildExcelPricingRemoteRequest(operation string, local excelPricingLocalRequest, source canonical.Source) excelPricingRemoteRequest {
 	request := excelPricingRemoteRequest{
 		Schema:                excelPricingRemoteRequestSchema,
-		SchemaVersion:         1,
 		Operation:             operation,
 		ClientID:              local.ClientID,
 		Channel:               local.Channel,
@@ -518,7 +515,8 @@ func (s *Server) forwardExcelPricing(
 		Schema        string `json:"schema"`
 		StateRevision string `json:"state_revision"`
 	}
-	if json.Unmarshal(responseBody, &metadata) != nil ||
+	if excelPricingEnvelopeHasRemovedSchemaVersion(responseBody) ||
+		json.Unmarshal(responseBody, &metadata) != nil ||
 		metadata.Schema != expectedSchema ||
 		!isSHA256Revision(metadata.StateRevision) {
 		return excelPricingRemoteResponse{}, errors.New("remote pricing response contract is invalid")
@@ -565,11 +563,10 @@ func (s *Server) completeExcelPricingApply(
 	}
 
 	stateRequest := excelPricingLocalRequest{
-		Schema:        excelPricingLocalRequestSchema,
-		SchemaVersion: 1,
-		Operation:     "state",
-		ClientID:      excelPricingContractClientID,
-		Channel:       excelPricingContractChannel,
+		Schema:    excelPricingLocalRequestSchema,
+		Operation: "state",
+		ClientID:  excelPricingContractClientID,
+		Channel:   excelPricingContractChannel,
 		RequestID: "excel-state-readback-" +
 			strings.TrimPrefix(applied.stateRevision, "sha256:")[:32],
 		Page:   1,
@@ -605,7 +602,6 @@ func excelPricingDeliveryComplete(result updateout.DeliveryResult, eventID strin
 
 func validateExcelPricingLocalRequest(r *http.Request, operation string, request excelPricingLocalRequest) error {
 	if request.Schema != excelPricingLocalRequestSchema ||
-		request.SchemaVersion != 1 ||
 		request.Operation != operation ||
 		request.ClientID != excelPricingContractClientID ||
 		request.Channel != excelPricingContractChannel ||
@@ -849,6 +845,15 @@ func decodeBoundedJSON(w http.ResponseWriter, r *http.Request, maximum int64, ta
 		return errors.New("request contains trailing JSON")
 	}
 	return nil
+}
+
+func excelPricingEnvelopeHasRemovedSchemaVersion(body []byte) bool {
+	var envelope map[string]json.RawMessage
+	if json.Unmarshal(body, &envelope) != nil || envelope == nil {
+		return false
+	}
+	_, exists := envelope["schema_version"]
+	return exists
 }
 
 func jsonContentType(value string) bool {
