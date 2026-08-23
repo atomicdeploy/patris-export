@@ -75,6 +75,7 @@ type Server struct {
 	catalogProvider      pricingcatalog.Provider
 	catalogProviderKey   string
 	catalogProviderMu    sync.Mutex
+	canonicalProjection  *canonicalProjectionCache
 	sqlOperations        *sqlOperationsState
 	excelPricing         *excelPricingState
 	excelPricingRemote   *excelPricingRemoteEventsBridge
@@ -180,19 +181,20 @@ func NewServerWithOptions(dbPath string, charMap converter.CharMapping, options 
 
 	backgroundCtx, backgroundCancel := context.WithCancel(context.Background())
 	s := &Server{
-		router:           mux.NewRouter(),
-		dbPath:           dbPath,
-		charMap:          charMap,
-		dataSource:       ds,
-		wsClients:        make(map[*websocket.Conn]*sync.Mutex),
-		eventSubscribers: make(map[chan map[string]interface{}]struct{}),
-		sqlOperations:    newSQLOperationsState(),
-		excelPricing:     newExcelPricingState(),
-		backgroundCtx:    backgroundCtx,
-		backgroundCancel: backgroundCancel,
-		useTempFile:      copyBeforeRead,
-		config:           options.Config,
-		version:          options.Version,
+		router:              mux.NewRouter(),
+		dbPath:              dbPath,
+		charMap:             charMap,
+		dataSource:          ds,
+		wsClients:           make(map[*websocket.Conn]*sync.Mutex),
+		eventSubscribers:    make(map[chan map[string]interface{}]struct{}),
+		canonicalProjection: newCanonicalProjectionCache(),
+		sqlOperations:       newSQLOperationsState(),
+		excelPricing:        newExcelPricingState(),
+		backgroundCtx:       backgroundCtx,
+		backgroundCancel:    backgroundCancel,
+		useTempFile:         copyBeforeRead,
+		config:              options.Config,
+		version:             options.Version,
 		upgrader: websocket.Upgrader{
 			// Security: Configure origin checking for production use
 			// Default allows localhost only
@@ -227,6 +229,7 @@ func NewServerWithOptions(dbPath string, charMap converter.CharMapping, options 
 		converter.SetRTLConversion(s.config.Get().Database.RTLConversion)
 		w, err := s.config.Watch(func(cfg appconfig.Config) {
 			log.Printf("⚙️ Config reloaded: %s", s.config.Path())
+			s.invalidateCanonicalProjection(false)
 			converter.SetRTLConversion(cfg.Database.RTLConversion)
 			s.excelPricingRemote.configChanged(cfg)
 			s.broadcastConfig(cfg)
@@ -347,9 +350,19 @@ func (s *Server) RecordResultContext(ctx context.Context) (recordpipe.Result, er
 // observational source rows; it must not disable the dedicated integration
 // contract for a dataset with an enabled canonical profile.
 func (s *Server) canonicalRecordResultContext(ctx context.Context) (recordpipe.Result, error) {
-	options := s.recordOptions()
-	options.Raw = false
-	return s.recordResultContext(ctx, options)
+	build := func(buildContext context.Context) (recordpipe.Result, error) {
+		options := s.recordOptions()
+		options.Raw = false
+		return s.recordResultContext(buildContext, options)
+	}
+	if s.canonicalProjection == nil {
+		return build(ctx)
+	}
+	return s.canonicalProjection.get(
+		ctx,
+		func() time.Duration { return canonicalProjectionMaxAge(s.Config()) },
+		build,
+	)
 }
 
 func (s *Server) recordResultContext(ctx context.Context, options recordpipe.Options) (recordpipe.Result, error) {
@@ -525,6 +538,7 @@ func (s *Server) ReplaceConfig(cfg appconfig.Config) (appconfig.Config, error) {
 		return appconfig.Config{}, err
 	}
 	cfg = s.config.Get()
+	s.invalidateCanonicalProjection(false)
 	s.excelPricingRemote.configChanged(cfg)
 	s.broadcastConfig(cfg)
 	return cfg, nil
@@ -545,6 +559,7 @@ func (s *Server) ShowToast(req ToastRequest) error {
 // Refresh forces a data refresh broadcast to browser, IPC, and embedded
 // subscribers.
 func (s *Server) Refresh() {
+	s.invalidateCanonicalProjection(false)
 	s.broadcastInitialSnapshot("source_changed")
 }
 

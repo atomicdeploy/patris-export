@@ -533,6 +533,9 @@ func TestExcelPricingApplyRegeneratesDispatchesAndRefetchesState(t *testing.T) {
 	}))
 	defer remote.Close()
 	server := newExcelPricingTestServer(t, remote.URL+"/wp-json/digitalogic/patris/product-sync")
+	server.canonicalProjection = newCanonicalProjectionCache()
+	seedCanonicalProjectionCacheForTest(server, "pre-apply")
+	canonicalGeneration := canonicalProjectionCacheGenerationForTest(server)
 	server.excelPricing.canonical = canonicalProjectionSequence(oldSource, newSource)
 	var dispatched atomic.Int32
 	server.excelPricing.dispatch = func(_ context.Context, cfg updateout.Config, event updateout.Event) (updateout.DeliveryResult, error) {
@@ -578,6 +581,7 @@ func TestExcelPricingApplyRegeneratesDispatchesAndRefetchesState(t *testing.T) {
 	if staleCacheRemained {
 		t.Fatal("successful apply did not invalidate the pre-apply snapshot cache")
 	}
+	assertCanonicalProjectionInvalidatedForTest(t, server, canonicalGeneration, "apply")
 	if !strings.Contains(response.Body.String(), excelPricingApplySchema) ||
 		strings.Contains(response.Body.String(), excelPricingTestSecret) {
 		t.Fatalf("unsafe or wrong apply response: %s", response.Body.String())
@@ -587,6 +591,8 @@ func TestExcelPricingApplyRegeneratesDispatchesAndRefetchesState(t *testing.T) {
 		stateRevision: stateRevision,
 	}
 	server.excelPricing.snapshots.mu.Unlock()
+	seedCanonicalProjectionCacheForTest(server, "post-apply")
+	replayCanonicalGeneration := canonicalProjectionCacheGenerationForTest(server)
 	replayRequest := authenticatedExcelPricingRequest(http.MethodPost, "/api/pricing-sync/apply", body, token)
 	replayRequest.Header.Set("Idempotency-Key", "excel-apply-0001")
 	replayRequest.Header.Set("If-Match", `"`+stateRevision+`"`)
@@ -603,6 +609,13 @@ func TestExcelPricingApplyRegeneratesDispatchesAndRefetchesState(t *testing.T) {
 	server.excelPricing.snapshots.mu.Unlock()
 	if !replayPreservedCache {
 		t.Fatal("idempotent apply replay invalidated cache without a new mutation")
+	}
+	server.canonicalProjection.mu.Lock()
+	replayPreservedCanonical := server.canonicalProjection.cached != nil &&
+		server.canonicalProjection.generation == replayCanonicalGeneration
+	server.canonicalProjection.mu.Unlock()
+	if !replayPreservedCanonical {
+		t.Fatal("idempotent apply replay invalidated the canonical projection cache")
 	}
 
 	var conflictingPayload map[string]interface{}

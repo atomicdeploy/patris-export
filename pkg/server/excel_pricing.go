@@ -327,6 +327,7 @@ func (s *Server) handleExcelPricingOperation(w http.ResponseWriter, r *http.Requ
 		// delivery or readback fails. Shared serialization guarantees there is no
 		// concurrent snapshot build, so invalidate warm reuse immediately after
 		// the successful remote apply response.
+		s.invalidateCanonicalProjection(true)
 		s.excelPricing.snapshots.publishPricingStateInvalidated(remote.stateRevision)
 		if err := s.completeExcelPricingApply(operationContext, cfg, remote); err != nil {
 			writeExcelPricingError(w, http.StatusBadGateway, "post_apply_verification_failed")
@@ -532,11 +533,6 @@ func (s *Server) completeExcelPricingApply(
 	cfg appconfig.Config,
 	applied excelPricingRemoteResponse,
 ) error {
-	s.catalogProviderMu.Lock()
-	s.catalogProvider = nil
-	s.catalogProviderKey = ""
-	s.catalogProviderMu.Unlock()
-
 	contract, err := s.excelPricingCanonical(ctx, cfg)
 	if err != nil {
 		return err

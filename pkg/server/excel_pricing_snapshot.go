@@ -1427,6 +1427,7 @@ func (store *excelPricingSnapshotStore) publishIdentityChangeLocked(
 }
 
 func (s *Server) notifyExcelPricingSourceChanged(sourceChangeToken string) {
+	s.invalidateCanonicalProjection(false)
 	store := s.excelPricing.snapshots
 	store.mu.Lock()
 	previous := store.lastVerifiedChangeLocked()
@@ -1489,6 +1490,10 @@ func (s *Server) notifyExcelPricingRemoteRevisionChanged(
 		!isStrongExcelPricingRevisionETag(revision.ETag, revision.StateRevision) {
 		return errExcelPricingRemoteRevision
 	}
+	// The authenticated composite revision is authoritative for every remote
+	// pricing input. Fence the exact product-sync projection and discard the
+	// provider's shorter-lived assignment cache before acknowledging its cursor.
+	s.invalidateCanonicalProjection(true)
 
 	store := s.excelPricing.snapshots
 	store.mu.Lock()
