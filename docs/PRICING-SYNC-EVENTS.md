@@ -12,7 +12,7 @@ All routes are loopback-only and require the existing companion session:
    `X-Patris-Excel-Client: digitalogic-price-calculator`.
 2. Keep the returned CSRF token only in process memory.
 3. Send the client header and the token in the existing CSRF header on every
-   snapshot, wait, payload, cancel, and event request.
+   snapshot, wait, payload, apply-status, cancel, and event request.
 
 The workbook never stores the WordPress machine credential. The companion
 resolves that credential server-side from its configured environment variable.
@@ -98,6 +98,7 @@ Semantic event kinds include:
 - `catalog_changed`
 - `pricing_state_changed`
 - `pricing_state_invalidated`
+- `pricing_apply_terminal`
 - `replay_required`
 
 An event with `stale: true` invalidates any staged-but-uncommitted import. The
@@ -110,6 +111,35 @@ it never cancels a job. It closes when its local companion session expires or
 the server shuts down. The client then creates a fresh session and reconnects
 with the last fully processed event ID; it does not issue recurring status
 requests.
+
+## Apply completion without polling
+
+`POST /api/pricing-sync/apply` is admission only. It may return an active
+`202 patris.pricing-apply-job`, a replayed terminal `200`, or a terminal
+scheduling failure `503`. The workbook records the request ID before the
+single `POST`; an uncertain response is recovered by exactly one `GET` to
+`/api/pricing-sync/jobs/{original_request_id}`. It never repeats the mutation.
+
+The companion subscribes outbound to the authenticated WordPress
+`digitalogic.pricing` WebSocket. The `pricing.apply.terminal` frame is accepted
+only when its exact source, request/job identities, preview digest, terminal
+status, result digest, and status path match the durable local admission. The
+local ledger commits the frame before the remote cursor advances. Duplicate
+frames are harmless by the stable terminal-event fingerprint.
+
+A remote `completed` frame is not yet success for Excel. Patris first performs
+the existing canonical WooCommerce delivery and exact pricing-state readback
+under a stable delivery event identity. Only that terminal verified result
+emits local `pricing_apply_terminal` with `verified: true` and the exact new
+state revision. Excel then requests one fresh exact-revision snapshot. Failed,
+cancelled, or `outcome_unknown` events never trigger a workbook refresh;
+`outcome_unknown` retains the request and requires readback rather than another
+mutation.
+
+There is no timer-driven apply-status loop. A single status reconciliation is
+allowed after a lost admission response and on each authenticated stream
+connect/reconnect. Cancellation may perform one reconciliation before one
+`DELETE`. Normal operation is event-driven.
 
 ## Payload caching and terminal errors
 
@@ -127,7 +157,9 @@ source/state identity.
 `pkg/server/excel_pricing_events_client.go` implements the authenticated
 `digitalogic.pricing` WordPress WebSocket consumer, conditional composite
 revision validation, and the `pricing.snapshot.build.terminal` callback used by
-the remote bulk waiter. The server wiring is active only for a valid protected
+the remote bulk waiter. It also validates `pricing.apply.terminal` and advances
+the cursor only after the terminal event is durably accepted by the local
+apply ledger. The server wiring is active only for a valid protected
 remote configuration. This source contract does not prove that the matching
 WordPress terminal-event publisher is deployed or enabled; that external
 activation must be independently verified before claiming cold remote snapshot

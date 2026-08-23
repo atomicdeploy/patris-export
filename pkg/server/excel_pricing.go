@@ -115,6 +115,7 @@ type excelPricingState struct {
 	client    *http.Client
 	snapshots *excelPricingSnapshotStore
 	mutations *excelPricingMutationLedger
+	applyJobs *excelPricingApplyJobStore
 
 	canonical func(context.Context) (recordpipe.Result, error)
 	dispatch  func(context.Context, updateout.Config, updateout.Event) (updateout.DeliveryResult, error)
@@ -231,9 +232,26 @@ func (s *Server) handleExcelPricingOperation(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
+	if operation == "apply" {
+		exists, matches := s.excelPricing.mutations.previewMatch(
+			local.PreviewDigest,
+			excelPricingPreviewBindingFingerprint(local),
+		)
+		if !exists {
+			writeExcelPricingError(w, http.StatusConflict, "preview_required")
+			return
+		}
+		if !matches {
+			writeExcelPricingError(w, http.StatusConflict, "preview_binding_conflict")
+			return
+		}
+		s.handleExcelPricingApplyAdmission(w, r, local)
+		return
+	}
+
 	mutationFingerprint := ""
 	mutationReserved := false
-	if operation == "preview" || operation == "apply" {
+	if operation == "preview" {
 		mutationFingerprint = excelPricingMutationFingerprint(local)
 		begin, replayStatus, replayBody := s.excelPricing.mutations.begin(
 			operation,
@@ -260,20 +278,6 @@ func (s *Server) handleExcelPricingOperation(w http.ResponseWriter, r *http.Requ
 				s.excelPricing.mutations.abort(operation, local.IdempotencyKey, mutationFingerprint)
 			}
 		}()
-		if operation == "apply" {
-			exists, matches := s.excelPricing.mutations.previewMatch(
-				local.PreviewDigest,
-				excelPricingPreviewBindingFingerprint(local),
-			)
-			if !exists {
-				writeExcelPricingError(w, http.StatusConflict, "preview_required")
-				return
-			}
-			if !matches {
-				writeExcelPricingError(w, http.StatusConflict, "preview_binding_conflict")
-				return
-			}
-		}
 	}
 
 	operationContext, cancel := context.WithTimeout(r.Context(), excelPricingOperationTimeout)
@@ -323,19 +327,7 @@ func (s *Server) handleExcelPricingOperation(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	if operation == "apply" {
-		// The remote mutation may already be committed even if local canonical
-		// delivery or readback fails. Shared serialization guarantees there is no
-		// concurrent snapshot build, so invalidate warm reuse immediately after
-		// the successful remote apply response.
-		s.invalidateCanonicalProjection(true)
-		s.excelPricing.snapshots.publishPricingStateInvalidated(remote.stateRevision)
-		if err := s.completeExcelPricingApply(operationContext, cfg, remote); err != nil {
-			writeExcelPricingError(w, http.StatusBadGateway, "post_apply_verification_failed")
-			return
-		}
-		s.excelPricing.snapshots.publishPricingStateVerified(remote.stateRevision)
-	} else if operation == "preview" {
+	if operation == "preview" {
 		previewDigest, present, err := excelPricingPreviewDigest(remote.body)
 		if err != nil {
 			writeExcelPricingError(w, http.StatusBadGateway, "remote_contract_invalid")
@@ -469,7 +461,7 @@ func (s *Server) forwardExcelPricing(
 	}
 	request.Header.Set("Accept", "application/json")
 	request.Header.Set("Content-Type", "application/json")
-	request.Header.Set("User-Agent", "patris-export-excel-companion/1")
+	request.Header.Set("User-Agent", "patris-export-excel-companion")
 	request.Header.Set(updateout.ProductSyncSecretHeader, secret)
 	if operation == "preview" || operation == "apply" {
 		request.Header.Set("Idempotency-Key", local.IdempotencyKey)
@@ -515,8 +507,7 @@ func (s *Server) forwardExcelPricing(
 		Schema        string `json:"schema"`
 		StateRevision string `json:"state_revision"`
 	}
-	if excelPricingEnvelopeHasRemovedSchemaVersion(responseBody) ||
-		json.Unmarshal(responseBody, &metadata) != nil ||
+	if json.Unmarshal(responseBody, &metadata) != nil ||
 		metadata.Schema != expectedSchema ||
 		!isSHA256Revision(metadata.StateRevision) {
 		return excelPricingRemoteResponse{}, errors.New("remote pricing response contract is invalid")
@@ -533,10 +524,20 @@ func (s *Server) completeExcelPricingApply(
 	ctx context.Context,
 	cfg appconfig.Config,
 	applied excelPricingRemoteResponse,
+	expectedSource canonical.Source,
+	beforeDispatch func(string) error,
 ) error {
 	contract, err := s.excelPricingCanonical(ctx, cfg)
 	if err != nil {
 		return err
+	}
+	if expectedSource != (canonical.Source{}) && contract.Source != expectedSource {
+		return errors.New("canonical source changed before pricing apply delivery")
+	}
+	if beforeDispatch != nil {
+		if err := beforeDispatch(contract.EventID); err != nil {
+			return err
+		}
 	}
 	event := updateout.Event{
 		Type:             "update",
@@ -845,15 +846,6 @@ func decodeBoundedJSON(w http.ResponseWriter, r *http.Request, maximum int64, ta
 		return errors.New("request contains trailing JSON")
 	}
 	return nil
-}
-
-func excelPricingEnvelopeHasRemovedSchemaVersion(body []byte) bool {
-	var envelope map[string]json.RawMessage
-	if json.Unmarshal(body, &envelope) != nil || envelope == nil {
-		return false
-	}
-	_, exists := envelope["schema_version"]
-	return exists
 }
 
 func jsonContentType(value string) bool {

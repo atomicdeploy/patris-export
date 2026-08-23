@@ -747,8 +747,7 @@ func (fixture *excelPricingRemoteSnapshotFixture) validSourceQuery(query url.Val
 		query.Get("source_dataset") == fixture.source.Dataset &&
 		query.Get("source_revision") == fixture.source.Revision &&
 		query.Get("locale") == "fa" &&
-		query.Get("page_size") == strconv.Itoa(excelPricingSnapshotPageSize) &&
-		query.Get("schema_version") == ""
+		query.Get("page_size") == strconv.Itoa(excelPricingSnapshotPageSize)
 }
 
 func (fixture *excelPricingRemoteSnapshotFixture) buildResponse() excelPricingRemoteSnapshotBuildResponse {

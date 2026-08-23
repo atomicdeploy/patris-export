@@ -24,6 +24,8 @@ type excelPricingRemoteBridgeTestRun struct {
 	onCursor      func(uint64)
 	onRevision    func(excelPricingRemoteRevision) error
 	onTerminal    func(excelPricingRemoteSnapshotTerminalEvent) error
+	onApply       func(excelPricingRemoteApplyTerminalEvent) error
+	onConnected   func(context.Context) error
 	stopped       chan struct{}
 }
 
@@ -58,6 +60,8 @@ func excelPricingRemoteBridgeTestRunner(
 	func(uint64),
 	func(excelPricingRemoteRevision) error,
 	func(excelPricingRemoteSnapshotTerminalEvent) error,
+	func(excelPricingRemoteApplyTerminalEvent) error,
+	func(context.Context) error,
 ) error {
 	return func(
 		ctx context.Context,
@@ -67,6 +71,8 @@ func excelPricingRemoteBridgeTestRunner(
 		onCursor func(uint64),
 		onRevision func(excelPricingRemoteRevision) error,
 		onTerminal func(excelPricingRemoteSnapshotTerminalEvent) error,
+		onApply func(excelPricingRemoteApplyTerminalEvent) error,
+		onConnected func(context.Context) error,
 	) error {
 		call := &excelPricingRemoteBridgeTestRun{
 			config:        cfg,
@@ -75,6 +81,8 @@ func excelPricingRemoteBridgeTestRunner(
 			onCursor:      onCursor,
 			onRevision:    onRevision,
 			onTerminal:    onTerminal,
+			onApply:       onApply,
+			onConnected:   onConnected,
 			stopped:       make(chan struct{}),
 		}
 		select {
@@ -141,6 +149,8 @@ func TestExcelPricingRemoteEventsBridgeCoalescesRestartToNewestGeneration(t *tes
 		onCursor func(uint64),
 		onRevision func(excelPricingRemoteRevision) error,
 		onTerminal func(excelPricingRemoteSnapshotTerminalEvent) error,
+		onApply func(excelPricingRemoteApplyTerminalEvent) error,
+		onConnected func(context.Context) error,
 	) error {
 		call := &excelPricingRemoteBridgeTestRun{
 			config:        cfg,
@@ -149,6 +159,8 @@ func TestExcelPricingRemoteEventsBridgeCoalescesRestartToNewestGeneration(t *tes
 			onCursor:      onCursor,
 			onRevision:    onRevision,
 			onTerminal:    onTerminal,
+			onApply:       onApply,
+			onConnected:   onConnected,
 			stopped:       make(chan struct{}),
 		}
 		runMu.Lock()
@@ -828,6 +840,8 @@ func TestExcelPricingRemoteEventsBridgeLogsAreSecretSafe(t *testing.T) {
 			func(uint64),
 			func(excelPricingRemoteRevision) error,
 			func(excelPricingRemoteSnapshotTerminalEvent) error,
+			func(excelPricingRemoteApplyTerminalEvent) error,
+			func(context.Context) error,
 		) error {
 			return fmt.Errorf("transport rejected %s with %s", privateEndpoint, privateSecret)
 		},

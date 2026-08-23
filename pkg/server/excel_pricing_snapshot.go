@@ -134,6 +134,11 @@ type excelPricingStateChangeEvent struct {
 	Reason                   string                        `json:"reason,omitempty"`
 	OccurredAt               time.Time                     `json:"occurred_at"`
 	JobID                    string                        `json:"job_id,omitempty"`
+	RequestID                string                        `json:"request_id,omitempty"`
+	Status                   string                        `json:"status,omitempty"`
+	Code                     string                        `json:"code,omitempty"`
+	PreviewDigest            string                        `json:"preview_digest,omitempty"`
+	ReadbackRequired         bool                          `json:"readback_required,omitempty"`
 	Source                   *canonical.Source             `json:"source,omitempty"`
 	SourceChangeToken        string                        `json:"source_change_token,omitempty"`
 	CatalogRevision          string                        `json:"catalog_revision,omitempty"`

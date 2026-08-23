@@ -1134,20 +1134,100 @@ func TestDynamicCalculatorVBASourceGuardsLivePricingBeforeMutation(t *testing.T)
 	if idempotencyPosition < 0 || savedIDPosition < idempotencyPosition {
 		t.Fatal("apply must persist its idempotency key before the asynchronous request can become uncertain")
 	}
+	for _, required := range []string{
+		"recoveryOnly = (Len(PendingApplyRequestID()) > 0)",
+		"mOperationApplyPostStarted = recoveryOnly",
+		`If requireConfirmation And Not recoveryOnly Then`,
+	} {
+		if !strings.Contains(applyHandler, required) {
+			t.Fatalf("apply recovery path is missing %q", required)
+		}
+	}
+	beginApply := section("Private Sub BeginApplyRequest", "Private Sub BeginApplyStatusRequest")
+	postStarted := strings.Index(beginApply, "mOperationApplyPostStarted = True")
+	postRequest := strings.Index(beginApply, `StartFiniteRequest "POST"`)
+	for _, required := range []string{
+		"If mOperationApplyPostStarted Then",
+		"BeginApplyStatusRequest vbNullString",
+		"APPLY_ADMISSION_TIMEOUT_MS",
+	} {
+		if !strings.Contains(beginApply, required) {
+			t.Fatalf("one-way apply admission is missing %q", required)
+		}
+	}
+	if postStarted < 0 || postRequest < postStarted {
+		t.Fatal("apply must durably choose POST before starting its only admission request")
+	}
+	statusRequest := section("Private Sub BeginApplyStatusRequest", "Private Sub BeginRepairRequest")
+	for _, required := range []string{
+		"PricingApplyJobURL(mLastApplyRequestID)",
+		`reconcileReason <> "connect"`,
+		`reconcileReason <> "lost_response"`,
+		`StartFiniteRequest "GET"`,
+	} {
+		if !strings.Contains(statusRequest, required) {
+			t.Fatalf("bounded apply status reconciliation is missing %q", required)
+		}
+	}
+	terminalDispatcher := section("Private Sub HandleOperationTerminal", "Private Sub HandleContractResponse")
+	for _, required := range []string{
+		`If stageName = "apply" And mOperationApplyPostStarted Then`,
+		`BeginApplyStatusRequest "lost_response"`,
+		`Case "apply", "apply_status"`,
+		"HandleApplyResponse statusCode, responseHeaders, responseBody",
+	} {
+		if !strings.Contains(terminalDispatcher, required) {
+			t.Fatalf("lost apply response recovery is missing %q", required)
+		}
+	}
+	applyResponse := section("Private Sub HandleApplyResponse", "Private Sub BeginVerifiedApplyRefresh")
+	for _, required := range []string{
+		"ParsePricingApplyJob root, statusCode, responseHeaders",
+		"If Not terminal Then",
+		"CompleteActiveOperation False",
+		`If statusText = "completed" Then`,
+		"BeginVerifiedApplyRefresh appliedStateRevision, statusText",
+	} {
+		if !strings.Contains(applyResponse, required) {
+			t.Fatalf("terminal-gated apply response is missing %q", required)
+		}
+	}
+	if strings.Index(applyResponse, "If Not terminal Then") >
+		strings.Index(applyResponse, "BeginVerifiedApplyRefresh appliedStateRevision, statusText") {
+		t.Fatal("Excel refresh is not gated behind a terminal apply document")
+	}
+	cancelApply := section("Private Sub BeginBestEffortApplyCancel", "Private Sub HandleOperationTerminal")
+	for _, required := range []string{
+		`requestValue.OpenAsync "DELETE"`,
+		"PricingApplyJobURL(requestID)",
+		`"apply_cancel"`,
+	} {
+		if !strings.Contains(cancelApply, required) {
+			t.Fatalf("suffix-free apply cancellation is missing %q", required)
+		}
+	}
 	sseEventHandler := section("Private Sub HandlePricingSseEvent", "Private Function IsExpectedApplyMutationEvent")
 	for _, required := range []string{
 		`Case "pricing_state_changed"`,
 		`Case "pricing_state_invalidated"`,
+		`Case "pricing_apply_terminal"`,
 		"eventStateRevision = SiteText(change, \"state_revision\")",
 		"IsExpectedApplyMutationEvent(eventStateRevision)",
 		"PreserveExpectedApplyMutationEvent",
+		"mSseLastEventID = eventID",
+		"BeginVerifiedApplyRefresh eventStateRevision, eventStatus",
 	} {
 		if !strings.Contains(sseEventHandler, required) {
 			t.Fatalf("SSE apply-race handling is missing %q", required)
 		}
 	}
+	if strings.Index(sseEventHandler, "mSseLastEventID = eventID") >
+		strings.Index(sseEventHandler, "BeginVerifiedApplyRefresh eventStateRevision, eventStatus") {
+		t.Fatal("terminal apply cursor must be accepted before Excel starts its verified refresh")
+	}
 	expectedApplyEvent := section("Private Function IsExpectedApplyMutationEvent", "Private Sub PreserveExpectedApplyMutationEvent")
 	for _, required := range []string{
+		"Len(PendingApplyRequestID()) > 0",
 		`Case "apply"`,
 		`Case "apply_refresh"`,
 		"mRequiredSnapshotStateRevision",
@@ -1160,9 +1240,8 @@ func TestDynamicCalculatorVBASourceGuardsLivePricingBeforeMutation(t *testing.T)
 	preserveApplyEvent := section("Private Sub PreserveExpectedApplyMutationEvent", "Private Sub MarkSseRefreshRequired")
 	for _, required := range []string{
 		"mForceFreshSnapshot = True",
+		"If Len(PendingApplyRequestID()) > 0 Then Exit Sub",
 		"InvalidatePricingPreview",
-		`If mOperationKind = "apply" Then`,
-		"mSseRefreshRequired = True",
 	} {
 		if !strings.Contains(preserveApplyEvent, required) {
 			t.Fatalf("expected apply mutation preservation is missing %q", required)
@@ -1172,6 +1251,7 @@ func TestDynamicCalculatorVBASourceGuardsLivePricingBeforeMutation(t *testing.T)
 		"mOperationRequest.Abort",
 		"FailActiveOperation",
 		"ScheduleEventDrivenRefresh",
+		"mSseRefreshRequired = True",
 	} {
 		if strings.Contains(preserveApplyEvent, forbidden) {
 			t.Fatalf("apply's own SSE mutation event must not terminate or bypass its HTTP response: %s", forbidden)
@@ -1405,7 +1485,6 @@ func TestDynamicCalculatorVBASourceGuardsLivePricingBeforeMutation(t *testing.T)
 		"linkText = wooID",
 		"X-Patris-Product-Sync-Secret",
 		"PATRIS_PRODUCT_SYNC_SECRET",
-		"schema_version",
 		"MsgBox ",
 		"MsgBox(",
 		"VBA.MsgBox",

@@ -33,6 +33,7 @@ Private Const PRICING_SNAPSHOT_REQUEST_SCHEMA As String = "patris.pricing-snapsh
 Private Const PRICING_SNAPSHOT_JOB_SCHEMA As String = "patris.pricing-snapshot-job"
 Private Const PRICING_SNAPSHOT_PAYLOAD_SCHEMA As String = "patris.pricing-snapshot"
 Private Const PRICING_SNAPSHOT_EVENT_SCHEMA As String = "patris.pricing-state-event"
+Private Const PRICING_APPLY_JOB_SCHEMA As String = "patris.pricing-apply-job"
 Private Const PRICING_SNAPSHOT_PROJECTION As String = "excel"
 Private Const PRICING_SNAPSHOT_ROW_FIELD_COUNT As Long = 26
 Private Const PRICING_SNAPSHOT_ROW_FIELDS As String = _
@@ -71,6 +72,7 @@ Private Const SNAPSHOT_FIELD_PATRIS_FINAL_PRICE As Long = 24
 Private Const SNAPSHOT_FIELD_SALE_PRICE As Long = 25
 Private Const SNAPSHOT_FIELD_PUBLICATION_STATUS As Long = 26
 Private Const PRICING_SNAPSHOT_CACHE_SECONDS As Long = 30
+Private Const APPLY_ADMISSION_TIMEOUT_MS As Long = 30000
 Private Const PRICE_ROUNDING_MODE As String = "nearest_half_up"
 Private Const LOOPBACK_PREFIX As String = "http://127.0.0.1:18080/"
 Private Const SEARCH_BUTTON_SHAPE As String = "ProductSearchButton"
@@ -188,6 +190,17 @@ Private mOperationSavedPreviewStateRevision As String
 Private mOperationSavedPreviewSettings As String
 Private mOperationSavedPreviewWarningCount As Long
 Private mOperationSavedApplyRequestID As String
+Private mOperationApplyPostStarted As Boolean
+Private mApplyJobID As String
+Private mApplyJobStatus As String
+Private mApplyJobCode As String
+Private mApplyStatusURL As String
+Private mApplyCancelURL As String
+Private mApplyLastReconciledSseToken As Long
+Private mPendingApplyTerminalRevision As String
+Private mPendingApplyTerminalStatus As String
+Private mPendingApplyTerminalCode As String
+Private mPendingApplyTerminalReadback As Boolean
 Private mSnapshotJobID As String
 Private mSnapshotJobStatus As String
 Private mSnapshotJobCode As String
@@ -578,6 +591,10 @@ Public Sub RefreshAllData(Optional ByVal silent As Boolean = False)
     ResumeAfterCancelledClose False
     If mRefreshInProgress Then Exit Sub
     If mPricingActionInProgress And Not mInternalPricingRefresh Then Exit Sub
+    If Len(PendingApplyRequestID()) > 0 Then
+        ApplyPricingChangesCore False, False
+        Exit Sub
+    End If
     BeginRefreshPipeline silent, False
 End Sub
 
@@ -899,6 +916,13 @@ Public Sub CancelActivePricingOperations( _
     If Len(mSnapshotCancelURL) > 0 And Len(mPricingCSRFToken) > 0 Then
         BeginBestEffortSnapshotCancel mSnapshotCancelURL, mPricingCSRFToken
     End If
+    If Len(PendingApplyRequestID()) > 0 Then
+        If Len(mPricingCSRFToken) = 43 Then
+            BeginBestEffortApplyCancel mPricingCSRFToken
+        ElseIf Len(mSseCSRFToken) = 43 Then
+            BeginBestEffortApplyCancel mSseCSRFToken
+        End If
+    End If
     If Not mOperationRequest Is Nothing Then mOperationRequest.Abort
     If workbookIsClosing And Not mCancelRequest Is Nothing Then
         mCancelRequest.Abort
@@ -970,6 +994,12 @@ Private Sub ResetFiniteOperationContext()
     mOperationSavedPreviewSettings = vbNullString
     mOperationSavedPreviewWarningCount = 0
     mOperationSavedApplyRequestID = vbNullString
+    mOperationApplyPostStarted = False
+    mApplyJobID = vbNullString
+    mApplyJobStatus = vbNullString
+    mApplyJobCode = vbNullString
+    mApplyStatusURL = vbNullString
+    mApplyCancelURL = vbNullString
     mSnapshotJobID = vbNullString
     mSnapshotJobStatus = vbNullString
     mSnapshotJobCode = vbNullString
@@ -1273,18 +1303,49 @@ Private Sub BeginPreviewRequest()
 End Sub
 
 Private Sub BeginApplyRequest()
-    If Len(mLastApplyRequestID) = 0 Then
-        mLastApplyRequestID = NewRequestID("apply")
-        ConfigSheet().Range("G28").Value2 = mLastApplyRequestID
+    If Not IsSafePricingRequestID(mLastApplyRequestID) Then
+        Err.Raise vbObjectError + 161, "BeginApplyRequest", _
+                  T("sync_failed")
     End If
     mOperationRequestID = mLastApplyRequestID
+    If mOperationApplyPostStarted Then
+        BeginApplyStatusRequest vbNullString
+        Exit Sub
+    End If
+    ' Persist the one-way admission transition before opening WinHTTP. Any
+    ' uncertain response is recovered by GET with this exact request ID; the
+    ' mutation POST is never repeated.
+    mOperationApplyPostStarted = True
     mOperationStage = "apply"
     StartFiniteRequest "POST", PricingEndpoint("apply"), _
         "application/json", _
         BuildPricingRequest("apply", mOperationRequestID, _
             mLastPreviewDigest, True, mLastPreviewStateRevision), _
         mOperationRequestID, mLastPreviewStateRevision, True, _
-        PRICING_HTTP_TIMEOUT_MS
+        APPLY_ADMISSION_TIMEOUT_MS
+End Sub
+
+Private Sub BeginApplyStatusRequest(ByVal reconcileReason As String)
+    Dim endpoint As String
+
+    If Not IsSafePricingRequestID(mLastApplyRequestID) Then
+        Err.Raise vbObjectError + 161, "BeginApplyStatusRequest", _
+                  T("sync_failed")
+    End If
+    endpoint = PricingApplyJobURL(mLastApplyRequestID)
+    reconcileReason = LCase$(Trim$(reconcileReason))
+    If Len(reconcileReason) > 0 Then
+        If reconcileReason <> "connect" And _
+           reconcileReason <> "lost_response" Then
+            Err.Raise vbObjectError + 161, _
+                      "BeginApplyStatusRequest", T("sync_failed")
+        End If
+        endpoint = endpoint & "&reconcile=" & reconcileReason
+    End If
+    mOperationRequestID = mLastApplyRequestID
+    mOperationStage = "apply_status"
+    StartFiniteRequest "GET", endpoint, "application/json", _
+        vbNullString, vbNullString, vbNullString, True, HTTP_TIMEOUT_MS
 End Sub
 
 Private Sub BeginRepairRequest()
@@ -1383,6 +1444,29 @@ Private Sub BeginBestEffortSnapshotCancel(ByVal endpoint As String, _
     requestValue.Send
 End Sub
 
+Private Sub BeginBestEffortApplyCancel(ByVal csrfToken As String)
+    Dim requestValue As AsyncWinHttpRequest
+    Dim requestToken As Long
+    Dim endpoint As String
+    Dim requestID As String
+
+    requestID = PendingApplyRequestID()
+    If Len(requestID) = 0 Or Len(csrfToken) <> 43 Or _
+       Not mCancelRequest Is Nothing Then Exit Sub
+    endpoint = PricingApplyJobURL(requestID)
+    If Not IsAllowedPricingBridgeUrl(endpoint) Then Exit Sub
+    requestToken = NextAsyncToken()
+    Set requestValue = New AsyncWinHttpRequest
+    Set mCancelRequest = requestValue
+    requestValue.OpenAsync "DELETE", endpoint, requestToken, _
+        "apply_cancel", False, 262144, HTTP_TIMEOUT_MS, _
+        HTTP_TIMEOUT_MS, HTTP_TIMEOUT_MS, HTTP_TIMEOUT_MS
+    requestValue.SetRequestHeader "Accept", "application/json"
+    requestValue.SetRequestHeader PRICING_CLIENT_HEADER, PRICING_CLIENT_ID
+    requestValue.SetRequestHeader PRICING_CSRF_HEADER, csrfToken
+    requestValue.Send
+End Sub
+
 Private Sub HandleOperationTerminal()
     Dim requestValue As AsyncWinHttpRequest
     Dim responseBody As Variant
@@ -1411,6 +1495,10 @@ Private Sub HandleOperationTerminal()
         Exit Sub
     End If
     If errorNumber <> 0 Then
+        If stageName = "apply" And mOperationApplyPostStarted Then
+            BeginApplyStatusRequest "lost_response"
+            Exit Sub
+        End If
         FailActiveOperation errorNumber, stageName, errorDescription
         Exit Sub
     End If
@@ -1429,8 +1517,8 @@ Private Sub HandleOperationTerminal()
                 responseBody
         Case "preview"
             HandlePreviewResponse statusCode, responseBody
-        Case "apply"
-            HandleApplyResponse statusCode, responseBody
+        Case "apply", "apply_status"
+            HandleApplyResponse statusCode, responseHeaders, responseBody
         Case "repair"
             HandleRepairResponse statusCode, responseBody
         Case Else
@@ -1681,31 +1769,78 @@ Private Sub HandlePreviewResponse(ByVal statusCode As Long, _
 End Sub
 
 Private Sub HandleApplyResponse(ByVal statusCode As Long, _
+                                ByVal responseHeaders As String, _
                                 ByVal responseBody As Variant)
     Dim responseText As String
     Dim root As JsonValue
-    Dim result As JsonValue
     Dim statusText As String
     Dim appliedStateRevision As String
+    Dim terminal As Boolean
+    Dim readbackRequired As Boolean
 
-    RequireHTTPSuccess statusCode, responseBody, "apply"
     responseText = Utf8TextFromBytes(responseBody)
     Set root = JsonRuntime.ParseJson(responseText)
-    Set result = ResponseData(root)
-    appliedStateRevision = Trim$(CStr(BlankIfNull( _
-        JsonRuntime.JsonText(result, "state_revision"))))
-    If Not IsSHA256RevisionText(appliedStateRevision) Then
+    ParsePricingApplyJob root, statusCode, responseHeaders, _
+        mOperationRequestID, statusText, terminal, readbackRequired, _
+        appliedStateRevision
+    If Not terminal Then
+        ConfigSheet().Range("B23").Value2 = _
+            T("sync_title") & " - " & statusText
+        CompleteActiveOperation False
+        mLastOperationError = "pending"
+        Exit Sub
+    End If
+    If statusText = "completed" Then
+        If readbackRequired Or _
+           Not IsSHA256RevisionText(appliedStateRevision) Then
+            Err.Raise vbObjectError + 161, "HandleApplyResponse", _
+                      T("sync_failed")
+        End If
+        BeginVerifiedApplyRefresh appliedStateRevision, statusText
+        Exit Sub
+    End If
+    ConfigSheet().Range("B23").Value2 = _
+        T("sync_failed") & " " & statusText & " " & mApplyJobCode
+    If statusText <> "outcome_unknown" Then InvalidatePricingPreview
+    CompleteActiveOperation False
+    mLastOperationError = statusText
+End Sub
+
+Private Sub BeginVerifiedApplyRefresh(ByVal appliedStateRevision As String, _
+                                      ByVal statusText As String)
+    If Not IsSHA256RevisionText(appliedStateRevision) Or _
+       statusText <> "completed" Then
         Err.Raise vbObjectError + 161, "HandleApplyResponse", _
                   T("sync_failed")
     End If
-    statusText = Trim$(CStr(BlankIfNull( _
-        JsonRuntime.JsonText(result, "status"))))
-    mOperationAppliedStatus = T("apply_done") & " " & statusText & _
-        WarningSummary(result)
+    If (Len(mOperationKind) > 0 And mOperationKind <> "apply" And _
+        mOperationKind <> "apply_reconcile") Or _
+       Not mOperationRequest Is Nothing Then
+        mPendingApplyTerminalRevision = appliedStateRevision
+        mPendingApplyTerminalStatus = statusText
+        Exit Sub
+    End If
+    If Len(mOperationKind) = 0 Then
+        ResetFiniteOperationContext
+        mOperationKind = "apply_reconcile"
+        mOperationOriginalSourceID = mSourceID
+        mOperationOriginalSourceDataset = mSourceDataset
+        mOperationOriginalSourceRevision = mSourceRevision
+        mOperationSavedPreviewDigest = PendingApplyPreviewDigest()
+        mOperationSavedPreviewStateRevision = PendingApplyExpectedRevision()
+        mOperationSavedApplyRequestID = PendingApplyRequestID()
+        mPricingActionInProgress = True
+    End If
+    mPendingApplyTerminalRevision = vbNullString
+    mPendingApplyTerminalStatus = vbNullString
+    mPendingApplyTerminalCode = vbNullString
+    mPendingApplyTerminalReadback = False
+    mOperationAppliedStatus = T("apply_done") & " " & statusText
     mOperationAppliedStateRevision = appliedStateRevision
     mRequiredSnapshotStateRevision = appliedStateRevision
     mInternalPricingRefresh = True
     mSseRefreshRequired = False
+    mForceFreshSnapshot = True
     BeginRefreshPipeline True, True
 End Sub
 
@@ -1841,6 +1976,7 @@ Private Sub CompleteActiveOperation(ByVal success As Boolean)
         mSseRefreshRequired = False
         ScheduleEventDrivenRefresh
     End If
+    ResumePendingApplyTerminal
     If mPricingPreviewQueued And Not mWorkbookClosing Then _
         SchedulePricingPreview
 End Sub
@@ -1912,8 +2048,58 @@ Private Sub FailActiveOperation(ByVal errorNumber As Long, _
         mSseRefreshRequired = False
         ScheduleEventDrivenRefresh
     End If
+    ResumePendingApplyTerminal
     If mPricingPreviewQueued And Not mWorkbookClosing Then _
         SchedulePricingPreview
+End Sub
+
+Private Sub ResumePendingApplyTerminal()
+    Dim stateRevision As String
+    Dim statusText As String
+    Dim codeText As String
+    Dim readbackRequired As Boolean
+
+    If mWorkbookClosing Or Len(mOperationKind) > 0 Or _
+       Len(mPendingApplyTerminalStatus) = 0 Then Exit Sub
+    stateRevision = mPendingApplyTerminalRevision
+    statusText = mPendingApplyTerminalStatus
+    codeText = mPendingApplyTerminalCode
+    readbackRequired = mPendingApplyTerminalReadback
+    mPendingApplyTerminalRevision = vbNullString
+    mPendingApplyTerminalStatus = vbNullString
+    mPendingApplyTerminalCode = vbNullString
+    mPendingApplyTerminalReadback = False
+    On Error GoTo ResumeFailed
+    If statusText = "completed" Then
+        BeginVerifiedApplyRefresh stateRevision, statusText
+    Else
+        HandleApplyTerminalFailure statusText, codeText, _
+            readbackRequired
+    End If
+    Exit Sub
+
+ResumeFailed:
+    mPendingApplyTerminalRevision = stateRevision
+    mPendingApplyTerminalStatus = statusText
+    mPendingApplyTerminalCode = codeText
+    mPendingApplyTerminalReadback = readbackRequired
+    Err.Clear
+End Sub
+
+Private Sub HandleApplyTerminalFailure(ByVal statusText As String, _
+                                       ByVal codeText As String, _
+                                       ByVal readbackRequired As Boolean)
+    If statusText <> "failed" And statusText <> "cancelled" And _
+       statusText <> "outcome_unknown" Then Exit Sub
+    If (statusText = "outcome_unknown") <> readbackRequired Then Exit Sub
+    On Error Resume Next
+    ConfigSheet().Range("B23").Value2 = _
+        T("sync_failed") & " " & statusText & " " & codeText
+    If statusText <> "outcome_unknown" Then InvalidatePricingPreview
+    mLastOperationName = "apply"
+    mLastOperationSucceeded = False
+    mLastOperationError = statusText
+    On Error GoTo 0
 End Sub
 
 Private Sub RestoreSavedPreviewAfterApplyFailure()
@@ -2169,6 +2355,7 @@ Private Sub HandleSseDispatch()
                 "text/event-stream")
         If responseAccepted Then
             mSseReconnectAttempt = 0
+            ReconcilePendingApplyOnSseConnect requestValue.Token
         Else
             If statusCode = 403 Then
                 renewSession = True
@@ -2206,6 +2393,41 @@ StreamFailed:
     On Error GoTo 0
     ScheduleEventDrivenRefresh
     ScheduleSseReconnect False
+End Sub
+
+Private Sub ReconcilePendingApplyOnSseConnect(ByVal requestToken As Long)
+    Dim requestID As String
+
+    If requestToken < 1 Or _
+       mApplyLastReconciledSseToken = requestToken Then Exit Sub
+    requestID = PendingApplyRequestID()
+    If Len(requestID) = 0 Or Len(mOperationKind) > 0 Or _
+       Len(mSseCSRFToken) <> 43 Or Len(mSourceID) = 0 Or _
+       Len(PendingApplyPreviewDigest()) = 0 Or _
+       Len(PendingApplyExpectedRevision()) = 0 Then Exit Sub
+    ' Read the durable local status once for this exact connection. Remote
+    ' reconciliation belongs to the companion's outbound WordPress stream;
+    ' Excel never turns a local reconnect into WordPress polling.
+    mApplyLastReconciledSseToken = requestToken
+    On Error GoTo ReconcileFailed
+    ResetFiniteOperationContext
+    mOperationKind = "apply_reconcile"
+    mOperationOriginalSourceID = mSourceID
+    mOperationOriginalSourceDataset = mSourceDataset
+    mOperationOriginalSourceRevision = mSourceRevision
+    mOperationRequestID = requestID
+    mOperationSavedPreviewDigest = PendingApplyPreviewDigest()
+    mOperationSavedPreviewStateRevision = PendingApplyExpectedRevision()
+    mOperationSavedApplyRequestID = requestID
+    mOperationApplyPostStarted = True
+    mPricingCSRFToken = mSseCSRFToken
+    BeginApplyStatusRequest vbNullString
+    Exit Sub
+
+ReconcileFailed:
+    Set mOperationRequest = Nothing
+    ResetFiniteOperationContext
+    Err.Clear
 End Sub
 
 Private Sub DrainSseChunks(ByVal requestValue As AsyncWinHttpRequest)
@@ -2256,6 +2478,13 @@ Private Sub HandlePricingSseEvent(ByVal eventValue As Object)
     Dim verified As Boolean
     Dim stale As Boolean
     Dim alreadyForcingFreshSnapshot As Boolean
+    Dim eventRequestID As String
+    Dim eventPreviewDigest As String
+    Dim eventStatus As String
+    Dim eventCode As String
+    Dim eventReadbackRequired As Boolean
+    Dim applyTerminalMatched As Boolean
+    Dim eventSource As JsonValue
 
     On Error GoTo InvalidEvent
     If eventValue Is Nothing Then GoTo InvalidEvent
@@ -2347,10 +2576,68 @@ Private Sub HandlePricingSseEvent(ByVal eventValue As Object)
                 MarkSseRefreshRequired
             End If
 
+        Case "pricing_apply_terminal"
+            Set eventSource = JsonRuntime.JsonMember(change, "source")
+            If eventSource Is Nothing Or eventSource.Kind <> "object" Or _
+               SiteText(eventSource, "id") <> mSourceID Or _
+               SiteText(eventSource, "dataset") <> mSourceDataset Or _
+               SiteText(eventSource, "revision") <> mSourceRevision Then _
+                GoTo InvalidEvent
+            eventRequestID = SiteText(change, "request_id")
+            eventPreviewDigest = SiteText(change, "preview_digest")
+            eventStatus = LCase$(SiteText(change, "status"))
+            eventCode = LCase$(SiteText(change, "code"))
+            eventReadbackRequired = BooleanValue( _
+                JsonRuntime.JsonText(change, "readback_required"))
+            applyTerminalMatched = _
+                (Len(PendingApplyRequestID()) > 0 And _
+                 eventRequestID = PendingApplyRequestID())
+            If Not applyTerminalMatched Then
+                If eventStatus = "completed" And verified And stale And _
+                   IsSHA256RevisionText(eventStateRevision) Then
+                    If Len(PendingApplyRequestID()) > 0 Then
+                        mForceFreshSnapshot = True
+                    Else
+                        MarkSseRefreshRequired
+                    End If
+                End If
+            Else
+                If eventPreviewDigest <> PendingApplyPreviewDigest() Then _
+                    GoTo InvalidEvent
+                Select Case eventStatus
+                    Case "completed"
+                        If Not verified Or Not stale Or _
+                           eventReadbackRequired Or Len(eventCode) > 0 Or _
+                           Not IsSHA256RevisionText(eventStateRevision) Then _
+                            GoTo InvalidEvent
+                    Case "failed", "cancelled", "outcome_unknown"
+                        If verified Or stale Or Len(eventStateRevision) > 0 Or _
+                           Len(eventCode) = 0 Or _
+                           ((eventStatus = "outcome_unknown") <> _
+                               eventReadbackRequired) Then GoTo InvalidEvent
+                    Case Else
+                        GoTo InvalidEvent
+                End Select
+            End If
+
         Case Else
             GoTo InvalidEvent
     End Select
     mSseLastEventID = eventID
+    If applyTerminalMatched Then
+        If eventStatus = "completed" Then
+            BeginVerifiedApplyRefresh eventStateRevision, eventStatus
+        ElseIf Len(mOperationKind) > 0 Or _
+               Not mOperationRequest Is Nothing Then
+            mPendingApplyTerminalRevision = vbNullString
+            mPendingApplyTerminalStatus = eventStatus
+            mPendingApplyTerminalCode = eventCode
+            mPendingApplyTerminalReadback = eventReadbackRequired
+        Else
+            HandleApplyTerminalFailure eventStatus, eventCode, _
+                eventReadbackRequired
+        End If
+    End If
     Exit Sub
 
 InvalidEvent:
@@ -2363,6 +2650,10 @@ End Sub
 Private Function IsExpectedApplyMutationEvent( _
     ByVal eventStateRevision As String) As Boolean
     If Not IsSHA256RevisionText(eventStateRevision) Then Exit Function
+    If Len(PendingApplyRequestID()) > 0 Then
+        IsExpectedApplyMutationEvent = True
+        Exit Function
+    End If
 
     Select Case mOperationKind
         Case "apply"
@@ -2381,12 +2672,8 @@ End Function
 
 Private Sub PreserveExpectedApplyMutationEvent()
     mForceFreshSnapshot = True
+    If Len(PendingApplyRequestID()) > 0 Then Exit Sub
     InvalidatePricingPreview
-    If mOperationKind = "apply" Then
-        ' If post-apply verification fails after the remote mutation committed,
-        ' the terminal failure path must still schedule a fresh snapshot.
-        mSseRefreshRequired = True
-    End If
 End Sub
 
 Private Sub MarkSseRefreshRequired()
@@ -2934,6 +3221,10 @@ Public Sub HandlePricingProposalChanged()
 
     On Error GoTo CleanExit
     mProposalSyncActive = True
+    If Len(PendingApplyRequestID()) > 0 Then
+        ConfigSheet().Range("B23").Value2 = T("sync_retry")
+        GoTo CleanExit
+    End If
     InvalidatePricingPreview
     ConfigSheet().Range("B23").Value2 = T("preview_first")
     mPricingPreviewQueued = True
@@ -2947,6 +3238,10 @@ Public Sub PreviewPricingChanges()
     ResumeAfterCancelledClose
     KickQueuedAsyncDispatch
     If mRefreshInProgress Or mPricingActionInProgress Then Exit Sub
+    If Len(PendingApplyRequestID()) > 0 Then
+        ApplyPricingChangesCore False, False
+        Exit Sub
+    End If
     CancelScheduledPricingPreview True
     PreviewPricingChangesCore False
 End Sub
@@ -3028,19 +3323,28 @@ Private Sub ApplyPricingChangesCore(ByVal requireConfirmation As Boolean, _
                                     ByVal showSuccess As Boolean)
     Dim settings As Worksheet
     Dim answer As Long
+    Dim recoveryOnly As Boolean
 
     On Error GoTo BeginFailed
     Set settings = ConfigSheet()
-    If Len(mLastPreviewDigest) = 0 Then
+    recoveryOnly = (Len(PendingApplyRequestID()) > 0)
+    If recoveryOnly Then
+        If Len(PendingApplyPreviewDigest()) = 0 Or _
+           Len(PendingApplyExpectedRevision()) = 0 Then
+            settings.Range("B23").Value2 = T("sync_failed")
+            Exit Sub
+        End If
+    ElseIf Len(mLastPreviewDigest) = 0 Then
         settings.Range("B23").Value2 = T("preview_first")
         Exit Sub
     End If
-    If mLastPreviewSettings <> PricingSettingsCanonical() Then
+    If Not recoveryOnly And _
+       mLastPreviewSettings <> PricingSettingsCanonical() Then
         InvalidatePricingPreview
         settings.Range("B23").Value2 = T("preview_first")
         Exit Sub
     End If
-    If Len(mLastApplyRequestID) = 0 And _
+    If Not recoveryOnly And _
        mLastPreviewStateRevision <> _
            Trim$(CStr(settings.Range("G14").Value2)) Then
         InvalidatePricingPreview
@@ -3048,7 +3352,7 @@ Private Sub ApplyPricingChangesCore(ByVal requireConfirmation As Boolean, _
         Exit Sub
     End If
 
-    If requireConfirmation Then
+    If requireConfirmation And Not recoveryOnly Then
         answer = ConfirmUnicodeMessage( _
             T("apply_confirm") & vbCrLf & vbCrLf & _
             CStr(settings.Range("B23").Value2), _
@@ -3056,7 +3360,7 @@ Private Sub ApplyPricingChangesCore(ByVal requireConfirmation As Boolean, _
         If answer <> vbYes Then Exit Sub
     End If
 
-    If Len(mLastApplyRequestID) = 0 Then
+    If Not recoveryOnly Then
         mLastApplyRequestID = NewRequestID("apply")
         settings.Range("G28").Value2 = mLastApplyRequestID
     End If
@@ -3076,6 +3380,7 @@ Private Sub ApplyPricingChangesCore(ByVal requireConfirmation As Boolean, _
     mOperationSavedPreviewSettings = mLastPreviewSettings
     mOperationSavedPreviewWarningCount = mLastPreviewWarningCount
     mOperationSavedApplyRequestID = mLastApplyRequestID
+    mOperationApplyPostStarted = recoveryOnly
     mPricingActionInProgress = True
     mLastOperationName = "apply"
     mLastOperationSucceeded = False
@@ -3261,6 +3566,108 @@ Private Function PricingSnapshotRequestJson(ByVal requestID As String) As String
         """max_age_seconds"":" & _
         CStr(maxAgeSeconds) & stateRevisionField & "}"
 End Function
+
+Private Sub ParsePricingApplyJob(ByVal root As JsonValue, _
+                                 ByVal statusCode As Long, _
+                                 ByVal responseHeaders As String, _
+                                 ByVal expectedRequestID As String, _
+                                 ByRef jobStatus As String, _
+                                 ByRef terminal As Boolean, _
+                                 ByRef readbackRequired As Boolean, _
+                                 ByRef stateRevision As String)
+    Dim sourceValue As JsonValue
+    Dim expectedURL As String
+    Dim expectedPreviewDigest As String
+    Dim expectedStateRevision As String
+    Dim responseLocation As String
+    Dim parsedJobID As String
+
+    expectedPreviewDigest = PendingApplyPreviewDigest()
+    expectedStateRevision = PendingApplyExpectedRevision()
+    If root Is Nothing Or root.Kind <> "object" Or _
+       SiteText(root, "schema") <> PRICING_APPLY_JOB_SCHEMA Or _
+       SiteText(root, "request_id") <> expectedRequestID Or _
+       SiteText(root, "idempotency_key") <> expectedRequestID Or _
+       SiteText(root, "preview_digest") <> expectedPreviewDigest Or _
+       SiteText(root, "expected_state_revision") <> _
+           expectedStateRevision Then
+        Err.Raise vbObjectError + 161, "ParsePricingApplyJob", _
+                  T("sync_failed")
+    End If
+    Set sourceValue = JsonRuntime.JsonMember(root, "source")
+    If sourceValue Is Nothing Or sourceValue.Kind <> "object" Or _
+       SiteText(sourceValue, "id") <> mSourceID Or _
+       SiteText(sourceValue, "dataset") <> mSourceDataset Or _
+       SiteText(sourceValue, "revision") <> mSourceRevision Then
+        Err.Raise vbObjectError + 161, "ParsePricingApplyJob", _
+                  T("sync_failed")
+    End If
+    jobStatus = LCase$(SiteText(root, "status"))
+    terminal = BooleanValue(JsonRuntime.JsonText(root, "terminal"))
+    readbackRequired = BooleanValue( _
+        JsonRuntime.JsonText(root, "readback_required"))
+    stateRevision = SiteText(root, "state_revision")
+    mApplyJobCode = LCase$(SiteText(root, "code"))
+    parsedJobID = SiteText(root, "job_id")
+    If Len(parsedJobID) > 0 And Not IsSafePricingJobID(parsedJobID) Then
+        Err.Raise vbObjectError + 161, "ParsePricingApplyJob", _
+                  T("sync_failed")
+    End If
+    If Len(mApplyJobID) > 0 And Len(parsedJobID) > 0 And _
+       parsedJobID <> mApplyJobID Then
+        Err.Raise vbObjectError + 161, "ParsePricingApplyJob", _
+                  T("sync_failed")
+    End If
+    mApplyJobID = parsedJobID
+    expectedURL = PricingApplyJobURL(expectedRequestID)
+    mApplyStatusURL = SnapshotRouteURL(SiteText(root, "status_url"))
+    mApplyCancelURL = SnapshotRouteURL(SiteText(root, "cancel_url"))
+    responseLocation = SnapshotRouteURL( _
+        ResponseHeaderValue(responseHeaders, "Location"))
+    If mApplyStatusURL <> expectedURL Or mApplyCancelURL <> expectedURL Or _
+       responseLocation <> expectedURL Then
+        Err.Raise vbObjectError + 161, "ParsePricingApplyJob", _
+                  T("sync_failed")
+    End If
+
+    If terminal Then
+        Select Case jobStatus
+            Case "completed", "failed", "cancelled", "outcome_unknown"
+            Case Else
+                Err.Raise vbObjectError + 161, "ParsePricingApplyJob", _
+                          T("sync_failed")
+        End Select
+        If statusCode <> 200 And _
+           Not (statusCode = 503 And jobStatus = "failed") Then
+            Err.Raise vbObjectError + 161, "ParsePricingApplyJob", _
+                      T("sync_failed")
+        End If
+        If jobStatus = "completed" Then
+            If readbackRequired Or _
+               Not IsSHA256RevisionText(stateRevision) Then
+                Err.Raise vbObjectError + 161, "ParsePricingApplyJob", _
+                          T("sync_failed")
+            End If
+        ElseIf Len(stateRevision) > 0 Or _
+               (jobStatus = "outcome_unknown") <> readbackRequired Then
+            Err.Raise vbObjectError + 161, "ParsePricingApplyJob", _
+                      T("sync_failed")
+        End If
+    Else
+        Select Case jobStatus
+            Case "admitting", "admission_unknown", "queued", "running", _
+                 "recovering", "cancelling", "finalizing"
+            Case Else
+                Err.Raise vbObjectError + 161, "ParsePricingApplyJob", _
+                          T("sync_failed")
+        End Select
+        If statusCode <> 202 Or Len(stateRevision) > 0 Then
+            Err.Raise vbObjectError + 161, "ParsePricingApplyJob", _
+                      T("sync_failed")
+        End If
+    End If
+    mApplyJobStatus = jobStatus
+End Sub
 
 Private Sub ParsePricingSnapshotJob(ByVal root As JsonValue, _
                                     ByVal expectedRequestID As String, _
@@ -5237,6 +5644,118 @@ End Sub
 
 Private Function PricingEndpoint(ByVal operationName As String) As String
     PricingEndpoint = PricingBaseURL() & "/" & operationName
+End Function
+
+Private Function PricingApplyJobURL(ByVal requestID As String) As String
+    EnsureSourceIdentity
+    If Not IsSafePricingRequestID(requestID) Then
+        Err.Raise vbObjectError + 161, "PricingApplyJobURL", _
+                  T("sync_failed")
+    End If
+    PricingApplyJobURL = PricingBaseURL() & "/jobs/" & requestID & _
+        "?source_id=" & SafePricingQueryValue(mSourceID) & _
+        "&source_dataset=" & SafePricingQueryValue(mSourceDataset) & _
+        "&source_revision=" & SafePricingQueryValue(mSourceRevision)
+End Function
+
+Private Function SafePricingQueryValue(ByVal value As String) As String
+    Dim index As Long
+    Dim character As String
+    Dim characterCode As Long
+
+    value = Trim$(value)
+    If Len(value) = 0 Or Len(value) > 256 Then GoTo UnsafeValue
+    For index = 1 To Len(value)
+        character = Mid$(value, index, 1)
+        characterCode = AscW(character)
+        If (characterCode >= 48 And characterCode <= 57) Or _
+           (characterCode >= 65 And characterCode <= 90) Or _
+           (characterCode >= 97 And characterCode <= 122) Or _
+           InStr(1, "._-", character, vbBinaryCompare) > 0 Then
+            SafePricingQueryValue = SafePricingQueryValue & character
+        ElseIf character = ":" Then
+            SafePricingQueryValue = SafePricingQueryValue & "%3A"
+        ElseIf character = " " Then
+            SafePricingQueryValue = SafePricingQueryValue & "%20"
+        Else
+            GoTo UnsafeValue
+        End If
+    Next index
+    Exit Function
+
+UnsafeValue:
+    Err.Raise vbObjectError + 161, "SafePricingQueryValue", _
+              T("sync_failed")
+End Function
+
+Private Function IsSafePricingRequestID(ByVal value As String) As Boolean
+    Dim index As Long
+    Dim characterCode As Long
+    Dim character As String
+
+    value = Trim$(value)
+    If Len(value) < 8 Or Len(value) > 128 Then Exit Function
+    For index = 1 To Len(value)
+        character = Mid$(value, index, 1)
+        characterCode = AscW(character)
+        If Not ((characterCode >= 48 And characterCode <= 57) Or _
+                (characterCode >= 65 And characterCode <= 90) Or _
+                (characterCode >= 97 And characterCode <= 122) Or _
+                InStr(1, "._:-", character, vbBinaryCompare) > 0) Then _
+            Exit Function
+    Next index
+    IsSafePricingRequestID = True
+End Function
+
+Private Function IsSafePricingJobID(ByVal value As String) As Boolean
+    Dim index As Long
+    Dim character As String
+
+    value = LCase$(Trim$(value))
+    If Len(value) <> 41 Or Left$(value, 9) <> "currency-" Then _
+        Exit Function
+    For index = 10 To Len(value)
+        character = Mid$(value, index, 1)
+        If InStr(1, "0123456789abcdef", character, _
+                 vbBinaryCompare) = 0 Then Exit Function
+    Next index
+    IsSafePricingJobID = True
+End Function
+
+Private Function PendingApplyRequestID() As String
+    Dim candidate As String
+
+    candidate = Trim$(mLastApplyRequestID)
+    If Len(candidate) = 0 Then
+        candidate = Trim$(CStr(ConfigSheet().Range("G28").Value2))
+    End If
+    If Not IsSafePricingRequestID(candidate) Then Exit Function
+    mLastApplyRequestID = candidate
+    PendingApplyRequestID = candidate
+End Function
+
+Private Function PendingApplyPreviewDigest() As String
+    Dim candidate As String
+
+    candidate = Trim$(mLastPreviewDigest)
+    If Len(candidate) = 0 Then
+        candidate = Trim$(CStr(ConfigSheet().Range("G26").Value2))
+    End If
+    If Not IsSHA256RevisionText(candidate) Then Exit Function
+    mLastPreviewDigest = candidate
+    PendingApplyPreviewDigest = candidate
+End Function
+
+Private Function PendingApplyExpectedRevision() As String
+    Dim candidate As String
+
+    candidate = Trim$(mLastPreviewStateRevision)
+    If Len(candidate) = 0 Then
+        candidate = Trim$(CStr(ConfigSheet().Range("G14").Value2))
+    End If
+    If Not IsSHA256RevisionText(candidate) Then Exit Function
+    mLastPreviewStateRevision = candidate
+    PendingApplyExpectedRevision = candidate
 End Function
 
 Private Function PricingBaseURL() As String

@@ -530,8 +530,7 @@ func (client *excelPricingRemoteSnapshotClient) fetchRevision(
 		return excelPricingRemoteSnapshotRevision{}, errExcelPricingRemoteSnapshotProtocol
 	}
 	var payload excelPricingRemoteRevisionResponse
-	if excelPricingEnvelopeHasRemovedSchemaVersion(body) ||
-		json.Unmarshal(body, &payload) != nil || payload.Schema != excelPricingRemoteRevisionSchema ||
+	if json.Unmarshal(body, &payload) != nil || payload.Schema != excelPricingRemoteRevisionSchema ||
 		payload.Projection != excelPricingRemoteProjection ||
 		payload.ProjectionSchema != excelPricingRemoteProjectionSchema || payload.Source != client.source ||
 		payload.Locale != "fa" || payload.PageSize != excelPricingSnapshotPageSize ||
@@ -602,8 +601,7 @@ func (client *excelPricingRemoteSnapshotClient) startSnapshot(
 		return excelPricingRemoteSnapshotBuildResponse{}, response.StatusCode, errExcelPricingRemoteSnapshotProtocol
 	}
 	var build excelPricingRemoteSnapshotBuildResponse
-	if excelPricingEnvelopeHasRemovedSchemaVersion(responseBody) ||
-		json.Unmarshal(responseBody, &build) != nil ||
+	if json.Unmarshal(responseBody, &build) != nil ||
 		validateExcelPricingRemoteSnapshotBuild(build, response.StatusCode, requestID, client.source, revision) != nil {
 		return excelPricingRemoteSnapshotBuildResponse{}, response.StatusCode, errExcelPricingRemoteSnapshotProtocol
 	}
@@ -653,7 +651,7 @@ func (client *excelPricingRemoteSnapshotClient) fetchSnapshot(
 		return nil, errExcelPricingRemoteSnapshotProtocol
 	}
 	var payload excelPricingRemoteSnapshotPayload
-	if excelPricingEnvelopeHasRemovedSchemaVersion(body) || json.Unmarshal(body, &payload) != nil {
+	if json.Unmarshal(body, &payload) != nil {
 		return nil, errExcelPricingRemoteSnapshotProtocol
 	}
 	etag := strings.TrimSpace(response.Header.Get("ETag"))
@@ -703,7 +701,7 @@ func (client *excelPricingRemoteSnapshotClient) cancelSnapshot(cancelURL, buildI
 
 func (client *excelPricingRemoteSnapshotClient) setRemoteHeaders(request *http.Request, jsonBody bool) {
 	request.Header.Set("Accept", "application/json")
-	request.Header.Set("User-Agent", "patris-export-excel-companion/1")
+	request.Header.Set("User-Agent", "patris-export-excel-companion")
 	request.Header.Set(excelPricingRemoteSecretHeader, client.secret)
 	request.Header.Set(excelPricingRemoteSourceIDHeader, client.source.ID)
 	request.Header.Set(excelPricingRemoteDatasetHeader, client.source.Dataset)

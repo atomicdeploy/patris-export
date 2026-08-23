@@ -142,8 +142,7 @@ func TestExcelPricingRemoteEventsConnectValidateAndConsumePHPFrame(t *testing.T)
 				r.URL.Query().Get("source_dataset") == source.Dataset &&
 				r.URL.Query().Get("source_revision") == source.Revision &&
 				r.URL.Query().Get("locale") == "fa" &&
-				r.URL.Query().Get("page_size") == strconv.Itoa(excelPricingSnapshotPageSize) &&
-				r.URL.Query().Get("schema_version") == ""
+				r.URL.Query().Get("page_size") == strconv.Itoa(excelPricingSnapshotPageSize)
 			if !valid {
 				http.Error(w, "invalid protected request", http.StatusForbidden)
 				return

@@ -502,32 +502,35 @@ func TestValidateExcelPricingSettingsUsesUniversalShippingRange(t *testing.T) {
 
 func TestExcelPricingApplyRegeneratesDispatchesAndRefetchesState(t *testing.T) {
 	oldSource := canonical.Source{ID: "source", Dataset: "dataset", Revision: excelPricingRevisionForTest("old-source")}
-	newSource := canonical.Source{ID: "source", Dataset: "dataset", Revision: excelPricingRevisionForTest("new-source")}
+	newSource := oldSource
 	stateRevision := excelPricingRevisionForTest("new-settings")
 	previewDigest := excelPricingRevisionForTest("preview")
 	var remoteCalls atomic.Int32
+	requestID := "excel-apply-0001"
 	remote := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		remoteCalls.Add(1)
-		var payload struct {
-			Operation string           `json:"operation"`
-			Source    canonical.Source `json:"source"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
-			t.Fatal(err)
-		}
-		switch payload.Operation {
-		case "apply":
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/apply"):
+			var payload excelPricingRemoteRequest
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				t.Fatal(err)
+			}
 			if payload.Source != oldSource {
 				t.Fatalf("apply source=%#v, want %#v", payload.Source, oldSource)
 			}
-			writeRemotePricingResponse(t, w, excelPricingApplySchema, stateRevision)
-		case "state":
+			writeRemotePricingApplyJobForTest(t, w, http.StatusAccepted, requestID, oldSource,
+				stateRevision, previewDigest, "queued", false, "")
+		case strings.HasSuffix(r.URL.Path, "/state"):
+			var payload excelPricingRemoteRequest
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				t.Fatal(err)
+			}
 			if payload.Source != newSource {
 				t.Fatalf("post-apply state source=%#v, want %#v", payload.Source, newSource)
 			}
 			writeRemotePricingResponse(t, w, excelPricingStateSchema, stateRevision)
 		default:
-			t.Fatalf("unexpected remote operation %q", payload.Operation)
+			t.Fatalf("unexpected remote path %q", r.URL.Path)
 		}
 	}))
 	defer remote.Close()
@@ -556,7 +559,7 @@ func TestExcelPricingApplyRegeneratesDispatchesAndRefetchesState(t *testing.T) {
 		}, nil
 	}
 	token := openExcelPricingSession(t, server)
-	body := validExcelPricingMutationBody("apply", "excel-apply-0001", stateRevision, previewDigest, "APPLY")
+	body := validExcelPricingMutationBody("apply", requestID, stateRevision, previewDigest, "APPLY")
 	bindExcelPricingPreviewForTest(t, server, body)
 	server.excelPricing.snapshots.mu.Lock()
 	server.excelPricing.snapshots.cache["pre-apply"] = &excelPricingSnapshot{
@@ -564,15 +567,35 @@ func TestExcelPricingApplyRegeneratesDispatchesAndRefetchesState(t *testing.T) {
 	}
 	server.excelPricing.snapshots.mu.Unlock()
 	request := authenticatedExcelPricingRequest(http.MethodPost, "/api/pricing-sync/apply", body, token)
-	request.Header.Set("Idempotency-Key", "excel-apply-0001")
+	request.Header.Set("Idempotency-Key", requestID)
 	request.Header.Set("If-Match", `"`+stateRevision+`"`)
 	response := httptest.NewRecorder()
 	server.router.ServeHTTP(response, request)
-	if response.Code != http.StatusOK {
+	if response.Code != http.StatusAccepted {
 		t.Fatalf("apply status=%d: %s", response.Code, response.Body.String())
 	}
+	if dispatched.Load() != 0 || remoteCalls.Load() != 1 {
+		t.Fatalf("admission blocked on effects: dispatch=%d remote_calls=%d", dispatched.Load(), remoteCalls.Load())
+	}
+	event := excelPricingRemoteApplyTerminalEventForTest(
+		requestID, oldSource, previewDigest, stateRevision, "completed",
+	)
+	if err := server.acceptExcelPricingRemoteApplyTerminal(event); err != nil {
+		t.Fatal(err)
+	}
+	completed := waitForExcelPricingApplyJobForTest(t, server, requestID, "completed")
+	if completed.StateRevision != stateRevision {
+		t.Fatalf("completed state revision=%q", completed.StateRevision)
+	}
 	if dispatched.Load() != 1 || remoteCalls.Load() != 2 {
-		t.Fatalf("dispatch=%d remote_calls=%d, want 1/2", dispatched.Load(), remoteCalls.Load())
+		t.Fatalf("terminal effects dispatch=%d remote_calls=%d, want 1/2", dispatched.Load(), remoteCalls.Load())
+	}
+	if err := server.acceptExcelPricingRemoteApplyTerminal(event); err != nil {
+		t.Fatal(err)
+	}
+	server.backgroundWG.Wait()
+	if dispatched.Load() != 1 || remoteCalls.Load() != 2 {
+		t.Fatalf("duplicate terminal event repeated effects: dispatch=%d remote=%d", dispatched.Load(), remoteCalls.Load())
 	}
 	server.excelPricing.snapshots.mu.Lock()
 	_, staleCacheRemained := server.excelPricing.snapshots.cache["pre-apply"]
@@ -581,7 +604,7 @@ func TestExcelPricingApplyRegeneratesDispatchesAndRefetchesState(t *testing.T) {
 		t.Fatal("successful apply did not invalidate the pre-apply snapshot cache")
 	}
 	assertCanonicalProjectionInvalidatedForTest(t, server, canonicalGeneration, "apply")
-	if !strings.Contains(response.Body.String(), excelPricingApplySchema) ||
+	if !strings.Contains(response.Body.String(), excelPricingApplyJobSchema) ||
 		strings.Contains(response.Body.String(), excelPricingTestSecret) {
 		t.Fatalf("unsafe or wrong apply response: %s", response.Body.String())
 	}
@@ -593,11 +616,11 @@ func TestExcelPricingApplyRegeneratesDispatchesAndRefetchesState(t *testing.T) {
 	seedCanonicalProjectionCacheForTest(server, "post-apply")
 	replayCanonicalGeneration := canonicalProjectionCacheGenerationForTest(server)
 	replayRequest := authenticatedExcelPricingRequest(http.MethodPost, "/api/pricing-sync/apply", body, token)
-	replayRequest.Header.Set("Idempotency-Key", "excel-apply-0001")
+	replayRequest.Header.Set("Idempotency-Key", requestID)
 	replayRequest.Header.Set("If-Match", `"`+stateRevision+`"`)
 	replayResponse := httptest.NewRecorder()
 	server.router.ServeHTTP(replayResponse, replayRequest)
-	if replayResponse.Code != http.StatusOK || replayResponse.Body.String() != response.Body.String() {
+	if replayResponse.Code != http.StatusOK || !strings.Contains(replayResponse.Body.String(), `"status":"completed"`) {
 		t.Fatalf("apply replay status=%d body=%s", replayResponse.Code, replayResponse.Body.String())
 	}
 	if dispatched.Load() != 1 || remoteCalls.Load() != 2 {
@@ -626,12 +649,12 @@ func TestExcelPricingApplyRegeneratesDispatchesAndRefetchesState(t *testing.T) {
 	conflictRequest := authenticatedExcelPricingRequest(
 		http.MethodPost, "/api/pricing-sync/apply", string(conflictingBody), token,
 	)
-	conflictRequest.Header.Set("Idempotency-Key", "excel-apply-0001")
+	conflictRequest.Header.Set("Idempotency-Key", requestID)
 	conflictRequest.Header.Set("If-Match", `"`+stateRevision+`"`)
 	conflictResponse := httptest.NewRecorder()
 	server.router.ServeHTTP(conflictResponse, conflictRequest)
 	if conflictResponse.Code != http.StatusConflict ||
-		!strings.Contains(conflictResponse.Body.String(), "idempotency_conflict") {
+		!strings.Contains(conflictResponse.Body.String(), "preview_binding_conflict") {
 		t.Fatalf("apply idempotency conflict status=%d: %s", conflictResponse.Code, conflictResponse.Body.String())
 	}
 	if dispatched.Load() != 1 || remoteCalls.Load() != 2 {
@@ -641,12 +664,15 @@ func TestExcelPricingApplyRegeneratesDispatchesAndRefetchesState(t *testing.T) {
 
 func TestExcelPricingApplyRejectsAmbiguousDeferredProductSync(t *testing.T) {
 	oldSource := canonical.Source{ID: "source", Dataset: "dataset", Revision: excelPricingRevisionForTest("old-source")}
-	newSource := canonical.Source{ID: "source", Dataset: "dataset", Revision: excelPricingRevisionForTest("new-source")}
+	newSource := oldSource
 	stateRevision := excelPricingRevisionForTest("new-settings")
 	var remoteCalls atomic.Int32
+	requestID := "excel-apply-0002"
+	previewDigest := excelPricingRevisionForTest("preview")
 	remote := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		remoteCalls.Add(1)
-		writeRemotePricingResponse(t, w, excelPricingApplySchema, stateRevision)
+		writeRemotePricingApplyJobForTest(t, w, http.StatusAccepted, requestID, oldSource,
+			stateRevision, previewDigest, "queued", false, "")
 	}))
 	defer remote.Close()
 	server := newExcelPricingTestServer(t, remote.URL+"/wp-json/digitalogic/patris/product-sync")
@@ -664,9 +690,9 @@ func TestExcelPricingApplyRejectsAmbiguousDeferredProductSync(t *testing.T) {
 	token := openExcelPricingSession(t, server)
 	body := validExcelPricingMutationBody(
 		"apply",
-		"excel-apply-0002",
+		requestID,
 		stateRevision,
-		excelPricingRevisionForTest("preview"),
+		previewDigest,
 		"APPLY",
 	)
 	bindExcelPricingPreviewForTest(t, server, body)
@@ -676,12 +702,23 @@ func TestExcelPricingApplyRejectsAmbiguousDeferredProductSync(t *testing.T) {
 	}
 	server.excelPricing.snapshots.mu.Unlock()
 	request := authenticatedExcelPricingRequest(http.MethodPost, "/api/pricing-sync/apply", body, token)
-	request.Header.Set("Idempotency-Key", "excel-apply-0002")
+	request.Header.Set("Idempotency-Key", requestID)
 	request.Header.Set("If-Match", `"`+stateRevision+`"`)
 	response := httptest.NewRecorder()
 	server.router.ServeHTTP(response, request)
-	if response.Code != http.StatusBadGateway {
-		t.Fatalf("apply status=%d, want 502: %s", response.Code, response.Body.String())
+	if response.Code != http.StatusAccepted {
+		t.Fatalf("apply status=%d, want 202: %s", response.Code, response.Body.String())
+	}
+	if err := server.acceptExcelPricingRemoteApplyTerminal(
+		excelPricingRemoteApplyTerminalEventForTest(
+			requestID, oldSource, previewDigest, stateRevision, "completed",
+		),
+	); err != nil {
+		t.Fatal(err)
+	}
+	terminal := waitForExcelPricingApplyJobForTest(t, server, requestID, "outcome_unknown")
+	if !terminal.Terminal || !terminal.ReadbackRequired {
+		t.Fatalf("ambiguous delivery terminal=%#v", terminal)
 	}
 	if remoteCalls.Load() != 1 {
 		t.Fatalf("remote calls=%d, want apply only and no state readback", remoteCalls.Load())
@@ -696,14 +733,17 @@ func TestExcelPricingApplyRejectsAmbiguousDeferredProductSync(t *testing.T) {
 
 func TestExcelPricingApplyAcceptsMissingDeferredProductSync(t *testing.T) {
 	oldSource := canonical.Source{ID: "source", Dataset: "dataset", Revision: excelPricingRevisionForTest("old-source")}
-	newSource := canonical.Source{ID: "source", Dataset: "dataset", Revision: excelPricingRevisionForTest("new-source")}
+	newSource := oldSource
 	stateRevision := excelPricingRevisionForTest("new-settings")
 	var remoteCalls atomic.Int32
+	requestID := "excel-apply-0003"
+	previewDigest := excelPricingRevisionForTest("preview")
 	remote := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		remoteCalls.Add(1)
 		switch {
 		case strings.HasSuffix(r.URL.Path, "/apply"):
-			writeRemotePricingResponse(t, w, excelPricingApplySchema, stateRevision)
+			writeRemotePricingApplyJobForTest(t, w, http.StatusAccepted, requestID, oldSource,
+				stateRevision, previewDigest, "queued", false, "")
 		case strings.HasSuffix(r.URL.Path, "/state"):
 			writeRemotePricingResponse(t, w, excelPricingStateSchema, stateRevision)
 		default:
@@ -728,20 +768,28 @@ func TestExcelPricingApplyAcceptsMissingDeferredProductSync(t *testing.T) {
 	token := openExcelPricingSession(t, server)
 	body := validExcelPricingMutationBody(
 		"apply",
-		"excel-apply-0003",
+		requestID,
 		stateRevision,
-		excelPricingRevisionForTest("preview"),
+		previewDigest,
 		"APPLY",
 	)
 	bindExcelPricingPreviewForTest(t, server, body)
 	request := authenticatedExcelPricingRequest(http.MethodPost, "/api/pricing-sync/apply", body, token)
-	request.Header.Set("Idempotency-Key", "excel-apply-0003")
+	request.Header.Set("Idempotency-Key", requestID)
 	request.Header.Set("If-Match", `"`+stateRevision+`"`)
 	response := httptest.NewRecorder()
 	server.router.ServeHTTP(response, request)
-	if response.Code != http.StatusOK {
-		t.Fatalf("apply status=%d, want 200: %s", response.Code, response.Body.String())
+	if response.Code != http.StatusAccepted {
+		t.Fatalf("apply status=%d, want 202: %s", response.Code, response.Body.String())
 	}
+	if err := server.acceptExcelPricingRemoteApplyTerminal(
+		excelPricingRemoteApplyTerminalEventForTest(
+			requestID, oldSource, previewDigest, stateRevision, "completed",
+		),
+	); err != nil {
+		t.Fatal(err)
+	}
+	waitForExcelPricingApplyJobForTest(t, server, requestID, "completed")
 	if remoteCalls.Load() != 2 {
 		t.Fatalf("remote calls=%d, want apply plus state readback", remoteCalls.Load())
 	}
@@ -775,17 +823,6 @@ func TestExcelPricingRemoteErrorsAndRedirectsAreSecretSafe(t *testing.T) {
 	if strings.Contains(response.Body.String(), excelPricingTestSecret) ||
 		strings.Contains(response.Body.String(), "credential-leak") {
 		t.Fatalf("remote error leaked protected material: %s", response.Body.String())
-	}
-}
-
-func TestExcelPricingLivingEnvelopeRejectsRemovedSchemaVersionField(t *testing.T) {
-	if excelPricingEnvelopeHasRemovedSchemaVersion([]byte(`{"schema":"digitalogic.pricing-sync-state"}`)) {
-		t.Fatal("Living envelope without the removed field was rejected")
-	}
-	if !excelPricingEnvelopeHasRemovedSchemaVersion(
-		[]byte(`{"schema":"digitalogic.pricing-sync-state","schema_version":1}`),
-	) {
-		t.Fatal("removed schema field was accepted")
 	}
 }
 
@@ -923,6 +960,10 @@ func newExcelPricingTestServer(t *testing.T, productSyncURL string) *Server {
 		t.Fatal(err)
 	}
 	state := newExcelPricingState()
+	state.applyJobs = newExcelPricingApplyJobStore(
+		excelPricingApplyJobStatePath(manager, "dataset"),
+		state.now,
+	)
 	state.canonical = canonicalProjectionSequence(excelPricingStateSourceForTest())
 	server := &Server{
 		router:       mux.NewRouter(),
@@ -1077,6 +1118,125 @@ func canonicalProjectionSequence(sources ...canonical.Source) func(context.Conte
 			Warnings:      []string{},
 		}}, nil
 	}
+}
+
+func writeRemotePricingApplyJobForTest(
+	t *testing.T,
+	w http.ResponseWriter,
+	statusCode int,
+	requestID string,
+	source canonical.Source,
+	expectedStateRevision string,
+	previewDigest string,
+	status string,
+	terminal bool,
+	stateRevision string,
+) {
+	t.Helper()
+	jobID := "currency-0123456789abcdef0123456789abcdef"
+	statusPath := excelPricingRemoteApplyJobPath(jobID, source)
+	retryAfter := 2
+	accepted := true
+	remote := excelPricingRemoteApplyJob{
+		Schema:                excelPricingRemoteApplySchema,
+		JobID:                 jobID,
+		RequestID:             requestID,
+		IdempotencyKey:        requestID,
+		Status:                status,
+		Terminal:              terminal,
+		ExpectedStateRevision: expectedStateRevision,
+		PreviewDigest:         previewDigest,
+		Source:                source,
+		Progress:              map[string]interface{}{},
+		RetryAfter:            &retryAfter,
+		EventDelivery:         map[string]interface{}{},
+		StatusURL:             statusPath,
+		CancelURL:             statusPath,
+		Accepted:              &accepted,
+	}
+	if terminal {
+		remote.RetryAfter = nil
+	}
+	if status == "completed" {
+		remote.Result = &excelPricingApplyResult{
+			Schema:         excelPricingApplySchema,
+			Mode:           "apply",
+			Status:         "applied",
+			StateRevision:  stateRevision,
+			Source:         source,
+			ClientID:       excelPricingContractClientID,
+			Channel:        excelPricingContractChannel,
+			RequestID:      requestID,
+			PreviewDigest:  previewDigest,
+			Settings:       json.RawMessage(`{}`),
+			Warnings:       json.RawMessage(`[]`),
+			ProductResults: json.RawMessage(`[]`),
+		}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	if statusCode == http.StatusAccepted {
+		w.Header().Set("Location", statusPath)
+	}
+	w.WriteHeader(statusCode)
+	if err := json.NewEncoder(w).Encode(remote); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func excelPricingRemoteApplyTerminalEventForTest(
+	requestID string,
+	source canonical.Source,
+	previewDigest string,
+	stateRevision string,
+	status string,
+) excelPricingRemoteApplyTerminalEvent {
+	jobID := "currency-0123456789abcdef0123456789abcdef"
+	event := excelPricingRemoteApplyTerminalEvent{
+		Schema:           excelPricingApplyEventSchema,
+		Projection:       excelPricingRemoteProjection,
+		JobID:            jobID,
+		RequestIDs:       []string{requestID},
+		PrimaryRequestID: requestID,
+		Status:           status,
+		Source:           source,
+		PreviewDigest:    previewDigest,
+		StateRevision:    stateRevision,
+		ResultDigest:     excelPricingRevisionForTest("result-" + requestID + "-" + status),
+		StatusPath:       excelPricingRemoteApplyJobPath(jobID, source),
+		RevisionPath:     "/wp-json/digitalogic/pricing/sync/revision",
+		IdempotencyKey:   excelPricingRevisionForTest("event-" + requestID + "-" + status),
+		Audience:         excelPricingApplyAudience{Services: []string{"patris_pricing"}},
+		EventID:          1,
+	}
+	if status != "completed" {
+		event.StateRevision = ""
+		event.Code = "pricing_apply_" + status
+		event.ReadbackRequired = status == "outcome_unknown"
+	}
+	return event
+}
+
+func waitForExcelPricingApplyJobForTest(
+	t *testing.T,
+	server *Server,
+	requestID string,
+	status string,
+) *excelPricingApplyJob {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		job, err := server.excelPricing.applyJobs.lookup(requestID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if job != nil && job.Status == status {
+			return job
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	job, _ := server.excelPricing.applyJobs.lookup(requestID)
+	t.Fatalf("pricing apply job did not reach %q: %#v", status, job)
+	return nil
 }
 
 func writeRemotePricingResponse(t *testing.T, w http.ResponseWriter, schema, stateRevision string) {

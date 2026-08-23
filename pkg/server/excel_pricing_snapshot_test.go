@@ -513,29 +513,6 @@ func TestExcelPricingSnapshotUsesOnlyExcelPositionalRows(t *testing.T) {
 		t.Fatalf("invalid projection status=%d remote=%d", invalidResponse.Code, remoteCalls.Load())
 	}
 
-	removedSchemaFieldID := "snapshot-removed-schema-field-0001"
-	removedSchemaFieldBody := strings.Replace(
-		validExcelPricingSnapshotStartBody(source, removedSchemaFieldID, "fa", 0),
-		"{",
-		`{"schema_version":1,`,
-		1,
-	)
-	removedSchemaField := authenticatedExcelPricingRequest(
-		http.MethodPost,
-		"/api/pricing-sync/snapshots",
-		removedSchemaFieldBody,
-		token,
-	)
-	removedSchemaField.Header.Set("Idempotency-Key", removedSchemaFieldID)
-	removedSchemaFieldResponse := httptest.NewRecorder()
-	server.router.ServeHTTP(removedSchemaFieldResponse, removedSchemaField)
-	if removedSchemaFieldResponse.Code != http.StatusBadRequest || remoteCalls.Load() != 1 {
-		t.Fatalf(
-			"removed schema field status=%d remote=%d",
-			removedSchemaFieldResponse.Code,
-			remoteCalls.Load(),
-		)
-	}
 }
 
 func TestExcelPricingSnapshotPayloadForRepresentativeCatalog(t *testing.T) {

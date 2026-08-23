@@ -34,9 +34,13 @@ type excelPricingRemoteBridgeDependencies struct {
 		func(uint64),
 		func(excelPricingRemoteRevision) error,
 		func(excelPricingRemoteSnapshotTerminalEvent) error,
+		func(excelPricingRemoteApplyTerminalEvent) error,
+		func(context.Context) error,
 	) error
-	apply func(excelPricingRemoteRevision) error
-	logf  func(string, ...interface{})
+	apply          func(excelPricingRemoteRevision) error
+	applyTerminal  func(excelPricingRemoteApplyTerminalEvent) error
+	reconcileApply func(context.Context) error
+	logf           func(string, ...interface{})
 }
 
 // excelPricingRemoteEventsBridge owns the production lifecycle around the
@@ -88,6 +92,8 @@ func newExcelPricingRemoteEventsBridge(server *Server) *excelPricingRemoteEvents
 			onCursor func(uint64),
 			onRevision func(excelPricingRemoteRevision) error,
 			onTerminal func(excelPricingRemoteSnapshotTerminalEvent) error,
+			onApplyTerminal func(excelPricingRemoteApplyTerminalEvent) error,
+			onConnected func(context.Context) error,
 		) error {
 			return runExcelPricingRemoteEvents(
 				ctx,
@@ -97,10 +103,14 @@ func newExcelPricingRemoteEventsBridge(server *Server) *excelPricingRemoteEvents
 				onCursor,
 				onRevision,
 				onTerminal,
+				onApplyTerminal,
+				onConnected,
 			)
 		},
-		apply: server.notifyExcelPricingRemoteRevisionChanged,
-		logf:  log.Printf,
+		apply:          server.notifyExcelPricingRemoteRevisionChanged,
+		applyTerminal:  server.acceptExcelPricingRemoteApplyTerminal,
+		reconcileApply: server.reconcileExcelPricingApplyJobsOnConnect,
+		logf:           log.Printf,
 	})
 }
 
@@ -349,6 +359,15 @@ func (bridge *excelPricingRemoteEventsBridge) runGeneration(
 		func(event excelPricingRemoteSnapshotTerminalEvent) error {
 			return bridge.acceptSnapshotTerminal(epoch, source, event)
 		},
+		func(event excelPricingRemoteApplyTerminalEvent) error {
+			return bridge.acceptApplyTerminal(epoch, source, event)
+		},
+		func(callbackContext context.Context) error {
+			if bridge.dependencies.reconcileApply == nil {
+				return nil
+			}
+			return bridge.dependencies.reconcileApply(callbackContext)
+		},
 	)
 	if err != nil && ctx.Err() == nil && bridge.generationCurrent(epoch) {
 		// Never include an endpoint, environment-variable name, transport error,
@@ -427,6 +446,22 @@ func (bridge *excelPricingRemoteEventsBridge) acceptSnapshotTerminal(
 		return errExcelPricingRemoteBridgeStale
 	}
 	return bridge.terminals.publishAuthenticated(event)
+}
+
+func (bridge *excelPricingRemoteEventsBridge) acceptApplyTerminal(
+	epoch uint64,
+	source canonical.Source,
+	event excelPricingRemoteApplyTerminalEvent,
+) error {
+	if bridge == nil || bridge.dependencies.applyTerminal == nil {
+		return errExcelPricingRemoteBridgeStale
+	}
+	bridge.mu.Lock()
+	defer bridge.mu.Unlock()
+	if epoch == 0 || bridge.epoch != epoch || event.Source != source {
+		return errExcelPricingRemoteBridgeStale
+	}
+	return bridge.dependencies.applyTerminal(event)
 }
 
 func (bridge *excelPricingRemoteEventsBridge) clearVerifiedRevision(epoch uint64) {
