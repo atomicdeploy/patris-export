@@ -481,7 +481,9 @@ func (client *excelPricingRemoteEventsClient) handleExcelPricingRemoteFrame(
 			(data.Reason != "cursor_gap" && data.Reason != "invalid_event") ||
 			!data.RevisionValidationRequired ||
 			data.RevisionPath != client.revisionPath ||
-			!validExcelPricingRemoteWindow(data.Cursor, data.OldestEventID, data.LatestEventID) {
+			!validExcelPricingRemoteResetWindow(
+				data.Reason, data.Cursor, data.OldestEventID, data.LatestEventID,
+			) {
 			return false, errExcelPricingRemoteProtocol
 		}
 		if err := client.validateExcelPricingRemoteRevision(ctx, "cursor_reset", data.Cursor); err != nil {
@@ -680,6 +682,16 @@ func validExcelPricingRemoteWindow(cursor, oldest, latest uint64) bool {
 	return oldest == 0 || cursor >= oldest-1
 }
 
+func validExcelPricingRemoteResetWindow(reason string, cursor, oldest, latest uint64) bool {
+	if !validExcelPricingRemoteWindow(cursor, oldest, latest) {
+		return false
+	}
+	// cursor_gap may legitimately clamp to oldest-1. invalid_event names an
+	// actual retained event that the server rejected, so its cursor must be a
+	// non-zero member of the advertised retained window.
+	return reason != "invalid_event" || (oldest != 0 && cursor >= oldest)
+}
+
 func (client *excelPricingRemoteEventsClient) validateExcelPricingRemoteRevision(
 	ctx context.Context,
 	origin string,
@@ -873,7 +885,7 @@ func (client *excelPricingRemoteEventsClient) rememberRevision(revision excelPri
 // materialized canonical source, restart it whenever that local source changes,
 // and supply synchronous revision and snapshot-terminal hooks. The revision
 // hook invalidates the old snapshot generation; the terminal hook durably
-// retains a waiter event. Only a nil acknowledgement permits the durable
+// retains a waiter event. Only a nil acknowledgement permits the process-local
 // remote cursor to advance.
 func runExcelPricingRemoteEvents(
 	ctx context.Context,

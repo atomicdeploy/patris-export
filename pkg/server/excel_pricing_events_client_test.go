@@ -464,13 +464,13 @@ func TestExcelPricingRemoteEventsStreamResetTriggersOneConditionalValidation(t *
 	}
 }
 
-func TestExcelPricingRemoteEventsInvalidRetainedEventResetValidatesPersistsAndReconnects(t *testing.T) {
+func TestExcelPricingRemoteEventsInvalidRetainedEventResetValidatesRemembersAndReconnects(t *testing.T) {
 	source := excelPricingRemoteTestSource()
 	state := excelPricingRemoteTestRevision("a")
 	etag := `"` + state + `"`
 	var revisionCalls atomic.Int32
 	var connections atomic.Int32
-	var persistedCursor atomic.Uint64
+	var rememberedCursor atomic.Uint64
 	reconnected := make(chan struct{})
 	upgrader := websocket.Upgrader{
 		Subprotocols: []string{excelPricingRemoteWebSocketProtocol},
@@ -550,7 +550,7 @@ func TestExcelPricingRemoteEventsInvalidRetainedEventResetValidatesPersistsAndRe
 				accepted.Add(1)
 				return nil
 			},
-			OnCursor: persistedCursor.Store,
+			OnCursor: rememberedCursor.Store,
 		})
 	if err != nil {
 		t.Fatal(err)
@@ -568,10 +568,10 @@ func TestExcelPricingRemoteEventsInvalidRetainedEventResetValidatesPersistsAndRe
 		time.Sleep(time.Millisecond)
 	}
 	if revisionCalls.Load() != 3 || accepted.Load() != 1 ||
-		client.currentCursor() != 11 || persistedCursor.Load() != 11 {
-		t.Fatalf("connections=%d revisions=%d accepted=%d cursor=%d persisted=%d",
+		client.currentCursor() != 11 || rememberedCursor.Load() != 11 {
+		t.Fatalf("connections=%d revisions=%d accepted=%d cursor=%d remembered=%d",
 			connections.Load(), revisionCalls.Load(), accepted.Load(),
-			client.currentCursor(), persistedCursor.Load())
+			client.currentCursor(), rememberedCursor.Load())
 	}
 	cancel()
 	if err := <-result; !errors.Is(err, context.Canceled) {
@@ -579,7 +579,55 @@ func TestExcelPricingRemoteEventsInvalidRetainedEventResetValidatesPersistsAndRe
 	}
 }
 
-func TestExcelPricingRemoteConnectedCursorResetMayClampAHighPersistedCursor(t *testing.T) {
+func TestExcelPricingRemoteInvalidEventResetRequiresRetainedEventCursor(t *testing.T) {
+	source := excelPricingRemoteTestSource()
+	client, err := newExcelPricingRemoteEventsClient(
+		excelPricingRemoteTestConfig(t, "http://127.0.0.1:18080"), source,
+		excelPricingRemoteEventsOptions{
+			InitialCursor: 9,
+			OnRevision:    func(excelPricingRemoteRevision) error { return nil },
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, window := range map[string]struct {
+		cursor uint64
+		oldest uint64
+		latest uint64
+	}{
+		"zero cursor":           {cursor: 0, oldest: 1, latest: 11},
+		"before retained range": {cursor: 9, oldest: 10, latest: 11},
+		"empty retained range":  {cursor: 1, oldest: 0, latest: 11},
+	} {
+		t.Run(name, func(t *testing.T) {
+			frame, marshalErr := json.Marshal(map[string]interface{}{
+				"event":   "pricing.stream.reset",
+				"success": true,
+				"data": map[string]interface{}{
+					"schema":                       excelPricingRemoteStreamResetSchema,
+					"reason":                       "invalid_event",
+					"cursor":                       window.cursor,
+					"oldest_event_id":              window.oldest,
+					"latest_event_id":              window.latest,
+					"revision_validation_required": true,
+					"revision_path":                "/wp-json/digitalogic/pricing/sync/revision",
+				},
+			})
+			if marshalErr != nil {
+				t.Fatal(marshalErr)
+			}
+			if _, frameErr := client.handleExcelPricingRemoteFrame(t.Context(), frame, true); !errors.Is(frameErr, errExcelPricingRemoteProtocol) {
+				t.Fatalf("invalid retained cursor error = %v", frameErr)
+			}
+			if client.currentCursor() != 9 {
+				t.Fatalf("invalid retained cursor advanced to %d", client.currentCursor())
+			}
+		})
+	}
+}
+
+func TestExcelPricingRemoteConnectedCursorResetMayClampAHighRememberedCursor(t *testing.T) {
 	source := excelPricingRemoteTestSource()
 	state := excelPricingRemoteTestRevision("b")
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -653,7 +701,7 @@ func TestExcelPricingRemoteEventCursorAdvancesOnlyAfterAtomicAcceptance(t *testi
 	}
 }
 
-func TestExcelPricingRemoteSourceChangedAndRemovedRequireDurableAcceptance(t *testing.T) {
+func TestExcelPricingRemoteSourceChangedAndRemovedRequireSynchronousAcceptance(t *testing.T) {
 	current := excelPricingRemoteTestSource()
 	changed := current
 	changed.Revision = excelPricingRemoteTestRevision("b")
@@ -666,7 +714,7 @@ func TestExcelPricingRemoteSourceChangedAndRemovedRequireDurableAcceptance(t *te
 		),
 	} {
 		t.Run(name, func(t *testing.T) {
-			acceptErr := errors.New("durable source transition journal unavailable")
+			acceptErr := errors.New("source transition acceptance unavailable")
 			var accepted excelPricingRemoteSourceTransition
 			client, err := newExcelPricingRemoteEventsClient(
 				excelPricingRemoteTestConfig(t, "http://127.0.0.1:18080"), current,
@@ -690,7 +738,7 @@ func TestExcelPricingRemoteSourceChangedAndRemovedRequireDurableAcceptance(t *te
 				t.Fatalf("failed acceptance error = %v", err)
 			}
 			if client.currentCursor() != 5 {
-				t.Fatalf("failed durable acceptance advanced cursor to %d", client.currentCursor())
+				t.Fatalf("failed source acceptance advanced cursor to %d", client.currentCursor())
 			}
 
 			client.onSource = func(candidate excelPricingRemoteSourceTransition) error {
