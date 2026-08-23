@@ -1056,8 +1056,10 @@ func TestDynamicCalculatorVBASourceGuardsLivePricingBeforeMutation(t *testing.T)
 	}
 	macroFreeExport := section("Private Sub ExportMacroFreeCopy", "Private Sub RemoveMacroOnlyUI")
 	for _, required := range []string{
+		"Dim sourceWasSaved As Boolean",
 		"Set syncSheetValue = SyncSheet()",
 		"originalSyncVisibility = syncSheetValue.Visible",
+		"sourceWasSaved = ThisWorkbook.Saved",
 		"syncSheetValue.Visible = xlSheetVisible",
 		"ThisWorkbook.Worksheets.Copy",
 		"copyBook.Worksheets(syncSheetName).Visible = originalSyncVisibility",
@@ -1070,9 +1072,25 @@ func TestDynamicCalculatorVBASourceGuardsLivePricingBeforeMutation(t *testing.T)
 	showSync := strings.Index(macroFreeExport, "syncSheetValue.Visible = xlSheetVisible")
 	copySheets := strings.Index(macroFreeExport, "ThisWorkbook.Worksheets.Copy")
 	restoreSource := strings.Index(macroFreeExport, "syncSheetValue.Visible = originalSyncVisibility")
+	verifySuccessRestore := strings.Index(macroFreeExport, "If syncSheetValue.Visible <> originalSyncVisibility Then")
 	restoreCopy := strings.Index(macroFreeExport, "copyBook.Worksheets(syncSheetName).Visible = originalSyncVisibility")
-	if showSync < 0 || copySheets <= showSync || restoreSource <= copySheets || restoreCopy <= restoreSource {
+	if showSync < 0 || copySheets <= showSync || restoreSource <= copySheets ||
+		verifySuccessRestore <= restoreSource || restoreCopy <= verifySuccessRestore {
 		t.Fatal("macro-free export must expose SyncData only for the collection copy and restore both workbooks afterward")
+	}
+	captureSaved := strings.Index(macroFreeExport, "sourceWasSaved = ThisWorkbook.Saved")
+	cleanExit := strings.Index(macroFreeExport, "CleanExit:")
+	failedHandler := strings.Index(macroFreeExport, "Failed:")
+	savedRestores := strings.Count(macroFreeExport, "If sourceWasSaved And Not syncVisibilityChanged Then")
+	savedRestore := strings.Index(macroFreeExport, "If sourceWasSaved And Not syncVisibilityChanged Then")
+	lastVisibilityRestore := strings.LastIndex(macroFreeExport, "        syncSheetValue.Visible = originalSyncVisibility")
+	verifiedVisibilityRestore := strings.LastIndex(macroFreeExport, "If syncSheetValue.Visible = originalSyncVisibility Then")
+	resumeCleanExit := strings.LastIndex(macroFreeExport, "Resume CleanExit")
+	if captureSaved < 0 || captureSaved >= showSync || cleanExit <= restoreCopy || failedHandler <= cleanExit ||
+		savedRestores != 1 || savedRestore <= cleanExit || savedRestore >= failedHandler ||
+		lastVisibilityRestore <= failedHandler || verifiedVisibilityRestore <= lastVisibilityRestore ||
+		resumeCleanExit <= verifiedVisibilityRestore {
+		t.Fatal("macro-free export must preserve the source workbook's original Saved state on success and failure")
 	}
 	saveResume := section("Private Sub ResumeQualifiedSchedulesAfterSaveAs", "Public Sub RefreshAllData")
 	for _, required := range []string{

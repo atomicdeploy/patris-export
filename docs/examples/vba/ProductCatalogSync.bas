@@ -453,6 +453,7 @@ Private Sub ExportMacroFreeCopy(ByVal outputPath As String)
     Dim syncSheetName As String
     Dim originalSyncVisibility As XlSheetVisibility
     Dim syncVisibilityChanged As Boolean
+    Dim sourceWasSaved As Boolean
     Dim previousAlerts As Boolean
     Dim previousEvents As Boolean
     Dim previousScreenUpdating As Boolean
@@ -470,6 +471,7 @@ Private Sub ExportMacroFreeCopy(ByVal outputPath As String)
     Set syncSheetValue = SyncSheet()
     syncSheetName = syncSheetValue.Name
     originalSyncVisibility = syncSheetValue.Visible
+    sourceWasSaved = ThisWorkbook.Saved
     If originalSyncVisibility <> xlSheetVisible Then
         syncSheetValue.Visible = xlSheetVisible
         syncVisibilityChanged = True
@@ -481,6 +483,10 @@ Private Sub ExportMacroFreeCopy(ByVal outputPath As String)
     Set copyBook = ActiveWorkbook
     If syncVisibilityChanged Then
         syncSheetValue.Visible = originalSyncVisibility
+        If syncSheetValue.Visible <> originalSyncVisibility Then
+            Err.Raise vbObjectError + 2182, "ExportMacroFreeCopy", _
+                      "SyncData visibility could not be restored."
+        End If
         syncVisibilityChanged = False
     End If
     copyBook.Worksheets(syncSheetName).Visible = originalSyncVisibility
@@ -493,6 +499,8 @@ CleanExit:
     Application.DisplayAlerts = previousAlerts
     Application.EnableEvents = previousEvents
     Application.ScreenUpdating = previousScreenUpdating
+    If sourceWasSaved And Not syncVisibilityChanged Then _
+        ThisWorkbook.Saved = True
     If savedErrorNumber <> 0 Then
         Err.Raise savedErrorNumber, "ExportMacroFreeCopy", _
                   savedErrorDescription
@@ -505,6 +513,8 @@ Failed:
     On Error Resume Next
     If syncVisibilityChanged And Not syncSheetValue Is Nothing Then
         syncSheetValue.Visible = originalSyncVisibility
+        If syncSheetValue.Visible = originalSyncVisibility Then _
+            syncVisibilityChanged = False
     End If
     If Not copyBook Is Nothing Then copyBook.Close SaveChanges:=False
     Set copyBook = Nothing
