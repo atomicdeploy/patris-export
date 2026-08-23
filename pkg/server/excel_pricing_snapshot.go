@@ -24,10 +24,14 @@ import (
 const (
 	excelPricingSnapshotRequestSchema     = "patris.pricing-snapshot-request/v1"
 	excelPricingSnapshotJobSchema         = "patris.pricing-snapshot-job/v1"
+	excelPricingSnapshotFailureSchema     = "patris.pricing-snapshot-failure/v1"
 	excelPricingSnapshotPayloadSchema     = "patris.pricing-snapshot/v1"
 	excelPricingSnapshotProjectionFull    = "full"
 	excelPricingSnapshotProjectionExcelV1 = "excel-v1"
-	excelPricingSnapshotEventSchema       = "patris.pricing-state-event/v1"
+
+	excelPricingSnapshotStageRemoteConfiguration = "remote_configuration"
+	excelPricingSnapshotStageLocalProjection     = "local_projection"
+	excelPricingSnapshotEventSchema              = "patris.pricing-state-event/v1"
 
 	excelPricingSnapshotPageSize         = 250
 	excelPricingSnapshotMaxPages         = 8
@@ -60,6 +64,16 @@ type excelPricingSnapshotProgress struct {
 	TotalPages     int       `json:"total_pages"`
 	Rows           int       `json:"rows"`
 	HeartbeatAt    time.Time `json:"heartbeat_at"`
+}
+
+// excelPricingSnapshotFailure is intentionally smaller than the internal
+// error chain. It exposes only reviewed enum-like values, so a status or SSE
+// response cannot disclose credentials, routes, identifiers, response bodies,
+// or row data while still distinguishing the failed remote stage.
+type excelPricingSnapshotFailure struct {
+	Schema string `json:"schema"`
+	Stage  string `json:"stage"`
+	Code   string `json:"code"`
 }
 
 type excelPricingSnapshotIntegrity struct {
@@ -173,6 +187,7 @@ type excelPricingSnapshotJob struct {
 	deadline              time.Time
 	progress              excelPricingSnapshotProgress
 	errorCode             string
+	failure               *excelPricingSnapshotFailure
 	cached                bool
 	coalesced             bool
 	leaderJobID           string
@@ -1171,6 +1186,7 @@ func (s *Server) cancelExcelPricingSnapshotJob(
 	if job.leaderJobID != "" {
 		job.status = "cancelled"
 		job.errorCode = "request_cancelled"
+		job.failure = nil
 		job.updatedAt = now
 		changedJobs = append(changedJobs, job)
 		leader := store.jobs[job.leaderJobID]
@@ -1178,6 +1194,7 @@ func (s *Server) cancelExcelPricingSnapshotJob(
 			!store.hasRunningFollowersLocked(leader.id) {
 			leader.status = "cancelling"
 			leader.errorCode = "request_cancelled"
+			leader.failure = nil
 			leader.updatedAt = now
 			cancel = leader.cancel
 			changedJobs = append(changedJobs, leader)
@@ -1185,11 +1202,13 @@ func (s *Server) cancelExcelPricingSnapshotJob(
 	} else if store.hasRunningFollowersLocked(job.id) {
 		job.status = "cancelled"
 		job.errorCode = "request_cancelled"
+		job.failure = nil
 		job.updatedAt = now
 		changedJobs = append(changedJobs, job)
 	} else {
 		job.status = "cancelling"
 		job.errorCode = "request_cancelled"
+		job.failure = nil
 		job.updatedAt = now
 		cancel = job.cancel
 		status = http.StatusAccepted
@@ -1278,6 +1297,7 @@ func (store *excelPricingSnapshotStore) pruneLocked(now time.Time) {
 		}
 		active.status = "failed"
 		active.errorCode = code
+		active.failure = nil
 		active.updatedAt = now
 		delete(store.idempotency, excelPricingSnapshotIdempotencyKey(active.owner, active.requestID))
 		store.publishJobLocked(active)
@@ -1287,6 +1307,7 @@ func (store *excelPricingSnapshotStore) pruneLocked(now time.Time) {
 			}
 			follower.status = "failed"
 			follower.errorCode = code
+			follower.failure = nil
 			follower.updatedAt = now
 			delete(store.idempotency, excelPricingSnapshotIdempotencyKey(follower.owner, follower.requestID))
 			store.publishJobLocked(follower)
@@ -1301,6 +1322,7 @@ func (store *excelPricingSnapshotStore) pruneLocked(now time.Time) {
 			(job.snapshot == nil || !job.snapshot.expiresAt.After(now)) {
 			job.status = "expired"
 			job.errorCode = "snapshot_expired"
+			job.failure = nil
 			job.updatedAt = now
 			store.publishJobLocked(job)
 		}
@@ -1357,6 +1379,7 @@ func (store *excelPricingSnapshotStore) invalidateGenerationLocked(
 	now := store.now().UTC()
 	leader.status = "cancelling"
 	leader.errorCode = code
+	leader.failure = nil
 	leader.updatedAt = now
 	store.publishJobLocked(leader)
 	for _, follower := range store.jobs {
@@ -1366,6 +1389,7 @@ func (store *excelPricingSnapshotStore) invalidateGenerationLocked(
 		}
 		follower.status = "cancelled"
 		follower.errorCode = code
+		follower.failure = nil
 		follower.updatedAt = now
 		store.publishJobLocked(follower)
 	}
@@ -1385,6 +1409,7 @@ func (store *excelPricingSnapshotStore) invalidateReadyJobsExceptLocked(
 			}
 			job.status = "invalidated"
 			job.errorCode = code
+			job.failure = nil
 			job.updatedAt = now
 			invalidated = append(invalidated, job)
 		}
@@ -1594,6 +1619,7 @@ func (store *excelPricingSnapshotStore) makeJobReadyLocked(
 ) {
 	job.status = "ready"
 	job.errorCode = ""
+	job.failure = nil
 	job.snapshot = snapshot
 	job.deadline = snapshot.expiresAt
 	job.updatedAt = store.now().UTC()
@@ -1643,6 +1669,11 @@ func (store *excelPricingSnapshotStore) completeFollowersLocked(
 ) ([]*excelPricingSnapshotJob, int) {
 	changed := make([]*excelPricingSnapshotJob, 0)
 	ready := 0
+	var leaderFailure *excelPricingSnapshotFailure
+	if leader := store.jobs[leaderJobID]; leader != nil && leader.failure != nil {
+		copyFailure := *leader.failure
+		leaderFailure = &copyFailure
+	}
 	for _, follower := range store.jobs {
 		if follower == nil || follower.leaderJobID != leaderJobID {
 			continue
@@ -1650,6 +1681,7 @@ func (store *excelPricingSnapshotStore) completeFollowersLocked(
 		if follower.status == "cancelling" {
 			follower.status = "cancelled"
 			follower.errorCode = "request_cancelled"
+			follower.failure = nil
 			follower.updatedAt = store.now().UTC()
 			changed = append(changed, follower)
 			continue
@@ -1658,9 +1690,14 @@ func (store *excelPricingSnapshotStore) completeFollowersLocked(
 			continue
 		}
 		if snapshot == nil {
+			if leaderFailure != nil {
+				copyFailure := *leaderFailure
+				follower.failure = &copyFailure
+			}
 			if code == "request_cancelled" {
 				follower.status = "cancelled"
 				follower.errorCode = "request_cancelled"
+				follower.failure = nil
 			} else {
 				follower.status = "failed"
 				follower.errorCode = code
@@ -1673,6 +1710,7 @@ func (store *excelPricingSnapshotStore) completeFollowersLocked(
 			follower.expectedStateRevision != snapshot.stateRevision {
 			follower.status = "failed"
 			follower.errorCode = "snapshot_state_revision_mismatch"
+			follower.failure = nil
 			follower.updatedAt = store.now().UTC()
 			changed = append(changed, follower)
 			continue
@@ -1729,6 +1767,7 @@ func (s *Server) runExcelPricingSnapshotJob(
 		}
 		job.status = "cancelled"
 		job.errorCode = code
+		job.failure = nil
 		job.snapshot = nil
 		job.updatedAt = store.now().UTC()
 		store.publishJobLocked(job)
@@ -1739,6 +1778,7 @@ func (s *Server) runExcelPricingSnapshotJob(
 			}
 			follower.status = "cancelled"
 			follower.errorCode = code
+			follower.failure = nil
 			follower.snapshot = nil
 			follower.updatedAt = store.now().UTC()
 			store.publishJobLocked(follower)
@@ -1752,6 +1792,7 @@ func (s *Server) runExcelPricingSnapshotJob(
 			if job.errorCode == "" {
 				job.errorCode = "request_cancelled"
 			}
+			job.failure = nil
 		} else {
 			job.status = "failed"
 			job.errorCode = code
@@ -1770,12 +1811,14 @@ func (s *Server) runExcelPricingSnapshotJob(
 		if job.errorCode == "" {
 			job.errorCode = "request_cancelled"
 		}
+		job.failure = nil
 		job.updatedAt = store.now().UTC()
 		jobChanged = true
 	} else if job.status == "running" {
 		if job.expectedStateRevision != "" && job.expectedStateRevision != snapshot.stateRevision {
 			job.status = "failed"
 			job.errorCode = "snapshot_state_revision_mismatch"
+			job.failure = nil
 			job.updatedAt = store.now().UTC()
 			jobChanged = true
 		} else {
@@ -1881,6 +1924,13 @@ func (s *Server) collectExcelPricingSnapshot(
 		return s.excelPricing.snapshotCollector(ctx, jobID, request, cfg)
 	}
 	if s == nil || s.excelPricing == nil || s.excelPricingRemote == nil {
+		if s != nil {
+			s.setExcelPricingSnapshotFailure(
+				jobID,
+				excelPricingSnapshotStageRemoteConfiguration,
+				"snapshot_remote_configuration_failed",
+			)
+		}
 		return nil, "remote_unavailable"
 	}
 	s.updateExcelPricingSnapshotProgress(jobID, "fetching_remote", 0, 1, 0)
@@ -1893,6 +1943,11 @@ func (s *Server) collectExcelPricingSnapshot(
 		},
 	)
 	if err != nil {
+		s.setExcelPricingSnapshotFailure(
+			jobID,
+			excelPricingSnapshotStageRemoteConfiguration,
+			"snapshot_remote_configuration_failed",
+		)
 		return nil, excelPricingRemoteSnapshotFailureCode(ctx, err)
 	}
 	result, err := client.Collect(
@@ -1901,6 +1956,9 @@ func (s *Server) collectExcelPricingSnapshot(
 		request.MaxAgeSeconds,
 	)
 	if err != nil {
+		if stage, detail, ok := excelPricingRemoteSnapshotFailureDetails(err); ok {
+			s.setExcelPricingSnapshotFailure(jobID, stage, detail)
+		}
 		return nil, excelPricingRemoteSnapshotFailureCode(ctx, err)
 	}
 	s.updateExcelPricingSnapshotProgress(
@@ -1910,13 +1968,13 @@ func (s *Server) collectExcelPricingSnapshot(
 		resultRowsPageCount(result),
 		len(result.Rows),
 	)
-	snapshot, err := buildExcelPricingSnapshotFromRemoteResult(
+	snapshot, code := s.finalizeExcelPricingRemoteSnapshot(
+		jobID,
 		result,
 		excelPricingSnapshotProjection(request.Projection),
-		s.excelPricing.snapshots.now().UTC(),
 	)
-	if err != nil {
-		return nil, "snapshot_integrity_failed"
+	if snapshot == nil {
+		return nil, code
 	}
 	s.updateExcelPricingSnapshotProgress(
 		jobID,
@@ -1925,6 +1983,27 @@ func (s *Server) collectExcelPricingSnapshot(
 		snapshot.integrity.PageCount,
 		snapshot.integrity.RowCount,
 	)
+	return snapshot, ""
+}
+
+func (s *Server) finalizeExcelPricingRemoteSnapshot(
+	jobID string,
+	result *excelPricingRemoteSnapshotResult,
+	projection string,
+) (*excelPricingSnapshot, string) {
+	snapshot, err := buildExcelPricingSnapshotFromRemoteResult(
+		result,
+		projection,
+		s.excelPricing.snapshots.now().UTC(),
+	)
+	if err != nil {
+		s.setExcelPricingSnapshotFailure(
+			jobID,
+			excelPricingSnapshotStageLocalProjection,
+			"snapshot_local_projection_integrity_failed",
+		)
+		return nil, "snapshot_integrity_failed"
+	}
 	return snapshot, ""
 }
 
@@ -2749,6 +2828,67 @@ func (s *Server) updateExcelPricingSnapshotProgress(
 	}
 }
 
+func (s *Server) setExcelPricingSnapshotFailure(jobID, stage, code string) {
+	if s == nil || s.excelPricing == nil || s.excelPricing.snapshots == nil ||
+		strings.TrimSpace(jobID) == "" || strings.TrimSpace(stage) == "" ||
+		strings.TrimSpace(code) == "" || !validExcelPricingSnapshotFailure(stage, code) {
+		return
+	}
+	failure := excelPricingSnapshotFailure{
+		Schema: excelPricingSnapshotFailureSchema,
+		Stage:  stage,
+		Code:   code,
+	}
+	store := s.excelPricing.snapshots
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if job := store.jobs[jobID]; job != nil && job.status == "running" {
+		copyFailure := failure
+		job.failure = &copyFailure
+	}
+	for _, follower := range store.jobs {
+		if follower == nil || follower.leaderJobID != jobID ||
+			follower.status != "running" {
+			continue
+		}
+		copyFailure := failure
+		follower.failure = &copyFailure
+	}
+}
+
+func validExcelPricingSnapshotFailure(stage, code string) bool {
+	switch stage {
+	case excelPricingRemoteSnapshotStageRevisionFetch:
+		return code == "snapshot_revision_fetch_protocol_failed" ||
+			code == "snapshot_revision_fetch_configuration_failed" ||
+			code == "snapshot_revision_fetch_unavailable"
+	case excelPricingRemoteSnapshotStageTerminalSubscription:
+		return code == "snapshot_terminal_subscription_failed"
+	case excelPricingRemoteSnapshotStageSnapshotStart:
+		return code == "snapshot_start_protocol_failed" ||
+			code == "snapshot_start_configuration_failed" ||
+			code == "snapshot_start_rejected" ||
+			code == "snapshot_start_unavailable"
+	case excelPricingRemoteSnapshotStageTerminalWait:
+		return code == "snapshot_terminal_wait_failed"
+	case excelPricingRemoteSnapshotStageTerminalMatch:
+		return code == "snapshot_terminal_match_failed"
+	case excelPricingRemoteSnapshotStageRemoteTerminal:
+		return code == "snapshot_remote_terminal_failed"
+	case excelPricingRemoteSnapshotStageSnapshotPayload:
+		return code == "snapshot_payload_integrity_failed" ||
+			code == "snapshot_payload_protocol_failed" ||
+			code == "snapshot_payload_configuration_failed" ||
+			code == "snapshot_payload_unavailable"
+	case excelPricingSnapshotStageRemoteConfiguration:
+		return code == "snapshot_remote_configuration_failed"
+	case excelPricingSnapshotStageLocalProjection:
+		return code == "snapshot_local_projection_integrity_failed"
+	default:
+		return false
+	}
+}
+
 func excelPricingSnapshotJobResponse(job *excelPricingSnapshotJob) map[string]interface{} {
 	response := map[string]interface{}{
 		"schema":         excelPricingSnapshotJobSchema,
@@ -2786,6 +2926,9 @@ func excelPricingSnapshotJobResponse(job *excelPricingSnapshotJob) map[string]in
 	}
 	if job.errorCode != "" {
 		response["code"] = job.errorCode
+	}
+	if job.failure != nil {
+		response["failure"] = *job.failure
 	}
 	if job.snapshot != nil {
 		response["snapshot_revision"] = job.snapshot.revision
