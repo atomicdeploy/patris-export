@@ -449,6 +449,10 @@ End Sub
 
 Private Sub ExportMacroFreeCopy(ByVal outputPath As String)
     Dim copyBook As Workbook
+    Dim syncSheetValue As Worksheet
+    Dim syncSheetName As String
+    Dim originalSyncVisibility As XlSheetVisibility
+    Dim syncVisibilityChanged As Boolean
     Dim previousAlerts As Boolean
     Dim previousEvents As Boolean
     Dim previousScreenUpdating As Boolean
@@ -463,8 +467,23 @@ Private Sub ExportMacroFreeCopy(ByVal outputPath As String)
     Application.EnableEvents = False
     Application.ScreenUpdating = False
 
+    Set syncSheetValue = SyncSheet()
+    syncSheetName = syncSheetValue.Name
+    originalSyncVisibility = syncSheetValue.Visible
+    If originalSyncVisibility <> xlSheetVisible Then
+        syncSheetValue.Visible = xlSheetVisible
+        syncVisibilityChanged = True
+    End If
+
+    ' Excel omits xlSheetVeryHidden worksheets when copying the collection.
+    ' Briefly expose SyncData for the copy, then restore both source and copy.
     ThisWorkbook.Worksheets.Copy
     Set copyBook = ActiveWorkbook
+    If syncVisibilityChanged Then
+        syncSheetValue.Visible = originalSyncVisibility
+        syncVisibilityChanged = False
+    End If
+    copyBook.Worksheets(syncSheetName).Visible = originalSyncVisibility
     RemoveMacroOnlyUI copyBook
     copyBook.SaveAs Filename:=outputPath, FileFormat:=xlOpenXMLWorkbook
     copyBook.Close SaveChanges:=False
@@ -484,8 +503,12 @@ Failed:
     savedErrorNumber = Err.Number
     savedErrorDescription = Err.Description
     On Error Resume Next
+    If syncVisibilityChanged And Not syncSheetValue Is Nothing Then
+        syncSheetValue.Visible = originalSyncVisibility
+    End If
     If Not copyBook Is Nothing Then copyBook.Close SaveChanges:=False
     Set copyBook = Nothing
+    Set syncSheetValue = Nothing
     On Error GoTo 0
     Resume CleanExit
 End Sub

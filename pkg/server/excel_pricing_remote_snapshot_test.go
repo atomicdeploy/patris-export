@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -54,6 +55,7 @@ type excelPricingRemoteSnapshotFixture struct {
 	revisionCompressedCalls int
 	payloadIdentityCalls    int
 	payloadCompressedCalls  int
+	payloadConditionalCalls int
 }
 
 type rejectingExcelPricingRemoteTerminalSource struct{}
@@ -707,7 +709,68 @@ func TestExcelPricingRemoteSnapshotCollectAnnotatesEveryRemoteStage(t *testing.T
 		_, err := fixture.Client(t).Collect(context.Background(), fixture.requestID, 60)
 		assertStage(t, err, excelPricingRemoteSnapshotStageSnapshotPayload,
 			"snapshot_payload_protocol_failed")
+		fixture.assertCalls(t, 1, 1, 1, 0, 0)
 	})
+
+	t.Run("snapshot payload missing ETag verified once", func(t *testing.T) {
+		fixture := newExcelPricingRemoteSnapshotFixture(t, "payload_missing_etag_verified")
+		defer fixture.Close()
+		result, err := fixture.Client(t).Collect(context.Background(), fixture.requestID, 60)
+		if err != nil {
+			t.Fatalf("Collect() error = %v", err)
+		}
+		if result.ETag != `"`+fixture.payload.Digest+`"` {
+			t.Fatalf("result ETag = %q", result.ETag)
+		}
+		fixture.assertCalls(t, 1, 1, 2, 0, 0)
+		fixture.assertConditionalPayloadCalls(t, 1)
+	})
+
+	t.Run("snapshot payload present empty ETag does not fall back", func(t *testing.T) {
+		fixture := newExcelPricingRemoteSnapshotFixture(t, "payload_present_empty_etag")
+		defer fixture.Close()
+		_, err := fixture.Client(t).Collect(context.Background(), fixture.requestID, 60)
+		assertStage(t, err, excelPricingRemoteSnapshotStageSnapshotPayload,
+			"snapshot_payload_protocol_failed")
+		fixture.assertCalls(t, 1, 1, 1, 0, 0)
+		fixture.assertConditionalPayloadCalls(t, 0)
+	})
+
+	t.Run("snapshot payload duplicate ETag does not fall back", func(t *testing.T) {
+		fixture := newExcelPricingRemoteSnapshotFixture(t, "payload_duplicate_etag")
+		defer fixture.Close()
+		_, err := fixture.Client(t).Collect(context.Background(), fixture.requestID, 60)
+		assertStage(t, err, excelPricingRemoteSnapshotStageSnapshotPayload,
+			"snapshot_payload_protocol_failed")
+		fixture.assertCalls(t, 1, 1, 1, 0, 0)
+		fixture.assertConditionalPayloadCalls(t, 0)
+	})
+
+	t.Run("snapshot payload wrong strong ETag does not fall back", func(t *testing.T) {
+		fixture := newExcelPricingRemoteSnapshotFixture(t, "payload_wrong_strong_etag")
+		defer fixture.Close()
+		_, err := fixture.Client(t).Collect(context.Background(), fixture.requestID, 60)
+		assertStage(t, err, excelPricingRemoteSnapshotStageSnapshotPayload,
+			"snapshot_payload_protocol_failed")
+		fixture.assertCalls(t, 1, 1, 1, 0, 0)
+		fixture.assertConditionalPayloadCalls(t, 0)
+	})
+
+	for name, mode := range map[string]string{
+		"snapshot payload missing ETag conditional non-304":                 "payload_missing_etag_non304",
+		"snapshot payload missing ETag conditional wrong present validator": "payload_missing_etag_wrong_confirmation_etag",
+		"snapshot payload missing ETag conditional duplicate validator":     "payload_missing_etag_duplicate_confirmation_etag",
+	} {
+		t.Run(name, func(t *testing.T) {
+			fixture := newExcelPricingRemoteSnapshotFixture(t, mode)
+			defer fixture.Close()
+			_, err := fixture.Client(t).Collect(context.Background(), fixture.requestID, 60)
+			assertStage(t, err, excelPricingRemoteSnapshotStageSnapshotPayload,
+				"snapshot_payload_protocol_failed")
+			fixture.assertCalls(t, 1, 1, 2, 0, 0)
+			fixture.assertConditionalPayloadCalls(t, 1)
+		})
+	}
 
 	t.Run("snapshot payload wrong content type", func(t *testing.T) {
 		fixture := newExcelPricingRemoteSnapshotFixture(t, "payload_wrong_content_type")
@@ -812,6 +875,49 @@ func TestExcelPricingRemoteSnapshotStageCodeCoversConfigurationAndTransportClass
 				t.Fatalf("body error=%v, want protocol", err)
 			}
 		})
+	}
+}
+
+func TestExcelPricingRemoteSnapshotMissingETagConfirmationRejectsNonempty304(t *testing.T) {
+	digest := testExcelPricingRevision('a')
+	requestURL, err := url.Parse("https://example.test/wp-json/digitalogic/pricing/sync/snapshots/snap_00000000000000000000000000000000")
+	if err != nil {
+		t.Fatal(err)
+	}
+	calls := 0
+	client := &excelPricingRemoteSnapshotClient{
+		source: canonical.Source{
+			ID:       "patris-office",
+			Dataset:  "kala.db",
+			Revision: testExcelPricingRevision('1'),
+		},
+		secret: "test-remote-snapshot-secret-value",
+		client: &http.Client{Transport: excelPricingRemoteSnapshotRoundTripFunc(
+			func(request *http.Request) (*http.Response, error) {
+				calls++
+				if request.Method != http.MethodGet ||
+					request.Header.Get("Accept-Encoding") != excelPricingRemoteIdentityEncoding ||
+					request.Header.Get("If-None-Match") != `"`+digest+`"` ||
+					request.Header.Get(excelPricingRemoteSecretHeader) != "test-remote-snapshot-secret-value" {
+					t.Fatal("conditional validator request headers are invalid")
+				}
+				return &http.Response{
+					StatusCode: http.StatusNotModified,
+					Header:     make(http.Header),
+					Body:       io.NopCloser(strings.NewReader("unexpected")),
+					Request:    request,
+				}, nil
+			},
+		)},
+	}
+	if err := client.confirmSnapshotValidator(context.Background(), requestURL, digest); !errors.Is(
+		err,
+		errExcelPricingRemoteSnapshotProtocol,
+	) {
+		t.Fatalf("confirmation error = %v, want protocol", err)
+	}
+	if calls != 1 {
+		t.Fatalf("conditional calls = %d, want 1", calls)
 	}
 }
 
@@ -1523,7 +1629,10 @@ func (fixture *excelPricingRemoteSnapshotFixture) handle(w http.ResponseWriter, 
 		build := fixture.buildResponse()
 		if fixture.mode == "ready" || fixture.mode == "cdn_rewritten_etag" ||
 			fixture.mode == "payload_wrong_content_type" ||
-			fixture.mode == "payload_empty_body" || fixture.mode == "payload_oversized_body" {
+			fixture.mode == "payload_empty_body" || fixture.mode == "payload_oversized_body" ||
+			fixture.mode == "payload_present_empty_etag" || fixture.mode == "payload_duplicate_etag" ||
+			fixture.mode == "payload_wrong_strong_etag" ||
+			strings.HasPrefix(fixture.mode, "payload_missing_etag_") {
 			w.WriteHeader(http.StatusOK)
 			_ = json.NewEncoder(w).Encode(build)
 			return
@@ -1582,6 +1691,52 @@ func (fixture *excelPricingRemoteSnapshotFixture) handle(w http.ResponseWriter, 
 		fixture.mu.Lock()
 		fixture.bulkCalls++
 		fixture.mu.Unlock()
+		if strings.HasPrefix(fixture.mode, "payload_missing_etag_") {
+			if r.Header.Get("If-None-Match") == "" {
+				_, _ = w.Write(fixture.payloadBody)
+				return
+			}
+			fixture.mu.Lock()
+			fixture.payloadConditionalCalls++
+			if r.Header.Get("Accept-Encoding") != excelPricingRemoteIdentityEncoding ||
+				r.Header.Get("If-None-Match") != `"`+fixture.payload.Digest+`"` {
+				fixture.headerFailure = "conditional payload validator headers are invalid"
+			}
+			fixture.mu.Unlock()
+			switch fixture.mode {
+			case "payload_missing_etag_verified":
+				w.WriteHeader(http.StatusNotModified)
+			case "payload_missing_etag_non304":
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write(fixture.payloadBody)
+			case "payload_missing_etag_wrong_confirmation_etag":
+				w.Header().Set("ETag", `"`+testExcelPricingRevision('b')+`"`)
+				w.WriteHeader(http.StatusNotModified)
+			case "payload_missing_etag_duplicate_confirmation_etag":
+				w.Header().Add("ETag", `"`+fixture.payload.Digest+`"`)
+				w.Header().Add("ETag", `"`+fixture.payload.Digest+`"`)
+				w.WriteHeader(http.StatusNotModified)
+			default:
+				http.Error(w, "unknown missing ETag mode", http.StatusInternalServerError)
+			}
+			return
+		}
+		if fixture.mode == "payload_present_empty_etag" {
+			w.Header()["ETag"] = []string{""}
+			_, _ = w.Write(fixture.payloadBody)
+			return
+		}
+		if fixture.mode == "payload_duplicate_etag" {
+			w.Header().Add("ETag", `"`+fixture.payload.Digest+`"`)
+			w.Header().Add("ETag", `"`+fixture.payload.Digest+`"`)
+			_, _ = w.Write(fixture.payloadBody)
+			return
+		}
+		if fixture.mode == "payload_wrong_strong_etag" {
+			w.Header().Set("ETag", `"`+testExcelPricingRevision('b')+`"`)
+			_, _ = w.Write(fixture.payloadBody)
+			return
+		}
 		if fixture.mode == "cdn_rewritten_etag" {
 			fixture.writeIdentityBoundRepresentation(
 				w, r, fixture.payloadBody, fixture.payload.Digest, "payload",
@@ -1979,6 +2134,18 @@ func (fixture *excelPricingRemoteSnapshotFixture) assertRepresentationCalls(
 	}
 	if fixture.headerFailure != "" {
 		t.Fatal(fixture.headerFailure)
+	}
+}
+
+func (fixture *excelPricingRemoteSnapshotFixture) assertConditionalPayloadCalls(
+	t *testing.T,
+	want int,
+) {
+	t.Helper()
+	fixture.mu.Lock()
+	defer fixture.mu.Unlock()
+	if fixture.payloadConditionalCalls != want {
+		t.Fatalf("conditional payload calls = %d, want %d", fixture.payloadConditionalCalls, want)
 	}
 }
 

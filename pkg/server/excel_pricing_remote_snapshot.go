@@ -797,9 +797,21 @@ func (client *excelPricingRemoteSnapshotClient) fetchSnapshot(
 	if json.Unmarshal(body, &payload) != nil {
 		return nil, errExcelPricingRemoteSnapshotProtocol
 	}
+	etagValues := response.Header.Values("ETag")
 	etag := strings.TrimSpace(response.Header.Get("ETag"))
+	missingETag := len(etagValues) == 0
+	if missingETag {
+		etag = `"` + build.Digest + `"`
+	} else if len(etagValues) != 1 {
+		return nil, errExcelPricingRemoteSnapshotProtocol
+	}
 	if err := validateExcelPricingRemoteSnapshotPayload(payload, build, revision, client.source, etag); err != nil {
 		return nil, err
+	}
+	if missingETag {
+		if err := client.confirmSnapshotValidator(ctx, requestURL, build.Digest); err != nil {
+			return nil, err
+		}
 	}
 	projected, fields, err := projectExcelPricingSnapshotRows(payload.Catalog.Rows, excelPricingSnapshotProjectionExcel)
 	if err != nil {
@@ -820,6 +832,52 @@ func (client *excelPricingRemoteSnapshotClient) fetchSnapshot(
 		ProjectedRowFields:     fields,
 		RawPayload:             append([]byte(nil), body...),
 	}, nil
+}
+
+// confirmSnapshotValidator handles intermediaries that remove an ETag header
+// from an otherwise intact immutable payload. The terminal build digest is
+// already authenticated. Requiring one exact conditional 304 with no response
+// bytes proves that the origin still binds that digest as its strong validator.
+// Present malformed or mismatched validators never enter this fallback.
+func (client *excelPricingRemoteSnapshotClient) confirmSnapshotValidator(
+	ctx context.Context,
+	requestURL *url.URL,
+	digest string,
+) error {
+	expectedETag := `"` + digest + `"`
+	if !isStrongExcelPricingRevisionETag(expectedETag, digest) {
+		return errExcelPricingRemoteSnapshotProtocol
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, requestURL.String(), nil)
+	if err != nil {
+		return errExcelPricingRemoteSnapshotConfiguration
+	}
+	client.setRemoteHeaders(request, false)
+	request.Header.Set("Accept-Encoding", excelPricingRemoteIdentityEncoding)
+	request.Header.Set("If-None-Match", expectedETag)
+	response, err := client.client.Do(request)
+	if err != nil {
+		return errExcelPricingRemoteSnapshotUnavailable
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusNotModified {
+		return errExcelPricingRemoteSnapshotProtocol
+	}
+	confirmationETagValues := response.Header.Values("ETag")
+	confirmationETag := strings.TrimSpace(response.Header.Get("ETag"))
+	if len(confirmationETagValues) > 1 ||
+		(len(confirmationETagValues) == 1 &&
+			!isStrongExcelPricingRevisionETag(confirmationETag, digest)) {
+		return errExcelPricingRemoteSnapshotProtocol
+	}
+	body, err := io.ReadAll(io.LimitReader(response.Body, 1))
+	if err != nil {
+		return errExcelPricingRemoteSnapshotUnavailable
+	}
+	if len(body) != 0 {
+		return errExcelPricingRemoteSnapshotProtocol
+	}
+	return nil
 }
 
 func readExcelPricingRemoteSnapshotBody(reader io.Reader, limit int64) ([]byte, error) {

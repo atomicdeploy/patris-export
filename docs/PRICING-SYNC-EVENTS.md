@@ -43,6 +43,15 @@ snapshots by paging the legacy remote `/state` route, and it does not poll a
 remote build-status route. A terminal-event cursor is acknowledged only after
 the generation-fenced local terminal hub retains the event for its waiter.
 
+Remote revision and immutable-payload reads explicitly request the identity
+representation. If an intermediary removes the payload `ETag` header entirely,
+the companion sends exactly one conditional identity `GET` with the
+authenticated terminal digest and accepts that exceptional path only for an
+exact `304` with zero response bytes. A present empty, weak, malformed, or
+mismatched validator fails closed; this verification is neither polling nor a
+retry loop. All payload schema, source, revision, expiry, row, reconciliation,
+and canonical digest checks still run before the local snapshot is committed.
+
 `max_age_seconds: 0` without `expected_state_revision` deliberately requests a
 new verification/build. Exact-revision reuse is allowed only when the requested
 composite revision matches the cached snapshot and the authenticated upstream
