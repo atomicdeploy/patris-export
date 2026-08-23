@@ -23,6 +23,7 @@ type excelPricingRemoteBridgeTestRun struct {
 	initialCursor uint64
 	onCursor      func(uint64)
 	onRevision    func(excelPricingRemoteRevision) error
+	onSource      func(excelPricingRemoteSourceTransition) error
 	onTerminal    func(excelPricingRemoteSnapshotTerminalEvent) error
 	onApply       func(excelPricingRemoteApplyTerminalEvent) error
 	onConnected   func(context.Context) error
@@ -59,6 +60,7 @@ func excelPricingRemoteBridgeTestRunner(
 	uint64,
 	func(uint64),
 	func(excelPricingRemoteRevision) error,
+	func(excelPricingRemoteSourceTransition) error,
 	func(excelPricingRemoteSnapshotTerminalEvent) error,
 	func(excelPricingRemoteApplyTerminalEvent) error,
 	func(context.Context) error,
@@ -70,6 +72,7 @@ func excelPricingRemoteBridgeTestRunner(
 		initialCursor uint64,
 		onCursor func(uint64),
 		onRevision func(excelPricingRemoteRevision) error,
+		onSource func(excelPricingRemoteSourceTransition) error,
 		onTerminal func(excelPricingRemoteSnapshotTerminalEvent) error,
 		onApply func(excelPricingRemoteApplyTerminalEvent) error,
 		onConnected func(context.Context) error,
@@ -80,6 +83,7 @@ func excelPricingRemoteBridgeTestRunner(
 			initialCursor: initialCursor,
 			onCursor:      onCursor,
 			onRevision:    onRevision,
+			onSource:      onSource,
 			onTerminal:    onTerminal,
 			onApply:       onApply,
 			onConnected:   onConnected,
@@ -148,6 +152,7 @@ func TestExcelPricingRemoteEventsBridgeCoalescesRestartToNewestGeneration(t *tes
 		initialCursor uint64,
 		onCursor func(uint64),
 		onRevision func(excelPricingRemoteRevision) error,
+		onSource func(excelPricingRemoteSourceTransition) error,
 		onTerminal func(excelPricingRemoteSnapshotTerminalEvent) error,
 		onApply func(excelPricingRemoteApplyTerminalEvent) error,
 		onConnected func(context.Context) error,
@@ -158,6 +163,7 @@ func TestExcelPricingRemoteEventsBridgeCoalescesRestartToNewestGeneration(t *tes
 			initialCursor: initialCursor,
 			onCursor:      onCursor,
 			onRevision:    onRevision,
+			onSource:      onSource,
 			onTerminal:    onTerminal,
 			onApply:       onApply,
 			onConnected:   onConnected,
@@ -635,6 +641,131 @@ func TestExcelPricingRemoteEventsBridgeSourceFenceRemovalAndReset(t *testing.T) 
 	waitExcelPricingRemoteBridgeTestSignal(t, callThree.stopped, "restored source cancellation")
 }
 
+func TestExcelPricingRemoteEventsBridgeRemoteSourceTransitionsRematerializeAndRestart(t *testing.T) {
+	var sourceMu sync.RWMutex
+	cfg := excelPricingRemoteBridgeTestConfig("remote-source-transition")
+	current := excelPricingRemoteTestSource()
+	previousRevision := current.Revision
+	runs := make(chan *excelPricingRemoteBridgeTestRun, 4)
+	applied := make(chan excelPricingRemoteSourceTransition, 2)
+	bridge := newExcelPricingRemoteEventsBridgeWithDependencies(excelPricingRemoteBridgeDependencies{
+		config:  func() appconfig.Config { return cfg },
+		resolve: excelPricingRemoteBridgeTestResolve,
+		materialize: func(context.Context) (canonical.Source, error) {
+			sourceMu.RLock()
+			defer sourceMu.RUnlock()
+			return current, nil
+		},
+		run: excelPricingRemoteBridgeTestRunner(runs),
+		apply: func(excelPricingRemoteRevision) error {
+			return nil
+		},
+		applySource: func(transition excelPricingRemoteSourceTransition) error {
+			applied <- transition
+			return nil
+		},
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	var waitGroup sync.WaitGroup
+	bridge.start(ctx, &waitGroup)
+	callOne := nextExcelPricingRemoteBridgeTestRun(t, runs)
+	initialState := excelPricingRemoteTestRevision("1")
+	if err := callOne.onRevision(excelPricingRemoteRevision{
+		Source:                current,
+		StateRevision:         initialState,
+		CatalogRevision:       excelPricingRemoteTestRevision("2"),
+		PricingStateRevision:  excelPricingRemoteTestRevision("3"),
+		PricingPolicyRevision: excelPricingRemoteTestRevision("4"),
+		ETag:                  `"` + initialState + `"`,
+	}); err != nil {
+		cancel()
+		waitExcelPricingRemoteBridgeTestGroup(t, &waitGroup)
+		t.Fatal(err)
+	}
+
+	replacement := current
+	replacement.Revision = excelPricingRemoteTestRevision("b")
+	sourceMu.Lock()
+	current = replacement
+	sourceMu.Unlock()
+	changed := excelPricingRemoteTestSourceTransition(
+		"pricing.source.changed", "changed", replacement,
+		&previousRevision,
+		12,
+	)
+	if err := callOne.onSource(changed); err != nil {
+		cancel()
+		waitExcelPricingRemoteBridgeTestGroup(t, &waitGroup)
+		t.Fatalf("accept changed source: %v", err)
+	}
+	if accepted := <-applied; accepted.EventID != changed.EventID || accepted.Source != replacement {
+		cancel()
+		waitExcelPricingRemoteBridgeTestGroup(t, &waitGroup)
+		t.Fatalf("changed transition = %+v", accepted)
+	}
+	callTwo := nextExcelPricingRemoteBridgeTestRun(t, runs)
+	waitExcelPricingRemoteBridgeTestSignal(t, callOne.stopped, "changed-source subscriber cancellation")
+	if callTwo.source != replacement || callTwo.initialCursor != changed.EventID {
+		cancel()
+		waitExcelPricingRemoteBridgeTestGroup(t, &waitGroup)
+		t.Fatalf("replacement source=%+v cursor=%d", callTwo.source, callTwo.initialCursor)
+	}
+	replacementState := excelPricingRemoteTestRevision("5")
+	replacementCatalog := excelPricingRemoteTestRevision("6")
+	if err := callTwo.onRevision(excelPricingRemoteRevision{
+		Source:                replacement,
+		StateRevision:         replacementState,
+		CatalogRevision:       replacementCatalog,
+		PricingStateRevision:  excelPricingRemoteTestRevision("7"),
+		PricingPolicyRevision: excelPricingRemoteTestRevision("8"),
+		ETag:                  `"` + replacementState + `"`,
+	}); err != nil {
+		cancel()
+		waitExcelPricingRemoteBridgeTestGroup(t, &waitGroup)
+		t.Fatalf("accept replacement authoritative revision: %v", err)
+	}
+	if !bridge.revisionCurrent(replacement, replacementState, replacementCatalog) {
+		cancel()
+		waitExcelPricingRemoteBridgeTestGroup(t, &waitGroup)
+		t.Fatal("replacement source was not authoritative after reconnect validation")
+	}
+
+	removed := excelPricingRemoteTestSourceTransition(
+		"pricing.source.removed", "removed", replacement, &replacement.Revision, 13,
+	)
+	if err := callTwo.onSource(removed); err != nil {
+		cancel()
+		waitExcelPricingRemoteBridgeTestGroup(t, &waitGroup)
+		t.Fatalf("accept removed source: %v", err)
+	}
+	if accepted := <-applied; accepted.EventID != removed.EventID || accepted.Change != "removed" {
+		cancel()
+		waitExcelPricingRemoteBridgeTestGroup(t, &waitGroup)
+		t.Fatalf("removed transition = %+v", accepted)
+	}
+	callThree := nextExcelPricingRemoteBridgeTestRun(t, runs)
+	waitExcelPricingRemoteBridgeTestSignal(t, callTwo.stopped, "removed-source subscriber cancellation")
+	if callThree.source != replacement || callThree.initialCursor != removed.EventID {
+		cancel()
+		waitExcelPricingRemoteBridgeTestGroup(t, &waitGroup)
+		t.Fatalf("removed-source rematerialization=%+v cursor=%d", callThree.source, callThree.initialCursor)
+	}
+	_, cursor, acknowledged := excelPricingRemoteBridgeState(bridge)
+	if cursor != removed.EventID || !acknowledged ||
+		bridge.revisionCurrent(replacement, replacementState, replacementCatalog) {
+		cancel()
+		waitExcelPricingRemoteBridgeTestGroup(t, &waitGroup)
+		t.Fatalf("removed cursor=%d acknowledged=%v old_revision_current=%v",
+			cursor, acknowledged,
+			bridge.revisionCurrent(replacement, replacementState, replacementCatalog))
+	}
+
+	cancel()
+	waitExcelPricingRemoteBridgeTestGroup(t, &waitGroup)
+	waitExcelPricingRemoteBridgeTestSignal(t, callThree.stopped, "removed-source reconnect cancellation")
+}
+
 func TestExcelPricingRemoteEventsBridgeCursorRequiresSuccessfulApplyAndAllowsReset(t *testing.T) {
 	source := excelPricingRemoteTestSource()
 	applyErr := errors.New("journal append failed")
@@ -839,6 +970,7 @@ func TestExcelPricingRemoteEventsBridgeLogsAreSecretSafe(t *testing.T) {
 			uint64,
 			func(uint64),
 			func(excelPricingRemoteRevision) error,
+			func(excelPricingRemoteSourceTransition) error,
 			func(excelPricingRemoteSnapshotTerminalEvent) error,
 			func(excelPricingRemoteApplyTerminalEvent) error,
 			func(context.Context) error,

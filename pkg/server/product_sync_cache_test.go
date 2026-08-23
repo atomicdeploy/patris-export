@@ -257,6 +257,44 @@ func TestCanonicalProjectionCacheSourceConfigAndRemoteEventsInvalidate(t *testin
 	if provider != nil {
 		t.Fatal("remote revision retained the stale pricing provider")
 	}
+
+	seedCanonicalProjectionCacheForTest(server, "remote-source-transition")
+	server.catalogProviderMu.Lock()
+	server.catalogProvider = pricingcatalog.NewProvider(pricingcatalog.Config{Mode: pricingcatalog.ModeNone})
+	server.catalogProviderMu.Unlock()
+	transitionGeneration := canonicalProjectionCacheGenerationForTest(server)
+	previousSourceRevision := excelPricingRevisionForTest("remote-source-before")
+	transitionSource := canonical.Source{
+		ID:       "source",
+		Dataset:  "records.json",
+		Revision: excelPricingRevisionForTest("remote-source-after"),
+	}
+	transition := excelPricingRemoteTestSourceTransition(
+		"pricing.source.changed", "changed", transitionSource, &previousSourceRevision, 27,
+	)
+	if err := server.notifyExcelPricingRemoteSourceTransition(transition); err != nil {
+		t.Fatal(err)
+	}
+	assertCanonicalProjectionInvalidatedForTest(t, server, transitionGeneration, "remote source transition")
+	server.catalogProviderMu.Lock()
+	provider = server.catalogProvider
+	server.catalogProviderMu.Unlock()
+	if provider != nil {
+		t.Fatal("remote source transition retained the stale pricing provider")
+	}
+	server.excelPricing.snapshots.mu.Lock()
+	events := server.excelPricing.snapshots.events
+	var change *excelPricingStateChangeEvent
+	if len(events) > 0 {
+		change = events[len(events)-1].Change
+	}
+	server.excelPricing.snapshots.mu.Unlock()
+	if change == nil || change.Kind != "source_changed" ||
+		change.Reason != "upstream_source_changed" || change.Source == nil ||
+		*change.Source != transitionSource || change.SourceChangeToken != transition.IdempotencyKey ||
+		!change.Stale || change.Verified {
+		t.Fatalf("remote source transition change=%+v", change)
+	}
 }
 
 func canonicalProjectionCacheFixture(revision string) recordpipe.Result {

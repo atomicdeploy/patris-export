@@ -1487,6 +1487,39 @@ func (s *Server) notifyExcelPricingSourceChanged(sourceChangeToken string) {
 	}
 }
 
+func (s *Server) notifyExcelPricingRemoteSourceTransition(
+	transition excelPricingRemoteSourceTransition,
+) error {
+	if s == nil || s.excelPricing == nil || s.excelPricing.snapshots == nil ||
+		transition.EventID == 0 || !validExcelPricingRemoteSource(transition.Source) ||
+		!isSHA256Revision(transition.IdempotencyKey) {
+		return errExcelPricingRemoteRevision
+	}
+	// The authenticated remote source lifecycle is authoritative for both the
+	// canonical projection and its pricing assignment cache. Invalidate both
+	// synchronously before the bridge durably accepts the transition cursor.
+	s.invalidateCanonicalProjection(true)
+	store := s.excelPricing.snapshots
+	store.mu.Lock()
+	previous := store.lastVerifiedChangeLocked()
+	cancel := store.invalidateGenerationLocked("snapshot_source_changed")
+	source := transition.Source
+	event := excelPricingStateChangeEvent{
+		Kind:              "source_changed",
+		Reason:            "upstream_source_" + transition.Change,
+		Source:            &source,
+		SourceChangeToken: transition.IdempotencyKey,
+		Stale:             true,
+	}
+	bindExcelPricingPreviousState(&event, previous)
+	store.publishChangeLocked(event)
+	store.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	return nil
+}
+
 func (store *excelPricingSnapshotStore) publishPricingStateInvalidated(stateRevision string) {
 	store.mu.Lock()
 	previous := store.lastVerifiedChangeLocked()

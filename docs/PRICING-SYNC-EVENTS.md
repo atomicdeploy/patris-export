@@ -136,6 +136,24 @@ cancelled, or `outcome_unknown` events never trigger a workbook refresh;
 `outcome_unknown` retains the request and requires readback rather than another
 mutation.
 
+Exact `pricing.source.changed` and `pricing.source.removed` frames are also
+durable lifecycle barriers. The companion validates the source schema,
+projection, ID/dataset ownership, old/new revision relationship, audience,
+revision route, and idempotency key; synchronously invalidates the old local
+generation; and only then accepts the frame cursor. It immediately
+rematerializes the canonical source and starts a fresh outbound subscriber at
+that cursor. The replacement connection must pass the authenticated composite
+revision validation before later event cursors can advance. A removed remote
+source therefore remains fail-closed until that same validation succeeds or a
+later local source transition starts another generation.
+
+WordPress may return `pricing.stream.reset` with reason `invalid_event` when a
+retained event predates the Living stream contract. After validating the reset
+schema, retained window, revision route, and supplied cursor, the companion
+performs one authenticated conditional revision validation, durably replaces
+its cursor, and reconnects. It neither treats the retired frame as a successful
+state change nor replays it indefinitely.
+
 There is no timer-driven apply-status loop. A single status reconciliation is
 allowed after a lost admission response and on each authenticated stream
 connect/reconnect. Cancellation may perform one reconciliation before one

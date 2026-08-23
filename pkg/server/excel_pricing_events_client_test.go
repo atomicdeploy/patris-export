@@ -89,6 +89,41 @@ func excelPricingRemoteTestStateFrame(source canonical.Source, eventID uint64, s
 	}
 }
 
+func excelPricingRemoteTestSourceTransition(
+	name, change string,
+	source canonical.Source,
+	previous *string,
+	eventID uint64,
+) excelPricingRemoteSourceTransition {
+	transition := excelPricingRemoteSourceTransition{
+		Schema:                     excelPricingRemoteSourceEventSchema,
+		Projection:                 excelPricingRemoteProjection,
+		Change:                     change,
+		Source:                     source,
+		PreviousSourceRevision:     previous,
+		IdempotencyKey:             excelPricingRemoteTestRevision("9"),
+		RevisionValidationRequired: true,
+		RevisionPath:               "/wp-json/digitalogic/pricing/sync/revision",
+		Name:                       name,
+		EventID:                    eventID,
+	}
+	transition.Audience.Services = []string{"patris_pricing"}
+	return transition
+}
+
+func excelPricingRemoteTestSourceTransitionFrame(
+	transition excelPricingRemoteSourceTransition,
+) map[string]interface{} {
+	return map[string]interface{}{
+		"event":   transition.Name,
+		"name":    transition.Name,
+		"success": true,
+		"time":    "2026-08-23T00:00:00Z",
+		"id":      transition.EventID,
+		"data":    transition,
+	}
+}
+
 func excelPricingRemoteWriteJSON(t *testing.T, connection *websocket.Conn, value interface{}) {
 	t.Helper()
 	if err := connection.WriteJSON(value); err != nil {
@@ -429,6 +464,121 @@ func TestExcelPricingRemoteEventsStreamResetTriggersOneConditionalValidation(t *
 	}
 }
 
+func TestExcelPricingRemoteEventsInvalidRetainedEventResetValidatesPersistsAndReconnects(t *testing.T) {
+	source := excelPricingRemoteTestSource()
+	state := excelPricingRemoteTestRevision("a")
+	etag := `"` + state + `"`
+	var revisionCalls atomic.Int32
+	var connections atomic.Int32
+	var persistedCursor atomic.Uint64
+	reconnected := make(chan struct{})
+	upgrader := websocket.Upgrader{
+		Subprotocols: []string{excelPricingRemoteWebSocketProtocol},
+		CheckOrigin:  func(*http.Request) bool { return true },
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/wp-json/digitalogic/pricing/sync/revision":
+			call := revisionCalls.Add(1)
+			w.Header().Set("ETag", etag)
+			if call == 1 {
+				w.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(w).Encode(excelPricingRemoteTestRevisionPayload(source, state))
+				return
+			}
+			if r.Header.Get("If-None-Match") != etag {
+				http.Error(w, "missing conditional validator", http.StatusPreconditionRequired)
+				return
+			}
+			w.WriteHeader(http.StatusNotModified)
+		case "/wordpress-ws":
+			connectionNumber := connections.Add(1)
+			if connectionNumber == 2 && r.Header.Get("Last-Event-ID") != "11" {
+				http.Error(w, "accepted reset cursor missing", http.StatusBadRequest)
+				return
+			}
+			connectedCursor := uint64(10)
+			if connectionNumber == 2 {
+				connectedCursor = 11
+			}
+			connection, err := upgrader.Upgrade(w, r, nil)
+			if err != nil {
+				return
+			}
+			defer connection.Close()
+			excelPricingRemoteWriteJSON(t, connection, map[string]interface{}{
+				"event":   "connected",
+				"success": true,
+				"data": map[string]interface{}{
+					"principal":                    "patris_pricing",
+					"cursor":                       connectedCursor,
+					"oldest_event_id":              1,
+					"latest_event_id":              11,
+					"revision_validation_required": true,
+					"revision_path":                "/wp-json/digitalogic/pricing/sync/revision",
+				},
+			})
+			if connectionNumber == 1 {
+				excelPricingRemoteWriteJSON(t, connection, map[string]interface{}{
+					"event":   "pricing.stream.reset",
+					"success": true,
+					"data": map[string]interface{}{
+						"schema":                       excelPricingRemoteStreamResetSchema,
+						"reason":                       "invalid_event",
+						"cursor":                       11,
+						"oldest_event_id":              1,
+						"latest_event_id":              11,
+						"revision_validation_required": true,
+						"revision_path":                "/wp-json/digitalogic/pricing/sync/revision",
+					},
+				})
+				return
+			}
+			close(reconnected)
+			_, _, _ = connection.ReadMessage()
+		}
+	}))
+	defer server.Close()
+
+	var accepted atomic.Int32
+	client, err := newExcelPricingRemoteEventsClient(excelPricingRemoteTestConfig(t, server.URL), source,
+		excelPricingRemoteEventsOptions{
+			MinReconnectBackoff: 2 * time.Millisecond,
+			MaxReconnectBackoff: 5 * time.Millisecond,
+			OnRevision: func(excelPricingRemoteRevision) error {
+				accepted.Add(1)
+				return nil
+			},
+			OnCursor: persistedCursor.Store,
+		})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	result := make(chan error, 1)
+	go func() { result <- client.Run(ctx) }()
+	select {
+	case <-reconnected:
+	case <-time.After(2 * time.Second):
+		t.Fatal("subscriber did not reconnect after invalid retained event reset")
+	}
+	deadline := time.Now().Add(time.Second)
+	for revisionCalls.Load() < 3 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if revisionCalls.Load() != 3 || accepted.Load() != 1 ||
+		client.currentCursor() != 11 || persistedCursor.Load() != 11 {
+		t.Fatalf("connections=%d revisions=%d accepted=%d cursor=%d persisted=%d",
+			connections.Load(), revisionCalls.Load(), accepted.Load(),
+			client.currentCursor(), persistedCursor.Load())
+	}
+	cancel()
+	if err := <-result; !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run error = %v", err)
+	}
+}
+
 func TestExcelPricingRemoteConnectedCursorResetMayClampAHighPersistedCursor(t *testing.T) {
 	source := excelPricingRemoteTestSource()
 	state := excelPricingRemoteTestRevision("b")
@@ -500,6 +650,63 @@ func TestExcelPricingRemoteEventCursorAdvancesOnlyAfterAtomicAcceptance(t *testi
 	}
 	if client.currentCursor() != 6 {
 		t.Fatalf("accepted event cursor = %d", client.currentCursor())
+	}
+}
+
+func TestExcelPricingRemoteSourceChangedAndRemovedRequireDurableAcceptance(t *testing.T) {
+	current := excelPricingRemoteTestSource()
+	changed := current
+	changed.Revision = excelPricingRemoteTestRevision("b")
+	for name, transition := range map[string]excelPricingRemoteSourceTransition{
+		"changed": excelPricingRemoteTestSourceTransition(
+			"pricing.source.changed", "changed", changed, &current.Revision, 6,
+		),
+		"removed": excelPricingRemoteTestSourceTransition(
+			"pricing.source.removed", "removed", current, &current.Revision, 6,
+		),
+	} {
+		t.Run(name, func(t *testing.T) {
+			acceptErr := errors.New("durable source transition journal unavailable")
+			var accepted excelPricingRemoteSourceTransition
+			client, err := newExcelPricingRemoteEventsClient(
+				excelPricingRemoteTestConfig(t, "http://127.0.0.1:18080"), current,
+				excelPricingRemoteEventsOptions{
+					InitialCursor: 5,
+					OnRevision:    func(excelPricingRemoteRevision) error { return nil },
+					OnSourceTransition: func(candidate excelPricingRemoteSourceTransition) error {
+						accepted = candidate
+						return acceptErr
+					},
+				},
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			body, err := json.Marshal(excelPricingRemoteTestSourceTransitionFrame(transition))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := client.handleExcelPricingRemoteFrame(t.Context(), body, true); !errors.Is(err, errExcelPricingRemoteRevision) {
+				t.Fatalf("failed acceptance error = %v", err)
+			}
+			if client.currentCursor() != 5 {
+				t.Fatalf("failed durable acceptance advanced cursor to %d", client.currentCursor())
+			}
+
+			client.onSource = func(candidate excelPricingRemoteSourceTransition) error {
+				accepted = candidate
+				return nil
+			}
+			if _, err := client.handleExcelPricingRemoteFrame(t.Context(), body, true); !errors.Is(err, errExcelPricingRemoteSourceChanged) {
+				t.Fatalf("accepted transition error = %v", err)
+			}
+			if client.currentCursor() != transition.EventID ||
+				accepted.Name != transition.Name || accepted.Change != transition.Change ||
+				accepted.Source != transition.Source || accepted.EventID != transition.EventID ||
+				len(accepted.Audience.Services) != 1 || accepted.Audience.Services[0] != "patris_pricing" {
+				t.Fatalf("accepted=%+v cursor=%d", accepted, client.currentCursor())
+			}
+		})
 	}
 }
 
