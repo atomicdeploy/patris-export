@@ -276,9 +276,12 @@ function buildFailures(report, options) {
     report.fontAudit.passed === true
       && report.fontAudit.persianFont === 'Yekan Bakh'
       && report.fontAudit.latinFont === 'Segoe UI'
-      && report.fontAudit.auditMode === 'RepairAndWarn'
-      && report.fontAudit.validateOnOpen === 'Yes'
-      && report.fontAudit.allowFallback === 'No'
+      && report.fontAudit.auditMode === 'ترمیم و هشدار'
+      && report.fontAudit.validateOnOpen === 'بله'
+      && report.fontAudit.allowFallback === 'خیر'
+      && report.fontAudit.priceDisplayFaNum === 'بله'
+      && report.fontAudit.faNumToggle.enabled === true
+      && report.fontAudit.faNumToggle.disabled === true
       && report.fontAudit.invalidModeRejected === true
       && report.fontAudit.missingConfigRejected === true
       && report.fontAudit.missingFontRejected === true
@@ -289,9 +292,13 @@ function buildFailures(report, options) {
       && !report.fontAudit.friendlyError.includes('[pricing state]')
       && !report.fontAudit.friendlyError.toLowerCase().includes('http')
       && report.fontAudit.priceSlots.some((slot) => (
-        slot.name === 'Name' && slot.supported === true && slot.value === 'Segoe UI'
+        slot.name === 'Name' && slot.supported === true && slot.value === 'Yekan Bakh FaNum'
       ))
       && report.fontAudit.priceSlots.every((slot) => (
+        slot.supported === false || slot.value === 'Yekan Bakh FaNum'
+      ))
+      && report.fontAudit.technicalSlots.length > 0
+      && report.fontAudit.technicalSlots.every((slot) => (
         slot.supported === false || slot.value === 'Segoe UI'
       )),
     `the fixed font policy or hard font audit failed: ${JSON.stringify(report.fontAudit)}`,
@@ -977,14 +984,17 @@ function Test-SearchLiteralText([object]$excel, [object]$book) {
 function Test-FontAudit([object]$excel, [object]$book) {
     $settings = $null
     $table = $null
+    $tableDataRange = $null
     $priceDataRange = $null
     $priceColumn = $null
     $savedPersianFont = $null
     $savedAuditMode = $null
+    $savedPriceDisplayFaNum = $null
     $savedPriceFont = $null
     try {
         $settings = $book.Worksheets.Item(3)
         $table = Find-Table $book 'Products'
+        $tableDataRange = $table.DataBodyRange
         $priceDataRange = $table.ListColumns.Item(1).DataBodyRange
         if ($null -ne $priceDataRange) {
             $priceColumn = $priceDataRange.Cells.Item(1, 1)
@@ -1005,14 +1015,21 @@ function Test-FontAudit([object]$excel, [object]$book) {
         $policyFixturesPassed = [bool]$excel.Run($policyFixtureMacro)
         $savedPersianFont = $settings.Range('B39').Value2
         $savedAuditMode = $settings.Range('B41').Value2
+        $savedPriceDisplayFaNum = $settings.Range('B44').Value2
         $driftRepaired = $false
+        $faNumEnabled = $false
+        $faNumDisabled = $false
         $priceSlots = @()
+        $technicalSlots = @()
         if ($null -ne $priceColumn) {
             $savedPriceFont = $priceColumn.Font.Name
-            $priceColumn.Font.Name = 'Arial'
-            $repairMacro = "'$($book.Name.Replace("'", "''"))'!ProductCatalogSync.RepairFontDriftForValidation"
-            $driftRepaired = [bool]$excel.Run($repairMacro) -and
-                [Convert]::ToString($priceColumn.Font.Name, $invariant) -eq 'Segoe UI'
+            $applyPriceFontMacro = "'$($book.Name.Replace("'", "''"))'!ProductCatalogSync.ApplyPriceDisplayFontSetting"
+            $settings.Range('B44').Value2 = 'بله'
+            [void]$excel.Run($applyPriceFontMacro)
+            $faNumEnabled = [Convert]::ToString(
+                $priceColumn.Font.Name,
+                $invariant
+            ) -eq 'Yekan Bakh FaNum'
             $priceSlots = @(
                 foreach ($slot in @('Name', 'NameComplexScript', 'NameFarEast')) {
                     try {
@@ -1031,6 +1048,44 @@ function Test-FontAudit([object]$excel, [object]$book) {
                     }
                 }
             )
+            foreach ($columnIndex in @(2, 5, 6, 7, 9)) {
+                $technicalCell = $null
+                try {
+                    $technicalCell = $tableDataRange.Cells.Item(1, $columnIndex)
+                    foreach ($slot in @('Name', 'NameComplexScript', 'NameFarEast')) {
+                        try {
+                            $slotValue = [Convert]::ToString($technicalCell.Font.$slot, $invariant)
+                            $technicalSlots += [pscustomobject]@{
+                                column = $columnIndex
+                                name = $slot
+                                supported = $slot -eq 'Name' -or -not [string]::IsNullOrWhiteSpace($slotValue)
+                                value = $slotValue
+                            }
+                        } catch {
+                            $technicalSlots += [pscustomobject]@{
+                                column = $columnIndex
+                                name = $slot
+                                supported = $false
+                                value = ''
+                            }
+                        }
+                    }
+                } finally {
+                    Release-ComObject $technicalCell
+                }
+            }
+            $settings.Range('B44').Value2 = 'خیر'
+            [void]$excel.Run($applyPriceFontMacro)
+            $faNumDisabled = [Convert]::ToString(
+                $priceColumn.Font.Name,
+                $invariant
+            ) -eq 'Segoe UI'
+            $settings.Range('B44').Value2 = 'بله'
+            [void]$excel.Run($applyPriceFontMacro)
+            $priceColumn.Font.Name = 'Arial'
+            $repairMacro = "'$($book.Name.Replace("'", "''"))'!ProductCatalogSync.RepairFontDriftForValidation"
+            $driftRepaired = [bool]$excel.Run($repairMacro) -and
+                [Convert]::ToString($priceColumn.Font.Name, $invariant) -eq 'Yekan Bakh FaNum'
         }
 
         return [pscustomobject]@{
@@ -1040,6 +1095,11 @@ function Test-FontAudit([object]$excel, [object]$book) {
             auditMode = [Convert]::ToString($settings.Range('B41').Value2, $invariant)
             validateOnOpen = [Convert]::ToString($settings.Range('B42').Value2, $invariant)
             allowFallback = [Convert]::ToString($settings.Range('B43').Value2, $invariant)
+            priceDisplayFaNum = [Convert]::ToString($savedPriceDisplayFaNum, $invariant)
+            faNumToggle = [pscustomobject]@{
+                enabled = $faNumEnabled
+                disabled = $faNumDisabled
+            }
             invalidModeRejected = $policyFixturesPassed
             missingConfigRejected = $policyFixturesPassed
             missingFontRejected = $policyFixturesPassed
@@ -1047,6 +1107,7 @@ function Test-FontAudit([object]$excel, [object]$book) {
             dialogPassed = $dialogPassed
             friendlyError = $friendlyError
             priceSlots = $priceSlots
+            technicalSlots = $technicalSlots
         }
     } finally {
         if ($null -ne $settings) {
@@ -1056,12 +1117,20 @@ function Test-FontAudit([object]$excel, [object]$book) {
             if ($null -ne $savedAuditMode) {
                 $settings.Range('B41').Value2 = $savedAuditMode
             }
+            if ($null -ne $savedPriceDisplayFaNum) {
+                $settings.Range('B44').Value2 = $savedPriceDisplayFaNum
+                if ($null -ne $priceColumn) {
+                    $restorePriceFontMacro = "'$($book.Name.Replace("'", "''"))'!ProductCatalogSync.ApplyPriceDisplayFontSetting"
+                    [void]$excel.Run($restorePriceFontMacro)
+                }
+            }
         }
         if ($null -ne $priceColumn -and $null -ne $savedPriceFont) {
             $priceColumn.Font.Name = $savedPriceFont
         }
         Release-ComObject $priceColumn
         Release-ComObject $priceDataRange
+        Release-ComObject $tableDataRange
         Release-ComObject $table
         Release-ComObject $settings
     }

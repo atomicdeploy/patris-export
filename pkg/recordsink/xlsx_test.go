@@ -614,10 +614,11 @@ func TestDynamicCalculatorPackagesPassFixedOpenXMLFontPolicy(t *testing.T) {
 	if err != nil || len(paths) != 1 {
 		t.Fatalf("locate canonical calculator: paths=%v error=%v", paths, err)
 	}
-	report, err := ValidateDynamicWorkbookFontPolicy(paths[0], DynamicWorkbookFontPolicy{
-		PersianFont: "Yekan Bakh",
-		LatinFont:   "Segoe UI",
-	})
+	policy, err := ReadDynamicWorkbookFontPolicy(paths[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	report, err := ValidateDynamicWorkbookFontPolicy(paths[0], policy)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1003,27 +1004,178 @@ func TestDynamicCalculatorVBASourceGuardsLivePricingBeforeMutation(t *testing.T)
 		t.Fatal("source identity must be validated before the callback pipeline creates a session")
 	}
 	startHandler := section("Private Sub HandleSnapshotStartResponse", "Private Sub HandleSnapshotWaitResponse")
-	for _, required := range []string{"ParsePricingSnapshotJob root", "EnsureSseListener", "BeginSnapshotWaitRequest"} {
+	for _, required := range []string{"ParsePricingSnapshotJob root", "mSseJobID = mSnapshotJobID", "BeginSnapshotWaitRequest"} {
 		if !strings.Contains(startHandler, required) {
 			t.Fatalf("snapshot start callback is missing %s", required)
 		}
+	}
+	if strings.Contains(startHandler, "EnsureSseListener") {
+		t.Fatal("cold refresh must not subscribe to durable SSE before the first atomic commit")
 	}
 	waitHandler := section("Private Sub HandleSnapshotWaitResponse", "Private Sub HandleSnapshotPayloadResponse")
 	if !strings.Contains(waitHandler, "BeginSnapshotPayloadRequest") || strings.Contains(waitHandler, "Do While") {
 		t.Fatal("terminal wait callback must transition once to the payload without polling")
 	}
+	queueHandler := section("Public Sub QueueAsyncDispatch", "Private Sub ScheduleQueuedAsyncDispatch")
+	if !strings.Contains(queueHandler, "ScheduleQueuedAsyncDispatch") ||
+		!strings.Contains(queueHandler, "mSaveRenameAsyncPending = True") ||
+		strings.Contains(queueHandler, "DispatchAsyncRequest") ||
+		strings.Contains(queueHandler, "FailActiveOperation") {
+		t.Fatal("WinHTTP callbacks must only queue a rename-safe deferred dispatcher and return")
+	}
+	scheduleHandler := section("Private Sub ScheduleQueuedAsyncDispatch", "Public Sub DispatchQueuedAsyncRequests")
+	for _, required := range []string{
+		"Application.OnTime",
+		"mAsyncDispatchTime = Now + TimeSerial(0, 0, 1)",
+		`QualifiedWorkbookMacro("DispatchQueuedAsyncRequests")`,
+		"DispatchFailed:",
+		"mAsyncDispatchScheduled = False",
+	} {
+		if !strings.Contains(scheduleHandler, required) {
+			t.Fatalf("async callback dispatcher is not safely deferred: %s", required)
+		}
+	}
+	if strings.Count(scheduleHandler, "Application.OnTime") != 1 ||
+		!strings.Contains(scheduleHandler, "mSaveRenameSchedulesSuspended") ||
+		strings.Contains(scheduleHandler, "DispatchAsyncRequest") ||
+		strings.Contains(scheduleHandler, "FailActiveOperation") {
+		t.Fatal("OnTime scheduling must be a single non-reentrant action with deferred failure handling")
+	}
+	kickHandler := section("Public Sub KickQueuedAsyncDispatch", "Public Sub DispatchQueuedAsyncRequests")
+	for _, required := range []string{
+		"mAsyncDispatchErrorNumber <> 0",
+		"DispatchQueuedAsyncRequests",
+		"ScheduleQueuedAsyncDispatch",
+	} {
+		if !strings.Contains(kickHandler, required) {
+			t.Fatalf("safe workbook-event dispatch kick is missing %q", required)
+		}
+	}
+	if strings.Contains(kickHandler, "DispatchAsyncRequest") {
+		t.Fatal("safe dispatch kick must not run a WinHTTP state transition directly")
+	}
+	saveResume := section("Private Sub ResumeQualifiedSchedulesAfterSaveAs", "Public Sub RefreshAllData")
+	for _, required := range []string{
+		"mAsyncDispatchPending.Count > 0",
+		"If refreshPending Then ScheduleRefreshOnOpen",
+		"If asyncPending Then ScheduleQueuedAsyncDispatch",
+		"If previewPending Then SchedulePricingPreview",
+		"If eventRefreshPending Then ScheduleEventDrivenRefresh",
+		"If sseReconnectPending Then ScheduleSseReconnect sseRenewSession",
+	} {
+		if !strings.Contains(saveResume, required) {
+			t.Fatalf("Save As schedule rebinding is missing %q", required)
+		}
+	}
+	for _, scheduler := range []struct {
+		start string
+		end   string
+		flag  string
+		reset string
+	}{
+		{"Public Sub ScheduleRefreshOnOpen", "Public Sub RunScheduledRefresh", "mSaveRenameRefreshPending = True", "mRefreshScheduled = False"},
+		{"Private Sub ScheduleSseReconnect", "Public Sub RunSseReconnect", "mSaveRenameSseReconnectPending = True", "mSseReconnectScheduled = False"},
+		{"Private Sub ScheduleEventDrivenRefresh", "Public Sub RunEventDrivenRefresh", "mSaveRenameEventRefreshPending = True", "mEventRefreshScheduled = False"},
+		{"Private Sub SchedulePricingPreview", "Public Sub RunScheduledPricingPreview", "mSaveRenamePreviewPending = True", "mPricingPreviewScheduled = False"},
+	} {
+		schedulerSource := section(scheduler.start, scheduler.end)
+		if !strings.Contains(schedulerSource, scheduler.flag) {
+			t.Fatalf("qualified scheduler %s is not suspended across Save As", scheduler.start)
+		}
+		if !strings.Contains(schedulerSource, "ScheduleFailed:") ||
+			!strings.Contains(schedulerSource, scheduler.reset) {
+			t.Fatalf("qualified scheduler %s can retain a false scheduled flag after OnTime failure", scheduler.start)
+		}
+	}
+	dispatchHandler := section("Public Sub DispatchQueuedAsyncRequests", "Private Sub CancelQueuedAsyncDispatch")
+	for _, required := range []string{
+		"mAsyncDispatchErrorNumber",
+		"FailActiveOperation pendingToken",
+		"DispatchAsyncRequest pendingToken",
+	} {
+		if !strings.Contains(dispatchHandler, required) {
+			t.Fatalf("deferred async dispatcher is missing post-callback handling: %s", required)
+		}
+	}
 	payloadHandler := section("Private Sub HandleSnapshotPayloadResponse", "Private Sub HandlePreviewResponse")
 	rawHashPosition := strings.Index(payloadHandler, "SHA256RevisionBytes(responseBody)")
 	validatePosition := strings.Index(payloadHandler, "ImportPricingSnapshotPayload(")
+	listenerValidatePosition := strings.Index(payloadHandler, "ValidateSseListenerPrerequisites")
 	commitPosition := strings.Index(payloadHandler, "CommitRefreshSnapshot reconciledRows")
-	if rawHashPosition < 0 || validatePosition < rawHashPosition || commitPosition < validatePosition {
-		t.Fatal("raw payload bytes and immutable snapshot must be validated before atomic workbook commit")
+	completePosition := strings.Index(payloadHandler, "CompleteActiveOperation True")
+	sseArmPosition := strings.Index(payloadHandler, "ArmSseListenerAfterCommit")
+	if rawHashPosition < 0 || validatePosition < rawHashPosition ||
+		listenerValidatePosition < validatePosition || commitPosition < listenerValidatePosition ||
+		completePosition < commitPosition || sseArmPosition < completePosition {
+		t.Fatal("payload/listener prerequisites must validate before commit, and listener arm must follow successful completion")
+	}
+	listenerArm := section("Private Sub ArmSseListenerAfterCommit", "Private Sub AdoptSseSessionToken")
+	for _, required := range []string{
+		"EnsureSseListener eventsURL, jobID, csrfToken",
+		"ListenerFailed:",
+		"ScheduleSseReconnect True",
+	} {
+		if !strings.Contains(listenerArm, required) {
+			t.Fatalf("post-commit listener recovery is missing %q", required)
+		}
+	}
+	for _, forbidden := range []string{
+		"FailActiveOperation",
+		"CommitRefreshSnapshot",
+		"RestoreCatalogTableSnapshot",
+	} {
+		if strings.Contains(listenerArm, forbidden) {
+			t.Fatalf("post-commit listener recovery must preserve the committed snapshot: %s", forbidden)
+		}
 	}
 	applyHandler := section("Private Sub ApplyPricingChangesCore", "Private Sub InvalidatePricingPreview")
 	idempotencyPosition := strings.Index(applyHandler, `mLastApplyRequestID = NewRequestID("apply")`)
 	savedIDPosition := strings.Index(applyHandler, "mOperationSavedApplyRequestID = mLastApplyRequestID")
 	if idempotencyPosition < 0 || savedIDPosition < idempotencyPosition {
 		t.Fatal("apply must persist its idempotency key before the asynchronous request can become uncertain")
+	}
+	sseEventHandler := section("Private Sub HandlePricingSseEvent", "Private Function IsExpectedApplyMutationEvent")
+	for _, required := range []string{
+		`Case "pricing_state_changed"`,
+		`Case "pricing_state_invalidated"`,
+		"eventStateRevision = SiteText(change, \"state_revision\")",
+		"IsExpectedApplyMutationEvent(eventStateRevision)",
+		"PreserveExpectedApplyMutationEvent",
+	} {
+		if !strings.Contains(sseEventHandler, required) {
+			t.Fatalf("SSE apply-race handling is missing %q", required)
+		}
+	}
+	expectedApplyEvent := section("Private Function IsExpectedApplyMutationEvent", "Private Sub PreserveExpectedApplyMutationEvent")
+	for _, required := range []string{
+		`Case "apply"`,
+		`Case "apply_refresh"`,
+		"mRequiredSnapshotStateRevision",
+		"vbBinaryCompare",
+	} {
+		if !strings.Contains(expectedApplyEvent, required) {
+			t.Fatalf("expected apply mutation classifier is missing %q", required)
+		}
+	}
+	preserveApplyEvent := section("Private Sub PreserveExpectedApplyMutationEvent", "Private Sub MarkSseRefreshRequired")
+	for _, required := range []string{
+		"mForceFreshSnapshot = True",
+		"InvalidatePricingPreview",
+		`If mOperationKind = "apply" Then`,
+		"mSseRefreshRequired = True",
+	} {
+		if !strings.Contains(preserveApplyEvent, required) {
+			t.Fatalf("expected apply mutation preservation is missing %q", required)
+		}
+	}
+	for _, forbidden := range []string{
+		"mOperationRequest.Abort",
+		"FailActiveOperation",
+		"ScheduleEventDrivenRefresh",
+	} {
+		if strings.Contains(preserveApplyEvent, forbidden) {
+			t.Fatalf("apply's own SSE mutation event must not terminate or bypass its HTTP response: %s", forbidden)
+		}
 	}
 	wooLinkRowPosition := strings.Index(source, "Private Sub ApplyWooLinkRow")
 	if wooLinkRowPosition < 0 {
@@ -1056,10 +1208,15 @@ func TestDynamicCalculatorVBASourceGuardsLivePricingBeforeMutation(t *testing.T)
 		`Private Const PRICING_SNAPSHOT_PAYLOAD_SCHEMA As String = "patris.pricing-snapshot/v1"`,
 		`Private Const PRICING_SNAPSHOT_EVENT_SCHEMA As String = "patris.pricing-state-event/v1"`,
 		`Private Const PRICING_SNAPSHOT_PROJECTION As String = "excel-v1"`,
+		`Private Const DEFAULT_FANUM_FONT As String = "Yekan Bakh FaNum"`,
 		"Private mOperationRequest As AsyncWinHttpRequest",
 		"Private mSseRequest As AsyncWinHttpRequest",
 		"Private mSseSessionRequest As AsyncWinHttpRequest",
 		"Private mSseParser As PricingSseParser",
+		"Private mAsyncDispatchScheduled As Boolean",
+		"Private mCatalogCommitInProgress As Boolean",
+		"Public Sub DispatchQueuedAsyncRequests",
+		"Private Sub CancelQueuedAsyncDispatch",
 		"Private Sub BeginRefreshPipeline",
 		"Private Sub BeginContractRequest",
 		"Private Sub BeginSessionRequest",
@@ -1067,6 +1224,8 @@ func TestDynamicCalculatorVBASourceGuardsLivePricingBeforeMutation(t *testing.T)
 		"Private Sub BeginSnapshotWaitRequest",
 		"Private Sub BeginSnapshotPayloadRequest",
 		"Private Sub StartFiniteRequest",
+		"Private Function IsAllowedPricingAuthenticatedUrl",
+		"If pricingRequest And Not IsAllowedPricingAuthenticatedUrl(endpoint) Then",
 		`requestValue.OpenAsync UCase$(methodName), endpoint`,
 		`requestValue.SetRequestHeader PRICING_CLIENT_HEADER, PRICING_CLIENT_ID`,
 		`requestValue.SetRequestHeader PRICING_CSRF_HEADER`,
@@ -1101,7 +1260,15 @@ func TestDynamicCalculatorVBASourceGuardsLivePricingBeforeMutation(t *testing.T)
 		"Public Sub RunSseReconnect",
 		"Private Sub ScheduleEventDrivenRefresh",
 		"Public Sub RunEventDrivenRefresh",
+		"Set activeBook = Application.ActiveWorkbook",
+		"If Not activeBook Is ThisWorkbook Then Exit Sub",
 		"Public Sub CancelActivePricingOperations",
+		"Public Sub ResumeAfterCancelledClose",
+		"mResumeRefreshAfterCancelledClose",
+		"If workbookIsClosing And Not mCancelRequest Is Nothing Then",
+		"mCancelRequest.Abort",
+		"If workbookIsClosing Then CancelSseReconnect",
+		"If workbookIsClosing Then StopSseListener True",
 		"Private Sub CommitRefreshSnapshot",
 		"Private Sub CaptureCatalogTableSnapshot",
 		"Private Sub RestoreCatalogTableSnapshot",
@@ -1126,6 +1293,7 @@ func TestDynamicCalculatorVBASourceGuardsLivePricingBeforeMutation(t *testing.T)
 		`Left$(warningCode, Len("projection_integrity"))`,
 		"Private Sub BeginRepairRequest",
 		`StartFiniteRequest "POST", UniversalRefreshURL()`,
+		`(StrComp(Trim$(address), UniversalRefreshURL(), vbTextCompare) = 0)`,
 		`JsonRuntime.JsonText(root, "source_revision")`,
 		"mSourceRevision <> mOperationDeliveredRevision",
 		"Public Sub PreviewPricingChanges()",
@@ -1194,6 +1362,12 @@ func TestDynamicCalculatorVBASourceGuardsLivePricingBeforeMutation(t *testing.T)
 		`Private Const SEARCH_BUTTON_SHAPE As String = "ProductSearchButton"`,
 		"Public Sub HighlightSelectedProductRow",
 		"Public Sub ApplyPriceDisplayFontSetting()",
+		"Private Function PriceDisplayFontName",
+		`NamedYesNo("PriceDisplayFaNum", valid)`,
+		"table.ListColumns(1).DataBodyRange, priceDisplayFont, repair",
+		"For Each columnIndex In Array(2, 5, 6, 7, 9)",
+		`book.Worksheets(3).Range("A44:F44").ClearContents`,
+		`book.Names("PriceDisplayFaNum").Delete`,
 		"ValidateRoundingRuntime",
 		"Application.WorksheetFunction.Round(123450#, -2) <> 123500#",
 		"Public Sub HandleWorkbookBeforeSave",
@@ -1235,7 +1409,6 @@ func TestDynamicCalculatorVBASourceGuardsLivePricingBeforeMutation(t *testing.T)
 		"MsgBox ",
 		"MsgBox(",
 		"VBA.MsgBox",
-		"Yekan Bakh" + " Fa" + "Num",
 		`"catalog_materialization"`,
 		"ApplyCatalogMaterializationState",
 		`http.Open "GET", endpoint, False`,
@@ -1296,6 +1469,8 @@ func TestDynamicCalculatorVBASourceGuardsLivePricingBeforeMutation(t *testing.T)
 	}
 	commitSource := section("Private Sub CommitRefreshSnapshot", "Public Sub RefreshOnOpen")
 	for _, required := range []string{
+		"mCatalogCommitInProgress = True",
+		"mCatalogCommitInProgress = False",
 		"Application.ScreenUpdating = False",
 		"Application.EnableEvents = False",
 		"Application.Calculation = xlCalculationManual",
@@ -1308,6 +1483,21 @@ func TestDynamicCalculatorVBASourceGuardsLivePricingBeforeMutation(t *testing.T)
 	}
 	if strings.Contains(refreshSource+beginRefreshSource, "ConfirmUnicodeMessage") {
 		t.Fatal("routine refresh status must remain inline and never open a modal dialog")
+	}
+	for _, uiSection := range []struct {
+		start string
+		end   string
+	}{
+		{"Public Sub FocusProductSearch", "Public Sub SearchProducts"},
+		{"Public Sub SearchProducts", "Public Sub ClearProductSearch"},
+		{"Public Sub ClearProductSearch", "Private Function ProductSearchMatchRows"},
+		{"Public Sub HighlightSelectedProductRow", "Public Sub HandlePricingProposalChanged"},
+	} {
+		sectionSource := section(uiSection.start, uiSection.end)
+		if strings.Contains(sectionSource, "mRefreshInProgress") ||
+			!strings.Contains(sectionSource, "mCatalogCommitInProgress") {
+			t.Fatalf("%s must remain usable throughout the network wait and pause only for atomic commit", uiSection.start)
+		}
 	}
 	for _, required := range []string{
 		"mOperationPreviousEnableCancelKey = Application.EnableCancelKey",
@@ -1329,7 +1519,7 @@ func TestDynamicCalculatorVBASourceGuardsLivePricingBeforeMutation(t *testing.T)
 		t.Fatal("routine no-result search status must remain inline and never open a modal dialog")
 	}
 	for _, required := range []string{
-		"If mRefreshInProgress Or mSearchInProgress Then Exit Sub",
+		"If mCatalogCommitInProgress Or mSearchInProgress Then Exit Sub",
 		"mSearchInProgress = True",
 		"Application.EnableCancelKey = xlErrorHandler",
 		`SetSearchButtonCaption T("search_button") & " (0)"`,
@@ -1367,7 +1557,14 @@ func TestDynamicCalculatorVBASourceGuardsLivePricingBeforeMutation(t *testing.T)
 		"ProductCatalogSync.HandleWorkbookBeforeSave SaveAsUI, Cancel",
 		"Private Sub Workbook_AfterSave",
 		"ProductCatalogSync.FinishWorkbookSaveTiming Success",
+		"If Not Success Then ProductCatalogSync.ResumeAfterCancelledClose",
+		"Private Sub Workbook_WindowActivate",
+		"ProductCatalogSync.ResumeAfterCancelledClose",
+		"ProductCatalogSync.KickQueuedAsyncDispatch",
+		"If Success Then ProductCatalogSync.RegisterSearchHotkey",
 		"Private Sub Workbook_SheetChange",
+		`If Not Intersect(Target, Sh.Range("B44")) Is Nothing Then`,
+		"ProductCatalogSync.ApplyPriceDisplayFontSetting",
 		`Union(Sh.Range("B18:B22"), _`,
 		`Sh.Range("B26"))`,
 		"ProductCatalogSync.HandlePricingProposalChanged",
@@ -1477,6 +1674,13 @@ func TestDynamicCalculatorValidatorHandlesEmptyProductTable(t *testing.T) {
 		`if ($null -ne $priceDataRange) {`,
 		`if ($null -eq $titleColumn) {`,
 		`priceSlots = $priceSlots`,
+		`technicalSlots = $technicalSlots`,
+		`report.fontAudit.priceDisplayFaNum === 'بله'`,
+		`report.fontAudit.faNumToggle.enabled === true`,
+		`report.fontAudit.faNumToggle.disabled === true`,
+		`slot.value === 'Yekan Bakh FaNum'`,
+		`$settings.Range('B44').Value2 = 'بله'`,
+		`$settings.Range('B44').Value2 = 'خیر'`,
 		`if ($productRows.Count -eq 0 -or $tableFirstColumn -le 0 -or`,
 		`found = $false`,
 		`ProductCatalogSync.AsyncPricingIdleForValidation`,
@@ -1513,6 +1717,7 @@ func TestDynamicCalculatorBuilderStylesPersianButtonsAndChartText(t *testing.T) 
 		"function Assert-RangeFontSlots",
 		"function Assert-ShapeFontSlots",
 		"function Assert-FontFamilyAvailable",
+		"Assert-FontFamilyAvailable 'Yekan Bakh FaNum' 'Persian price digits'",
 		"function Add-DigitalogicMessageForm",
 		"$Workbook.VBProject.VBComponents.Add(3)",
 		`$workbook.VBProject.References.AddFromGuid(`,
@@ -1545,12 +1750,20 @@ func TestDynamicCalculatorBuilderStylesPersianButtonsAndChartText(t *testing.T) 
 		"$searchButton.Name = 'ProductSearchButton'",
 		"$searchButton.AlternativeText = ",
 		"[void]$workbook.Names.Add($setting.Name, $settings.Range(\"B${row}\"))",
-		"$settings.Range('B41').Validation.Add(3, 1, 1, 'Off,Warn,RepairAndWarn,Strict')",
-		"Set-RangeFontSlots $priceList.Range('B6:C6,F6:H6,J6') 'Segoe UI'",
+		"Name = 'PriceDisplayFaNum'",
+		"Value = 'ترمیم و هشدار'",
+		"Value = 'بله'",
+		"Value = 'خیر'",
+		"$settings.Range('B41').Validation.Add(3, 1, 1, 'خاموش,هشدار,ترمیم و هشدار,سختگیرانه')",
+		"$settings.Range('B44').Validation.Add(3, 1, 1, 'بله,خیر')",
+		"Set-RangeFontSlots $priceList.Range('B6') 'Yekan Bakh FaNum'",
+		"Set-RangeFontSlots $priceList.Range('C6,F6:H6,J6') 'Segoe UI'",
 		"Set-RangeFontSlots $priceList.Range('I6,K6') 'Yekan Bakh'",
 		"Products column B is narrower than the required 20-character minimum",
 		"Products column K is narrower than the required 34-character minimum",
 		"Set-RangeFontSlots $settings.Range('A1:F55') 'Yekan Bakh'",
+		"Set-RangeFontSlots $settings.Range('B3:F4,B7:F7,B10:F15,B18:F22,B24:F26,B39:F40,B46:F55') 'Segoe UI'",
+		"Assert-RangeFontSlots $settings.Range('B41:F44') 'Yekan Bakh' 'localized font policy values'",
 		"(46..55)",
 		"[void]$workbook.Names.Add('ProjectedPricePreviewRow', $settings.Range('G48'))",
 		"'مبلغ منبع قیمت'",

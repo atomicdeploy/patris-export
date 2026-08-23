@@ -76,6 +76,7 @@ Private Const LOOPBACK_PREFIX As String = "http://127.0.0.1:18080/"
 Private Const SEARCH_BUTTON_SHAPE As String = "ProductSearchButton"
 Private Const DEFAULT_PERSIAN_FONT As String = "Yekan Bakh"
 Private Const DEFAULT_LATIN_FONT As String = "Segoe UI"
+Private Const DEFAULT_FANUM_FONT As String = "Yekan Bakh FaNum"
 Private Const RECONCILED_COLUMN_KEYS As String = _
     "sync_key,reconciliation_status,patris_code,woocommerce_id,parent_id," & _
     "product_type,publication_status,name,part_number,sku,categories," & _
@@ -104,6 +105,13 @@ Private mLastApplyRequestID As String
 Private mProposalSyncActive As Boolean
 Private mLastRefreshSucceeded As Boolean
 Private mSaveFlowActive As Boolean
+Private mSaveRenameSchedulesSuspended As Boolean
+Private mSaveRenameRefreshPending As Boolean
+Private mSaveRenameAsyncPending As Boolean
+Private mSaveRenamePreviewPending As Boolean
+Private mSaveRenameEventRefreshPending As Boolean
+Private mSaveRenameSseReconnectPending As Boolean
+Private mSaveRenameSseRenewSession As Boolean
 Private mSearchQuery As String
 Private mSearchCurrentRow As Long
 Private mPricingCSRFToken As String
@@ -124,6 +132,7 @@ Private mRequiredSnapshotStateRevision As String
 Private mRefreshCancelRequested As Boolean
 Private mRefreshCancelHotkeyRegistered As Boolean
 Private mRefreshScheduled As Boolean
+Private mRefreshScheduleFailed As Boolean
 Private mScheduledRefreshTime As Date
 Private mPricingPreviewQueued As Boolean
 Private mPricingPreviewScheduled As Boolean
@@ -140,6 +149,10 @@ Private mSseSessionRequest As AsyncWinHttpRequest
 Private mSseParser As PricingSseParser
 Private mAsyncDispatchPending As Object
 Private mAsyncDispatchActive As Boolean
+Private mAsyncDispatchScheduled As Boolean
+Private mAsyncDispatchTime As Date
+Private mAsyncDispatchErrorNumber As Long
+Private mAsyncDispatchErrorDescription As String
 Private mAsyncTokenCounter As Long
 Private mOperationKind As String
 Private mOperationStage As String
@@ -203,6 +216,8 @@ Private mSseRefreshRequired As Boolean
 Private mEventRefreshScheduled As Boolean
 Private mEventRefreshTime As Date
 Private mWorkbookClosing As Boolean
+Private mResumeRefreshAfterCancelledClose As Boolean
+Private mCatalogCommitInProgress As Boolean
 Private mLastOperationName As String
 Private mLastOperationSucceeded As Boolean
 Private mLastOperationError As String
@@ -377,8 +392,10 @@ Public Sub HandleWorkbookBeforeSave(ByVal saveAsUI As Boolean, _
         BeginWorkbookSaveTiming
         mSaveFlowActive = True
         On Error GoTo SaveFailed
+        SuspendQualifiedSchedulesForSaveAs
         ThisWorkbook.SaveAs Filename:=outputPath, _
             FileFormat:=xlOpenXMLWorkbookMacroEnabled
+        ResumeQualifiedSchedulesAfterSaveAs
         mSaveFlowActive = False
     End If
     Exit Sub
@@ -386,6 +403,9 @@ Public Sub HandleWorkbookBeforeSave(ByVal saveAsUI As Boolean, _
 SaveFailed:
     savedErrorNumber = Err.Number
     savedErrorDescription = Err.Description
+    On Error Resume Next
+    ResumeQualifiedSchedulesAfterSaveAs
+    On Error GoTo 0
     mSaveFlowActive = False
     FinishWorkbookSaveTiming False
     On Error Resume Next
@@ -481,13 +501,81 @@ Private Sub RemoveMacroOnlyUI(ByVal book As Workbook)
     book.Worksheets(1).Range("B3:K3").ClearContents
     book.Worksheets(1).ListObjects(PRODUCTS_TABLE). _
         DataBodyRange.FormatConditions.Delete
+    book.Worksheets(3).Range("A44:F44").ClearContents
+    book.Worksheets(3).Range("B44").Validation.Delete
     book.Names("ProductSearchQuery").Delete
     book.Names("SelectedProductRow").Delete
     book.Names("ProjectedPricePreviewRow").Delete
+    book.Names("PriceDisplayFaNum").Delete
+    On Error GoTo 0
+End Sub
+
+Private Sub SuspendQualifiedSchedulesForSaveAs()
+    If mSaveRenameSchedulesSuspended Then Exit Sub
+    mSaveRenameRefreshPending = mRefreshScheduled
+    mSaveRenameAsyncPending = mAsyncDispatchScheduled
+    If Not mAsyncDispatchPending Is Nothing Then
+        If mAsyncDispatchPending.Count > 0 Then _
+            mSaveRenameAsyncPending = True
+    End If
+    mSaveRenamePreviewPending = mPricingPreviewScheduled
+    mSaveRenameEventRefreshPending = mEventRefreshScheduled
+    mSaveRenameSseReconnectPending = mSseReconnectScheduled
+    mSaveRenameSseRenewSession = mSseRenewSessionBeforeReconnect
+    mSaveRenameSchedulesSuspended = True
+
+    CancelScheduledRefresh
+    UnscheduleQueuedAsyncDispatch
+    CancelScheduledPricingPreview False
+    CancelEventDrivenRefresh
+    If mSseReconnectScheduled Then
+        On Error Resume Next
+        Application.OnTime EarliestTime:=mSseReconnectTime, _
+            Procedure:=QualifiedWorkbookMacro("RunSseReconnect"), _
+            Schedule:=False
+        On Error GoTo 0
+        mSseReconnectScheduled = False
+    End If
+End Sub
+
+Private Sub ResumeQualifiedSchedulesAfterSaveAs()
+    Dim refreshPending As Boolean
+    Dim asyncPending As Boolean
+    Dim previewPending As Boolean
+    Dim eventRefreshPending As Boolean
+    Dim sseReconnectPending As Boolean
+    Dim sseRenewSession As Boolean
+
+    If Not mSaveRenameSchedulesSuspended Then Exit Sub
+    refreshPending = mSaveRenameRefreshPending
+    asyncPending = mSaveRenameAsyncPending
+    previewPending = mSaveRenamePreviewPending
+    eventRefreshPending = mSaveRenameEventRefreshPending
+    sseReconnectPending = mSaveRenameSseReconnectPending
+    sseRenewSession = mSaveRenameSseRenewSession
+    If Not mAsyncDispatchPending Is Nothing Then
+        If mAsyncDispatchPending.Count > 0 Then asyncPending = True
+    End If
+    mSaveRenameRefreshPending = False
+    mSaveRenameAsyncPending = False
+    mSaveRenamePreviewPending = False
+    mSaveRenameEventRefreshPending = False
+    mSaveRenameSseReconnectPending = False
+    mSaveRenameSseRenewSession = False
+    mSaveRenameSchedulesSuspended = False
+    If mWorkbookClosing Then Exit Sub
+
+    On Error Resume Next
+    If refreshPending Then ScheduleRefreshOnOpen
+    If asyncPending Then ScheduleQueuedAsyncDispatch
+    If previewPending Then SchedulePricingPreview
+    If eventRefreshPending Then ScheduleEventDrivenRefresh
+    If sseReconnectPending Then ScheduleSseReconnect sseRenewSession
     On Error GoTo 0
 End Sub
 
 Public Sub RefreshAllData(Optional ByVal silent As Boolean = False)
+    ResumeAfterCancelledClose False
     If mRefreshInProgress Then Exit Sub
     If mPricingActionInProgress And Not mInternalPricingRefresh Then Exit Sub
     BeginRefreshPipeline silent, False
@@ -578,6 +666,7 @@ Private Sub CommitRefreshSnapshot(ByVal reconciledRows As Object, _
 
     ' Network callbacks have already validated the complete immutable payload.
     ' Freeze Excel only for this short, rollback-protected atomic commit.
+    mCatalogCommitInProgress = True
     ReleaseSearchEnterHotkey
     Application.ScreenUpdating = False
     Application.EnableEvents = False
@@ -658,6 +747,7 @@ CommitExit:
         Application.EnableEvents = previousEnableEvents
         Application.ScreenUpdating = previousScreenUpdating
     End If
+    mCatalogCommitInProgress = False
     RefreshSearchEnterHotkey
     On Error GoTo 0
     If savedErrorNumber <> 0 Then
@@ -687,6 +777,11 @@ End Sub
 
 Public Sub ScheduleRefreshOnOpen()
     On Error GoTo ScheduleFailed
+    If mSaveRenameSchedulesSuspended Then
+        mSaveRenameRefreshPending = True
+        Exit Sub
+    End If
+    mRefreshScheduleFailed = False
     If Trim$(CStr(ConfigSheet().Range("B5").Value2)) = U("062806440647") Then
         CancelScheduledRefresh
         mScheduledRefreshTime = Now + _
@@ -696,16 +791,19 @@ Public Sub ScheduleRefreshOnOpen()
             EarliestTime:=mScheduledRefreshTime, _
             Procedure:=QualifiedWorkbookMacro("RunScheduledRefresh"), _
             Schedule:=True
+        mRefreshScheduleFailed = False
     End If
     Exit Sub
 
 ScheduleFailed:
     mRefreshScheduled = False
+    mRefreshScheduleFailed = True
     Err.Clear
 End Sub
 
 Public Sub RunScheduledRefresh()
     mRefreshScheduled = False
+    mRefreshScheduleFailed = False
     If mRefreshInProgress Then Exit Sub
     If Trim$(CStr(ConfigSheet().Range("B5").Value2)) <> _
        U("062806440647") Then Exit Sub
@@ -779,11 +877,20 @@ Public Sub CancelActivePricingOperations( _
         Optional ByVal workbookIsClosing As Boolean = False)
     Dim cancellationMessage As String
 
-    If workbookIsClosing Then mWorkbookClosing = True
+    If workbookIsClosing Then
+        mResumeRefreshAfterCancelledClose = _
+            (mResumeRefreshAfterCancelledClose Or _
+             Len(mOperationKind) > 0 Or mRefreshScheduled Or _
+             mEventRefreshScheduled Or mSseReconnectScheduled Or _
+             Len(mSseEventsURL) > 0 Or Not mSseRequest Is Nothing Or _
+             Not mSseSessionRequest Is Nothing)
+        mWorkbookClosing = True
+        CancelQueuedAsyncDispatch
+    End If
     CancelScheduledRefresh
     CancelScheduledPricingPreview True
     CancelEventDrivenRefresh
-    CancelSseReconnect
+    If workbookIsClosing Then CancelSseReconnect
     mOperationCancelRequested = True
     mRefreshCancelRequested = True
     cancellationMessage = T("sync_retry")
@@ -793,7 +900,11 @@ Public Sub CancelActivePricingOperations( _
         BeginBestEffortSnapshotCancel mSnapshotCancelURL, mPricingCSRFToken
     End If
     If Not mOperationRequest Is Nothing Then mOperationRequest.Abort
-    StopSseListener True
+    If workbookIsClosing And Not mCancelRequest Is Nothing Then
+        mCancelRequest.Abort
+        Set mCancelRequest = Nothing
+    End If
+    If workbookIsClosing Then StopSseListener True
     On Error GoTo 0
 
     If Len(mOperationKind) > 0 Then
@@ -806,6 +917,24 @@ Public Sub CancelActivePricingOperations( _
         ReleaseRefreshCancelHotkey
         RestoreOperationCancelKey
         RestoreOperationStatusBar
+    End If
+End Sub
+
+Public Sub ResumeAfterCancelledClose( _
+        Optional ByVal scheduleRefresh As Boolean = True)
+    Dim shouldRefresh As Boolean
+
+    If Not mWorkbookClosing Then Exit Sub
+    shouldRefresh = mResumeRefreshAfterCancelledClose
+    mResumeRefreshAfterCancelledClose = False
+    mWorkbookClosing = False
+    mOperationCancelRequested = False
+    mRefreshCancelRequested = False
+    mSseManualStop = False
+    RegisterSearchHotkey
+    If shouldRefresh And scheduleRefresh Then
+        mForceFreshSnapshot = True
+        ScheduleEventDrivenRefresh
     End If
 End Sub
 
@@ -898,24 +1027,112 @@ Private Function NextAsyncToken() As Long
 End Function
 
 Public Sub QueueAsyncDispatch(ByVal requestToken As Long)
-    Dim pendingToken As Long
-    Dim pendingKey As Variant
-
-    If requestToken < 1 Then Exit Sub
+    If requestToken < 1 Or mWorkbookClosing Then Exit Sub
     If mAsyncDispatchPending Is Nothing Then
         Set mAsyncDispatchPending = CreateObject("Scripting.Dictionary")
         mAsyncDispatchPending.CompareMode = vbBinaryCompare
     End If
+    mAsyncDispatchPending(CStr(requestToken)) = True
+    If mSaveRenameSchedulesSuspended Then
+        mSaveRenameAsyncPending = True
+        Exit Sub
+    End If
+    If mAsyncDispatchActive Or mAsyncDispatchScheduled Then Exit Sub
+
+    ScheduleQueuedAsyncDispatch
+End Sub
+
+Private Sub ScheduleQueuedAsyncDispatch()
+    If mWorkbookClosing Or mAsyncDispatchScheduled Then Exit Sub
+    If mAsyncDispatchPending Is Nothing Then Exit Sub
+    If mAsyncDispatchPending.Count = 0 Then Exit Sub
+    If mSaveRenameSchedulesSuspended Then
+        mSaveRenameAsyncPending = True
+        Exit Sub
+    End If
+
+    On Error GoTo DispatchFailed
+    mAsyncDispatchTime = Now + TimeSerial(0, 0, 1)
+    mAsyncDispatchScheduled = True
+    Application.OnTime EarliestTime:=mAsyncDispatchTime, _
+        Procedure:=QualifiedWorkbookMacro("DispatchQueuedAsyncRequests"), _
+        Schedule:=True
+    Exit Sub
+
+DispatchFailed:
+    mAsyncDispatchErrorNumber = Err.Number
+    mAsyncDispatchErrorDescription = Err.Description
+    mAsyncDispatchScheduled = False
+    Err.Clear
+End Sub
+
+Public Sub KickQueuedAsyncDispatch()
+    Dim hasPendingDispatch As Boolean
+
+    If mWorkbookClosing Or mSaveRenameSchedulesSuspended Then Exit Sub
+    If Not mAsyncDispatchPending Is Nothing Then
+        hasPendingDispatch = (mAsyncDispatchPending.Count > 0 Or _
+                              mAsyncDispatchErrorNumber <> 0)
+    End If
+
+    ' This entrypoint is called only from normal Excel workbook/input events,
+    ' never from a WinHTTP callback. It is the deterministic non-polling fault
+    ' handoff if Excel rejected the callback's one-shot OnTime request.
+    If hasPendingDispatch And Not mAsyncDispatchActive And _
+       Not mAsyncDispatchScheduled Then
+        If mAsyncDispatchErrorNumber <> 0 Then
+            DispatchQueuedAsyncRequests
+        Else
+            ScheduleQueuedAsyncDispatch
+        End If
+    End If
+
+    If Len(mOperationKind) = 0 Then
+        If mRefreshScheduleFailed Then ScheduleRefreshOnOpen
+        If mPricingPreviewQueued And Not mPricingPreviewScheduled Then _
+            SchedulePricingPreview
+        If mSseRefreshRequired And Not mEventRefreshScheduled Then _
+            ScheduleEventDrivenRefresh
+    End If
+    If Not mSseManualStop And Len(mSseEventsURL) > 0 And _
+       mSseReconnectAttempt > 0 And Not mSseReconnectScheduled And _
+       mSseRequest Is Nothing And mSseSessionRequest Is Nothing Then _
+        ScheduleSseReconnect mSseRenewSessionBeforeReconnect
+End Sub
+
+Public Sub DispatchQueuedAsyncRequests()
+    Dim pendingToken As Long
+    Dim pendingKey As Variant
+
+    mAsyncDispatchScheduled = False
+    If mWorkbookClosing Then
+        CancelQueuedAsyncDispatch
+        Exit Sub
+    End If
+    If mAsyncDispatchPending Is Nothing Then Exit Sub
     If mAsyncDispatchActive Then
-        mAsyncDispatchPending(CStr(requestToken)) = True
+        ScheduleQueuedAsyncDispatch
         Exit Sub
     End If
 
     On Error GoTo DispatchFailed
     mAsyncDispatchActive = True
-    pendingToken = requestToken
+    If mAsyncDispatchErrorNumber <> 0 Then
+        If Len(mOperationKind) > 0 Then
+            pendingToken = mAsyncDispatchErrorNumber
+            mAsyncDispatchErrorNumber = 0
+            If Not mAsyncDispatchPending Is Nothing Then _
+                mAsyncDispatchPending.RemoveAll
+            FailActiveOperation pendingToken, _
+                "ScheduleQueuedAsyncDispatch", _
+                mAsyncDispatchErrorDescription
+            mAsyncDispatchErrorDescription = vbNullString
+            GoTo DispatchExit
+        End If
+        mAsyncDispatchErrorNumber = 0
+        mAsyncDispatchErrorDescription = vbNullString
+    End If
     Do
-        DispatchAsyncRequest pendingToken
         pendingToken = 0
         If mAsyncDispatchPending.Count > 0 Then
             For Each pendingKey In mAsyncDispatchPending.Keys
@@ -924,17 +1141,40 @@ Public Sub QueueAsyncDispatch(ByVal requestToken As Long)
                 Exit For
             Next pendingKey
         End If
-    Loop While pendingToken > 0
+        If pendingToken = 0 Then Exit Do
+        DispatchAsyncRequest pendingToken
+    Loop
 
 DispatchExit:
     mAsyncDispatchActive = False
+    If Not mWorkbookClosing Then ScheduleQueuedAsyncDispatch
     Exit Sub
 
 DispatchFailed:
     mAsyncDispatchActive = False
     If Len(mOperationKind) > 0 Then
-        FailActiveOperation Err.Number, "QueueAsyncDispatch", Err.Description
+        FailActiveOperation Err.Number, "DispatchQueuedAsyncRequests", _
+            Err.Description
     End If
+End Sub
+
+Private Sub UnscheduleQueuedAsyncDispatch()
+    If mAsyncDispatchScheduled Then
+        On Error Resume Next
+        Application.OnTime EarliestTime:=mAsyncDispatchTime, _
+            Procedure:=QualifiedWorkbookMacro("DispatchQueuedAsyncRequests"), _
+            Schedule:=False
+        On Error GoTo 0
+    End If
+    mAsyncDispatchScheduled = False
+End Sub
+
+Private Sub CancelQueuedAsyncDispatch()
+    UnscheduleQueuedAsyncDispatch
+    mAsyncDispatchErrorNumber = 0
+    mAsyncDispatchErrorDescription = vbNullString
+    If Not mAsyncDispatchPending Is Nothing Then _
+        mAsyncDispatchPending.RemoveAll
 End Sub
 
 Private Sub DispatchAsyncRequest(ByVal requestToken As Long)
@@ -1077,7 +1317,7 @@ Private Sub StartFiniteRequest(ByVal methodName As String, _
         Err.Raise vbObjectError + 760, "StartFiniteRequest", _
                   T("sync_retry")
     End If
-    If pricingRequest And Not IsAllowedPricingBridgeUrl(endpoint) Then
+    If pricingRequest And Not IsAllowedPricingAuthenticatedUrl(endpoint) Then
         Err.Raise vbObjectError + 143, "StartFiniteRequest", _
                   T("bridge_missing")
     End If
@@ -1270,12 +1510,8 @@ Private Sub HandleSessionResponse(ByVal statusCode As Long, _
             mOperationStateStartedAt = PhaseTimestamp()
             BeginSnapshotStartRequest
         Case "preview"
-            EnsureSseListener PricingBaseURL() & "/events", _
-                mSnapshotJobID, csrfToken
             BeginPreviewRequest
         Case "apply"
-            EnsureSseListener PricingBaseURL() & "/events", _
-                mSnapshotJobID, csrfToken
             BeginApplyRequest
         Case Else
             Err.Raise vbObjectError + 761, "HandleSessionResponse", _
@@ -1312,8 +1548,10 @@ Private Sub HandleSnapshotStartResponse(ByVal statusCode As Long, _
         mSnapshotCompletedPages, mSnapshotTotalPages, mSnapshotRowCount
     SetSnapshotProgress mSnapshotCompletedPages, mSnapshotTotalPages, _
         mSnapshotRowCount
-    EnsureSseListener mSnapshotEventsURL, mSnapshotJobID, _
-        mPricingCSRFToken
+    ' An already-established durable listener may observe this job while the
+    ' one-shot terminal wait is active. Bind it to the new job identity now,
+    ' but do not create the first listener until the snapshot is committed.
+    mSseJobID = mSnapshotJobID
     BeginSnapshotWaitRequest
 End Sub
 
@@ -1352,6 +1590,9 @@ Private Sub HandleSnapshotPayloadResponse(ByVal statusCode As Long, _
     Dim validatedSourceRevision As String
     Dim validatedCountSignature As String
     Dim fetchedRows As Long
+    Dim committedSseEventsURL As String
+    Dim committedSseJobID As String
+    Dim committedSseCSRFToken As String
 
     RequireHTTPSuccess statusCode, responseBody, "snapshot_payload"
     responseETag = ResponseHeaderValue(responseHeaders, "ETag")
@@ -1374,6 +1615,11 @@ Private Sub HandleSnapshotPayloadResponse(ByVal statusCode As Long, _
         mSnapshotStateRevision, reconciledRows, validatedState, _
         validatedCatalog, validatedDatasetRevision, _
         validatedSourceRevision, validatedCountSignature)
+    ValidateSseListenerPrerequisites mSnapshotEventsURL, mSnapshotJobID, _
+        mPricingCSRFToken
+    committedSseEventsURL = mSnapshotEventsURL
+    committedSseJobID = mSnapshotJobID
+    committedSseCSRFToken = mPricingCSRFToken
     mOperationStateSeconds = PhaseElapsed(mOperationStateStartedAt)
     mStatePageTimingText = "snapshot=" & _
         Format$(mOperationStateSeconds, "0.000") & "s; source=" & _
@@ -1391,6 +1637,10 @@ Private Sub HandleSnapshotPayloadResponse(ByVal statusCode As Long, _
         mRequiredSnapshotStateRevision = vbNullString
     End If
     CompleteActiveOperation True
+    ' Listener failures are isolated from the already-committed snapshot. Its
+    ' first replay therefore cannot cancel or roll back the cold atomic load.
+    ArmSseListenerAfterCommit committedSseEventsURL, committedSseJobID, _
+        committedSseCSRFToken
 End Sub
 
 Private Sub HandlePreviewResponse(ByVal statusCode As Long, _
@@ -1729,6 +1979,36 @@ Private Sub EnsureSseListener(ByVal eventsURL As String, _
     StartSseConnection
 End Sub
 
+Private Sub ValidateSseListenerPrerequisites(ByVal eventsURL As String, _
+                                             ByVal jobID As String, _
+                                             ByVal csrfToken As String)
+    If SnapshotRouteURL(eventsURL) <> PricingBaseURL() & "/events" Or _
+       Len(Trim$(jobID)) = 0 Or Len(Trim$(csrfToken)) <> 43 Then
+        Err.Raise vbObjectError + 130, _
+                  "ValidateSseListenerPrerequisites", T("invalid_workbook")
+    End If
+End Sub
+
+Private Sub ArmSseListenerAfterCommit(ByVal eventsURL As String, _
+                                      ByVal jobID As String, _
+                                      ByVal csrfToken As String)
+    On Error GoTo ListenerFailed
+    EnsureSseListener eventsURL, jobID, csrfToken
+    Exit Sub
+
+ListenerFailed:
+    ' The table is already a fully validated atomic snapshot. Preserve it and
+    ' recover only the durable listener through its bounded event reconnect.
+    On Error Resume Next
+    mSseEventsURL = SnapshotRouteURL(eventsURL)
+    mSseJobID = jobID
+    mSseCSRFToken = vbNullString
+    mSseManualStop = False
+    ScheduleSseReconnect True
+    Err.Clear
+    On Error GoTo 0
+End Sub
+
 Private Sub AdoptSseSessionToken(ByVal csrfToken As String)
     csrfToken = Trim$(csrfToken)
     If Len(csrfToken) <> 43 Then
@@ -1971,6 +2251,8 @@ Private Sub HandlePricingSseEvent(ByVal eventValue As Object)
     Dim eventJobID As String
     Dim eventReason As String
     Dim currentSnapshotConfirmation As Boolean
+    Dim expectedApplyMutationEvent As Boolean
+    Dim eventStateRevision As String
     Dim verified As Boolean
     Dim stale As Boolean
     Dim alreadyForcingFreshSnapshot As Boolean
@@ -2028,6 +2310,7 @@ Private Sub HandlePricingSseEvent(ByVal eventValue As Object)
     End If
 
     eventJobID = SiteText(change, "job_id")
+    eventStateRevision = SiteText(change, "state_revision")
     verified = BooleanValue(JsonRuntime.JsonText(change, "verified"))
     stale = BooleanValue(JsonRuntime.JsonText(change, "stale"))
     currentSnapshotConfirmation = (Len(mSseJobID) > 0 And _
@@ -2038,14 +2321,31 @@ Private Sub HandlePricingSseEvent(ByVal eventValue As Object)
                 GoTo InvalidEvent
             If Not currentSnapshotConfirmation Then MarkSseRefreshRequired
 
-        Case "source_changed", "catalog_changed", _
-             "pricing_state_changed"
+        Case "source_changed", "catalog_changed"
             If Not stale Then GoTo InvalidEvent
             If Not currentSnapshotConfirmation Then MarkSseRefreshRequired
 
+        Case "pricing_state_changed"
+            If Not stale Or Not IsSHA256RevisionText(eventStateRevision) Then _
+                GoTo InvalidEvent
+            expectedApplyMutationEvent = _
+                IsExpectedApplyMutationEvent(eventStateRevision)
+            If expectedApplyMutationEvent Then
+                PreserveExpectedApplyMutationEvent
+            ElseIf Not currentSnapshotConfirmation Then
+                MarkSseRefreshRequired
+            End If
+
         Case "pricing_state_invalidated"
-            If Not stale Then GoTo InvalidEvent
-            MarkSseRefreshRequired
+            If Not stale Or Not IsSHA256RevisionText(eventStateRevision) Then _
+                GoTo InvalidEvent
+            expectedApplyMutationEvent = _
+                IsExpectedApplyMutationEvent(eventStateRevision)
+            If expectedApplyMutationEvent Then
+                PreserveExpectedApplyMutationEvent
+            Else
+                MarkSseRefreshRequired
+            End If
 
         Case Else
             GoTo InvalidEvent
@@ -2058,6 +2358,35 @@ InvalidEvent:
     mSseRefreshRequired = True
     InvalidatePricingPreview
     If Not mSseRequest Is Nothing Then mSseRequest.Abort
+End Sub
+
+Private Function IsExpectedApplyMutationEvent( _
+    ByVal eventStateRevision As String) As Boolean
+    If Not IsSHA256RevisionText(eventStateRevision) Then Exit Function
+
+    Select Case mOperationKind
+        Case "apply"
+            ' The bridge publishes the committed/verified revisions before the
+            ' apply HTTP response can reach Excel. The response remains the
+            ' authoritative transition into the exact-state refresh.
+            IsExpectedApplyMutationEvent = True
+        Case "apply_refresh"
+            IsExpectedApplyMutationEvent = _
+                (Len(mRequiredSnapshotStateRevision) > 0 And _
+                 StrComp(eventStateRevision, _
+                         mRequiredSnapshotStateRevision, _
+                         vbBinaryCompare) = 0)
+    End Select
+End Function
+
+Private Sub PreserveExpectedApplyMutationEvent()
+    mForceFreshSnapshot = True
+    InvalidatePricingPreview
+    If mOperationKind = "apply" Then
+        ' If post-apply verification fails after the remote mutation committed,
+        ' the terminal failure path must still schedule a fresh snapshot.
+        mSseRefreshRequired = True
+    End If
 End Sub
 
 Private Sub MarkSseRefreshRequired()
@@ -2164,10 +2493,16 @@ Private Sub ScheduleSseReconnect(ByVal renewSession As Boolean)
     Dim attempt As Long
 
     If renewSession Then mSseRenewSessionBeforeReconnect = True
+    If mSaveRenameSchedulesSuspended Then
+        mSaveRenameSseReconnectPending = True
+        If renewSession Then mSaveRenameSseRenewSession = True
+        Exit Sub
+    End If
     If mWorkbookClosing Or mSseManualStop Or _
        mSseReconnectScheduled Then Exit Sub
     If Not mSseRequest Is Nothing Or _
        Not mSseSessionRequest Is Nothing Then Exit Sub
+    On Error GoTo ScheduleFailed
     mSseReconnectAttempt = mSseReconnectAttempt + 1
     delaySeconds = mSseReconnectDelaySeconds
     If delaySeconds < SSE_RECONNECT_MIN_SECONDS Then _
@@ -2183,6 +2518,11 @@ Private Sub ScheduleSseReconnect(ByVal renewSession As Boolean)
     Application.OnTime EarliestTime:=mSseReconnectTime, _
         Procedure:=QualifiedWorkbookMacro("RunSseReconnect"), _
         Schedule:=True
+    Exit Sub
+
+ScheduleFailed:
+    mSseReconnectScheduled = False
+    Err.Clear
 End Sub
 
 Public Sub RunSseReconnect()
@@ -2208,16 +2548,27 @@ Private Sub CancelSseReconnect()
 End Sub
 
 Private Sub ScheduleEventDrivenRefresh()
+    If mSaveRenameSchedulesSuspended Then
+        mSaveRenameEventRefreshPending = True
+        Exit Sub
+    End If
     If mWorkbookClosing Or mEventRefreshScheduled Then Exit Sub
     If Len(mOperationKind) > 0 Then
         mSseRefreshRequired = True
         Exit Sub
     End If
+    On Error GoTo ScheduleFailed
+    mSseRefreshRequired = True
     mEventRefreshTime = Now + TimeSerial(0, 0, 1)
     mEventRefreshScheduled = True
     Application.OnTime EarliestTime:=mEventRefreshTime, _
         Procedure:=QualifiedWorkbookMacro("RunEventDrivenRefresh"), _
         Schedule:=True
+    Exit Sub
+
+ScheduleFailed:
+    mEventRefreshScheduled = False
+    Err.Clear
 End Sub
 
 Public Sub RunEventDrivenRefresh()
@@ -2242,9 +2593,14 @@ Private Sub CancelEventDrivenRefresh()
 End Sub
 
 Public Sub RegisterSearchHotkey()
+    Dim activeBook As Workbook
     Dim workbookMacro As String
     Dim nextMacro As String
 
+    If mWorkbookClosing Then Exit Sub
+    Set activeBook = Application.ActiveWorkbook
+    If activeBook Is Nothing Then Exit Sub
+    If Not activeBook Is ThisWorkbook Then Exit Sub
     workbookMacro = "'" & Replace(ThisWorkbook.Name, "'", "''") & _
         "'!ProductCatalogSync.FocusProductSearch"
     nextMacro = "'" & Replace(ThisWorkbook.Name, "'", "''") & _
@@ -2327,7 +2683,7 @@ Public Sub FocusProductSearch()
     Dim searchInput As Range
     Dim table As ListObject
 
-    If mRefreshInProgress Then Exit Sub
+    If mCatalogCommitInProgress Then Exit Sub
     On Error GoTo CleanExit
     PriceSheet().Activate
     Set searchInput = ThisWorkbook.Names("ProductSearchQuery").RefersToRange
@@ -2350,7 +2706,9 @@ Public Sub SearchProducts()
     Dim previousEnableCancelKey As XlEnableCancelKey
     Dim cancelKeyCaptured As Boolean
 
-    If mRefreshInProgress Or mSearchInProgress Then Exit Sub
+    ResumeAfterCancelledClose
+    KickQueuedAsyncDispatch
+    If mCatalogCommitInProgress Or mSearchInProgress Then Exit Sub
     On Error GoTo CleanExit
     mSearchInProgress = True
     previousEnableCancelKey = Application.EnableCancelKey
@@ -2406,7 +2764,9 @@ End Sub
 Public Sub ClearProductSearch()
     Dim table As ListObject
 
-    If mRefreshInProgress Or mSearchInProgress Then Exit Sub
+    ResumeAfterCancelledClose
+    KickQueuedAsyncDispatch
+    If mCatalogCommitInProgress Or mSearchInProgress Then Exit Sub
     On Error Resume Next
     ResetProductSearchState True
     Set table = PriceSheet().ListObjects(PRODUCTS_TABLE)
@@ -2524,7 +2884,7 @@ Public Sub HighlightSelectedProductRow(ByVal target As Range)
     Dim priceCell As Range
     Dim previousPriceCell As Range
 
-    If mRefreshInProgress Then Exit Sub
+    If mCatalogCommitInProgress Then Exit Sub
     previousEvents = Application.EnableEvents
     On Error GoTo CleanExit
     Set table = PriceSheet().ListObjects(PRODUCTS_TABLE)
@@ -2584,18 +2944,30 @@ CleanExit:
 End Sub
 
 Public Sub PreviewPricingChanges()
+    ResumeAfterCancelledClose
+    KickQueuedAsyncDispatch
     If mRefreshInProgress Or mPricingActionInProgress Then Exit Sub
     CancelScheduledPricingPreview True
     PreviewPricingChangesCore False
 End Sub
 
 Private Sub SchedulePricingPreview()
+    If mSaveRenameSchedulesSuspended Then
+        mSaveRenamePreviewPending = True
+        Exit Sub
+    End If
     If mWorkbookClosing Or mPricingPreviewScheduled Then Exit Sub
+    On Error GoTo ScheduleFailed
     mScheduledPricingPreviewTime = Now + TimeSerial(0, 0, 1)
     mPricingPreviewScheduled = True
     Application.OnTime EarliestTime:=mScheduledPricingPreviewTime, _
         Procedure:=QualifiedWorkbookMacro("RunScheduledPricingPreview"), _
         Schedule:=True
+    Exit Sub
+
+ScheduleFailed:
+    mPricingPreviewScheduled = False
+    Err.Clear
 End Sub
 
 Public Sub RunScheduledPricingPreview()
@@ -2646,6 +3018,8 @@ BeginFailed:
 End Sub
 
 Public Sub ApplyPricingChanges()
+    ResumeAfterCancelledClose
+    KickQueuedAsyncDispatch
     If mRefreshInProgress Or mPricingActionInProgress Then Exit Sub
     ApplyPricingChangesCore True, False
 End Sub
@@ -4520,13 +4894,32 @@ End Sub
 
 Public Sub ApplyPriceDisplayFontSetting()
     Dim table As ListObject
+    Dim latinFont As String
 
     On Error GoTo CleanExit
     Set table = PriceSheet().ListObjects(PRODUCTS_TABLE)
     If table.DataBodyRange Is Nothing Then Exit Sub
-    ApplyLatinFont table.ListColumns(1).DataBodyRange
+    latinFont = NamedText("LatinFont", DEFAULT_LATIN_FONT)
+    ApplyRangeFontSlots table.ListColumns(1).DataBodyRange, _
+        PriceDisplayFontName(latinFont)
 CleanExit:
 End Sub
+
+Private Function PriceDisplayFontName(ByVal latinFont As String) As String
+    Dim valid As Boolean
+    Dim useFaNum As Boolean
+
+    useFaNum = NamedYesNo("PriceDisplayFaNum", valid)
+    If Not valid Then
+        Err.Raise vbObjectError + 233, "PriceDisplayFontName", _
+                  T("font_policy_invalid")
+    End If
+    If useFaNum Then
+        PriceDisplayFontName = DEFAULT_FANUM_FONT
+    Else
+        PriceDisplayFontName = latinFont
+    End If
+End Function
 
 Private Sub ApplyPersianFont(ByVal target As Range)
     Dim fontName As String
@@ -5218,6 +5611,16 @@ Private Function IsAllowedPricingBridgeUrl(ByVal address As String) As Boolean
         InStr(1, address, "/api/pricing-sync/", vbTextCompare) > 0
 End Function
 
+Private Function IsAllowedPricingAuthenticatedUrl( _
+        ByVal address As String) As Boolean
+    If IsAllowedPricingBridgeUrl(address) Then
+        IsAllowedPricingAuthenticatedUrl = True
+        Exit Function
+    End If
+    IsAllowedPricingAuthenticatedUrl = _
+        (StrComp(Trim$(address), UniversalRefreshURL(), vbTextCompare) = 0)
+End Function
+
 Private Function IsAllowedDigitalogicUrl(ByVal address As String) As Boolean
     Dim normalized As String
 
@@ -5651,6 +6054,13 @@ Public Function ValidateFontPolicyFixturesForValidation() As Boolean
 
     ignoredMode = NormalizedFontAuditMode("invalid", valid)
     If valid Or Len(ignoredMode) <> 0 Then Exit Function
+    If NormalizedFontAuditMode( _
+           U("062A0631064506CC064500200648002006470634062F06270631"), _
+           valid) <> "RepairAndWarn" Or Not valid Then Exit Function
+    If Not NormalizedYesNo(U("062806440647"), valid) Or _
+       Not valid Then Exit Function
+    If NormalizedYesNo(U("062E06CC0631"), valid) Or _
+       Not valid Then Exit Function
     If Len(Trim$(vbNullString)) <> 0 Then Exit Function
     If FontAvailable("__PatrisExportDefinitelyMissingFont__") Then _
         Exit Function
@@ -5742,7 +6152,7 @@ Private Sub ValidateSearchLiteralRuntime()
 
     Set inputCell = ThisWorkbook.Names("ProductSearchQuery").RefersToRange
     originalValue = inputCell.Value2
-    For Each sample In Array("25.40", "12/3", "01.02", "001234", _
+    For Each sample In Array("2.4", "25.40", "12/3", "01.02", "001234", _
                              U("06F106F206F306F4"))
         inputCell.MergeArea.NumberFormat = "@"
         inputCell.Value2 = CStr(sample)
@@ -5863,10 +6273,15 @@ End Function
 Private Function NormalizedFontAuditMode(ByVal value As String, _
                                          ByRef valid As Boolean) As String
     Select Case LCase$(Trim$(value))
-        Case "off": NormalizedFontAuditMode = "Off"
-        Case "warn": NormalizedFontAuditMode = "Warn"
-        Case "repairandwarn": NormalizedFontAuditMode = "RepairAndWarn"
-        Case "strict": NormalizedFontAuditMode = "Strict"
+        Case "off", U("062E0627064506480634")
+            NormalizedFontAuditMode = "Off"
+        Case "warn", U("06470634062F06270631")
+            NormalizedFontAuditMode = "Warn"
+        Case "repairandwarn", _
+             U("062A0631064506CC064500200648002006470634062F06270631")
+            NormalizedFontAuditMode = "RepairAndWarn"
+        Case "strict", U("0633062E062A06AF06CC0631062706460647")
+            NormalizedFontAuditMode = "Strict"
         Case Else
             valid = False
             Exit Function
@@ -5883,8 +6298,8 @@ End Function
 Private Function NormalizedYesNo(ByVal value As String, _
                                  ByRef valid As Boolean) As Boolean
     Select Case LCase$(Trim$(value))
-        Case "yes": NormalizedYesNo = True
-        Case "no": NormalizedYesNo = False
+        Case "yes", U("062806440647"): NormalizedYesNo = True
+        Case "no", U("062E06CC0631"): NormalizedYesNo = False
         Case Else: valid = False: Exit Function
     End Select
     valid = True
@@ -6026,11 +6441,13 @@ Private Function AuditFixedFontMap(ByVal persianFont As String, _
     Dim sheet As Worksheet
     Dim shapeValue As Shape
     Dim columnIndex As Variant
+    Dim priceDisplayFont As String
 
     Set table = PriceSheet().ListObjects(PRODUCTS_TABLE)
     Set syncTable = SyncSheet().ListObjects(SYNC_TABLE)
     Set dashboard = ThisWorkbook.Worksheets(2)
     Set settings = ConfigSheet()
+    priceDisplayFont = PriceDisplayFontName(latinFont)
     AuditFixedFontMap = AuditFixedFontMap + _
         AuditRangeFont(table.HeaderRowRange, persianFont, repair)
     AuditFixedFontMap = AuditFixedFontMap + AuditRangeFont( _
@@ -6043,7 +6460,9 @@ Private Function AuditFixedFontMap(ByVal persianFont As String, _
                 table.ListColumns(CLng(columnIndex)).DataBodyRange, _
                 persianFont, repair)
         Next columnIndex
-        For Each columnIndex In Array(1, 2, 5, 6, 7, 9)
+        AuditFixedFontMap = AuditFixedFontMap + AuditRangeFont( _
+            table.ListColumns(1).DataBodyRange, priceDisplayFont, repair)
+        For Each columnIndex In Array(2, 5, 6, 7, 9)
             AuditFixedFontMap = AuditFixedFontMap + AuditRangeFont( _
                 table.ListColumns(CLng(columnIndex)).DataBodyRange, _
                 latinFont, repair)
@@ -6057,7 +6476,7 @@ Private Function AuditFixedFontMap(ByVal persianFont As String, _
         dashboard.Range("B1:I34"), latinCells, persianFont, latinFont, repair)
     Set latinCells = settings.Range( _
         "B3:F4,B7:F7,B10:F15,B18:F22,B24:F26," & _
-        "B39:F43,B46:F55")
+        "B39:F40,B46:F55")
     AuditFixedFontMap = AuditFixedFontMap + AuditMappedGridFont( _
         settings.Range("A1:F55"), latinCells, persianFont, latinFont, repair)
     AuditFixedFontMap = AuditFixedFontMap + AuditRangeFont( _
@@ -6136,6 +6555,7 @@ Public Function AuditConfiguredFonts( _
         Optional ByVal forceStrict As Boolean = False) As Boolean
     Dim persianFont As String
     Dim latinFont As String
+    Dim priceDisplayFont As String
     Dim auditMode As String
     Dim valid As Boolean
     Dim validateOnOpen As Boolean
@@ -6150,6 +6570,7 @@ Public Function AuditConfiguredFonts( _
     If Len(persianFont) = 0 Or Len(latinFont) = 0 Then _
         Err.Raise vbObjectError + 228, "AuditConfiguredFonts", _
                   T("font_policy_invalid")
+    priceDisplayFont = PriceDisplayFontName(latinFont)
     auditMode = NormalizedFontAuditMode( _
         NamedText("FontAuditMode", vbNullString), valid)
     If Not valid Then Err.Raise vbObjectError + 228, _
@@ -6171,6 +6592,10 @@ Public Function AuditConfiguredFonts( _
     End If
     If Not FontAvailable(persianFont) Then missingCount = missingCount + 1
     If Not FontAvailable(latinFont) Then missingCount = missingCount + 1
+    If StrComp(priceDisplayFont, latinFont, vbTextCompare) <> 0 Then
+        If Not FontAvailable(priceDisplayFont) Then _
+            missingCount = missingCount + 1
+    End If
     repair = auditMode = "RepairAndWarn"
     driftCount = AuditFixedFontMap(persianFont, latinFont, repair)
     If missingCount = 0 And driftCount = 0 Then
@@ -6209,15 +6634,34 @@ Private Sub ValidateFontPolicyRuntime()
         If NormalizedFontAuditMode(CStr(value), valid) <> CStr(value) Or _
            Not valid Then GoTo InvalidPolicy
     Next value
+    If NormalizedFontAuditMode( _
+           U("062E0627064506480634"), valid) <> "Off" Or _
+       Not valid Then GoTo InvalidPolicy
+    If NormalizedFontAuditMode( _
+           U("06470634062F06270631"), valid) <> "Warn" Or _
+       Not valid Then GoTo InvalidPolicy
+    If NormalizedFontAuditMode( _
+           U("062A0631064506CC064500200648002006470634062F06270631"), _
+           valid) <> "RepairAndWarn" Or Not valid Then GoTo InvalidPolicy
+    If NormalizedFontAuditMode( _
+           U("0633062E062A06AF06CC0631062706460647"), valid) <> _
+           "Strict" Or Not valid Then GoTo InvalidPolicy
     ignored = NormalizedFontAuditMode("invalid", valid)
     If valid Then GoTo InvalidPolicy
     If Not NormalizedYesNo("Yes", valid) Or Not valid Then _
         GoTo InvalidPolicy
     If NormalizedYesNo("No", valid) Or Not valid Then GoTo InvalidPolicy
+    If Not NormalizedYesNo(U("062806440647"), valid) Or _
+       Not valid Then GoTo InvalidPolicy
+    If NormalizedYesNo(U("062E06CC0631"), valid) Or _
+       Not valid Then GoTo InvalidPolicy
     Call NormalizedYesNo("invalid", valid)
     If valid Then GoTo InvalidPolicy
     If NamedText("PersianFont", vbNullString) <> DEFAULT_PERSIAN_FONT Or _
        NamedText("LatinFont", vbNullString) <> DEFAULT_LATIN_FONT Then _
+        GoTo InvalidPolicy
+    If Not NamedYesNo("PriceDisplayFaNum", valid) Or Not valid Or _
+       PriceDisplayFontName(DEFAULT_LATIN_FONT) <> DEFAULT_FANUM_FONT Then _
         GoTo InvalidPolicy
     If FontAvailable("__PatrisExportDefinitelyMissingFont__") Then _
         GoTo InvalidPolicy

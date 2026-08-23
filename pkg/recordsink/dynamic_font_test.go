@@ -20,10 +20,16 @@ func TestReadDynamicWorkbookFontPolicyUsesNamedCells(t *testing.T) {
 	if err := book.SetCellStr("Settings", "B2", "Segoe UI"); err != nil {
 		t.Fatal(err)
 	}
+	if err := book.SetCellStr("Settings", "B3", "بله"); err != nil {
+		t.Fatal(err)
+	}
 	if err := book.SetDefinedName(&excelize.DefinedName{Name: "PersianFont", RefersTo: "Settings!$B$1"}); err != nil {
 		t.Fatal(err)
 	}
 	if err := book.SetDefinedName(&excelize.DefinedName{Name: "LatinFont", RefersTo: "Settings!$B$2"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := book.SetDefinedName(&excelize.DefinedName{Name: "PriceDisplayFaNum", RefersTo: "Settings!$B$3"}); err != nil {
 		t.Fatal(err)
 	}
 	if err := book.SaveAs(path); err != nil {
@@ -36,8 +42,30 @@ func TestReadDynamicWorkbookFontPolicyUsesNamedCells(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if policy.PersianFont != "Yekan Bakh" || policy.LatinFont != "Segoe UI" {
+	if policy.PersianFont != "Yekan Bakh" || policy.LatinFont != "Segoe UI" ||
+		!policy.HasPriceDisplayFaNum || !policy.PriceDisplayFaNum {
 		t.Fatalf("named font policy = %+v", policy)
+	}
+}
+
+func TestParseWorkbookYesNoAcceptsLocalizedAndInternalValues(t *testing.T) {
+	for _, test := range []struct {
+		value string
+		want  bool
+	}{
+		{value: "Yes", want: true},
+		{value: " yes ", want: true},
+		{value: "بله", want: true},
+		{value: "No", want: false},
+		{value: "خیر", want: false},
+	} {
+		got, err := parseWorkbookYesNo(test.value)
+		if err != nil || got != test.want {
+			t.Fatalf("parseWorkbookYesNo(%q) = %v, %v; want %v", test.value, got, err, test.want)
+		}
+	}
+	if _, err := parseWorkbookYesNo("maybe"); err == nil {
+		t.Fatal("invalid visible yes/no token passed workbook font policy parsing")
 	}
 }
 
@@ -73,7 +101,7 @@ func TestForbiddenWorkbookFontsAreNarrowAndCaseInsensitive(t *testing.T) {
 			t.Fatalf("forbidden font %q was accepted", value)
 		}
 	}
-	for _, value := range []string{"Yekan Bakh", "Segoe UI", "Arial Unicode MS"} {
+	for _, value := range []string{"Yekan Bakh", "Yekan Bakh FaNum", "Segoe UI", "Arial Unicode MS"} {
 		if isForbiddenWorkbookFont(value) {
 			t.Fatalf("allowed font %q was rejected", value)
 		}

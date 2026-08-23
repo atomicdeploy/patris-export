@@ -12,12 +12,16 @@ import (
 	"github.com/xuri/excelize/v2"
 )
 
+const defaultDynamicPriceDigitFont = "Yekan Bakh FaNum"
+
 // DynamicWorkbookFontPolicy is the fixed role-map policy used by the Persian
 // calculator. Cell roles are verified through their saved OpenXML style IDs;
 // DrawingML text runs are verified through their explicit latin/ea/cs slots.
 type DynamicWorkbookFontPolicy struct {
-	PersianFont string
-	LatinFont   string
+	PersianFont          string
+	LatinFont            string
+	PriceDisplayFaNum    bool
+	HasPriceDisplayFaNum bool
 }
 
 // DynamicWorkbookFontReport reports only counts and configured family names;
@@ -25,6 +29,7 @@ type DynamicWorkbookFontPolicy struct {
 type DynamicWorkbookFontReport struct {
 	PersianFont      string
 	LatinFont        string
+	PriceDisplayFont string
 	MappedCells      int
 	DrawingTextRuns  int
 	DrawingFontSlots int
@@ -58,8 +63,9 @@ type drawingRunAudit struct {
 	slots map[string]string
 }
 
-// ReadDynamicWorkbookFontPolicy reads the two configured font roles from the
-// workbook-scoped named cells. It does not infer either role from cell text.
+// ReadDynamicWorkbookFontPolicy reads the configured font roles and optional
+// selling-price FaNum toggle from workbook-scoped named cells. It does not
+// infer any role from cell text.
 func ReadDynamicWorkbookFontPolicy(path string) (DynamicWorkbookFontPolicy, error) {
 	var policy DynamicWorkbookFontPolicy
 	book, err := excelize.OpenFile(path)
@@ -67,9 +73,10 @@ func ReadDynamicWorkbookFontPolicy(path string) (DynamicWorkbookFontPolicy, erro
 		return policy, fmt.Errorf("open workbook font configuration: %w", err)
 	}
 	defer book.Close()
-	values := make(map[string]string, 2)
+	values := make(map[string]string, 3)
 	for _, definedName := range book.GetDefinedName() {
-		if !isWorkbookDefinedNameScope(definedName.Scope) || (definedName.Name != "PersianFont" && definedName.Name != "LatinFont") {
+		if !isWorkbookDefinedNameScope(definedName.Scope) ||
+			(definedName.Name != "PersianFont" && definedName.Name != "LatinFont" && definedName.Name != "PriceDisplayFaNum") {
 			continue
 		}
 		sheet, cellRange, err := parseDefinedNameReference(definedName.RefersTo)
@@ -91,18 +98,41 @@ func ReadDynamicWorkbookFontPolicy(path string) (DynamicWorkbookFontPolicy, erro
 	if policy.PersianFont == "" || policy.LatinFont == "" {
 		return policy, errors.New("workbook font configuration requires PersianFont and LatinFont named cells")
 	}
+	if value, ok := values["PriceDisplayFaNum"]; ok {
+		enabled, err := parseWorkbookYesNo(value)
+		if err != nil {
+			return policy, fmt.Errorf("font configuration name %q: %w", "PriceDisplayFaNum", err)
+		}
+		policy.HasPriceDisplayFaNum = true
+		policy.PriceDisplayFaNum = enabled
+	}
 	return policy, nil
+}
+
+func parseWorkbookYesNo(value string) (bool, error) {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "yes", "بله":
+		return true, nil
+	case "no", "خیر":
+		return false, nil
+	default:
+		return false, fmt.Errorf("value %q must be localized Yes or No", value)
+	}
 }
 
 // ValidateDynamicWorkbookFontPolicy is a hard package validator for the fixed
 // calculator role map. It never guesses a role from cell contents.
 func ValidateDynamicWorkbookFontPolicy(path string, policy DynamicWorkbookFontPolicy) (DynamicWorkbookFontReport, error) {
 	report := DynamicWorkbookFontReport{
-		PersianFont: strings.TrimSpace(policy.PersianFont),
-		LatinFont:   strings.TrimSpace(policy.LatinFont),
+		PersianFont:      strings.TrimSpace(policy.PersianFont),
+		LatinFont:        strings.TrimSpace(policy.LatinFont),
+		PriceDisplayFont: strings.TrimSpace(policy.LatinFont),
 	}
 	if report.PersianFont == "" || report.LatinFont == "" {
 		return report, errors.New("font policy requires nonblank PersianFont and LatinFont")
+	}
+	if policy.HasPriceDisplayFaNum && policy.PriceDisplayFaNum {
+		report.PriceDisplayFont = defaultDynamicPriceDigitFont
 	}
 	book, err := excelize.OpenFile(path)
 	if err != nil {
@@ -127,13 +157,21 @@ func ValidateDynamicWorkbookFontPolicy(path string, policy DynamicWorkbookFontPo
 		addFontRoleRange(expected, "داشبورد", value, report.LatinFont)
 	}
 	addFontRoleRange(expected, "تنظیمات", "A1:F55", report.PersianFont)
-	for _, value := range []string{
-		"B3:F4", "B7:F7", "B10:F15", "B18:F22", "B24:F26",
-		"B39:F43", "B46:F55",
-	} {
+	settingsLatinRanges := []string{
+		"B3:F4", "B7:F7", "B10:F15", "B18:F22", "B24:F26", "B46:F55",
+	}
+	if policy.HasPriceDisplayFaNum {
+		settingsLatinRanges = append(settingsLatinRanges, "B39:F40")
+	} else {
+		settingsLatinRanges = append(settingsLatinRanges, "B39:F43")
+	}
+	for _, value := range settingsLatinRanges {
 		addFontRoleRange(expected, "تنظیمات", value, report.LatinFont)
 	}
-	if err := addTableFontRoles(book, expected, "محصولات", "Products", report.PersianFont, report.LatinFont, []int{3, 4, 8, 10}, []int{1, 2, 5, 6, 7, 9}); err != nil {
+	if err := addTableFontRoles(book, expected, "محصولات", "Products", report.PersianFont, report.LatinFont, []int{3, 4, 8, 10}, []int{2, 5, 6, 7, 9}); err != nil {
+		return report, err
+	}
+	if err := addTableColumnFontRole(book, expected, "محصولات", "Products", 1, report.PriceDisplayFont); err != nil {
 		return report, err
 	}
 	if err := addTableFontRoles(book, expected, "داده‌های همگام‌سازی", "SyncData", report.PersianFont, report.LatinFont, []int{17, 18, 19, 20}, []int{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 21, 22, 23}); err != nil {
@@ -237,6 +275,40 @@ func addTableFontRoles(book *excelize.File, target map[string]string, sheet, tab
 					target[sheet+"!"+cellName] = role.font
 				}
 			}
+		}
+		return nil
+	}
+	return fmt.Errorf("font role table %q does not exist", tableName)
+}
+
+func addTableColumnFontRole(book *excelize.File, target map[string]string, sheet, tableName string, relativeColumn int, fontName string) error {
+	tables, err := book.GetTables(sheet)
+	if err != nil {
+		return err
+	}
+	for _, table := range tables {
+		if table.Name != tableName {
+			continue
+		}
+		parts := strings.Split(strings.ReplaceAll(table.Range, "$", ""), ":")
+		if len(parts) != 2 {
+			return fmt.Errorf("font role table %q has invalid range %q", tableName, table.Range)
+		}
+		startColumn, headerRow, err := excelize.CellNameToCoordinates(parts[0])
+		if err != nil {
+			return err
+		}
+		endColumn, endRow, err := excelize.CellNameToCoordinates(parts[1])
+		if err != nil {
+			return err
+		}
+		column := startColumn + relativeColumn - 1
+		if relativeColumn < 1 || column > endColumn {
+			return fmt.Errorf("font role column %d is outside table %q", relativeColumn, tableName)
+		}
+		for row := headerRow + 1; row <= endRow; row++ {
+			cellName, _ := excelize.CoordinatesToCellName(column, row)
+			target[sheet+"!"+cellName] = fontName
 		}
 		return nil
 	}
