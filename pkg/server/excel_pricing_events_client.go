@@ -728,9 +728,10 @@ func (client *excelPricingRemoteEventsClient) rememberRevision(revision excelPri
 // runExcelPricingRemoteEvents is the compile-isolated lifecycle entrypoint.
 // The Server owner must run it under backgroundCtx/backgroundWG with a freshly
 // materialized canonical source, restart it whenever that local source changes,
-// and supply a synchronous onRevision hook that invalidates the old snapshot
-// generation before returning. A returned nil acknowledgement permits the
-// durable remote cursor to advance.
+// and supply synchronous revision and snapshot-terminal hooks. The revision
+// hook invalidates the old snapshot generation; the terminal hook durably
+// retains a waiter event. Only a nil acknowledgement permits the durable
+// remote cursor to advance.
 func runExcelPricingRemoteEvents(
 	ctx context.Context,
 	cfg updateout.Config,
@@ -738,11 +739,13 @@ func runExcelPricingRemoteEvents(
 	initialCursor uint64,
 	onCursor func(uint64),
 	onRevision func(excelPricingRemoteRevision) error,
+	onSnapshotTerminal func(excelPricingRemoteSnapshotTerminalEvent) error,
 ) error {
 	client, err := newExcelPricingRemoteEventsClient(cfg, source, excelPricingRemoteEventsOptions{
-		InitialCursor: initialCursor,
-		OnCursor:      onCursor,
-		OnRevision:    onRevision,
+		InitialCursor:      initialCursor,
+		OnCursor:           onCursor,
+		OnRevision:         onRevision,
+		OnSnapshotTerminal: onSnapshotTerminal,
 	})
 	if err != nil {
 		return err

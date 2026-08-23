@@ -36,6 +36,19 @@ resolves that credential server-side from its configured environment variable.
    duplicate key, unsafe warning, or stale event, retain the previous committed
    workbook generation byte-for-byte.
 
+The companion obtains a snapshot from the protected remote bulk contract: one
+revision read, one build start, one authenticated terminal-event wait when the
+build is cold, and one immutable payload fetch. It does not assemble production
+snapshots by paging the legacy remote `/state` route, and it does not poll a
+remote build-status route. A terminal-event cursor is acknowledged only after
+the generation-fenced local terminal hub retains the event for its waiter.
+
+`max_age_seconds: 0` without `expected_state_revision` deliberately requests a
+new verification/build. Exact-revision reuse is allowed only when the requested
+composite revision matches the cached snapshot and the authenticated upstream
+event bridge still confirms that source, composite revision, and catalog
+revision. Positive `max_age_seconds` remains the separate bounded-age policy.
+
 The start document exposes both event URLs:
 
 - `events_url: /api/pricing-sync/events` is the lasting semantic stream.
@@ -112,9 +125,10 @@ source/state identity.
 ## Upstream WordPress delivery status
 
 `pkg/server/excel_pricing_events_client.go` implements the authenticated
-`digitalogic.pricing.v1` WordPress WebSocket consumer and conditional composite
-revision validation. Its server lifecycle/opt-in must remain disabled until the
-matching WordPress event endpoint is released. At the time this contract was
-written, that endpoint existed only in a held local WordPress draft and was not
-deployed; therefore WooCommerce-origin automatic refresh is not yet a live
-end-to-end capability.
+`digitalogic.pricing.v1` WordPress WebSocket consumer, conditional composite
+revision validation, and the `pricing.snapshot.build.terminal` callback used by
+the remote bulk waiter. The server wiring is active only for a valid protected
+remote configuration. This source contract does not prove that the matching
+WordPress terminal-event publisher is deployed or enabled; that external
+activation must be independently verified before claiming cold remote snapshot
+completion or WooCommerce-origin automatic refresh end to end.

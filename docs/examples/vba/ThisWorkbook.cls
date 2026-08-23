@@ -12,6 +12,16 @@ End Sub
 
 Private Sub Workbook_Activate()
     On Error Resume Next
+    ProductCatalogSync.ResumeAfterCancelledClose
+    ProductCatalogSync.KickQueuedAsyncDispatch
+    ProductCatalogSync.RegisterSearchHotkey
+    On Error GoTo 0
+End Sub
+
+Private Sub Workbook_WindowActivate(ByVal Wn As Window)
+    On Error Resume Next
+    ProductCatalogSync.ResumeAfterCancelledClose
+    ProductCatalogSync.KickQueuedAsyncDispatch
     ProductCatalogSync.RegisterSearchHotkey
     On Error GoTo 0
 End Sub
@@ -43,12 +53,17 @@ End Sub
 Private Sub Workbook_AfterSave(ByVal Success As Boolean)
     On Error Resume Next
     ProductCatalogSync.FinishWorkbookSaveTiming Success
+    If Not Success Then ProductCatalogSync.ResumeAfterCancelledClose
+    ProductCatalogSync.KickQueuedAsyncDispatch
+    If Success Then ProductCatalogSync.RegisterSearchHotkey
     On Error GoTo 0
 End Sub
 
 Private Sub Workbook_SheetChange(ByVal Sh As Object, ByVal Target As Range)
     Dim previousEvents As Boolean
 
+    ProductCatalogSync.ResumeAfterCancelledClose
+    ProductCatalogSync.KickQueuedAsyncDispatch
     previousEvents = Application.EnableEvents
     On Error GoTo CleanExit
     If Sh Is ThisWorkbook.Worksheets(1) Then
@@ -62,6 +77,11 @@ Private Sub Workbook_SheetChange(ByVal Sh As Object, ByVal Target As Range)
         GoTo CleanExit
     End If
     If Not Sh Is ThisWorkbook.Worksheets(3) Then GoTo CleanExit
+    If Not Intersect(Target, Sh.Range("B44")) Is Nothing Then
+        Application.EnableEvents = False
+        ProductCatalogSync.ApplyPriceDisplayFontSetting
+        GoTo CleanExit
+    End If
     If Intersect(Target, Union(Sh.Range("B18:B22"), _
                                Sh.Range("E20"), _
                                Sh.Range("B26"))) Is Nothing Then GoTo CleanExit
@@ -76,6 +96,8 @@ End Sub
 Private Sub Workbook_SheetSelectionChange(ByVal Sh As Object, _
                                            ByVal Target As Range)
     On Error GoTo CleanExit
+    ProductCatalogSync.ResumeAfterCancelledClose
+    ProductCatalogSync.KickQueuedAsyncDispatch
     If Sh Is ThisWorkbook.Worksheets(1) Then
         ProductCatalogSync.UpdateSearchEnterHotkey Target
     Else
@@ -88,6 +110,8 @@ End Sub
 
 Private Sub Workbook_SheetActivate(ByVal Sh As Object)
     On Error GoTo CleanExit
+    ProductCatalogSync.ResumeAfterCancelledClose
+    ProductCatalogSync.KickQueuedAsyncDispatch
     If Sh Is ThisWorkbook.Worksheets(1) Then
         ProductCatalogSync.RefreshSearchEnterHotkey
     Else

@@ -221,6 +221,7 @@ func NewServerWithOptions(dbPath string, charMap converter.CharMapping, options 
 	}
 	s.excelPricing.canonical = s.canonicalRecordResultContext
 	s.excelPricingRemote = newExcelPricingRemoteEventsBridge(s)
+	s.excelPricing.snapshotRevisionCurrent = s.excelPricingRemote.revisionCurrent
 
 	// Set up routes
 	s.setupRoutes()

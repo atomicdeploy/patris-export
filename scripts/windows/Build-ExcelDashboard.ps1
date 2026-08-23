@@ -658,6 +658,7 @@ function Remove-ExcelPrivatePackageMetadata([string]$Path) {
 }
 
 Assert-FontFamilyAvailable 'Yekan Bakh' 'Persian'
+Assert-FontFamilyAvailable 'Yekan Bakh FaNum' 'Persian price digits'
 Assert-FontFamilyAvailable 'Segoe UI' 'Latin'
 
 New-Item -ItemType Directory -Force (Split-Path -Parent $OutputPath) | Out-Null
@@ -1206,9 +1207,10 @@ try {
     $fontPolicy = @(
         @{ Row = 39; Label = 'قلم فارسی و متن‌های ترکیبی'; Value = 'Yekan Bakh'; Name = 'PersianFont' },
         @{ Row = 40; Label = 'قلم لاتین و شناسه‌های فنی'; Value = 'Segoe UI'; Name = 'LatinFont' },
-        @{ Row = 41; Label = 'حالت ممیزی قلم'; Value = 'RepairAndWarn'; Name = 'FontAuditMode' },
-        @{ Row = 42; Label = 'اعتبارسنجی قلم هنگام بازشدن'; Value = 'Yes'; Name = 'ValidateFontsOnOpen' },
-        @{ Row = 43; Label = 'اجازه قلم جایگزین'; Value = 'No'; Name = 'AllowFallback' }
+        @{ Row = 41; Label = 'حالت ممیزی قلم'; Value = 'ترمیم و هشدار'; Name = 'FontAuditMode' },
+        @{ Row = 42; Label = 'اعتبارسنجی قلم هنگام بازشدن'; Value = 'بله'; Name = 'ValidateFontsOnOpen' },
+        @{ Row = 43; Label = 'اجازه قلم جایگزین'; Value = 'خیر'; Name = 'AllowFallback' },
+        @{ Row = 44; Label = 'نمایش رقم‌های فارسی در قیمت فروش'; Value = 'بله'; Name = 'PriceDisplayFaNum' }
     )
     foreach ($setting in $fontPolicy) {
         $row = $setting.Row
@@ -1220,9 +1222,10 @@ try {
         $settings.Range("A${row}:F${row}").Borders.Color = ConvertTo-OleColor 'B9CCF4'
         [void]$workbook.Names.Add($setting.Name, $settings.Range("B${row}"))
     }
-    $settings.Range('B41').Validation.Add(3, 1, 1, 'Off,Warn,RepairAndWarn,Strict')
-    $settings.Range('B42').Validation.Add(3, 1, 1, 'Yes,No')
-    $settings.Range('B43').Validation.Add(3, 1, 1, 'Yes,No')
+    $settings.Range('B41').Validation.Add(3, 1, 1, 'خاموش,هشدار,ترمیم و هشدار,سختگیرانه')
+    $settings.Range('B42').Validation.Add(3, 1, 1, 'بله,خیر')
+    $settings.Range('B43').Validation.Add(3, 1, 1, 'بله,خیر')
+    $settings.Range('B44').Validation.Add(3, 1, 1, 'بله,خیر')
 
     $settings.Range('A45:F45').Merge()
     $settings.Range('A45').Value2 = 'زمان‌بندی مرحله‌های همگام‌سازی (ثانیه)'
@@ -1268,7 +1271,7 @@ try {
     # Never format only the first column of several adjacent merged rows.
     # Excel silently coalesces those rows into one large MergeArea, which
     # makes every setting except the first one inaccessible to VBA.
-    foreach ($row in @((10..15) + 18 + 19 + (21..23) + 26 + (39..43) + (46..55))) {
+    foreach ($row in @((10..15) + 18 + 19 + (21..23) + 26 + (39..44) + (46..55))) {
         $mergeCell = $settings.Range("B${row}")
         $mergeArea = $mergeCell.MergeArea
         try {
@@ -1299,14 +1302,16 @@ try {
     }
 
     # Apply the fixed role map after all cells/shapes exist. Font selection is
-    # role-based only; no content inspection or numeric font variant is used.
+    # role-based only; the sole numeric variant is the explicit selling-price
+    # FaNum toggle. Technical numerics and identifiers always remain Latin.
     Set-RangeFontSlots $priceList.Range('B1:K6') 'Yekan Bakh'
-    Set-RangeFontSlots $priceList.Range('B6:C6,F6:H6,J6') 'Segoe UI'
+    Set-RangeFontSlots $priceList.Range('B6') 'Yekan Bakh FaNum'
+    Set-RangeFontSlots $priceList.Range('C6,F6:H6,J6') 'Segoe UI'
     Set-RangeFontSlots $priceList.Range('I6,K6') 'Yekan Bakh'
     Set-RangeFontSlots $dashboard.Range('B1:I34') 'Yekan Bakh'
     Set-RangeFontSlots $dashboard.Range('B5:C6,D5:E6,F5:G6,H5:I6,B9:C10,D9:E10,F9:G10,H9:I10,B13:E14,F13:G14,H13:I14,C22:C24,C27:C29,C32:C34') 'Segoe UI'
     Set-RangeFontSlots $settings.Range('A1:F55') 'Yekan Bakh'
-    Set-RangeFontSlots $settings.Range('B3:F4,B7:F7,B10:F15,B18:F22,B24:F26,B39:F43,B46:F55') 'Segoe UI'
+    Set-RangeFontSlots $settings.Range('B3:F4,B7:F7,B10:F15,B18:F22,B24:F26,B39:F40,B46:F55') 'Segoe UI'
     Set-RangeFontSlots $syncData.Range('A1:W1') 'Yekan Bakh'
     Set-RangeFontSlots $syncData.Range('A2:P2,U2:W2') 'Segoe UI'
     Set-RangeFontSlots $syncData.Range('Q2:T2') 'Yekan Bakh'
@@ -1338,13 +1343,15 @@ try {
     }
     Assert-RangeFontSlots $priceList.Range('B5:K5') 'Yekan Bakh' 'Products headers'
     Assert-RangeFontSlots $priceList.Range('C3:E3') 'Yekan Bakh' 'search input'
-    Assert-RangeFontSlots $priceList.Range('B6:C6') 'Segoe UI' 'price and weight roles'
+    Assert-RangeFontSlots $priceList.Range('B6') 'Yekan Bakh FaNum' 'selling-price FaNum role'
+    Assert-RangeFontSlots $priceList.Range('C6') 'Segoe UI' 'weight role'
     Assert-RangeFontSlots $priceList.Range('H6,J6') 'Segoe UI' 'SKU and Woo ID roles'
     Assert-RangeFontSlots $priceList.Range('I6,K6') 'Yekan Bakh' 'name and category roles'
     Assert-RangeFontSlots $dashboard.Range('B1:I4') 'Yekan Bakh' 'dashboard text'
     Assert-RangeFontSlots $dashboard.Range('C22:C24') 'Segoe UI' 'dashboard counts'
     Assert-RangeFontSlots $settings.Range('A1:F2') 'Yekan Bakh' 'settings text'
-    Assert-RangeFontSlots $settings.Range('B39:F43') 'Segoe UI' 'font policy values'
+    Assert-RangeFontSlots $settings.Range('B39:F40') 'Segoe UI' 'font family values'
+    Assert-RangeFontSlots $settings.Range('B41:F44') 'Yekan Bakh' 'localized font policy values'
     Assert-RangeFontSlots $syncData.Range('A1:W1') 'Yekan Bakh' 'SyncData headers'
 
     $priceList.PageSetup.PrintArea = '$B$1:$O$30'

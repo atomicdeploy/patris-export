@@ -920,6 +920,8 @@ func newExcelPricingTestServer(t *testing.T, productSyncURL string) *Server {
 		excelPricing: state,
 		dbPath:       "dataset",
 	}
+	state.snapshotCollector = server.collectExcelPricingSnapshotPages
+	state.snapshotRevisionCurrent = func(canonical.Source, string, string) bool { return true }
 	server.setupRoutes()
 	return server
 }

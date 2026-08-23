@@ -111,14 +111,23 @@ type excelPricingSnapshotPayload struct {
 }
 
 type excelPricingSnapshot struct {
-	revision      string
-	etagRevision  string
-	stateRevision string
-	createdAt     time.Time
-	expiresAt     time.Time
-	integrity     excelPricingSnapshotIntegrity
-	body          []byte
+	revision                string
+	etagRevision            string
+	stateRevision           string
+	pricingStateRevision    string
+	upstreamCatalogRevision string
+	createdAt               time.Time
+	expiresAt               time.Time
+	integrity               excelPricingSnapshotIntegrity
+	body                    []byte
 }
+
+type excelPricingSnapshotCollector func(
+	context.Context,
+	string,
+	excelPricingSnapshotStartRequest,
+	updateout.Config,
+) (*excelPricingSnapshot, string)
 
 type excelPricingStateChangeEvent struct {
 	Schema                   string                        `json:"schema"`
@@ -419,7 +428,13 @@ func (s *Server) handlePostExcelPricingSnapshot(w http.ResponseWriter, r *http.R
 		ageAllowed := request.MaxAgeSeconds > 0 && age >= 0 &&
 			age <= time.Duration(request.MaxAgeSeconds)*time.Second
 		revisionAllowed := request.ExpectedStateRevision != "" &&
-			request.ExpectedStateRevision == cached.stateRevision
+			request.ExpectedStateRevision == cached.stateRevision &&
+			s.excelPricing.snapshotRevisionCurrent != nil &&
+			s.excelPricing.snapshotRevisionCurrent(
+				request.Source,
+				cached.stateRevision,
+				cached.upstreamCatalogRevision,
+			)
 		if ageAllowed || revisionAllowed {
 			job := &excelPricingSnapshotJob{
 				id:                    jobID,
@@ -1862,6 +1877,90 @@ func (s *Server) collectExcelPricingSnapshot(
 	request excelPricingSnapshotStartRequest,
 	cfg updateout.Config,
 ) (*excelPricingSnapshot, string) {
+	if s != nil && s.excelPricing != nil && s.excelPricing.snapshotCollector != nil {
+		return s.excelPricing.snapshotCollector(ctx, jobID, request, cfg)
+	}
+	if s == nil || s.excelPricing == nil || s.excelPricingRemote == nil {
+		return nil, "remote_unavailable"
+	}
+	s.updateExcelPricingSnapshotProgress(jobID, "fetching_remote", 0, 1, 0)
+	client, err := newExcelPricingRemoteSnapshotClient(
+		cfg,
+		request.Source,
+		excelPricingRemoteSnapshotClientOptions{
+			HTTPClient: s.excelPricing.client,
+			Terminals:  s.excelPricingRemote.snapshotTerminals(),
+		},
+	)
+	if err != nil {
+		return nil, excelPricingRemoteSnapshotFailureCode(ctx, err)
+	}
+	result, err := client.Collect(
+		ctx,
+		excelPricingRemoteSnapshotRequestID(jobID),
+		request.MaxAgeSeconds,
+	)
+	if err != nil {
+		return nil, excelPricingRemoteSnapshotFailureCode(ctx, err)
+	}
+	s.updateExcelPricingSnapshotProgress(
+		jobID,
+		"validating",
+		resultRowsPageCount(result),
+		resultRowsPageCount(result),
+		len(result.Rows),
+	)
+	snapshot, err := buildExcelPricingSnapshotFromRemoteResult(
+		result,
+		excelPricingSnapshotProjection(request.Projection),
+		s.excelPricing.snapshots.now().UTC(),
+	)
+	if err != nil {
+		return nil, "snapshot_integrity_failed"
+	}
+	s.updateExcelPricingSnapshotProgress(
+		jobID,
+		"building",
+		snapshot.integrity.PageCount,
+		snapshot.integrity.PageCount,
+		snapshot.integrity.RowCount,
+	)
+	return snapshot, ""
+}
+
+func resultRowsPageCount(result *excelPricingRemoteSnapshotResult) int {
+	if result == nil || len(result.Rows) == 0 {
+		return 1
+	}
+	return (len(result.Rows) + excelPricingSnapshotPageSize - 1) / excelPricingSnapshotPageSize
+}
+
+func excelPricingRemoteSnapshotFailureCode(ctx context.Context, err error) string {
+	if ctx != nil && ctx.Err() != nil {
+		return excelPricingSnapshotContextCode(ctx)
+	}
+	switch {
+	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
+		if ctx != nil {
+			return excelPricingSnapshotContextCode(ctx)
+		}
+		return "remote_unavailable"
+	case errors.Is(err, errExcelPricingRemoteSnapshotProtocol),
+		errors.Is(err, errExcelPricingRemoteSnapshotIntegrity):
+		return "snapshot_integrity_failed"
+	case errors.Is(err, errExcelPricingRemoteSnapshotConfiguration):
+		return "remote_not_configured"
+	default:
+		return "remote_unavailable"
+	}
+}
+
+func (s *Server) collectExcelPricingSnapshotPages(
+	ctx context.Context,
+	jobID string,
+	request excelPricingSnapshotStartRequest,
+	cfg updateout.Config,
+) (*excelPricingSnapshot, string) {
 	var first *excelPricingSnapshotPage
 	var allRows []json.RawMessage
 	seenKeys := make(map[string]struct{})
@@ -2303,6 +2402,202 @@ func excelPricingSnapshotStableCatalogMetadata(
 		metadata["reconciliation_"+key] = append(json.RawMessage(nil), raw...)
 	}
 	return metadata, nil
+}
+
+func buildExcelPricingSnapshotFromRemoteResult(
+	result *excelPricingRemoteSnapshotResult,
+	projection string,
+	now time.Time,
+) (*excelPricingSnapshot, error) {
+	if result == nil || !validExcelPricingRemoteSource(result.Source) ||
+		!validExcelPricingRemoteRevisionParts(
+			result.CompositeStateRevision,
+			result.PricingStateRevision,
+			result.PricingPolicyRevision,
+			result.CatalogRevision,
+			result.DatasetRevision,
+			result.SnapshotRevision,
+			result.MutationStateRevision,
+		) ||
+		result.MutationStateRevision != result.PricingStateRevision ||
+		!isStrongExcelPricingRevisionETag(result.ETag, result.SnapshotRevision) {
+		return nil, errExcelPricingRemoteSnapshotIntegrity
+	}
+	var remote excelPricingRemoteSnapshotPayload
+	if len(result.RawPayload) == 0 || json.Unmarshal(result.RawPayload, &remote) != nil ||
+		remote.Source != result.Source ||
+		remote.StateRevision != result.CompositeStateRevision ||
+		remote.PricingStateRevision != result.PricingStateRevision ||
+		remote.PricingPolicyRevision != result.PricingPolicyRevision ||
+		remote.CatalogRevision != result.CatalogRevision ||
+		remote.DatasetRevision != result.DatasetRevision ||
+		remote.SnapshotRevision != result.SnapshotRevision ||
+		remote.MutationGuard.ExpectedStateRevision != result.MutationStateRevision ||
+		remote.RowCount != len(result.Rows) ||
+		remote.RowCount > excelPricingSnapshotPageSize*excelPricingSnapshotMaxPages ||
+		remote.PageCount < 1 || remote.PageCount > excelPricingSnapshotMaxPages ||
+		remote.Integrity.RowCount != len(result.Rows) {
+		return nil, errExcelPricingRemoteSnapshotIntegrity
+	}
+
+	var rows []json.RawMessage
+	var rowFields []string
+	switch projection {
+	case excelPricingSnapshotProjectionFull:
+		rows = append([]json.RawMessage(nil), result.Rows...)
+	case excelPricingSnapshotProjectionExcelV1:
+		if len(result.ProjectedRows) != len(result.Rows) ||
+			len(result.ProjectedRowFields) != len(excelPricingSnapshotExcelV1RowFields) {
+			return nil, errExcelPricingRemoteSnapshotIntegrity
+		}
+		for index, expected := range excelPricingSnapshotExcelV1RowFields {
+			if result.ProjectedRowFields[index] != expected {
+				return nil, errExcelPricingRemoteSnapshotIntegrity
+			}
+		}
+		rows = append([]json.RawMessage(nil), result.ProjectedRows...)
+		rowFields = append([]string(nil), result.ProjectedRowFields...)
+	default:
+		return nil, errExcelPricingRemoteSnapshotConfiguration
+	}
+
+	var reconciliation excelPricingRemoteSnapshotReconciliation
+	if json.Unmarshal(remote.Reconciliation, &reconciliation) != nil {
+		return nil, errExcelPricingRemoteSnapshotIntegrity
+	}
+	warnings := reconciliation.Warnings
+	if warnings == nil {
+		warnings = []interface{}{}
+	}
+	warningsJSON, err := json.Marshal(warnings)
+	if err != nil {
+		return nil, errExcelPricingRemoteSnapshotIntegrity
+	}
+
+	type adaptedSource struct {
+		ID                     string `json:"id"`
+		Dataset                string `json:"dataset"`
+		CurrentRevision        string `json:"current_revision"`
+		SubmittedRevision      string `json:"submitted_revision"`
+		RevisionMatchesCurrent bool   `json:"revision_matches_current"`
+	}
+	type adaptedCatalog struct {
+		Dataset         string                         `json:"dataset"`
+		DatasetRevision string                         `json:"dataset_revision"`
+		Columns         json.RawMessage                `json:"columns"`
+		Reconciliation  json.RawMessage                `json:"reconciliation"`
+		Rows            []json.RawMessage              `json:"rows"`
+		Pagination      excelPricingSnapshotPagination `json:"pagination"`
+	}
+	state := struct {
+		Schema                string          `json:"schema"`
+		StateRevision         string          `json:"state_revision"`
+		PricingStateRevision  string          `json:"pricing_state_revision"`
+		PricingPolicyRevision string          `json:"pricing_policy_revision"`
+		CatalogRevision       string          `json:"catalog_revision"`
+		Status                string          `json:"status"`
+		Warnings              []interface{}   `json:"warnings"`
+		Source                adaptedSource   `json:"source"`
+		Settings              json.RawMessage `json:"settings"`
+		Catalog               adaptedCatalog  `json:"catalog"`
+	}{
+		Schema:                excelPricingStateSchema,
+		StateRevision:         result.CompositeStateRevision,
+		PricingStateRevision:  result.PricingStateRevision,
+		PricingPolicyRevision: result.PricingPolicyRevision,
+		CatalogRevision:       result.CatalogRevision,
+		Status:                "ready",
+		Warnings:              warnings,
+		Source: adaptedSource{
+			ID:                     result.Source.ID,
+			Dataset:                result.Source.Dataset,
+			CurrentRevision:        result.Source.Revision,
+			SubmittedRevision:      result.Source.Revision,
+			RevisionMatchesCurrent: true,
+		},
+		Settings: append(json.RawMessage(nil), remote.Settings...),
+		Catalog: adaptedCatalog{
+			Dataset:         remote.Catalog.Dataset,
+			DatasetRevision: remote.Catalog.DatasetRevision,
+			Columns:         append(json.RawMessage(nil), remote.Catalog.Columns...),
+			Reconciliation:  append(json.RawMessage(nil), remote.Catalog.Reconciliation...),
+			Rows:            rows,
+			Pagination: excelPricingSnapshotPagination{
+				Page: 1, Limit: len(rows), Total: len(rows), Pages: 1, HasMore: false,
+			},
+		},
+	}
+	stateJSON, err := json.Marshal(state)
+	if err != nil {
+		return nil, errExcelPricingRemoteSnapshotIntegrity
+	}
+	integrity := excelPricingSnapshotIntegrity{
+		Algorithm:             "sha256",
+		StateDigest:           excelPricingSnapshotDigest(stateJSON),
+		CatalogMetadataDigest: remote.Integrity.CatalogMetadataDigest,
+		PageRevisionsDigest:   remote.Integrity.PageRevisionsDigest,
+		WarningsDigest:        excelPricingSnapshotDigest(warningsJSON),
+		DatasetRevision:       result.DatasetRevision,
+		RemoteTotal:           remote.RemoteTotal,
+		RowCount:              len(rows),
+		DistinctSyncKeys:      len(rows),
+		PageCount:             remote.PageCount,
+		WarningCount:          len(warnings),
+	}
+	expiresAt := now.Add(excelPricingSnapshotMaxCacheAge)
+	revisionInput, _ := json.Marshal(struct {
+		Source        canonical.Source              `json:"source"`
+		StateRevision string                        `json:"state_revision"`
+		Projection    string                        `json:"projection"`
+		Integrity     excelPricingSnapshotIntegrity `json:"integrity"`
+	}{result.Source, result.CompositeStateRevision, projection, integrity})
+	snapshotRevision := excelPricingSnapshotDigest(revisionInput)
+	payload := excelPricingSnapshotPayload{
+		Schema:           excelPricingSnapshotPayloadSchema,
+		Projection:       projection,
+		RowFields:        rowFields,
+		SnapshotRevision: snapshotRevision,
+		Source:           result.Source,
+		StateRevision:    result.CompositeStateRevision,
+		CreatedAt:        now,
+		ExpiresAt:        expiresAt,
+		Integrity:        integrity,
+		// The loopback contract intentionally keeps the composite revision as
+		// the workbook guard. The remote pricing-only revision remains separately
+		// validated above and in the adapted state's internal metadata.
+		MutationGuard: excelPricingSnapshotMutationGuard{
+			ExpectedStateRevision: result.CompositeStateRevision,
+			Preview: excelPricingSnapshotMutationOperation{
+				Method:                 http.MethodPost,
+				Path:                   "/api/pricing-sync/preview",
+				RequiresIdempotencyKey: true,
+				RequiresIfMatch:        true,
+			},
+			Apply: excelPricingSnapshotMutationOperation{
+				Method:                 http.MethodPost,
+				Path:                   "/api/pricing-sync/apply",
+				RequiresIdempotencyKey: true,
+				RequiresIfMatch:        true,
+				Confirmation:           "APPLY",
+			},
+		},
+		State: stateJSON,
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return nil, errExcelPricingRemoteSnapshotIntegrity
+	}
+	return &excelPricingSnapshot{
+		revision:                snapshotRevision,
+		etagRevision:            excelPricingSnapshotDigest(body),
+		stateRevision:           result.CompositeStateRevision,
+		pricingStateRevision:    result.PricingStateRevision,
+		upstreamCatalogRevision: result.CatalogRevision,
+		createdAt:               now,
+		expiresAt:               expiresAt,
+		integrity:               integrity,
+		body:                    body,
+	}, nil
 }
 
 func buildExcelPricingSnapshot(

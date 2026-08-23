@@ -502,9 +502,32 @@ func (client *excelPricingRemoteSnapshotClient) Collect(
 	}
 	defer subscription.Close()
 
-	build, status, err := client.startSnapshot(ctx, requestID, maxAgeSeconds, revision)
-	if err != nil {
+	if err := ctx.Err(); err != nil {
 		return nil, err
+	}
+	// Once the idempotent start POST is dispatched, keep it alive long enough to
+	// receive the build receipt even if the local job is cancelled. Otherwise the
+	// provider can accept work while cancellation tears down the response before
+	// we learn the build ID needed for the compensating DELETE. The original
+	// deadline and the HTTP client's timeout still bound this commit window.
+	startContext := context.WithoutCancel(ctx)
+	var stopStart context.CancelFunc
+	if deadline, ok := ctx.Deadline(); ok {
+		startContext, stopStart = context.WithDeadline(startContext, deadline)
+	} else {
+		startContext, stopStart = context.WithCancel(startContext)
+	}
+	build, status, err := client.startSnapshot(startContext, requestID, maxAgeSeconds, revision)
+	stopStart()
+	if err != nil {
+		if contextErr := ctx.Err(); contextErr != nil {
+			return nil, contextErr
+		}
+		return nil, err
+	}
+	if contextErr := ctx.Err(); contextErr != nil {
+		client.cancelSnapshot(build.CancelURL, build.BuildID)
+		return nil, contextErr
 	}
 	if status == http.StatusAccepted {
 		event, waitErr := subscription.Wait(ctx)
@@ -901,7 +924,9 @@ func validateExcelPricingRemoteSnapshotPayload(
 		return errExcelPricingRemoteSnapshotProtocol
 	}
 	if payload.PageSize != excelPricingSnapshotPageSize || payload.RowCount < 0 ||
+		payload.RowCount > excelPricingSnapshotPageSize*excelPricingSnapshotMaxPages ||
 		payload.DistinctSyncKeys != payload.RowCount || payload.RemoteTotal != payload.RowCount ||
+		payload.PageCount < 1 || payload.PageCount > excelPricingSnapshotMaxPages ||
 		payload.PageCount != max(1, (payload.RowCount+payload.PageSize-1)/payload.PageSize) ||
 		len(payload.PageDigests) != payload.PageCount || len(payload.Catalog.Rows) != payload.RowCount ||
 		payload.Catalog.Dataset != "reconciled_products" || payload.Catalog.Locale != "fa" ||
