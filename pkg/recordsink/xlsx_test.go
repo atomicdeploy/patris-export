@@ -1708,7 +1708,10 @@ func TestDynamicCalculatorValidatorHandlesEmptyProductTable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	source := string(content)
+	// Git may materialize this CJS file with CRLF on Windows runners. Normalize
+	// before order-sensitive source checks so checkout policy cannot change the
+	// safety verdict.
+	source := strings.ReplaceAll(string(content), "\r\n", "\n")
 	for _, required := range []string{
 		`$priceDataRange = $table.ListColumns.Item(1).DataBodyRange`,
 		`if ($null -ne $priceDataRange) {`,
@@ -1757,11 +1760,16 @@ func TestDynamicCalculatorValidatorHandlesEmptyProductTable(t *testing.T) {
 		`$exitResult = Wait-ValidatorProcessExit $excelProcessIdentity 15000 @(0)`,
 		`PATRIS_VALIDATOR_PROCESS_IDENTITY_PATH`,
 		`function cleanupExactOwnedProcess`,
+		`function resolveAbnormalValidatorCleanup`,
+		`Preserve the same abnormal/unproven evidence invariant even for`,
 		`function finalizeValidatorTempDirectory`,
 		`preservedRecoveryDirectory = finalizeValidatorTempDirectory(`,
-		`abnormalCleanupError,`,
+		`abnormalCleanupOutcome,`,
+		`pre_identity_timeout_evidence_preserved`,
+		`pre_identity_recovery_message_present`,
 		`recovery_evidence_preserved_on_cleanup_failure`,
 		`Recovery evidence preserved for exact-process remediation:`,
+		`Scoped Excel cleanup is unproven:`,
 		`--self-test-process-safety`,
 		`--self-test-native-excel-timeout`,
 		`gatedExitChild`,
@@ -1796,14 +1804,33 @@ func TestDynamicCalculatorValidatorHandlesEmptyProductTable(t *testing.T) {
 		t.Fatal("native validator is missing its Node host cleanup boundary")
 	}
 	validatorHostCleanup := source[validatorMainStart : validatorMainStart+validatorResultErrorRelative]
-	if !strings.Contains(validatorHostCleanup, `preservedRecoveryDirectory = finalizeValidatorTempDirectory(
-      tempDirectory,
-      abnormalCleanupError,
-    );`) {
+	finalizeCall := strings.Index(validatorHostCleanup, `preservedRecoveryDirectory = finalizeValidatorTempDirectory(`)
+	tempDirectoryArgument := -1
+	abnormalOutcomeArgument := -1
+	if finalizeCall >= 0 {
+		tempDirectoryArgument = strings.Index(validatorHostCleanup[finalizeCall:], `tempDirectory,`)
+		abnormalOutcomeArgument = strings.Index(validatorHostCleanup[finalizeCall:], `abnormalCleanupOutcome,`)
+	}
+	if finalizeCall < 0 || tempDirectoryArgument < 0 || abnormalOutcomeArgument < 0 ||
+		tempDirectoryArgument >= abnormalOutcomeArgument {
 		t.Fatal("native validator must preserve exact-process recovery evidence when abnormal cleanup fails")
 	}
 	if strings.Contains(validatorHostCleanup, `fs.rmSync(tempDirectory`) {
 		t.Fatal("native validator must not unconditionally delete exact-process recovery evidence")
+	}
+	nativeTimeoutStart := strings.Index(source, `function runNativeExcelTimeoutSelfTest() {`)
+	nativeTimeoutEndRelative := -1
+	if nativeTimeoutStart >= 0 {
+		nativeTimeoutEndRelative = strings.Index(source[nativeTimeoutStart:], `function main() {`)
+	}
+	if nativeTimeoutStart < 0 || nativeTimeoutEndRelative < 0 {
+		t.Fatal("native validator is missing its opt-in Excel timeout control boundary")
+	}
+	nativeTimeoutBody := source[nativeTimeoutStart : nativeTimeoutStart+nativeTimeoutEndRelative]
+	if !strings.Contains(nativeTimeoutBody, `resolveAbnormalValidatorCleanup(`) ||
+		!strings.Contains(nativeTimeoutBody, `finalizeValidatorTempDirectory(tempDirectory, abnormalCleanupOutcome)`) ||
+		strings.Contains(nativeTimeoutBody, `fs.rmSync(tempDirectory`) {
+		t.Fatal("native Excel timeout control must preserve evidence unless exact cleanup is proven")
 	}
 
 	powershellStart := strings.Index(source, "const powershell = String.raw`")
@@ -1886,6 +1913,8 @@ func TestDynamicCalculatorValidatorProcessSafetyBehavior(t *testing.T) {
 	}
 	var report struct {
 		Passed                                    bool `json:"passed"`
+		PreIdentityTimeoutEvidencePreserved       bool `json:"pre_identity_timeout_evidence_preserved"`
+		PreIdentityRecoveryMessagePresent         bool `json:"pre_identity_recovery_message_present"`
 		RecoveryEvidencePreservedOnCleanupFailure bool `json:"recovery_evidence_preserved_on_cleanup_failure"`
 		Behavior                                  struct {
 			Passed                        bool `json:"passed"`
@@ -1907,7 +1936,9 @@ func TestDynamicCalculatorValidatorProcessSafetyBehavior(t *testing.T) {
 	if err := json.Unmarshal(output, &report); err != nil {
 		t.Fatalf("decode validator process-safety report: %v\n%s", err, output)
 	}
-	if !report.Passed || !report.RecoveryEvidencePreservedOnCleanupFailure ||
+	if !report.Passed || !report.PreIdentityTimeoutEvidencePreserved ||
+		!report.PreIdentityRecoveryMessagePresent ||
+		!report.RecoveryEvidencePreservedOnCleanupFailure ||
 		!report.Behavior.Passed || !report.Behavior.CrashExitRejected ||
 		!report.Behavior.ExactProcessHandleUsed || !report.Behavior.DualFailurePreserved ||
 		!report.Behavior.ExplicitJobAssignmentVerified || !report.Behavior.MissingReadinessRejected ||

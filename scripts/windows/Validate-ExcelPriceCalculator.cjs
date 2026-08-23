@@ -3155,16 +3155,57 @@ function cleanupExactOwnedProcess(tempDirectory, identityPath) {
   return report;
 }
 
-function finalizeValidatorTempDirectory(tempDirectory, abnormalCleanupError) {
-  if (abnormalCleanupError) {
-    // The identity and cleanup script are the only deterministic recovery
-    // handle if the exact owned process could not be proven terminated. Keep
-    // the whole private temp directory so an operator can inspect or rerun the
-    // scoped cleanup instead of losing evidence while Excel may still exist.
+function resolveAbnormalValidatorCleanup(
+  tempDirectory,
+  identityPath,
+  hostResult,
+  cleanupFunction = cleanupExactOwnedProcess,
+) {
+  const abnormal = !hostResult || Boolean(hostResult.error) || hostResult.status !== 0;
+  if (!abnormal) {
+    return { abnormal: false, proven: true, report: null, error: null };
+  }
+  if (!fs.existsSync(identityPath)) {
+    return {
+      abnormal: true,
+      proven: false,
+      report: null,
+      error: new Error(
+        'validator host exited before the exact Excel identity was published; scoped cleanup is unproven',
+      ),
+    };
+  }
+  try {
+    const report = cleanupFunction(tempDirectory, identityPath);
+    if (!report || report.passed !== true) {
+      throw new Error(`exact-process cleanup did not return a proven-success report: ${JSON.stringify(report)}`);
+    }
+    return { abnormal: true, proven: true, report, error: null };
+  } catch (error) {
+    return { abnormal: true, proven: false, report: null, error };
+  }
+}
+
+function finalizeValidatorTempDirectory(tempDirectory, abnormalCleanupOutcome) {
+  if (abnormalCleanupOutcome?.abnormal && abnormalCleanupOutcome.proven !== true) {
+    // The private temp contents are the only deterministic recovery evidence
+    // when the exact owned process could not be proven terminated. Keep the
+    // identity and scoped cleanup script when published, or the pre-identity
+    // script evidence otherwise; never guess at unrelated Excel processes.
     return path.resolve(tempDirectory);
   }
   fs.rmSync(tempDirectory, { recursive: true, force: true });
   return null;
+}
+
+function validatorRecoveryAggregate(primaryError, cleanupOutcome, tempDirectory) {
+  const recoveryError = cleanupOutcome?.error || new Error('scoped cleanup is unproven');
+  const preservedPath = path.resolve(tempDirectory);
+  return new AggregateError(
+    [primaryError, recoveryError],
+    `${primaryError.message}; scoped Excel cleanup is unproven: ${recoveryError.message}; `
+      + `recovery evidence preserved for exact-process remediation: ${preservedPath}`,
+  );
 }
 
 function runProcessSafetySelfTest() {
@@ -3428,29 +3469,76 @@ Start-Sleep -Seconds 60
       );
     }
 
-    const evidenceDirectory = fs.mkdtempSync(
+    const preIdentityEvidenceDirectory = fs.mkdtempSync(
       path.join(os.tmpdir(), 'patris-validator-recovery-evidence-'),
     );
-    const evidenceIdentityPath = path.join(evidenceDirectory, 'excel-process-identity.json');
-    let recoveryEvidencePreserved = false;
+    const preIdentityPath = path.join(preIdentityEvidenceDirectory, 'excel-process-identity.json');
+    const stubTimeout = {
+      error: Object.assign(new Error('stubbed pre-identity timeout'), { code: 'ETIMEDOUT' }),
+      status: null,
+    };
+    let preIdentityCleanupCalled = false;
+    let preIdentityTimeoutEvidencePreserved = false;
+    let preIdentityRecoveryMessagePresent = false;
     try {
-      fs.writeFileSync(evidenceIdentityPath, '{"pid":1234}', 'utf8');
-      const preservedPath = finalizeValidatorTempDirectory(
-        evidenceDirectory,
-        new Error('simulated exact-process cleanup failure'),
+      const outcome = resolveAbnormalValidatorCleanup(
+        preIdentityEvidenceDirectory,
+        preIdentityPath,
+        stubTimeout,
+        () => {
+          preIdentityCleanupCalled = true;
+          throw new Error('cleanup must not run without exact identity');
+        },
       );
-      recoveryEvidencePreserved = preservedPath === path.resolve(evidenceDirectory)
-        && fs.existsSync(evidenceIdentityPath);
-      if (!recoveryEvidencePreserved) {
-        throw new Error('failed cleanup did not preserve exact-process recovery evidence');
+      const preservedPath = finalizeValidatorTempDirectory(preIdentityEvidenceDirectory, outcome);
+      preIdentityTimeoutEvidencePreserved = preservedPath === path.resolve(preIdentityEvidenceDirectory)
+        && fs.existsSync(preIdentityEvidenceDirectory)
+        && !preIdentityCleanupCalled;
+      preIdentityRecoveryMessagePresent = String(outcome.error?.message || '')
+        .includes('before the exact Excel identity was published');
+      if (!preIdentityTimeoutEvidencePreserved || !preIdentityRecoveryMessagePresent) {
+        throw new Error('pre-identity timeout did not preserve recovery evidence and message');
       }
     } finally {
-      fs.rmSync(evidenceDirectory, { recursive: true, force: true });
+      fs.rmSync(preIdentityEvidenceDirectory, { recursive: true, force: true });
+    }
+
+    const cleanupFailureEvidenceDirectory = fs.mkdtempSync(
+      path.join(os.tmpdir(), 'patris-validator-cleanup-failure-evidence-'),
+    );
+    const cleanupFailureIdentityPath = path.join(
+      cleanupFailureEvidenceDirectory,
+      'excel-process-identity.json',
+    );
+    let cleanupFailureEvidencePreserved = false;
+    try {
+      fs.writeFileSync(cleanupFailureIdentityPath, '{"pid":1234}', 'utf8');
+      const outcome = resolveAbnormalValidatorCleanup(
+        cleanupFailureEvidenceDirectory,
+        cleanupFailureIdentityPath,
+        stubTimeout,
+        (directory) => {
+          fs.writeFileSync(path.join(directory, 'cleanup-owned-process.ps1'), 'stub cleanup', 'utf8');
+          throw new Error('simulated exact-process cleanup failure');
+        },
+      );
+      const preservedPath = finalizeValidatorTempDirectory(cleanupFailureEvidenceDirectory, outcome);
+      cleanupFailureEvidencePreserved = preservedPath === path.resolve(cleanupFailureEvidenceDirectory)
+        && fs.existsSync(cleanupFailureIdentityPath)
+        && fs.existsSync(path.join(cleanupFailureEvidenceDirectory, 'cleanup-owned-process.ps1'))
+        && String(outcome.error?.message || '').includes('simulated exact-process cleanup failure');
+      if (!cleanupFailureEvidencePreserved) {
+        throw new Error('failed exact cleanup did not preserve identity recovery evidence');
+      }
+    } finally {
+      fs.rmSync(cleanupFailureEvidenceDirectory, { recursive: true, force: true });
     }
 
     return {
       passed: true,
-      recovery_evidence_preserved_on_cleanup_failure: recoveryEvidencePreserved,
+      pre_identity_timeout_evidence_preserved: preIdentityTimeoutEvidencePreserved,
+      pre_identity_recovery_message_present: preIdentityRecoveryMessagePresent,
+      recovery_evidence_preserved_on_cleanup_failure: cleanupFailureEvidencePreserved,
       behavior,
       timeout: {
         spawn_error_code: timeoutResult.error.code,
@@ -3473,6 +3561,8 @@ function runNativeExcelTimeoutSelfTest() {
   };
   const controlIdentity = path.join(tempDirectory, 'control-excel-identity.json');
   const timeoutIdentity = path.join(tempDirectory, 'timeout-excel-identity.json');
+  let activeIdentityPath = controlIdentity;
+  let abnormalCleanupOutcome = null;
   const excelSetup = String.raw`
 function Release-SelfTestComObject([object]$value) {
     if ($null -ne $value -and [Runtime.InteropServices.Marshal]::IsComObject($value)) {
@@ -3522,12 +3612,10 @@ $identity.Process.Dispose()
     );
     const control = parsePowerShellJson(controlResult, 'native Excel control');
     if (controlResult.error || controlResult.status !== 0 || !control.passed) {
-      if (fs.existsSync(controlIdentity)) {
-        try { cleanupExactOwnedProcess(tempDirectory, controlIdentity); } catch {}
-      }
       throw new Error(`native Excel control failed: ${JSON.stringify(control)}`);
     }
 
+    activeIdentityPath = timeoutIdentity;
     const timeoutScript = writeScript('native-timeout.ps1', String.raw`
 $ErrorActionPreference = 'Stop'
 ${processSafetyPowerShell}
@@ -3547,9 +3635,6 @@ Start-Sleep -Seconds 60
       10000,
     );
     if (!timeoutResult.error || timeoutResult.error.code !== 'ETIMEDOUT') {
-      if (fs.existsSync(timeoutIdentity)) {
-        try { cleanupExactOwnedProcess(tempDirectory, timeoutIdentity); } catch {}
-      }
       throw new Error(`native Excel timeout self-test did not time out: ${JSON.stringify(timeoutResult.error)}`);
     }
     if (!fs.existsSync(timeoutIdentity)) {
@@ -3558,7 +3643,6 @@ Start-Sleep -Seconds 60
     const identity = JSON.parse(fs.readFileSync(timeoutIdentity, 'utf8'));
     if (identity.assigned_to_validator_job !== true
         || path.basename(String(identity.executable_path || '')).toUpperCase() !== 'EXCEL.EXE') {
-      try { cleanupExactOwnedProcess(tempDirectory, timeoutIdentity); } catch {}
       throw new Error(`native Excel was not explicitly fenced before timeout: ${JSON.stringify(identity)}`);
     }
     Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1000);
@@ -3583,8 +3667,18 @@ Start-Sleep -Seconds 60
         gone_readback_status: goneReadback.status,
       },
     };
+  } catch (primaryError) {
+    abnormalCleanupOutcome = resolveAbnormalValidatorCleanup(
+      tempDirectory,
+      activeIdentityPath,
+      { error: primaryError, status: 1 },
+    );
+    if (!abnormalCleanupOutcome.proven) {
+      throw validatorRecoveryAggregate(primaryError, abnormalCleanupOutcome, tempDirectory);
+    }
+    throw primaryError;
   } finally {
-    fs.rmSync(tempDirectory, { recursive: true, force: true });
+    finalizeValidatorTempDirectory(tempDirectory, abnormalCleanupOutcome);
   }
 }
 
@@ -3645,52 +3739,65 @@ function main() {
   let result;
   let abnormalCleanup = null;
   let abnormalCleanupError = null;
+  let abnormalCleanupOutcome = null;
   let preservedRecoveryDirectory = null;
   try {
     // Windows PowerShell 5.1 treats a BOM-less script as the active ANSI code
     // page. A UTF-8 BOM keeps the Persian literals used by the validator exact.
     fs.writeFileSync(powershellPath, `\uFEFF${powershell}\n`, 'utf8');
-    result = spawnSync(
-      'powershell.exe',
-      [
-        '-NoLogo',
-        '-NoProfile',
-        '-NonInteractive',
-        '-ExecutionPolicy',
-        'Bypass',
-        '-File',
-        powershellPath,
-      ],
-      {
-        cwd: repoRoot,
-        encoding: 'utf8',
-        env: {
-          ...process.env,
-          PATRIS_VALIDATOR_CANDIDATE: options.candidate,
-          PATRIS_VALIDATOR_REFERENCE: options.reference,
-          PATRIS_VALIDATOR_SYNC: options.sync ? '1' : '0',
-          PATRIS_VALIDATOR_TIMEOUT_MS: String(options.timeoutMs),
-          PATRIS_VALIDATOR_PROCESS_IDENTITY_PATH: processIdentityPath,
+    try {
+      result = spawnSync(
+        'powershell.exe',
+        [
+          '-NoLogo',
+          '-NoProfile',
+          '-NonInteractive',
+          '-ExecutionPolicy',
+          'Bypass',
+          '-File',
+          powershellPath,
+        ],
+        {
+          cwd: repoRoot,
+          encoding: 'utf8',
+          env: {
+            ...process.env,
+            PATRIS_VALIDATOR_CANDIDATE: options.candidate,
+            PATRIS_VALIDATOR_REFERENCE: options.reference,
+            PATRIS_VALIDATOR_SYNC: options.sync ? '1' : '0',
+            PATRIS_VALIDATOR_TIMEOUT_MS: String(options.timeoutMs),
+            PATRIS_VALIDATOR_PROCESS_IDENTITY_PATH: processIdentityPath,
+          },
+          maxBuffer: 16 * 1024 * 1024,
+          // The user-facing deadline governs workbook validation. Keep a bounded
+          // host grace so COM activation can expose and explicitly job-fence the
+          // exact Excel process before Node may terminate powershell.exe.
+          timeout: options.timeoutMs + VALIDATOR_HOST_STARTUP_CLEANUP_GRACE_MS,
+          windowsHide: true,
         },
-        maxBuffer: 16 * 1024 * 1024,
-        // The user-facing deadline governs workbook validation. Keep a bounded
-        // host grace so COM activation can expose and explicitly job-fence the
-        // exact Excel process before Node may terminate powershell.exe.
-        timeout: options.timeoutMs + VALIDATOR_HOST_STARTUP_CLEANUP_GRACE_MS,
-        windowsHide: true,
-      },
-    );
-    if ((result.error || result.status !== 0) && fs.existsSync(processIdentityPath)) {
-      try {
-        abnormalCleanup = cleanupExactOwnedProcess(tempDirectory, processIdentityPath);
-      } catch (error) {
-        abnormalCleanupError = error;
-      }
+      );
+    } catch (error) {
+      // Fixed inputs normally make spawnSync return an error object rather than
+      // throw. Preserve the same abnormal/unproven evidence invariant even for
+      // a synchronous host-runtime exception.
+      result = {
+        error: error instanceof Error ? error : new Error(String(error)),
+        status: null,
+        stdout: '',
+        stderr: '',
+      };
     }
+    abnormalCleanupOutcome = resolveAbnormalValidatorCleanup(
+      tempDirectory,
+      processIdentityPath,
+      result,
+    );
+    abnormalCleanup = abnormalCleanupOutcome.report;
+    abnormalCleanupError = abnormalCleanupOutcome.error;
   } finally {
     preservedRecoveryDirectory = finalizeValidatorTempDirectory(
       tempDirectory,
-      abnormalCleanupError,
+      abnormalCleanupOutcome,
     );
   }
 
@@ -3704,7 +3811,7 @@ function main() {
       console.error(`Scoped Excel cleanup: ${JSON.stringify(abnormalCleanup)}`);
     }
     if (abnormalCleanupError) {
-      console.error(`Scoped Excel cleanup failed: ${abnormalCleanupError.message}`);
+      console.error(`Scoped Excel cleanup is unproven: ${abnormalCleanupError.message}`);
     }
     if (preservedRecoveryDirectory) {
       console.error(`Recovery evidence preserved for exact-process remediation: ${preservedRecoveryDirectory}`);
@@ -3720,7 +3827,7 @@ function main() {
       console.error(`Scoped Excel cleanup: ${JSON.stringify(abnormalCleanup)}`);
     }
     if (abnormalCleanupError) {
-      console.error(`Scoped Excel cleanup failed: ${abnormalCleanupError.message}`);
+      console.error(`Scoped Excel cleanup is unproven: ${abnormalCleanupError.message}`);
     }
     if (preservedRecoveryDirectory) {
       console.error(`Recovery evidence preserved for exact-process remediation: ${preservedRecoveryDirectory}`);
