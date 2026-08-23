@@ -1482,7 +1482,12 @@ func TestDynamicCalculatorValidatorHandlesEmptyProductTable(t *testing.T) {
 		`ProductCatalogSync.AsyncPricingIdleForValidation`,
 		`ProductCatalogSync.LastPricingOperationSucceededForValidation`,
 		`ProductCatalogSync.LastPricingOperationErrorForValidation`,
-		`Start-Sleep -Milliseconds 50`,
+		`function Test-RetryableExcelComRejection`,
+		`RPC_E_CALL_REJECTED`,
+		`RPC_E_SERVERCALL_RETRYLATER`,
+		`Invoke-ExcelBusyRetry`,
+		`Start-Sleep -Milliseconds 100`,
+		`closing the validator Excel process`,
 		`PATRIS_VALIDATOR_TIMEOUT_MS`,
 		`foreach ($fixture in @('2.4', '25.40', '12/3', '01.02', '001234'`,
 	} {

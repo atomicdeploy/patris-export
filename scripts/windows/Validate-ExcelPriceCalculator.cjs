@@ -697,6 +697,42 @@ function Release-ComObject([object]$value) {
     } catch {}
 }
 
+function Test-RetryableExcelComRejection([object]$errorRecord) {
+    $exception = if ($null -ne $errorRecord) { $errorRecord.Exception } else { $null }
+    while ($null -ne $exception) {
+        # Excel temporarily rejects out-of-process automation while a native
+        # callback is committing workbook state. Retrying these two COM
+        # statuses is the documented automation behavior; every other error
+        # remains terminal and is surfaced unchanged.
+        if ($exception.HResult -eq -2147418111 -or # RPC_E_CALL_REJECTED
+            $exception.HResult -eq -2147417846) {  # RPC_E_SERVERCALL_RETRYLATER
+            return $true
+        }
+        $exception = $exception.InnerException
+    }
+    return $false
+}
+
+function Invoke-ExcelBusyRetry(
+    [scriptblock]$operation,
+    [DateTime]$deadline,
+    [string]$purpose
+) {
+    while ($true) {
+        try {
+            return & $operation
+        } catch {
+            if (-not (Test-RetryableExcelComRejection $_)) {
+                throw
+            }
+            if ([DateTime]::UtcNow -ge $deadline) {
+                throw "Excel remained busy beyond the validator deadline while $purpose."
+            }
+            Start-Sleep -Milliseconds 100
+        }
+    }
+}
+
 function Matrix-Value([object]$matrix, [int]$rows, [int]$columns, [int]$row, [int]$column) {
     if ($rows -eq 1 -and $columns -eq 1) {
         return $matrix
@@ -1995,9 +2031,11 @@ try {
         $syncDeadline = [DateTime]::UtcNow.AddMilliseconds(
             [Math]::Max(1000, $validationTimeoutMilliseconds - 30000)
         )
-        while (-not [bool]$excel.Run(
-            "'$macroBookName'!ProductCatalogSync.AsyncPricingIdleForValidation"
-        )) {
+        while (-not [bool](Invoke-ExcelBusyRetry {
+            $excel.Run(
+                "'$macroBookName'!ProductCatalogSync.AsyncPricingIdleForValidation"
+            )
+        } $syncDeadline 'checking asynchronous synchronization completion')) {
             if ([DateTime]::UtcNow -ge $syncDeadline) {
                 try {
                     [void]$excel.Run(
@@ -2008,7 +2046,7 @@ try {
             }
             # This waits only in the out-of-process native harness. The VBA
             # client itself never polls WinHTTP readiness or HTTP job status.
-            Start-Sleep -Milliseconds 50
+            Start-Sleep -Milliseconds 100
         }
         $syncOperation = [Convert]::ToString(
             $excel.Run(
@@ -2460,14 +2498,26 @@ try {
     [Console]::Out.WriteLine(($report | ConvertTo-Json -Depth 10 -Compress))
 } finally {
     if ($null -ne $referenceBook) {
-        try { $referenceBook.Close($false) } catch {}
+        try {
+            [void](Invoke-ExcelBusyRetry {
+                $referenceBook.Close($false)
+            } ([DateTime]::UtcNow.AddSeconds(5)) 'closing the reference workbook')
+        } catch {}
     }
     if ($null -ne $candidateBook) {
-        try { $candidateBook.Close($false) } catch {}
+        try {
+            [void](Invoke-ExcelBusyRetry {
+                $candidateBook.Close($false)
+            } ([DateTime]::UtcNow.AddSeconds(5)) 'closing the candidate workbook')
+        } catch {}
     }
     if ($null -ne $excel) {
         try { $excel.EnableEvents = $true } catch {}
-        try { $excel.Quit() } catch {}
+        try {
+            [void](Invoke-ExcelBusyRetry {
+                $excel.Quit()
+            } ([DateTime]::UtcNow.AddSeconds(5)) 'closing the validator Excel process')
+        } catch {}
     }
     Release-ComObject $referenceBook
     Release-ComObject $candidateBook
