@@ -28,16 +28,115 @@ const (
 
 	excelPricingRemoteSnapshotMaxResponseBytes = 32 << 20
 	excelPricingRemoteSnapshotTerminalHistory  = 256
+
+	excelPricingRemoteSnapshotStageRevisionFetch        = "revision_fetch"
+	excelPricingRemoteSnapshotStageTerminalSubscription = "terminal_subscription"
+	excelPricingRemoteSnapshotStageSnapshotStart        = "snapshot_start"
+	excelPricingRemoteSnapshotStageTerminalWait         = "terminal_wait"
+	excelPricingRemoteSnapshotStageTerminalMatch        = "terminal_match"
+	excelPricingRemoteSnapshotStageRemoteTerminal       = "remote_terminal"
+	excelPricingRemoteSnapshotStageSnapshotPayload      = "snapshot_payload"
 )
 
 var (
 	errExcelPricingRemoteSnapshotConfiguration = errors.New("remote pricing snapshot configuration is invalid")
 	errExcelPricingRemoteSnapshotProtocol      = errors.New("remote pricing snapshot protocol violation")
 	errExcelPricingRemoteSnapshotIntegrity     = errors.New("remote pricing snapshot integrity validation failed")
+	errExcelPricingRemoteSnapshotRejected      = errors.New("remote pricing snapshot request was rejected")
 	errExcelPricingRemoteSnapshotUnavailable   = errors.New("remote pricing snapshot is unavailable")
 
 	excelPricingRemoteSnapshotIdentifierPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$`)
 )
+
+// excelPricingRemoteSnapshotStageError preserves a bounded stage/code pair
+// without retaining a URL, response, credential, request/build identifier, or
+// raw transport error in the user-visible snapshot job contract.
+type excelPricingRemoteSnapshotStageError struct {
+	stage string
+	code  string
+	cause error
+}
+
+func (err *excelPricingRemoteSnapshotStageError) Error() string {
+	if err == nil {
+		return "remote pricing snapshot stage failed"
+	}
+	return "remote pricing snapshot " + err.stage + " failed: " + err.code
+}
+
+func (err *excelPricingRemoteSnapshotStageError) Unwrap() error {
+	if err == nil {
+		return nil
+	}
+	return err.cause
+}
+
+func wrapExcelPricingRemoteSnapshotStage(stage string, cause error) error {
+	if cause == nil {
+		return nil
+	}
+	return &excelPricingRemoteSnapshotStageError{
+		stage: stage,
+		code:  excelPricingRemoteSnapshotStageCode(stage, cause),
+		cause: cause,
+	}
+}
+
+func excelPricingRemoteSnapshotStageCode(stage string, cause error) string {
+	switch stage {
+	case excelPricingRemoteSnapshotStageRevisionFetch:
+		switch {
+		case errors.Is(cause, errExcelPricingRemoteSnapshotProtocol),
+			errors.Is(cause, errExcelPricingRemoteSnapshotIntegrity):
+			return "snapshot_revision_fetch_protocol_failed"
+		case errors.Is(cause, errExcelPricingRemoteSnapshotConfiguration):
+			return "snapshot_revision_fetch_configuration_failed"
+		default:
+			return "snapshot_revision_fetch_unavailable"
+		}
+	case excelPricingRemoteSnapshotStageTerminalSubscription:
+		return "snapshot_terminal_subscription_failed"
+	case excelPricingRemoteSnapshotStageSnapshotStart:
+		switch {
+		case errors.Is(cause, errExcelPricingRemoteSnapshotProtocol),
+			errors.Is(cause, errExcelPricingRemoteSnapshotIntegrity):
+			return "snapshot_start_protocol_failed"
+		case errors.Is(cause, errExcelPricingRemoteSnapshotConfiguration):
+			return "snapshot_start_configuration_failed"
+		case errors.Is(cause, errExcelPricingRemoteSnapshotRejected):
+			return "snapshot_start_rejected"
+		default:
+			return "snapshot_start_unavailable"
+		}
+	case excelPricingRemoteSnapshotStageTerminalWait:
+		return "snapshot_terminal_wait_failed"
+	case excelPricingRemoteSnapshotStageTerminalMatch:
+		return "snapshot_terminal_match_failed"
+	case excelPricingRemoteSnapshotStageRemoteTerminal:
+		return "snapshot_remote_terminal_failed"
+	case excelPricingRemoteSnapshotStageSnapshotPayload:
+		switch {
+		case errors.Is(cause, errExcelPricingRemoteSnapshotIntegrity):
+			return "snapshot_payload_integrity_failed"
+		case errors.Is(cause, errExcelPricingRemoteSnapshotProtocol):
+			return "snapshot_payload_protocol_failed"
+		case errors.Is(cause, errExcelPricingRemoteSnapshotConfiguration):
+			return "snapshot_payload_configuration_failed"
+		default:
+			return "snapshot_payload_unavailable"
+		}
+	default:
+		return "snapshot_remote_stage_failed"
+	}
+}
+
+func excelPricingRemoteSnapshotFailureDetails(err error) (string, string, bool) {
+	var staged *excelPricingRemoteSnapshotStageError
+	if !errors.As(err, &staged) || staged == nil || staged.stage == "" || staged.code == "" {
+		return "", "", false
+	}
+	return staged.stage, staged.code, true
+}
 
 type excelPricingRemoteSnapshotEndpoints struct {
 	baseURL      *url.URL
@@ -439,13 +538,19 @@ func (client *excelPricingRemoteSnapshotClient) Collect(
 	}
 	revision, err := client.fetchRevision(ctx)
 	if err != nil {
-		return nil, err
+		return nil, wrapExcelPricingRemoteSnapshotStage(
+			excelPricingRemoteSnapshotStageRevisionFetch,
+			err,
+		)
 	}
 	// Register before POST. A terminal event emitted by an unusually fast build
 	// can therefore be queued while the POST response is still in flight.
 	subscription, err := client.terminals.Subscribe(requestID, client.source, revision.StateRevision)
 	if err != nil {
-		return nil, errExcelPricingRemoteSnapshotUnavailable
+		return nil, wrapExcelPricingRemoteSnapshotStage(
+			excelPricingRemoteSnapshotStageTerminalSubscription,
+			errExcelPricingRemoteSnapshotUnavailable,
+		)
 	}
 	defer subscription.Close()
 
@@ -468,26 +573,44 @@ func (client *excelPricingRemoteSnapshotClient) Collect(
 	stopStart()
 	if err != nil {
 		if contextErr := ctx.Err(); contextErr != nil {
-			return nil, contextErr
+			return nil, wrapExcelPricingRemoteSnapshotStage(
+				excelPricingRemoteSnapshotStageSnapshotStart,
+				contextErr,
+			)
 		}
-		return nil, err
+		return nil, wrapExcelPricingRemoteSnapshotStage(
+			excelPricingRemoteSnapshotStageSnapshotStart,
+			err,
+		)
 	}
 	if contextErr := ctx.Err(); contextErr != nil {
 		client.cancelSnapshot(build.CancelURL, build.BuildID)
-		return nil, contextErr
+		return nil, wrapExcelPricingRemoteSnapshotStage(
+			excelPricingRemoteSnapshotStageSnapshotStart,
+			contextErr,
+		)
 	}
 	if status == http.StatusAccepted {
 		event, waitErr := subscription.Wait(ctx)
 		if waitErr != nil {
 			client.cancelSnapshot(build.CancelURL, build.BuildID)
-			return nil, waitErr
+			return nil, wrapExcelPricingRemoteSnapshotStage(
+				excelPricingRemoteSnapshotStageTerminalWait,
+				waitErr,
+			)
 		}
 		if validateExcelPricingRemoteSnapshotTerminalMatch(event, build, revision) != nil {
 			client.cancelSnapshot(build.CancelURL, build.BuildID)
-			return nil, errExcelPricingRemoteSnapshotProtocol
+			return nil, wrapExcelPricingRemoteSnapshotStage(
+				excelPricingRemoteSnapshotStageTerminalMatch,
+				errExcelPricingRemoteSnapshotProtocol,
+			)
 		}
 		if event.Status != "ready" {
-			return nil, errExcelPricingRemoteSnapshotUnavailable
+			return nil, wrapExcelPricingRemoteSnapshotStage(
+				excelPricingRemoteSnapshotStageRemoteTerminal,
+				errExcelPricingRemoteSnapshotUnavailable,
+			)
 		}
 		build.Status = event.Status
 		build.SnapshotToken = event.SnapshotToken
@@ -497,9 +620,19 @@ func (client *excelPricingRemoteSnapshotClient) Collect(
 		build.SnapshotURL = event.SnapshotPath
 	}
 	if build.Status != "ready" {
-		return nil, errExcelPricingRemoteSnapshotUnavailable
+		return nil, wrapExcelPricingRemoteSnapshotStage(
+			excelPricingRemoteSnapshotStageRemoteTerminal,
+			errExcelPricingRemoteSnapshotUnavailable,
+		)
 	}
-	return client.fetchSnapshot(ctx, build, revision)
+	result, err := client.fetchSnapshot(ctx, build, revision)
+	if err != nil {
+		return nil, wrapExcelPricingRemoteSnapshotStage(
+			excelPricingRemoteSnapshotStageSnapshotPayload,
+			err,
+		)
+	}
+	return result, nil
 }
 
 func (client *excelPricingRemoteSnapshotClient) fetchRevision(
@@ -514,17 +647,21 @@ func (client *excelPricingRemoteSnapshotClient) fetchRevision(
 		return excelPricingRemoteSnapshotRevision{}, errExcelPricingRemoteSnapshotConfiguration
 	}
 	client.setRemoteHeaders(request, false)
+	request.Header.Set("Accept-Encoding", excelPricingRemoteIdentityEncoding)
 	response, err := client.client.Do(request)
 	if err != nil {
 		return excelPricingRemoteSnapshotRevision{}, errExcelPricingRemoteSnapshotUnavailable
 	}
 	defer response.Body.Close()
-	if response.StatusCode != http.StatusOK || !excelPricingRemoteJSONContentType(response.Header.Get("Content-Type")) {
+	if response.StatusCode != http.StatusOK {
 		return excelPricingRemoteSnapshotRevision{}, errExcelPricingRemoteSnapshotUnavailable
 	}
-	body, err := io.ReadAll(io.LimitReader(response.Body, excelPricingRemoteRevisionMaxBytes+1))
-	if err != nil || len(body) == 0 || len(body) > excelPricingRemoteRevisionMaxBytes {
-		return excelPricingRemoteSnapshotRevision{}, errExcelPricingRemoteSnapshotUnavailable
+	if !excelPricingRemoteJSONContentType(response.Header.Get("Content-Type")) {
+		return excelPricingRemoteSnapshotRevision{}, errExcelPricingRemoteSnapshotProtocol
+	}
+	body, err := readExcelPricingRemoteSnapshotBody(response.Body, excelPricingRemoteRevisionMaxBytes)
+	if err != nil {
+		return excelPricingRemoteSnapshotRevision{}, err
 	}
 	if bytes.Contains(body, []byte(client.secret)) {
 		return excelPricingRemoteSnapshotRevision{}, errExcelPricingRemoteSnapshotProtocol
@@ -588,14 +725,14 @@ func (client *excelPricingRemoteSnapshotClient) startSnapshot(
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK && response.StatusCode != http.StatusAccepted {
-		return excelPricingRemoteSnapshotBuildResponse{}, response.StatusCode, errExcelPricingRemoteSnapshotUnavailable
+		return excelPricingRemoteSnapshotBuildResponse{}, response.StatusCode, errExcelPricingRemoteSnapshotRejected
 	}
 	if !excelPricingRemoteJSONContentType(response.Header.Get("Content-Type")) {
 		return excelPricingRemoteSnapshotBuildResponse{}, response.StatusCode, errExcelPricingRemoteSnapshotProtocol
 	}
-	responseBody, err := io.ReadAll(io.LimitReader(response.Body, excelPricingRemoteRevisionMaxBytes+1))
-	if err != nil || len(responseBody) == 0 || len(responseBody) > excelPricingRemoteRevisionMaxBytes {
-		return excelPricingRemoteSnapshotBuildResponse{}, response.StatusCode, errExcelPricingRemoteSnapshotProtocol
+	responseBody, err := readExcelPricingRemoteSnapshotBody(response.Body, excelPricingRemoteRevisionMaxBytes)
+	if err != nil {
+		return excelPricingRemoteSnapshotBuildResponse{}, response.StatusCode, err
 	}
 	if bytes.Contains(responseBody, []byte(client.secret)) {
 		return excelPricingRemoteSnapshotBuildResponse{}, response.StatusCode, errExcelPricingRemoteSnapshotProtocol
@@ -635,17 +772,23 @@ func (client *excelPricingRemoteSnapshotClient) fetchSnapshot(
 		return nil, errExcelPricingRemoteSnapshotConfiguration
 	}
 	client.setRemoteHeaders(request, false)
+	// The payload ETag is the SHA-256 of the identity response bytes. Do not let
+	// automatic gzip negotiation substitute a representation-specific ETag.
+	request.Header.Set("Accept-Encoding", excelPricingRemoteIdentityEncoding)
 	response, err := client.client.Do(request)
 	if err != nil {
 		return nil, errExcelPricingRemoteSnapshotUnavailable
 	}
 	defer response.Body.Close()
-	if response.StatusCode != http.StatusOK || !excelPricingRemoteJSONContentType(response.Header.Get("Content-Type")) {
+	if response.StatusCode != http.StatusOK {
 		return nil, errExcelPricingRemoteSnapshotUnavailable
 	}
-	body, err := io.ReadAll(io.LimitReader(response.Body, excelPricingRemoteSnapshotMaxResponseBytes+1))
-	if err != nil || len(body) == 0 || len(body) > excelPricingRemoteSnapshotMaxResponseBytes {
-		return nil, errExcelPricingRemoteSnapshotUnavailable
+	if !excelPricingRemoteJSONContentType(response.Header.Get("Content-Type")) {
+		return nil, errExcelPricingRemoteSnapshotProtocol
+	}
+	body, err := readExcelPricingRemoteSnapshotBody(response.Body, excelPricingRemoteSnapshotMaxResponseBytes)
+	if err != nil {
+		return nil, err
 	}
 	if bytes.Contains(body, []byte(client.secret)) {
 		return nil, errExcelPricingRemoteSnapshotProtocol
@@ -677,6 +820,17 @@ func (client *excelPricingRemoteSnapshotClient) fetchSnapshot(
 		ProjectedRowFields:     fields,
 		RawPayload:             append([]byte(nil), body...),
 	}, nil
+}
+
+func readExcelPricingRemoteSnapshotBody(reader io.Reader, limit int64) ([]byte, error) {
+	body, err := io.ReadAll(io.LimitReader(reader, limit+1))
+	if err != nil {
+		return nil, errExcelPricingRemoteSnapshotUnavailable
+	}
+	if len(body) == 0 || int64(len(body)) > limit {
+		return nil, errExcelPricingRemoteSnapshotProtocol
+	}
+	return body, nil
 }
 
 func (client *excelPricingRemoteSnapshotClient) cancelSnapshot(cancelURL, buildID string) {

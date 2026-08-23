@@ -1,6 +1,9 @@
 package server
 
 import (
+	"bufio"
+	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"errors"
@@ -39,14 +42,42 @@ type excelPricingRemoteSnapshotFixture struct {
 	startHeldOnce  sync.Once
 	releaseOnce    sync.Once
 
-	mu            sync.Mutex
-	revisionCalls int
-	startCalls    int
-	bulkCalls     int
-	statusCalls   int
-	cancelCalls   int
-	legacyCalls   int
-	headerFailure string
+	mu                      sync.Mutex
+	revisionCalls           int
+	startCalls              int
+	bulkCalls               int
+	statusCalls             int
+	cancelCalls             int
+	legacyCalls             int
+	headerFailure           string
+	revisionIdentityCalls   int
+	revisionCompressedCalls int
+	payloadIdentityCalls    int
+	payloadCompressedCalls  int
+}
+
+type rejectingExcelPricingRemoteTerminalSource struct{}
+
+type excelPricingRemoteSnapshotRoundTripFunc func(*http.Request) (*http.Response, error)
+
+type failingExcelPricingRemoteSnapshotReader struct{}
+
+func (failingExcelPricingRemoteSnapshotReader) Read([]byte) (int, error) {
+	return 0, errors.New("private response read failure")
+}
+
+func (roundTrip excelPricingRemoteSnapshotRoundTripFunc) RoundTrip(
+	request *http.Request,
+) (*http.Response, error) {
+	return roundTrip(request)
+}
+
+func (rejectingExcelPricingRemoteTerminalSource) Subscribe(
+	string,
+	canonical.Source,
+	string,
+) (excelPricingRemoteSnapshotTerminalSubscription, error) {
+	return nil, errors.New("private subscription implementation detail")
 }
 
 func TestExcelPricingRemoteSnapshotReadyUsesOneBulkFetchWithoutStatusPolling(t *testing.T) {
@@ -165,6 +196,111 @@ func TestExcelPricingRemoteSnapshotColdCompletesFromTerminalEventOnly(t *testing
 		t.Fatalf("snapshot revision = %q", result.SnapshotRevision)
 	}
 	fixture.assertCalls(t, 1, 1, 1, 0, 0)
+}
+
+func TestExcelPricingRemoteSnapshotIdentityEncodingPreservesOriginETags(t *testing.T) {
+	t.Run("revision", func(t *testing.T) {
+		fixture := newExcelPricingRemoteSnapshotFixture(t, "cdn_rewritten_etag")
+		defer fixture.Close()
+
+		client := fixture.Client(t)
+		base := client.client.Transport
+		if base == nil {
+			base = http.DefaultTransport
+		}
+		autoDecompressed := false
+		client.client.Transport = excelPricingRemoteSnapshotRoundTripFunc(
+			func(request *http.Request) (*http.Response, error) {
+				clone := request.Clone(request.Context())
+				clone.Header = request.Header.Clone()
+				if clone.URL.Path == "/wp-json/digitalogic/pricing/sync/revision" {
+					clone.Header.Del("Accept-Encoding")
+				}
+				response, err := base.RoundTrip(clone)
+				if response != nil && clone.URL.Path == "/wp-json/digitalogic/pricing/sync/revision" {
+					autoDecompressed = response.Uncompressed
+				}
+				return response, err
+			},
+		)
+		if _, err := client.fetchRevision(context.Background()); !errors.Is(
+			err, errExcelPricingRemoteSnapshotProtocol,
+		) {
+			t.Fatalf("compressed representation revision error = %v", err)
+		}
+		if !autoDecompressed {
+			t.Fatal("control response was not transparently decompressed")
+		}
+
+		client = fixture.Client(t)
+		if _, err := client.fetchRevision(context.Background()); err != nil {
+			t.Fatalf("identity revision error = %v", err)
+		}
+		fixture.assertRepresentationCalls(t, 1, 1, 0, 0)
+	})
+
+	t.Run("immutable payload", func(t *testing.T) {
+		fixture := newExcelPricingRemoteSnapshotFixture(t, "cdn_rewritten_etag")
+		defer fixture.Close()
+
+		client := fixture.Client(t)
+		revision, err := client.fetchRevision(context.Background())
+		if err != nil {
+			t.Fatalf("revision error = %v", err)
+		}
+		build := fixture.buildResponse()
+		base := client.client.Transport
+		if base == nil {
+			base = http.DefaultTransport
+		}
+		autoDecompressed := false
+		client.client.Transport = excelPricingRemoteSnapshotRoundTripFunc(
+			func(request *http.Request) (*http.Response, error) {
+				clone := request.Clone(request.Context())
+				clone.Header = request.Header.Clone()
+				if strings.HasPrefix(clone.URL.Path, "/wp-json/digitalogic/pricing/sync/snapshots/") {
+					clone.Header.Del("Accept-Encoding")
+				}
+				response, err := base.RoundTrip(clone)
+				if response != nil && strings.HasPrefix(
+					clone.URL.Path, "/wp-json/digitalogic/pricing/sync/snapshots/",
+				) {
+					autoDecompressed = response.Uncompressed
+				}
+				return response, err
+			},
+		)
+		if _, err := client.fetchSnapshot(context.Background(), build, revision); !errors.Is(
+			err, errExcelPricingRemoteSnapshotProtocol,
+		) {
+			t.Fatalf("compressed representation payload error = %v", err)
+		}
+		if !autoDecompressed {
+			t.Fatal("control payload was not transparently decompressed")
+		}
+
+		client = fixture.Client(t)
+		if _, err := client.fetchSnapshot(context.Background(), build, revision); err != nil {
+			t.Fatalf("identity payload error = %v", err)
+		}
+		fixture.assertRepresentationCalls(t, 1, 0, 1, 1)
+	})
+
+	t.Run("collector keeps start and terminal semantics", func(t *testing.T) {
+		fixture := newExcelPricingRemoteSnapshotFixture(t, "cdn_rewritten_etag")
+		defer fixture.Close()
+
+		result, err := fixture.Client(t).Collect(context.Background(), fixture.requestID, 60)
+		if err != nil {
+			t.Fatalf("Collect() error = %v", err)
+		}
+		if result.CompositeStateRevision != fixture.revision.StateRevision ||
+			result.SnapshotRevision != fixture.payload.SnapshotRevision {
+			t.Fatalf("collector identity = %+v", result)
+		}
+		fixture.assertCalls(t, 1, 1, 1, 0, 0)
+		fixture.assertRepresentationCalls(t, 1, 0, 1, 0)
+	})
 }
 
 func TestExcelPricingSnapshotProductionCollectorUsesBulkAndPreservesCompositeIdentity(t *testing.T) {
@@ -410,6 +546,681 @@ func TestExcelPricingRemoteSnapshotCancellationPropagatesWithoutStatusPolling(t 
 		t.Fatalf("Collect() error = %v, want deadline", err)
 	}
 	fixture.assertCalls(t, 1, 1, 0, 0, 1)
+}
+
+func TestExcelPricingRemoteSnapshotCollectAnnotatesEveryRemoteStage(t *testing.T) {
+	assertStage := func(t *testing.T, err error, wantStage, wantCode string) {
+		t.Helper()
+		stage, code, ok := excelPricingRemoteSnapshotFailureDetails(err)
+		if !ok || stage != wantStage || code != wantCode {
+			t.Fatalf("failure details = (%q, %q, %v), want (%q, %q, true): %v",
+				stage, code, ok, wantStage, wantCode, err)
+		}
+		if strings.Contains(err.Error(), "private subscription implementation detail") ||
+			strings.Contains(err.Error(), "private transport implementation detail") {
+			t.Fatalf("structured error leaked raw cause: %v", err)
+		}
+	}
+	rejectTransport := func(
+		client *excelPricingRemoteSnapshotClient,
+		predicate func(*http.Request) bool,
+	) {
+		base := client.client.Transport
+		if base == nil {
+			base = http.DefaultTransport
+		}
+		client.client.Transport = excelPricingRemoteSnapshotRoundTripFunc(
+			func(request *http.Request) (*http.Response, error) {
+				if predicate(request) {
+					return nil, errors.New("private transport implementation detail")
+				}
+				return base.RoundTrip(request)
+			},
+		)
+	}
+
+	t.Run("revision fetch protocol", func(t *testing.T) {
+		fixture := newExcelPricingRemoteSnapshotFixture(t, "ready")
+		defer fixture.Close()
+		fixture.revision.Schema = "invalid-revision-schema"
+		_, err := fixture.Client(t).Collect(context.Background(), fixture.requestID, 60)
+		assertStage(t, err, excelPricingRemoteSnapshotStageRevisionFetch,
+			"snapshot_revision_fetch_protocol_failed")
+		fixture.assertCalls(t, 1, 0, 0, 0, 0)
+	})
+
+	t.Run("revision fetch wrong content type", func(t *testing.T) {
+		fixture := newExcelPricingRemoteSnapshotFixture(t, "revision_wrong_content_type")
+		defer fixture.Close()
+		_, err := fixture.Client(t).Collect(context.Background(), fixture.requestID, 60)
+		assertStage(t, err, excelPricingRemoteSnapshotStageRevisionFetch,
+			"snapshot_revision_fetch_protocol_failed")
+		fixture.assertCalls(t, 1, 0, 0, 0, 0)
+	})
+
+	for name, mode := range map[string]string{
+		"revision fetch empty body":     "revision_empty_body",
+		"revision fetch oversized body": "revision_oversized_body",
+	} {
+		t.Run(name, func(t *testing.T) {
+			fixture := newExcelPricingRemoteSnapshotFixture(t, mode)
+			defer fixture.Close()
+			_, err := fixture.Client(t).Collect(context.Background(), fixture.requestID, 60)
+			assertStage(t, err, excelPricingRemoteSnapshotStageRevisionFetch,
+				"snapshot_revision_fetch_protocol_failed")
+			fixture.assertCalls(t, 1, 0, 0, 0, 0)
+		})
+	}
+
+	t.Run("revision fetch unavailable", func(t *testing.T) {
+		fixture := newExcelPricingRemoteSnapshotFixture(t, "ready")
+		defer fixture.Close()
+		client := fixture.Client(t)
+		rejectTransport(client, func(request *http.Request) bool {
+			return request.Method == http.MethodGet &&
+				request.URL.Path == "/wp-json/digitalogic/pricing/sync/revision"
+		})
+		_, err := client.Collect(context.Background(), fixture.requestID, 60)
+		assertStage(t, err, excelPricingRemoteSnapshotStageRevisionFetch,
+			"snapshot_revision_fetch_unavailable")
+		fixture.assertCalls(t, 0, 0, 0, 0, 0)
+	})
+
+	t.Run("terminal subscription", func(t *testing.T) {
+		fixture := newExcelPricingRemoteSnapshotFixture(t, "ready")
+		defer fixture.Close()
+		client := fixture.Client(t)
+		client.terminals = rejectingExcelPricingRemoteTerminalSource{}
+		_, err := client.Collect(context.Background(), fixture.requestID, 60)
+		assertStage(t, err, excelPricingRemoteSnapshotStageTerminalSubscription,
+			"snapshot_terminal_subscription_failed")
+		fixture.assertCalls(t, 1, 0, 0, 0, 0)
+	})
+
+	t.Run("snapshot start protocol", func(t *testing.T) {
+		fixture := newExcelPricingRemoteSnapshotFixture(t, "ready")
+		defer fixture.Close()
+		fixture.badSnapshotURL = "https://attacker.invalid/wp-json/digitalogic/pricing/sync/snapshots/" +
+			fixture.payload.SnapshotToken
+		_, err := fixture.Client(t).Collect(context.Background(), fixture.requestID, 60)
+		assertStage(t, err, excelPricingRemoteSnapshotStageSnapshotStart,
+			"snapshot_start_protocol_failed")
+		fixture.assertCalls(t, 1, 1, 0, 0, 0)
+	})
+
+	t.Run("snapshot start unavailable", func(t *testing.T) {
+		fixture := newExcelPricingRemoteSnapshotFixture(t, "ready")
+		defer fixture.Close()
+		client := fixture.Client(t)
+		rejectTransport(client, func(request *http.Request) bool {
+			return request.Method == http.MethodPost &&
+				request.URL.Path == "/wp-json/digitalogic/pricing/sync/snapshots"
+		})
+		_, err := client.Collect(context.Background(), fixture.requestID, 60)
+		assertStage(t, err, excelPricingRemoteSnapshotStageSnapshotStart,
+			"snapshot_start_unavailable")
+		fixture.assertCalls(t, 1, 0, 0, 0, 0)
+	})
+
+	t.Run("snapshot start rejected", func(t *testing.T) {
+		fixture := newExcelPricingRemoteSnapshotFixture(t, "start_rejected")
+		defer fixture.Close()
+		_, err := fixture.Client(t).Collect(context.Background(), fixture.requestID, 60)
+		assertStage(t, err, excelPricingRemoteSnapshotStageSnapshotStart,
+			"snapshot_start_rejected")
+		fixture.assertCalls(t, 1, 1, 0, 0, 0)
+	})
+
+	t.Run("terminal wait", func(t *testing.T) {
+		fixture := newExcelPricingRemoteSnapshotFixture(t, "cold")
+		defer fixture.Close()
+		ctx, cancel := context.WithTimeout(context.Background(), 40*time.Millisecond)
+		defer cancel()
+		_, err := fixture.Client(t).Collect(ctx, fixture.requestID, 0)
+		assertStage(t, err, excelPricingRemoteSnapshotStageTerminalWait,
+			"snapshot_terminal_wait_failed")
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("terminal wait lost deadline cause: %v", err)
+		}
+	})
+
+	t.Run("terminal match", func(t *testing.T) {
+		fixture := newExcelPricingRemoteSnapshotFixture(t, "event_bad_match")
+		defer fixture.Close()
+		_, err := fixture.Client(t).Collect(context.Background(), fixture.requestID, 0)
+		assertStage(t, err, excelPricingRemoteSnapshotStageTerminalMatch,
+			"snapshot_terminal_match_failed")
+	})
+
+	t.Run("remote terminal", func(t *testing.T) {
+		fixture := newExcelPricingRemoteSnapshotFixture(t, "event_failed")
+		defer fixture.Close()
+		_, err := fixture.Client(t).Collect(context.Background(), fixture.requestID, 0)
+		assertStage(t, err, excelPricingRemoteSnapshotStageRemoteTerminal,
+			"snapshot_remote_terminal_failed")
+	})
+
+	t.Run("snapshot payload protocol", func(t *testing.T) {
+		fixture := newExcelPricingRemoteSnapshotFixture(t, "ready")
+		defer fixture.Close()
+		fixture.badETag = true
+		_, err := fixture.Client(t).Collect(context.Background(), fixture.requestID, 60)
+		assertStage(t, err, excelPricingRemoteSnapshotStageSnapshotPayload,
+			"snapshot_payload_protocol_failed")
+	})
+
+	t.Run("snapshot payload wrong content type", func(t *testing.T) {
+		fixture := newExcelPricingRemoteSnapshotFixture(t, "payload_wrong_content_type")
+		defer fixture.Close()
+		_, err := fixture.Client(t).Collect(context.Background(), fixture.requestID, 60)
+		assertStage(t, err, excelPricingRemoteSnapshotStageSnapshotPayload,
+			"snapshot_payload_protocol_failed")
+		fixture.assertCalls(t, 1, 1, 1, 0, 0)
+	})
+
+	for name, mode := range map[string]string{
+		"snapshot payload empty body":     "payload_empty_body",
+		"snapshot payload oversized body": "payload_oversized_body",
+	} {
+		t.Run(name, func(t *testing.T) {
+			fixture := newExcelPricingRemoteSnapshotFixture(t, mode)
+			defer fixture.Close()
+			_, err := fixture.Client(t).Collect(context.Background(), fixture.requestID, 60)
+			assertStage(t, err, excelPricingRemoteSnapshotStageSnapshotPayload,
+				"snapshot_payload_protocol_failed")
+			fixture.assertCalls(t, 1, 1, 1, 0, 0)
+		})
+	}
+
+	t.Run("snapshot payload unavailable", func(t *testing.T) {
+		fixture := newExcelPricingRemoteSnapshotFixture(t, "ready")
+		defer fixture.Close()
+		client := fixture.Client(t)
+		rejectTransport(client, func(request *http.Request) bool {
+			return request.Method == http.MethodGet &&
+				strings.HasPrefix(request.URL.Path, "/wp-json/digitalogic/pricing/sync/snapshots/")
+		})
+		_, err := client.Collect(context.Background(), fixture.requestID, 60)
+		assertStage(t, err, excelPricingRemoteSnapshotStageSnapshotPayload,
+			"snapshot_payload_unavailable")
+		fixture.assertCalls(t, 1, 1, 0, 0, 0)
+	})
+
+	t.Run("snapshot payload integrity", func(t *testing.T) {
+		fixture := newExcelPricingRemoteSnapshotFixture(t, "ready")
+		defer fixture.Close()
+		var columns []map[string]json.RawMessage
+		if err := json.Unmarshal(fixture.payload.Catalog.Columns, &columns); err != nil {
+			t.Fatal(err)
+		}
+		columns[0], columns[1] = columns[1], columns[0]
+		fixture.payload.Catalog.Columns = mustMarshalExcelPricingRemoteSnapshotTestJSON(t, columns)
+		fixture.finalizePayload()
+		_, err := fixture.Client(t).Collect(context.Background(), fixture.requestID, 60)
+		assertStage(t, err, excelPricingRemoteSnapshotStageSnapshotPayload,
+			"snapshot_payload_integrity_failed")
+	})
+}
+
+func TestExcelPricingRemoteSnapshotStageCodeCoversConfigurationAndTransportClasses(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		stage string
+		cause error
+		code  string
+	}{
+		{"revision configuration", excelPricingRemoteSnapshotStageRevisionFetch,
+			errExcelPricingRemoteSnapshotConfiguration, "snapshot_revision_fetch_configuration_failed"},
+		{"revision transport", excelPricingRemoteSnapshotStageRevisionFetch,
+			errExcelPricingRemoteSnapshotUnavailable, "snapshot_revision_fetch_unavailable"},
+		{"start configuration", excelPricingRemoteSnapshotStageSnapshotStart,
+			errExcelPricingRemoteSnapshotConfiguration, "snapshot_start_configuration_failed"},
+		{"start transport", excelPricingRemoteSnapshotStageSnapshotStart,
+			errExcelPricingRemoteSnapshotUnavailable, "snapshot_start_unavailable"},
+		{"start response", excelPricingRemoteSnapshotStageSnapshotStart,
+			errExcelPricingRemoteSnapshotRejected, "snapshot_start_rejected"},
+		{"payload configuration", excelPricingRemoteSnapshotStageSnapshotPayload,
+			errExcelPricingRemoteSnapshotConfiguration, "snapshot_payload_configuration_failed"},
+		{"payload transport", excelPricingRemoteSnapshotStageSnapshotPayload,
+			errExcelPricingRemoteSnapshotUnavailable, "snapshot_payload_unavailable"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			err := wrapExcelPricingRemoteSnapshotStage(test.stage, test.cause)
+			stage, code, ok := excelPricingRemoteSnapshotFailureDetails(err)
+			if !ok || stage != test.stage || code != test.code {
+				t.Fatalf("failure details=(%q,%q,%v), want=(%q,%q,true)",
+					stage, code, ok, test.stage, test.code)
+			}
+		})
+	}
+
+	if _, err := readExcelPricingRemoteSnapshotBody(failingExcelPricingRemoteSnapshotReader{}, 8); !errors.Is(
+		err,
+		errExcelPricingRemoteSnapshotUnavailable,
+	) {
+		t.Fatalf("body read failure=%v, want unavailable", err)
+	}
+	for name, body := range map[string]string{
+		"empty":     "",
+		"oversized": "123456789",
+	} {
+		t.Run(name+" body", func(t *testing.T) {
+			if _, err := readExcelPricingRemoteSnapshotBody(strings.NewReader(body), 8); !errors.Is(
+				err,
+				errExcelPricingRemoteSnapshotProtocol,
+			) {
+				t.Fatalf("body error=%v, want protocol", err)
+			}
+		})
+	}
+}
+
+func TestExcelPricingSnapshotFailureEvidencePreservesPublicCodeAndPrivacy(t *testing.T) {
+	fixture := newExcelPricingRemoteSnapshotFixture(t, "ready")
+	defer fixture.Close()
+	fixture.acceptAnyID = true
+	fixture.revision.Schema = "invalid-revision-schema"
+	server, token := newExcelPricingRemoteSnapshotProductionServer(t, fixture)
+	requestID := "snapshot-stage-evidence-0001"
+	request := authenticatedExcelPricingRequest(
+		http.MethodPost,
+		"/api/pricing-sync/snapshots",
+		validExcelPricingSnapshotStartBody(fixture.source, requestID, "fa", 0),
+		token,
+	)
+	request.Header.Set("Idempotency-Key", requestID)
+	response := httptest.NewRecorder()
+	server.router.ServeHTTP(response, request)
+	if response.Code != http.StatusAccepted {
+		t.Fatalf("snapshot start=%d: %s", response.Code, response.Body.String())
+	}
+	jobID := excelPricingSnapshotJobIDForTest(t, response.Body.Bytes())
+	status := waitForExcelPricingSnapshotStatus(t, server, token, jobID, "failed")
+	if status["code"] != "snapshot_integrity_failed" {
+		t.Fatalf("stable public code changed: %#v", status)
+	}
+	failure, ok := status["failure"].(map[string]interface{})
+	if !ok || len(failure) != 3 ||
+		failure["schema"] != excelPricingSnapshotFailureSchema ||
+		failure["stage"] != excelPricingRemoteSnapshotStageRevisionFetch ||
+		failure["code"] != "snapshot_revision_fetch_protocol_failed" {
+		t.Fatalf("structured failure = %#v", status["failure"])
+	}
+	rendered, err := json.Marshal(failure)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, protected := range []string{
+		"test-remote-snapshot-secret-value",
+		fixture.server.URL,
+		fixture.source.ID,
+		fixture.source.Dataset,
+		fixture.requestID,
+		fixture.buildID,
+	} {
+		if protected != "" && strings.Contains(string(rendered), protected) {
+			t.Fatalf("structured failure leaked protected material: %s", rendered)
+		}
+	}
+	fixture.assertCalls(t, 1, 0, 0, 0, 0)
+}
+
+func TestExcelPricingSnapshotFailureEvidenceRejectsUnreviewedValues(t *testing.T) {
+	for _, test := range []struct {
+		stage string
+		code  string
+	}{
+		{stage: "https://private.invalid/path", code: "snapshot_revision_fetch_protocol_failed"},
+		{stage: excelPricingRemoteSnapshotStageRevisionFetch, code: "private raw transport error"},
+		{stage: excelPricingSnapshotStageRemoteConfiguration, code: "snapshot_payload_unavailable"},
+	} {
+		if validExcelPricingSnapshotFailure(test.stage, test.code) {
+			t.Fatalf("unreviewed failure pair accepted: stage=%q code=%q", test.stage, test.code)
+		}
+	}
+
+	for _, test := range []struct {
+		stage string
+		code  string
+	}{
+		{excelPricingRemoteSnapshotStageRevisionFetch, "snapshot_revision_fetch_protocol_failed"},
+		{excelPricingRemoteSnapshotStageTerminalSubscription, "snapshot_terminal_subscription_failed"},
+		{excelPricingRemoteSnapshotStageSnapshotStart, "snapshot_start_protocol_failed"},
+		{excelPricingRemoteSnapshotStageTerminalWait, "snapshot_terminal_wait_failed"},
+		{excelPricingRemoteSnapshotStageTerminalMatch, "snapshot_terminal_match_failed"},
+		{excelPricingRemoteSnapshotStageRemoteTerminal, "snapshot_remote_terminal_failed"},
+		{excelPricingRemoteSnapshotStageSnapshotPayload, "snapshot_payload_integrity_failed"},
+		{excelPricingSnapshotStageRemoteConfiguration, "snapshot_remote_configuration_failed"},
+		{excelPricingSnapshotStageLocalProjection, "snapshot_local_projection_integrity_failed"},
+	} {
+		if !validExcelPricingSnapshotFailure(test.stage, test.code) {
+			t.Fatalf("reviewed failure pair rejected: stage=%q code=%q", test.stage, test.code)
+		}
+	}
+}
+
+func TestExcelPricingSnapshotProductionFailureStagesCoverConfigurationAndLocalProjection(t *testing.T) {
+	source := excelPricingStateSourceForTest()
+	for _, test := range []struct {
+		name       string
+		publicCode string
+		stage      string
+		code       string
+		configure  func(*Server)
+	}{
+		{
+			name:       "remote configuration",
+			publicCode: "remote_unavailable",
+			stage:      excelPricingSnapshotStageRemoteConfiguration,
+			code:       "snapshot_remote_configuration_failed",
+			configure: func(server *Server) {
+				server.excelPricing.snapshotCollector = nil
+				server.excelPricingRemote = nil
+			},
+		},
+		{
+			name:       "local projection",
+			publicCode: "snapshot_integrity_failed",
+			stage:      excelPricingSnapshotStageLocalProjection,
+			code:       "snapshot_local_projection_integrity_failed",
+			configure: func(server *Server) {
+				server.excelPricing.snapshotCollector = func(
+					_ context.Context,
+					jobID string,
+					request excelPricingSnapshotStartRequest,
+					_ updateout.Config,
+				) (*excelPricingSnapshot, string) {
+					return server.finalizeExcelPricingRemoteSnapshot(
+						jobID,
+						nil,
+						excelPricingSnapshotProjection(request.Projection),
+					)
+				}
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			server := newExcelPricingTestServer(
+				t,
+				"http://127.0.0.1:1/wp-json/digitalogic/patris/product-sync",
+			)
+			test.configure(server)
+			token := openExcelPricingSession(t, server)
+			requestID := "snapshot-production-failure-" + strings.ReplaceAll(test.name, " ", "-")
+			request := authenticatedExcelPricingRequest(
+				http.MethodPost,
+				"/api/pricing-sync/snapshots",
+				validExcelPricingSnapshotStartBody(source, requestID, "fa", 0),
+				token,
+			)
+			request.Header.Set("Idempotency-Key", requestID)
+			response := httptest.NewRecorder()
+			server.router.ServeHTTP(response, request)
+			if response.Code != http.StatusAccepted {
+				t.Fatalf("snapshot start=%d: %s", response.Code, response.Body.String())
+			}
+			jobID := excelPricingSnapshotJobIDForTest(t, response.Body.Bytes())
+			status := waitForExcelPricingSnapshotStatus(t, server, token, jobID, "failed")
+			assertExcelPricingSnapshotFailureForTest(
+				t,
+				status,
+				test.publicCode,
+				test.stage,
+				test.code,
+			)
+		})
+	}
+}
+
+func TestExcelPricingSnapshotFailurePropagatesToTerminalWaitSSEAndFollower(t *testing.T) {
+	source := excelPricingStateSourceForTest()
+	server := newExcelPricingTestServer(
+		t,
+		"http://127.0.0.1:1/wp-json/digitalogic/patris/product-sync",
+	)
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var startedOnce sync.Once
+	server.excelPricing.snapshotCollector = func(
+		ctx context.Context,
+		jobID string,
+		_ excelPricingSnapshotStartRequest,
+		_ updateout.Config,
+	) (*excelPricingSnapshot, string) {
+		startedOnce.Do(func() { close(started) })
+		select {
+		case <-release:
+		case <-ctx.Done():
+			return nil, excelPricingSnapshotContextCode(ctx)
+		}
+		server.setExcelPricingSnapshotFailure(
+			jobID,
+			excelPricingRemoteSnapshotStageRevisionFetch,
+			"snapshot_revision_fetch_protocol_failed",
+		)
+		return nil, "snapshot_integrity_failed"
+	}
+	token := openExcelPricingSession(t, server)
+	start := func(requestID string) (string, map[string]interface{}) {
+		t.Helper()
+		request := authenticatedExcelPricingRequest(
+			http.MethodPost,
+			"/api/pricing-sync/snapshots",
+			validExcelPricingSnapshotStartBody(source, requestID, "fa", 0),
+			token,
+		)
+		request.Header.Set("Idempotency-Key", requestID)
+		response := httptest.NewRecorder()
+		server.router.ServeHTTP(response, request)
+		if response.Code != http.StatusAccepted {
+			t.Fatalf("snapshot start=%d: %s", response.Code, response.Body.String())
+		}
+		var status map[string]interface{}
+		if err := json.Unmarshal(response.Body.Bytes(), &status); err != nil {
+			t.Fatal(err)
+		}
+		return excelPricingSnapshotJobIDForTest(t, response.Body.Bytes()), status
+	}
+	leaderID, leaderStart := start("snapshot-failure-leader-0001")
+	if leaderStart["coalesced"] != false {
+		t.Fatalf("leader start=%#v", leaderStart)
+	}
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("leader collector did not start")
+	}
+	followerID, followerStart := start("snapshot-failure-follower-0001")
+	if followerStart["coalesced"] != true {
+		t.Fatalf("follower start=%#v", followerStart)
+	}
+	close(release)
+	leader := waitForExcelPricingSnapshotStatus(t, server, token, leaderID, "failed")
+	follower := waitForExcelPricingSnapshotStatus(t, server, token, followerID, "failed")
+	for name, status := range map[string]map[string]interface{}{
+		"leader":   leader,
+		"follower": follower,
+	} {
+		t.Run(name+" terminal wait", func(t *testing.T) {
+			assertExcelPricingSnapshotFailureForTest(
+				t,
+				status,
+				"snapshot_integrity_failed",
+				excelPricingRemoteSnapshotStageRevisionFetch,
+				"snapshot_revision_fetch_protocol_failed",
+			)
+		})
+	}
+
+	loopback := httptest.NewServer(server.router)
+	defer loopback.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	request, err := http.NewRequestWithContext(
+		ctx,
+		http.MethodGet,
+		loopback.URL+"/api/pricing-sync/snapshots/"+followerID,
+		nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set(excelPricingClientHeader, excelPricingClientID)
+	request.Header.Set(excelPricingCSRFHeader, token)
+	request.Header.Set("Accept", "text/event-stream")
+	response, err := loopback.Client().Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("SSE status=%d", response.StatusCode)
+	}
+	found := false
+	scanner := bufio.NewScanner(response.Body)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if !strings.HasPrefix(line, "data: ") {
+			continue
+		}
+		var event excelPricingSnapshotEventEnvelope
+		if err := json.Unmarshal([]byte(strings.TrimPrefix(line, "data: ")), &event); err != nil {
+			t.Fatal(err)
+		}
+		if event.Kind != "snapshot_job" || event.Job["status"] != "failed" {
+			continue
+		}
+		assertExcelPricingSnapshotFailureForTest(
+			t,
+			event.Job,
+			"snapshot_integrity_failed",
+			excelPricingRemoteSnapshotStageRevisionFetch,
+			"snapshot_revision_fetch_protocol_failed",
+		)
+		found = true
+		break
+	}
+	if err := scanner.Err(); err != nil && !errors.Is(err, context.Canceled) {
+		t.Fatal(err)
+	}
+	if !found {
+		t.Fatal("follower SSE did not replay the structured terminal failure")
+	}
+}
+
+func TestExcelPricingSnapshotCancellationNeverRetainsUnrelatedFailureEvidence(t *testing.T) {
+	source := excelPricingStateSourceForTest()
+	server := newExcelPricingTestServer(
+		t,
+		"http://127.0.0.1:1/wp-json/digitalogic/patris/product-sync",
+	)
+	started := make(chan struct{})
+	release := make(chan struct{})
+	server.excelPricing.snapshotCollector = func(
+		_ context.Context,
+		jobID string,
+		_ excelPricingSnapshotStartRequest,
+		_ updateout.Config,
+	) (*excelPricingSnapshot, string) {
+		close(started)
+		<-release
+		server.setExcelPricingSnapshotFailure(
+			jobID,
+			excelPricingRemoteSnapshotStageRevisionFetch,
+			"snapshot_revision_fetch_protocol_failed",
+		)
+		return nil, "snapshot_integrity_failed"
+	}
+	token := openExcelPricingSession(t, server)
+	requestID := "snapshot-cancel-failure-race-0001"
+	start := authenticatedExcelPricingRequest(
+		http.MethodPost,
+		"/api/pricing-sync/snapshots",
+		validExcelPricingSnapshotStartBody(source, requestID, "fa", 0),
+		token,
+	)
+	start.Header.Set("Idempotency-Key", requestID)
+	startResponse := httptest.NewRecorder()
+	server.router.ServeHTTP(startResponse, start)
+	if startResponse.Code != http.StatusAccepted {
+		t.Fatalf("snapshot start=%d: %s", startResponse.Code, startResponse.Body.String())
+	}
+	jobID := excelPricingSnapshotJobIDForTest(t, startResponse.Body.Bytes())
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("collector did not start")
+	}
+	cancel := authenticatedExcelPricingRequest(
+		http.MethodDelete,
+		"/api/pricing-sync/snapshots/"+jobID,
+		"",
+		token,
+	)
+	cancelResponse := httptest.NewRecorder()
+	server.router.ServeHTTP(cancelResponse, cancel)
+	if cancelResponse.Code != http.StatusAccepted {
+		t.Fatalf("cancel=%d: %s", cancelResponse.Code, cancelResponse.Body.String())
+	}
+	server.setExcelPricingSnapshotFailure(
+		jobID,
+		excelPricingRemoteSnapshotStageRevisionFetch,
+		"snapshot_revision_fetch_protocol_failed",
+	)
+	statusRequest := authenticatedExcelPricingRequest(
+		http.MethodGet,
+		"/api/pricing-sync/snapshots/"+jobID,
+		"",
+		token,
+	)
+	statusResponse := httptest.NewRecorder()
+	server.router.ServeHTTP(statusResponse, statusRequest)
+	var cancelling map[string]interface{}
+	if err := json.Unmarshal(statusResponse.Body.Bytes(), &cancelling); err != nil {
+		t.Fatal(err)
+	}
+	if cancelling["status"] != "cancelling" || cancelling["code"] != "request_cancelled" {
+		t.Fatalf("cancelling status=%#v", cancelling)
+	}
+	if _, exists := cancelling["failure"]; exists {
+		t.Fatalf("cancelling response retained unrelated failure=%#v", cancelling["failure"])
+	}
+	close(release)
+	terminal := waitForExcelPricingSnapshotStatus(t, server, token, jobID, "cancelled")
+	if terminal["code"] != "request_cancelled" {
+		t.Fatalf("cancelled status=%#v", terminal)
+	}
+	if _, exists := terminal["failure"]; exists {
+		t.Fatalf("cancelled response retained unrelated failure=%#v", terminal["failure"])
+	}
+}
+
+func assertExcelPricingSnapshotFailureForTest(
+	t *testing.T,
+	status map[string]interface{},
+	publicCode, stage, code string,
+) {
+	t.Helper()
+	if status["code"] != publicCode {
+		t.Fatalf("public code=%#v, want %q", status["code"], publicCode)
+	}
+	failure, ok := status["failure"].(map[string]interface{})
+	if !ok || len(failure) != 3 ||
+		failure["schema"] != excelPricingSnapshotFailureSchema ||
+		failure["stage"] != stage || failure["code"] != code {
+		t.Fatalf("structured failure=%#v", status["failure"])
+	}
+	rendered, err := json.Marshal(failure)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, protected := range []string{
+		"secret", "http://", "https://", "request_id", "build_id", "source_id", "dataset",
+	} {
+		if strings.Contains(strings.ToLower(string(rendered)), protected) {
+			t.Fatalf("structured failure exposed protected material: %s", rendered)
+		}
+	}
 }
 
 func TestExcelPricingRemoteSnapshotRejectsCrossOriginReturnedPath(t *testing.T) {
@@ -658,11 +1469,36 @@ func (fixture *excelPricingRemoteSnapshotFixture) handle(w http.ResponseWriter, 
 			http.Error(w, "bad query", http.StatusBadRequest)
 			return
 		}
+		if fixture.mode == "revision_wrong_content_type" {
+			w.Header().Set("Content-Type", "text/html; charset=UTF-8")
+		}
+		if fixture.mode == "cdn_rewritten_etag" {
+			body, err := json.Marshal(fixture.revision)
+			if err != nil {
+				http.Error(w, "revision fixture", http.StatusInternalServerError)
+				return
+			}
+			fixture.writeIdentityBoundRepresentation(
+				w, r, body, fixture.revision.StateRevision, "revision",
+			)
+			return
+		}
 		w.Header().Set("ETag", `"`+fixture.revision.StateRevision+`"`)
+		if fixture.mode == "revision_empty_body" {
+			return
+		}
+		if fixture.mode == "revision_oversized_body" {
+			_, _ = w.Write(bytes.Repeat([]byte{'x'}, excelPricingRemoteRevisionMaxBytes+1))
+			return
+		}
 		_ = json.NewEncoder(w).Encode(fixture.revision)
 	case r.Method == http.MethodPost && r.URL.Path == "/wp-json/digitalogic/pricing/sync/snapshots":
 		fixture.mu.Lock()
 		fixture.startCalls++
+		if fixture.mode == "cdn_rewritten_etag" &&
+			r.Header.Get("Accept-Encoding") == excelPricingRemoteIdentityEncoding {
+			fixture.headerFailure = "snapshot start unexpectedly forced identity encoding"
+		}
 		fixture.mu.Unlock()
 		var request excelPricingRemoteSnapshotStartRequest
 		if json.NewDecoder(r.Body).Decode(&request) != nil || request.RequestID == "" ||
@@ -680,8 +1516,14 @@ func (fixture *excelPricingRemoteSnapshotFixture) handle(w http.ResponseWriter, 
 			http.Error(w, "bad start", http.StatusBadRequest)
 			return
 		}
+		if fixture.mode == "start_rejected" {
+			http.Error(w, "rejected", http.StatusConflict)
+			return
+		}
 		build := fixture.buildResponse()
-		if fixture.mode == "ready" {
+		if fixture.mode == "ready" || fixture.mode == "cdn_rewritten_etag" ||
+			fixture.mode == "payload_wrong_content_type" ||
+			fixture.mode == "payload_empty_body" || fixture.mode == "payload_oversized_body" {
 			w.WriteHeader(http.StatusOK)
 			_ = json.NewEncoder(w).Encode(build)
 			return
@@ -706,9 +1548,23 @@ func (fixture *excelPricingRemoteSnapshotFixture) handle(w http.ResponseWriter, 
 		}
 		w.WriteHeader(http.StatusAccepted)
 		_ = json.NewEncoder(w).Encode(build)
-		if fixture.mode == "event_after_response" {
+		if fixture.mode == "event_after_response" || fixture.mode == "event_bad_match" ||
+			fixture.mode == "event_failed" {
 			time.AfterFunc(10*time.Millisecond, func() {
-				_ = fixture.hub.publishAuthenticated(fixture.terminalEvent(1))
+				event := fixture.terminalEvent(1)
+				switch fixture.mode {
+				case "event_bad_match":
+					event.BuildID = "build_0000000000000002"
+				case "event_failed":
+					event.Status = "failed"
+					event.SnapshotToken = ""
+					event.SnapshotRevision = ""
+					event.Digest = ""
+					event.SnapshotPath = ""
+					event.Code = "digitalogic_pricing_snapshot_test_failed"
+					event.Retryable = true
+				}
+				_ = fixture.hub.publishAuthenticated(event)
 			})
 		}
 	case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/wp-json/digitalogic/pricing/sync/builds/"):
@@ -726,10 +1582,26 @@ func (fixture *excelPricingRemoteSnapshotFixture) handle(w http.ResponseWriter, 
 		fixture.mu.Lock()
 		fixture.bulkCalls++
 		fixture.mu.Unlock()
+		if fixture.mode == "cdn_rewritten_etag" {
+			fixture.writeIdentityBoundRepresentation(
+				w, r, fixture.payloadBody, fixture.payload.Digest, "payload",
+			)
+			return
+		}
 		if fixture.badETag {
 			w.Header().Set("ETag", `W/"`+fixture.payload.Digest+`"`)
 		} else {
 			w.Header().Set("ETag", `"`+fixture.payload.Digest+`"`)
+		}
+		if fixture.mode == "payload_wrong_content_type" {
+			w.Header().Set("Content-Type", "text/plain; charset=UTF-8")
+		}
+		if fixture.mode == "payload_empty_body" {
+			return
+		}
+		if fixture.mode == "payload_oversized_body" {
+			_, _ = w.Write(bytes.Repeat([]byte{'x'}, excelPricingRemoteSnapshotMaxResponseBytes+1))
+			return
 		}
 		_, _ = w.Write(fixture.payloadBody)
 	case r.Method == http.MethodPost && r.URL.Path == "/wp-json/digitalogic/pricing/sync/state":
@@ -740,6 +1612,42 @@ func (fixture *excelPricingRemoteSnapshotFixture) handle(w http.ResponseWriter, 
 	default:
 		http.NotFound(w, r)
 	}
+}
+
+func (fixture *excelPricingRemoteSnapshotFixture) writeIdentityBoundRepresentation(
+	w http.ResponseWriter,
+	r *http.Request,
+	body []byte,
+	originRevision string,
+	kind string,
+) {
+	encoding := r.Header.Get("Accept-Encoding")
+	fixture.mu.Lock()
+	switch {
+	case kind == "revision" && encoding == excelPricingRemoteIdentityEncoding:
+		fixture.revisionIdentityCalls++
+	case kind == "revision" && strings.Contains(encoding, "gzip"):
+		fixture.revisionCompressedCalls++
+	case kind == "payload" && encoding == excelPricingRemoteIdentityEncoding:
+		fixture.payloadIdentityCalls++
+	case kind == "payload" && strings.Contains(encoding, "gzip"):
+		fixture.payloadCompressedCalls++
+	default:
+		fixture.headerFailure = "identity-bound response received an unexpected content encoding"
+	}
+	fixture.mu.Unlock()
+
+	if encoding == excelPricingRemoteIdentityEncoding {
+		w.Header().Set("ETag", `"`+originRevision+`"`)
+		_, _ = w.Write(body)
+		return
+	}
+
+	w.Header().Set("Content-Encoding", "gzip")
+	w.Header().Set("ETag", `"cdn-gzip-representation"`)
+	compressed := gzip.NewWriter(w)
+	_, _ = compressed.Write(body)
+	_ = compressed.Close()
 }
 
 func (fixture *excelPricingRemoteSnapshotFixture) validSourceQuery(query url.Values) bool {
@@ -1044,6 +1952,30 @@ func (fixture *excelPricingRemoteSnapshotFixture) assertCalls(
 		t.Fatalf("calls = revision:%d start:%d bulk:%d status:%d cancel:%d",
 			fixture.revisionCalls, fixture.startCalls, fixture.bulkCalls,
 			fixture.statusCalls, fixture.cancelCalls)
+	}
+	if fixture.headerFailure != "" {
+		t.Fatal(fixture.headerFailure)
+	}
+}
+
+func (fixture *excelPricingRemoteSnapshotFixture) assertRepresentationCalls(
+	t *testing.T,
+	revisionIdentity, revisionCompressed, payloadIdentity, payloadCompressed int,
+) {
+	t.Helper()
+	fixture.mu.Lock()
+	defer fixture.mu.Unlock()
+	if fixture.revisionIdentityCalls != revisionIdentity ||
+		fixture.revisionCompressedCalls != revisionCompressed ||
+		fixture.payloadIdentityCalls != payloadIdentity ||
+		fixture.payloadCompressedCalls != payloadCompressed {
+		t.Fatalf(
+			"representation calls = revision identity:%d compressed:%d payload identity:%d compressed:%d",
+			fixture.revisionIdentityCalls,
+			fixture.revisionCompressedCalls,
+			fixture.payloadIdentityCalls,
+			fixture.payloadCompressedCalls,
+		)
 	}
 	if fixture.headerFailure != "" {
 		t.Fatal(fixture.headerFailure)
