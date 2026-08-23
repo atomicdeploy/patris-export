@@ -190,7 +190,7 @@ func TestExcelPricingRemoteEventsConnectValidateAndConsumePHPFrame(t *testing.T)
 			valid := r.Header.Get(excelPricingRemoteSecretHeader) == excelPricingRemoteTestSecret &&
 				r.Header.Get(excelPricingRemoteSourceIDHeader) == source.ID &&
 				r.Header.Get(excelPricingRemoteDatasetHeader) == source.Dataset &&
-				r.Header.Get("Last-Event-ID") == "" &&
+				r.Header.Get("Last-Event-ID") == "0" &&
 				r.Header.Get("Sec-WebSocket-Protocol") == excelPricingRemoteWebSocketProtocol
 			handshakeOK <- valid
 			connection, err := upgrader.Upgrade(w, r, nil)
@@ -275,6 +275,120 @@ func TestExcelPricingRemoteEventsConnectValidateAndConsumePHPFrame(t *testing.T)
 	}
 	cancel()
 	if err := <-runResult; !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run error = %v", err)
+	}
+}
+
+func TestExcelPricingRemoteEventsZeroCursorHandshakeReplaysRetainedApplyTerminal(t *testing.T) {
+	source := excelPricingRemoteTestSource()
+	state := excelPricingRemoteTestRevision("b")
+	preview := excelPricingRemoteTestRevision("c")
+	requestID := "excel-apply-retained-restart-0001"
+	event := excelPricingRemoteApplyTerminalEventForTest(
+		requestID, source, preview, state, "completed",
+	)
+	event.EventID = 1
+	eventBody, err := json.Marshal(event)
+	if err != nil {
+		t.Fatal(err)
+	}
+	headerSeen := make(chan string, 1)
+	upgrader := websocket.Upgrader{
+		Subprotocols: []string{excelPricingRemoteWebSocketProtocol},
+		CheckOrigin:  func(*http.Request) bool { return true },
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/wp-json/digitalogic/pricing/sync/revision":
+			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set("ETag", `"`+state+`"`)
+			_ = json.NewEncoder(w).Encode(excelPricingRemoteTestRevisionPayload(source, state))
+		case "/wordpress-ws":
+			headerSeen <- r.Header.Get("Last-Event-ID")
+			connection, upgradeErr := upgrader.Upgrade(w, r, nil)
+			if upgradeErr != nil {
+				return
+			}
+			defer connection.Close()
+			excelPricingRemoteWriteJSON(t, connection, map[string]interface{}{
+				"event":   "connected",
+				"success": true,
+				"data": map[string]interface{}{
+					"principal":                    "patris_pricing",
+					"cursor":                       0,
+					"oldest_event_id":              1,
+					"latest_event_id":              1,
+					"cursor_reset_required":        false,
+					"revision_validation_required": true,
+					"revision_path":                "/wp-json/digitalogic/pricing/sync/revision",
+				},
+			})
+			excelPricingRemoteWriteJSON(t, connection, excelPricingRemoteWireFrame{
+				Event:   excelPricingApplyEventName,
+				Name:    excelPricingApplyEventName,
+				Success: true,
+				Data:    eventBody,
+				ID:      event.EventID,
+			})
+			_, _, _ = connection.ReadMessage()
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	accepted := make(chan excelPricingRemoteApplyTerminalEvent, 1)
+	cursors := make(chan uint64, 2)
+	client, err := newExcelPricingRemoteEventsClient(
+		excelPricingRemoteTestConfig(t, server.URL),
+		source,
+		excelPricingRemoteEventsOptions{
+			InitialCursor: 0,
+			OnRevision:    func(excelPricingRemoteRevision) error { return nil },
+			OnApplyTerminal: func(candidate excelPricingRemoteApplyTerminalEvent) error {
+				accepted <- candidate
+				return nil
+			},
+			OnCursor: func(cursor uint64) { cursors <- cursor },
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	result := make(chan error, 1)
+	go func() { result <- client.Run(ctx) }()
+	select {
+	case header := <-headerSeen:
+		if header != "0" {
+			t.Fatalf("Last-Event-ID = %q, want explicit zero", header)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("zero-cursor WebSocket handshake was not observed")
+	}
+	select {
+	case delivered := <-accepted:
+		if delivered.EventID != event.EventID || delivered.JobID != event.JobID ||
+			delivered.PrimaryRequestID != requestID {
+			t.Fatalf("retained terminal = %+v", delivered)
+		}
+	case runErr := <-result:
+		t.Fatalf("subscriber exited before retained terminal delivery: %v", runErr)
+	case <-time.After(2 * time.Second):
+		t.Fatal("retained terminal event was skipped")
+	}
+	var lastCursor uint64
+	deadline := time.After(2 * time.Second)
+	for lastCursor != event.EventID {
+		select {
+		case lastCursor = <-cursors:
+		case <-deadline:
+			t.Fatalf("retained terminal cursor = %d", lastCursor)
+		}
+	}
+	cancel()
+	if err := <-result; !errors.Is(err, context.Canceled) {
 		t.Fatalf("Run error = %v", err)
 	}
 }

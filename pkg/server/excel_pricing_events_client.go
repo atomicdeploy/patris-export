@@ -363,9 +363,10 @@ func (client *excelPricingRemoteEventsClient) runConnection(ctx context.Context)
 	headers.Set(excelPricingRemoteSecretHeader, client.secret)
 	headers.Set(excelPricingRemoteSourceIDHeader, client.source.ID)
 	headers.Set(excelPricingRemoteDatasetHeader, client.source.Dataset)
-	if cursor := client.currentCursor(); cursor > 0 {
-		headers.Set("Last-Event-ID", strconv.FormatUint(cursor, 10))
-	}
+	// Zero is an explicit replay cursor. Omitting the header means "new
+	// subscriber" to WordPress, which starts at the current tail and can skip a
+	// retained terminal frame after a companion restart.
+	headers.Set("Last-Event-ID", strconv.FormatUint(client.currentCursor(), 10))
 	connection, response, err := client.dialer.DialContext(ctx, client.webSocketURL, headers)
 	if response != nil && response.Body != nil {
 		_ = response.Body.Close()
