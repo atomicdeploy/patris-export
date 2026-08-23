@@ -921,6 +921,29 @@ func TestExcelPricingRemoteSnapshotMissingETagConfirmationRejectsNonempty304(t *
 	}
 }
 
+func TestExcelPricingRemoteSnapshotAcceptsExactWordPressTerminalPathWithoutProjectionAlias(t *testing.T) {
+	fixture := newExcelPricingRemoteSnapshotFixture(t, "ready")
+	defer fixture.Close()
+	client := fixture.Client(t)
+	path := "/wp-json/digitalogic/pricing/sync/snapshots/" + fixture.payload.SnapshotToken
+	query := make(url.Values)
+	query.Set("source_id", fixture.source.ID)
+	query.Set("source_dataset", fixture.source.Dataset)
+	query.Set("source_revision", fixture.source.Revision)
+	raw := path + "?" + query.Encode()
+
+	if _, err := client.allowedRemoteURL(raw, path); err != nil {
+		t.Fatalf("canonical WordPress terminal path rejected: %v", err)
+	}
+	query.Set("projection", excelPricingRemoteProjection)
+	if _, err := client.allowedRemoteURL(path+"?"+query.Encode(), path); !errors.Is(
+		err,
+		errExcelPricingRemoteSnapshotProtocol,
+	) {
+		t.Fatalf("retired projection query error = %v, want protocol rejection", err)
+	}
+}
+
 func TestExcelPricingSnapshotFailureEvidencePreservesPublicCodeAndPrivacy(t *testing.T) {
 	fixture := newExcelPricingRemoteSnapshotFixture(t, "ready")
 	defer fixture.Close()
