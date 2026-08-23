@@ -658,15 +658,15 @@ func validExcelPricingRemoteSourceTransition(
 			return transition.PreviousSourceRevision == nil
 		case "changed":
 			return transition.PreviousSourceRevision != nil &&
-				*transition.PreviousSourceRevision == current.Revision &&
-				transition.Source.Revision != current.Revision
+				isSHA256Revision(*transition.PreviousSourceRevision) &&
+				*transition.PreviousSourceRevision != transition.Source.Revision
 		default:
 			return false
 		}
 	case "pricing.source.removed":
-		return transition.Change == "removed" && transition.Source == current &&
+		return transition.Change == "removed" &&
 			transition.PreviousSourceRevision != nil &&
-			*transition.PreviousSourceRevision == current.Revision
+			*transition.PreviousSourceRevision == transition.Source.Revision
 	default:
 		return false
 	}

@@ -710,6 +710,89 @@ func TestExcelPricingRemoteSourceChangedAndRemovedRequireDurableAcceptance(t *te
 	}
 }
 
+func TestExcelPricingRemoteRetainedSourceTransitionsDoNotReplayLoop(t *testing.T) {
+	original := excelPricingRemoteTestSource()
+	changed := original
+	changed.Revision = excelPricingRemoteTestRevision("b")
+	advanced := original
+	advanced.Revision = excelPricingRemoteTestRevision("c")
+	for name, fixture := range map[string]struct {
+		current    canonical.Source
+		transition excelPricingRemoteSourceTransition
+	}{
+		"changed already materialized": {
+			current: changed,
+			transition: excelPricingRemoteTestSourceTransition(
+				"pricing.source.changed", "changed", changed, &original.Revision, 21,
+			),
+		},
+		"changed source advanced again": {
+			current: advanced,
+			transition: excelPricingRemoteTestSourceTransition(
+				"pricing.source.changed", "changed", changed, &original.Revision, 21,
+			),
+		},
+		"removed source later readded": {
+			current: advanced,
+			transition: excelPricingRemoteTestSourceTransition(
+				"pricing.source.removed", "removed", changed, &changed.Revision, 21,
+			),
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			client, err := newExcelPricingRemoteEventsClient(
+				excelPricingRemoteTestConfig(t, "http://127.0.0.1:18080"), fixture.current,
+				excelPricingRemoteEventsOptions{
+					InitialCursor:      20,
+					OnRevision:         func(excelPricingRemoteRevision) error { return nil },
+					OnSourceTransition: func(excelPricingRemoteSourceTransition) error { return nil },
+				},
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			body, err := json.Marshal(excelPricingRemoteTestSourceTransitionFrame(fixture.transition))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := client.handleExcelPricingRemoteFrame(t.Context(), body, true); !errors.Is(err, errExcelPricingRemoteSourceChanged) {
+				t.Fatalf("retained transition error = %v", err)
+			}
+			if client.currentCursor() != fixture.transition.EventID {
+				t.Fatalf("retained transition cursor=%d", client.currentCursor())
+			}
+		})
+	}
+}
+
+func TestExcelPricingRemoteSourceTransitionRejectsInvalidRevisionRelationship(t *testing.T) {
+	current := excelPricingRemoteTestSource()
+	transition := excelPricingRemoteTestSourceTransition(
+		"pricing.source.changed", "changed", current, &current.Revision, 6,
+	)
+	client, err := newExcelPricingRemoteEventsClient(
+		excelPricingRemoteTestConfig(t, "http://127.0.0.1:18080"), current,
+		excelPricingRemoteEventsOptions{
+			InitialCursor:      5,
+			OnRevision:         func(excelPricingRemoteRevision) error { return nil },
+			OnSourceTransition: func(excelPricingRemoteSourceTransition) error { return nil },
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := json.Marshal(excelPricingRemoteTestSourceTransitionFrame(transition))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.handleExcelPricingRemoteFrame(t.Context(), body, true); !errors.Is(err, errExcelPricingRemoteProtocol) {
+		t.Fatalf("invalid transition error = %v", err)
+	}
+	if client.currentCursor() != 5 {
+		t.Fatalf("invalid transition advanced cursor to %d", client.currentCursor())
+	}
+}
+
 func TestExcelPricingRemoteEventsRejectWrongSourceWeakETagAndUnmappedAlias(t *testing.T) {
 	source := excelPricingRemoteTestSource()
 	client, err := newExcelPricingRemoteEventsClient(
