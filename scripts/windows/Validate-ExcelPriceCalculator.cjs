@@ -107,6 +107,7 @@ function parseArgs(argv) {
     strictReference: false,
     json: false,
     timeoutMs: 240000,
+    selfTestProcessSafety: false,
   };
 
   for (let index = 0; index < argv.length; index += 1) {
@@ -145,6 +146,10 @@ function parseArgs(argv) {
       case '--help':
       case '-h':
         options.help = true;
+        break;
+      case '--self-test-process-safety':
+        options.selfTestProcessSafety = true;
+        options.sync = false;
         break;
       default:
         throw new Error(`unknown option: ${argument}`);
@@ -685,10 +690,247 @@ function printHumanReport(report) {
   }
 }
 
+const processSafetyPowerShell = String.raw`
+if (-not ('PatrisExcelValidatorNativeMethods' -as [type])) {
+    Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+
+public static class PatrisExcelValidatorNativeMethods {
+    public const uint JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000;
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct JOBOBJECT_BASIC_LIMIT_INFORMATION {
+        public long PerProcessUserTimeLimit;
+        public long PerJobUserTimeLimit;
+        public uint LimitFlags;
+        public UIntPtr MinimumWorkingSetSize;
+        public UIntPtr MaximumWorkingSetSize;
+        public uint ActiveProcessLimit;
+        public UIntPtr Affinity;
+        public uint PriorityClass;
+        public uint SchedulingClass;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct IO_COUNTERS {
+        public ulong ReadOperationCount;
+        public ulong WriteOperationCount;
+        public ulong OtherOperationCount;
+        public ulong ReadTransferCount;
+        public ulong WriteTransferCount;
+        public ulong OtherTransferCount;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct JOBOBJECT_EXTENDED_LIMIT_INFORMATION {
+        public JOBOBJECT_BASIC_LIMIT_INFORMATION BasicLimitInformation;
+        public IO_COUNTERS IoInfo;
+        public UIntPtr ProcessMemoryLimit;
+        public UIntPtr JobMemoryLimit;
+        public UIntPtr PeakProcessMemoryUsed;
+        public UIntPtr PeakJobMemoryUsed;
+    }
+
+    [DllImport("user32.dll")]
+    public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    public static extern IntPtr CreateJobObject(IntPtr securityAttributes, string name);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    public static extern bool SetInformationJobObject(
+        IntPtr job,
+        int informationClass,
+        IntPtr information,
+        uint informationLength
+    );
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    public static extern bool AssignProcessToJobObject(IntPtr job, IntPtr process);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    public static extern bool CloseHandle(IntPtr handle);
+}
+'@
+}
+
+function New-ValidatorKillOnCloseJob {
+    $jobHandle = [PatrisExcelValidatorNativeMethods]::CreateJobObject(
+        [IntPtr]::Zero,
+        $null
+    )
+    if ($jobHandle -eq [IntPtr]::Zero) {
+        throw [ComponentModel.Win32Exception]::new(
+            [Runtime.InteropServices.Marshal]::GetLastWin32Error(),
+            'Unable to create the validator kill-on-close job.'
+        )
+    }
+
+    $informationPointer = [IntPtr]::Zero
+    try {
+        $basic = [PatrisExcelValidatorNativeMethods+JOBOBJECT_BASIC_LIMIT_INFORMATION]::new()
+        $basic.LimitFlags = [PatrisExcelValidatorNativeMethods]::JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+        $information = [PatrisExcelValidatorNativeMethods+JOBOBJECT_EXTENDED_LIMIT_INFORMATION]::new()
+        $information.BasicLimitInformation = $basic
+        $informationLength = [Runtime.InteropServices.Marshal]::SizeOf($information)
+        $informationPointer = [Runtime.InteropServices.Marshal]::AllocHGlobal($informationLength)
+        [Runtime.InteropServices.Marshal]::StructureToPtr(
+            $information,
+            $informationPointer,
+            $false
+        )
+        if (-not [PatrisExcelValidatorNativeMethods]::SetInformationJobObject(
+            $jobHandle,
+            9,
+            $informationPointer,
+            [uint32]$informationLength
+        )) {
+            throw [ComponentModel.Win32Exception]::new(
+                [Runtime.InteropServices.Marshal]::GetLastWin32Error(),
+                'Unable to set JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE.'
+            )
+        }
+
+        $currentProcess = [Diagnostics.Process]::GetCurrentProcess()
+        try {
+            if (-not [PatrisExcelValidatorNativeMethods]::AssignProcessToJobObject(
+                $jobHandle,
+                $currentProcess.Handle
+            )) {
+                throw [ComponentModel.Win32Exception]::new(
+                    [Runtime.InteropServices.Marshal]::GetLastWin32Error(),
+                    'Unable to assign the validator host to its kill-on-close job.'
+                )
+            }
+        }
+        finally {
+            $currentProcess.Dispose()
+        }
+    }
+    catch {
+        [void][PatrisExcelValidatorNativeMethods]::CloseHandle($jobHandle)
+        throw
+    }
+    finally {
+        if ($informationPointer -ne [IntPtr]::Zero) {
+            [Runtime.InteropServices.Marshal]::FreeHGlobal($informationPointer)
+        }
+    }
+
+    # Intentionally retain this handle for the lifetime of powershell.exe. If
+    # Node times out and terminates this host, Windows closes the last handle
+    # and kills the validator's entire contained process tree, including Excel.
+    return $jobHandle
+}
+
+function Get-ValidatorProcessIdentityById(
+    [int]$processId,
+    [string]$expectedExecutableName = ''
+) {
+    $process = [Diagnostics.Process]::GetProcessById($processId)
+    try {
+        [void]$process.Handle
+        $path = [string]$process.MainModule.FileName
+        $startTimeUtc = $process.StartTime.ToUniversalTime()
+        if (-not [string]::IsNullOrWhiteSpace($expectedExecutableName) -and
+            -not [IO.Path]::GetFileName($path).Equals(
+                $expectedExecutableName,
+                [StringComparison]::OrdinalIgnoreCase
+            )) {
+            throw "Process $processId is not the expected $expectedExecutableName executable: $path"
+        }
+        return [pscustomobject]@{
+            Process = $process
+            Id = $processId
+            StartTimeUtc = $startTimeUtc
+            StartTimeUtcTicks = $startTimeUtc.Ticks
+            ExecutablePath = $path
+        }
+    }
+    catch {
+        $process.Dispose()
+        throw
+    }
+}
+
+function Get-ExcelProcessIdentity([object]$application) {
+    [uint32]$processIdValue = 0
+    [void][PatrisExcelValidatorNativeMethods]::GetWindowThreadProcessId(
+        [IntPtr]([long]$application.Hwnd),
+        [ref]$processIdValue
+    )
+    if ($processIdValue -eq 0) {
+        throw 'Unable to resolve the hidden validator Excel process ID.'
+    }
+    return Get-ValidatorProcessIdentityById ([int]$processIdValue) 'EXCEL.EXE'
+}
+
+function Write-ValidatorProcessIdentity([object]$identity, [string]$outputPath) {
+    if ([string]::IsNullOrWhiteSpace($outputPath)) { return }
+    $payload = [ordered]@{
+        pid = [int]$identity.Id
+        start_time_utc_ticks = [long]$identity.StartTimeUtcTicks
+        executable_path = [string]$identity.ExecutablePath
+    } | ConvertTo-Json -Compress
+    $temporaryPath = $outputPath + '.tmp-' + [Guid]::NewGuid().ToString('N')
+    [IO.File]::WriteAllText(
+        $temporaryPath,
+        $payload,
+        [Text.UTF8Encoding]::new($false)
+    )
+    [IO.File]::Move($temporaryPath, $outputPath)
+}
+
+function Wait-ValidatorProcessExit(
+    [object]$identity,
+    [int]$timeoutMilliseconds = 15000,
+    [int[]]$acceptedExitCodes = @(0)
+) {
+    $process = [Diagnostics.Process]$identity.Process
+    if (-not $process.WaitForExit($timeoutMilliseconds)) {
+        throw "Validator process $($identity.Id) did not exit within $timeoutMilliseconds ms."
+    }
+    $process.WaitForExit()
+    $exitCode = [int]$process.ExitCode
+    if ($acceptedExitCodes -notcontains $exitCode) {
+        throw "Validator process $($identity.Id) ($($identity.ExecutablePath), started $($identity.StartTimeUtc.ToString('o'))) exited with unexpected code $exitCode."
+    }
+    return [pscustomobject]@{
+        Exited = $true
+        ExitCode = $exitCode
+        Id = [int]$identity.Id
+        StartTimeUtc = $identity.StartTimeUtc
+        ExecutablePath = [string]$identity.ExecutablePath
+    }
+}
+
+function New-ValidatorCombinedException(
+    [Exception]$primaryException,
+    [Collections.Generic.List[Exception]]$cleanupExceptions
+) {
+    $exceptions = [Collections.Generic.List[Exception]]::new()
+    if ($null -ne $primaryException) {
+        $exceptions.Add($primaryException)
+    }
+    foreach ($cleanupException in $cleanupExceptions) {
+        $exceptions.Add($cleanupException)
+    }
+    if ($exceptions.Count -eq 0) { return $null }
+    if ($exceptions.Count -eq 1) { return $exceptions[0] }
+    return [AggregateException]::new(
+        'Excel validation and cleanup both failed.',
+        [Exception[]]$exceptions.ToArray()
+    )
+}
+`;
+
 const powershell = String.raw`
 $ErrorActionPreference = 'Stop'
 [Console]::InputEncoding = [System.Text.UTF8Encoding]::new($false)
 [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+
+${processSafetyPowerShell}
 
 $candidatePath = $env:PATRIS_VALIDATOR_CANDIDATE
 $referencePath = $env:PATRIS_VALIDATOR_REFERENCE
@@ -704,47 +946,11 @@ function Release-ComObject([object]$value) {
     } catch {}
 }
 
-if (-not ('PatrisExcelValidatorNativeMethods' -as [type])) {
-    Add-Type -TypeDefinition @'
-using System;
-using System.Runtime.InteropServices;
-
-public static class PatrisExcelValidatorNativeMethods {
-    [DllImport("user32.dll")]
-    public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
-}
-'@
-}
-
-function Get-ExcelProcessId([object]$application) {
-    [uint32]$processIdValue = 0
-    [void][PatrisExcelValidatorNativeMethods]::GetWindowThreadProcessId(
-        [IntPtr]([long]$application.Hwnd),
-        [ref]$processIdValue
-    )
-    if ($processIdValue -eq 0) {
-        throw 'Unable to resolve the hidden validator Excel process ID.'
-    }
-    return [int]$processIdValue
-}
-
 function Invoke-ComFinalizerBarrier {
     [GC]::Collect()
     [GC]::WaitForPendingFinalizers()
     [GC]::Collect()
     [GC]::WaitForPendingFinalizers()
-}
-
-function Wait-ExcelProcessExit([int]$excelProcessId, [int]$timeoutSeconds = 15) {
-    if ($excelProcessId -le 0) { return $true }
-    $deadline = [DateTime]::UtcNow.AddSeconds($timeoutSeconds)
-    while ([DateTime]::UtcNow -lt $deadline) {
-        if ($null -eq (Get-Process -Id $excelProcessId -ErrorAction SilentlyContinue)) {
-            return $true
-        }
-        Start-Sleep -Milliseconds 100
-    }
-    return $null -eq (Get-Process -Id $excelProcessId -ErrorAction SilentlyContinue)
 }
 
 function Test-RetryableExcelComRejection([object]$errorRecord) {
@@ -2118,16 +2324,24 @@ $excel = $null
 $workbooks = $null
 $candidateBook = $null
 $referenceBook = $null
+$validatorJobHandle = [IntPtr]::Zero
+$excelProcessIdentity = $null
 $excelProcessId = 0
 $excelProcessExited = $false
+$excelProcessExitCode = $null
+$validationException = $null
+$cleanupExceptions = [Collections.Generic.List[Exception]]::new()
 $report = $null
 $syncRan = $false
 $syncSucceeded = $false
 $syncOperation = ''
 $syncError = ''
 try {
+    $validatorJobHandle = New-ValidatorKillOnCloseJob
     $excel = New-Object -ComObject Excel.Application
-    $excelProcessId = Get-ExcelProcessId $excel
+    $excelProcessIdentity = Get-ExcelProcessIdentity $excel
+    $excelProcessId = [int]$excelProcessIdentity.Id
+    Write-ValidatorProcessIdentity $excelProcessIdentity $env:PATRIS_VALIDATOR_PROCESS_IDENTITY_PATH
     $excel.Visible = $false
     $excel.DisplayAlerts = $false
     $excel.AskToUpdateLinks = $false
@@ -2624,13 +2838,23 @@ try {
             wooFallback109001 = $wooFallbackRegression
         }
     }
-} finally {
+}
+catch {
+    $validationException = $_.Exception
+}
+finally {
     if ($null -ne $referenceBook) {
         try {
             [void](Invoke-ExcelBusyRetry {
                 $referenceBook.Close($false)
             } ([DateTime]::UtcNow.AddSeconds(5)) 'closing the reference workbook')
-        } catch {}
+        }
+        catch {
+            $cleanupExceptions.Add([InvalidOperationException]::new(
+                'Failed to close the reference workbook.',
+                $_.Exception
+            ))
+        }
     }
     Release-ComObject $referenceBook
     $referenceBook = $null
@@ -2639,34 +2863,344 @@ try {
             [void](Invoke-ExcelBusyRetry {
                 $candidateBook.Close($false)
             } ([DateTime]::UtcNow.AddSeconds(5)) 'closing the candidate workbook')
-        } catch {}
+        }
+        catch {
+            $cleanupExceptions.Add([InvalidOperationException]::new(
+                'Failed to close the candidate workbook.',
+                $_.Exception
+            ))
+        }
     }
     Release-ComObject $candidateBook
     $candidateBook = $null
     Release-ComObject $workbooks
     $workbooks = $null
-    Invoke-ComFinalizerBarrier
+    try { Invoke-ComFinalizerBarrier }
+    catch {
+        $cleanupExceptions.Add([InvalidOperationException]::new(
+            'Failed to finalize workbook COM wrappers.',
+            $_.Exception
+        ))
+    }
     if ($null -ne $excel) {
-        try { $excel.EnableEvents = $true } catch {}
+        try { $excel.EnableEvents = $true }
+        catch {
+            $cleanupExceptions.Add([InvalidOperationException]::new(
+                'Failed to restore Excel event handling before Quit.',
+                $_.Exception
+            ))
+        }
         try {
             [void](Invoke-ExcelBusyRetry {
                 $excel.Quit()
             } ([DateTime]::UtcNow.AddSeconds(5)) 'closing the validator Excel process')
-        } catch {}
+        }
+        catch {
+            $cleanupExceptions.Add([InvalidOperationException]::new(
+                'Excel Application.Quit failed.',
+                $_.Exception
+            ))
+        }
     }
     Release-ComObject $excel
     $excel = $null
-    Invoke-ComFinalizerBarrier
-    $excelProcessExited = Wait-ExcelProcessExit $excelProcessId
-    if (-not $excelProcessExited) {
-        throw "Hidden validator Excel process $excelProcessId did not exit within 15 seconds."
+    try { Invoke-ComFinalizerBarrier }
+    catch {
+        $cleanupExceptions.Add([InvalidOperationException]::new(
+            'Failed to finalize the Excel application COM wrapper.',
+            $_.Exception
+        ))
     }
+    if ($null -ne $excelProcessIdentity) {
+        try {
+            $exitResult = Wait-ValidatorProcessExit $excelProcessIdentity 15000 @(0)
+            $excelProcessExited = [bool]$exitResult.Exited
+            $excelProcessExitCode = [int]$exitResult.ExitCode
+        }
+        catch {
+            $cleanupExceptions.Add([InvalidOperationException]::new(
+                'The hidden validator Excel process did not exit normally.',
+                $_.Exception
+            ))
+        }
+        finally {
+            $excelProcessIdentity.Process.Dispose()
+        }
+    }
+}
+
+$combinedException = New-ValidatorCombinedException $validationException $cleanupExceptions
+if ($null -ne $combinedException) {
+    throw $combinedException
 }
 
 $report | Add-Member -NotePropertyName validatorExcelProcessId -NotePropertyValue $excelProcessId
 $report | Add-Member -NotePropertyName validatorExcelProcessExited -NotePropertyValue $excelProcessExited
+$report | Add-Member -NotePropertyName validatorExcelProcessExitCode -NotePropertyValue $excelProcessExitCode
+$report | Add-Member -NotePropertyName validatorExcelProcessStartTimeUtc -NotePropertyValue $excelProcessIdentity.StartTimeUtc.ToString('o')
+$report | Add-Member -NotePropertyName validatorExcelExecutablePath -NotePropertyValue $excelProcessIdentity.ExecutablePath
 [Console]::Out.WriteLine(($report | ConvertTo-Json -Depth 10 -Compress))
 `;
+
+const ownedProcessCleanupPowerShell = String.raw`
+$ErrorActionPreference = 'Stop'
+[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
+$identityPath = $env:PATRIS_VALIDATOR_PROCESS_IDENTITY_PATH
+if ([string]::IsNullOrWhiteSpace($identityPath) -or
+    -not (Test-Path -LiteralPath $identityPath -PathType Leaf)) {
+    [ordered]@{ passed = $false; status = 'identity_missing' } |
+        ConvertTo-Json -Compress
+    exit 2
+}
+
+$identity = Get-Content -LiteralPath $identityPath -Raw | ConvertFrom-Json
+$process = $null
+try {
+    try {
+        $process = [Diagnostics.Process]::GetProcessById([int]$identity.pid)
+        [void]$process.Handle
+    }
+    catch [ArgumentException] {
+        [ordered]@{ passed = $true; status = 'already_exited' } |
+            ConvertTo-Json -Compress
+        exit 0
+    }
+
+    $actualStartTicks = $process.StartTime.ToUniversalTime().Ticks
+    $actualPath = [string]$process.MainModule.FileName
+    if ($actualStartTicks -ne [long]$identity.start_time_utc_ticks -or
+        -not $actualPath.Equals(
+            [string]$identity.executable_path,
+            [StringComparison]::OrdinalIgnoreCase
+        )) {
+        [ordered]@{
+            passed = $true
+            status = 'identity_mismatch_not_owned'
+            pid = [int]$identity.pid
+        } | ConvertTo-Json -Compress
+        exit 0
+    }
+
+    $process.Kill()
+    if (-not $process.WaitForExit(5000)) {
+        [ordered]@{
+            passed = $false
+            status = 'owned_process_did_not_exit'
+            pid = [int]$identity.pid
+        } | ConvertTo-Json -Compress
+        exit 3
+    }
+    [ordered]@{
+        passed = $true
+        status = 'terminated_exact_owned_process'
+        pid = [int]$identity.pid
+    } | ConvertTo-Json -Compress
+}
+finally {
+    if ($null -ne $process) { $process.Dispose() }
+}
+`;
+
+function parsePowerShellJson(result, purpose) {
+  const output = String(result.stdout || '').replace(/^\uFEFF/u, '').trim();
+  if (!output) {
+    throw new Error(`${purpose} emitted no JSON; stderr=${String(result.stderr || '').trim()}`);
+  }
+  try {
+    return JSON.parse(output.split(/\r?\n/u).filter(Boolean).at(-1));
+  } catch (error) {
+    throw new Error(`${purpose} emitted invalid JSON: ${error.message}; output=${output}`);
+  }
+}
+
+function runPowerShellScript(scriptPath, environment, timeoutMs) {
+  return spawnSync(
+    'powershell.exe',
+    [
+      '-NoLogo',
+      '-NoProfile',
+      '-NonInteractive',
+      '-ExecutionPolicy',
+      'Bypass',
+      '-File',
+      scriptPath,
+    ],
+    {
+      cwd: repoRoot,
+      encoding: 'utf8',
+      env: { ...process.env, ...environment },
+      maxBuffer: 16 * 1024 * 1024,
+      timeout: timeoutMs,
+      windowsHide: true,
+    },
+  );
+}
+
+function cleanupExactOwnedProcess(tempDirectory, identityPath) {
+  const cleanupPath = path.join(tempDirectory, 'cleanup-owned-process.ps1');
+  fs.writeFileSync(cleanupPath, `\uFEFF${ownedProcessCleanupPowerShell}\n`, 'utf8');
+  const result = runPowerShellScript(
+    cleanupPath,
+    { PATRIS_VALIDATOR_PROCESS_IDENTITY_PATH: identityPath },
+    10000,
+  );
+  const report = parsePowerShellJson(result, 'owned-process cleanup');
+  if (result.error || result.status !== 0 || !report.passed) {
+    throw new Error(
+      `owned-process cleanup failed: status=${result.status} `
+      + `error=${result.error ? result.error.message : ''} report=${JSON.stringify(report)}`,
+    );
+  }
+  return report;
+}
+
+function runProcessSafetySelfTest() {
+  const tempDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'patris-validator-safety-'));
+  const writeScript = (name, content) => {
+    const scriptPath = path.join(tempDirectory, name);
+    fs.writeFileSync(scriptPath, `\uFEFF${content}\n`, 'utf8');
+    return scriptPath;
+  };
+  const exitSevenChild = writeScript('exit-seven.ps1', 'Start-Sleep -Milliseconds 300\nexit 7');
+  const exitZeroChild = writeScript('exit-zero.ps1', 'Start-Sleep -Milliseconds 300\nexit 0');
+  const longChild = writeScript('long-child.ps1', 'Start-Sleep -Seconds 60\nexit 0');
+  const startChild = String.raw`
+function Start-HiddenSelfTestChild([string]$scriptPath) {
+    return Start-Process -FilePath 'powershell.exe' -ArgumentList @(
+        '-NoLogo',
+        '-NoProfile',
+        '-NonInteractive',
+        '-ExecutionPolicy',
+        'Bypass',
+        '-File',
+        ('"' + $scriptPath + '"')
+    ) -WindowStyle Hidden -PassThru
+}
+`;
+
+  try {
+    const behaviorScript = writeScript('behavior.ps1', String.raw`
+$ErrorActionPreference = 'Stop'
+[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
+${processSafetyPowerShell}
+${startChild}
+$jobHandle = New-ValidatorKillOnCloseJob
+$crashRejected = $false
+$identityHandlePassed = $false
+$dualFailurePassed = $false
+
+$crashChild = Start-HiddenSelfTestChild $env:PATRIS_SELFTEST_EXIT_SEVEN
+$crashIdentity = Get-ValidatorProcessIdentityById $crashChild.Id 'powershell.exe'
+try {
+    try {
+        [void](Wait-ValidatorProcessExit $crashIdentity 5000 @(0))
+    }
+    catch {
+        $crashRejected = $_.Exception.Message -match 'unexpected code 7'
+    }
+}
+finally {
+    $crashIdentity.Process.Dispose()
+    $crashChild.Dispose()
+}
+
+$firstChild = Start-HiddenSelfTestChild $env:PATRIS_SELFTEST_EXIT_ZERO
+$firstIdentity = Get-ValidatorProcessIdentityById $firstChild.Id 'powershell.exe'
+$secondChild = Start-HiddenSelfTestChild $env:PATRIS_SELFTEST_LONG_CHILD
+$secondIdentity = Get-ValidatorProcessIdentityById $secondChild.Id 'powershell.exe'
+try {
+    $firstResult = Wait-ValidatorProcessExit $firstIdentity 5000 @(0)
+    $identityHandlePassed = (
+        $firstResult.Id -eq $firstIdentity.Id -and
+        $firstResult.StartTimeUtc.Ticks -eq $firstIdentity.StartTimeUtcTicks -and
+        -not $secondIdentity.Process.HasExited
+    )
+}
+finally {
+    if (-not $secondIdentity.Process.HasExited) {
+        $secondIdentity.Process.Kill()
+        [void]$secondIdentity.Process.WaitForExit(5000)
+    }
+    $secondIdentity.Process.Dispose()
+    $secondChild.Dispose()
+    $firstIdentity.Process.Dispose()
+    $firstChild.Dispose()
+}
+
+$cleanupFailures = [Collections.Generic.List[Exception]]::new()
+$cleanupFailures.Add([InvalidOperationException]::new('cleanup sentinel'))
+$combined = New-ValidatorCombinedException ([InvalidOperationException]::new('primary sentinel')) $cleanupFailures
+$dualFailurePassed = (
+    $combined -is [AggregateException] -and
+    $combined.InnerExceptions.Count -eq 2 -and
+    $combined.InnerExceptions[0].Message -eq 'primary sentinel' -and
+    $combined.InnerExceptions[1].Message -eq 'cleanup sentinel'
+)
+
+[ordered]@{
+    passed = $crashRejected -and $identityHandlePassed -and $dualFailurePassed
+    crash_exit_rejected = $crashRejected
+    exact_process_handle_used = $identityHandlePassed
+    dual_failure_preserved = $dualFailurePassed
+} | ConvertTo-Json -Compress
+`);
+    const behaviorResult = runPowerShellScript(
+      behaviorScript,
+      {
+        PATRIS_SELFTEST_EXIT_SEVEN: exitSevenChild,
+        PATRIS_SELFTEST_EXIT_ZERO: exitZeroChild,
+        PATRIS_SELFTEST_LONG_CHILD: longChild,
+      },
+      20000,
+    );
+    const behavior = parsePowerShellJson(behaviorResult, 'process-safety behavior test');
+    if (behaviorResult.error || behaviorResult.status !== 0 || !behavior.passed) {
+      throw new Error(`process-safety behavior test failed: ${JSON.stringify(behavior)}`);
+    }
+
+    const timeoutIdentity = path.join(tempDirectory, 'timeout-child-identity.json');
+    const timeoutScript = writeScript('timeout.ps1', String.raw`
+$ErrorActionPreference = 'Stop'
+${processSafetyPowerShell}
+${startChild}
+$jobHandle = New-ValidatorKillOnCloseJob
+$child = Start-HiddenSelfTestChild $env:PATRIS_SELFTEST_LONG_CHILD
+$identity = Get-ValidatorProcessIdentityById $child.Id 'powershell.exe'
+Write-ValidatorProcessIdentity $identity $env:PATRIS_VALIDATOR_PROCESS_IDENTITY_PATH
+$identity.Process.Dispose()
+$child.Dispose()
+Start-Sleep -Seconds 60
+`);
+    const timeoutResult = runPowerShellScript(
+      timeoutScript,
+      {
+        PATRIS_SELFTEST_LONG_CHILD: longChild,
+        PATRIS_VALIDATOR_PROCESS_IDENTITY_PATH: timeoutIdentity,
+      },
+      2000,
+    );
+    if (!timeoutResult.error || timeoutResult.error.code !== 'ETIMEDOUT') {
+      throw new Error(`timeout self-test did not time out: ${JSON.stringify(timeoutResult.error)}`);
+    }
+    const timeoutCleanup = cleanupExactOwnedProcess(tempDirectory, timeoutIdentity);
+    const goneReadback = cleanupExactOwnedProcess(tempDirectory, timeoutIdentity);
+    if (!['already_exited', 'identity_mismatch_not_owned'].includes(goneReadback.status)) {
+      throw new Error(`timeout child survived scoped cleanup: ${JSON.stringify(goneReadback)}`);
+    }
+
+    return {
+      passed: true,
+      behavior,
+      timeout: {
+        spawn_error_code: timeoutResult.error.code,
+        first_cleanup_status: timeoutCleanup.status,
+        gone_readback_status: goneReadback.status,
+      },
+    };
+  } finally {
+    fs.rmSync(tempDirectory, { recursive: true, force: true });
+  }
+}
 
 function main() {
   let options;
@@ -2688,6 +3222,16 @@ function main() {
     process.exitCode = 2;
     return;
   }
+  if (options.selfTestProcessSafety) {
+    try {
+      const report = runProcessSafetySelfTest();
+      console.log(JSON.stringify(report, null, 2));
+    } catch (error) {
+      console.error(`Validator process-safety self-test failed: ${error.message}`);
+      process.exitCode = 1;
+    }
+    return;
+  }
   for (const [label, filePath] of [
     ['candidate', options.candidate],
     ['reference', options.reference],
@@ -2701,7 +3245,10 @@ function main() {
 
   const tempDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'patris-excel-validator-'));
   const powershellPath = path.join(tempDirectory, 'validate.ps1');
+  const processIdentityPath = path.join(tempDirectory, 'excel-process-identity.json');
   let result;
+  let abnormalCleanup = null;
+  let abnormalCleanupError = null;
   try {
     // Windows PowerShell 5.1 treats a BOM-less script as the active ANSI code
     // page. A UTF-8 BOM keeps the Persian literals used by the validator exact.
@@ -2726,19 +3273,22 @@ function main() {
           PATRIS_VALIDATOR_REFERENCE: options.reference,
           PATRIS_VALIDATOR_SYNC: options.sync ? '1' : '0',
           PATRIS_VALIDATOR_TIMEOUT_MS: String(options.timeoutMs),
+          PATRIS_VALIDATOR_PROCESS_IDENTITY_PATH: processIdentityPath,
         },
         maxBuffer: 16 * 1024 * 1024,
         timeout: options.timeoutMs,
         windowsHide: true,
       },
     );
+    if ((result.error || result.status !== 0) && fs.existsSync(processIdentityPath)) {
+      try {
+        abnormalCleanup = cleanupExactOwnedProcess(tempDirectory, processIdentityPath);
+      } catch (error) {
+        abnormalCleanupError = error;
+      }
+    }
   } finally {
-    try {
-      fs.unlinkSync(powershellPath);
-    } catch {}
-    try {
-      fs.rmdirSync(tempDirectory);
-    } catch {}
+    fs.rmSync(tempDirectory, { recursive: true, force: true });
   }
 
   if (result.error) {
@@ -2746,6 +3296,12 @@ function main() {
       ? ` after ${options.timeoutMs} ms`
       : '';
     console.error(`Excel validation could not run${suffix}: ${result.error.message}`);
+    if (abnormalCleanup) {
+      console.error(`Scoped Excel cleanup: ${JSON.stringify(abnormalCleanup)}`);
+    }
+    if (abnormalCleanupError) {
+      console.error(`Scoped Excel cleanup failed: ${abnormalCleanupError.message}`);
+    }
     process.exitCode = 2;
     return;
   }
@@ -2753,6 +3309,12 @@ function main() {
     console.error('Excel validation process failed.');
     if (result.stderr.trim()) console.error(result.stderr.trim());
     if (result.stdout.trim()) console.error(result.stdout.trim());
+    if (abnormalCleanup) {
+      console.error(`Scoped Excel cleanup: ${JSON.stringify(abnormalCleanup)}`);
+    }
+    if (abnormalCleanupError) {
+      console.error(`Scoped Excel cleanup failed: ${abnormalCleanupError.message}`);
+    }
     process.exitCode = 2;
     return;
   }

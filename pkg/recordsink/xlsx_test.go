@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -1730,17 +1732,28 @@ func TestDynamicCalculatorValidatorHandlesEmptyProductTable(t *testing.T) {
 		`Invoke-ExcelBusyRetry`,
 		`Start-Sleep -Milliseconds 100`,
 		`closing the validator Excel process`,
-		`public static extern uint GetWindowThreadProcessId`,
-		`function Get-ExcelProcessId`,
+		`public const uint JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`,
+		`AssignProcessToJobObject`,
+		`function New-ValidatorKillOnCloseJob`,
+		`function Get-ExcelProcessIdentity`,
+		`function Get-ValidatorProcessIdentityById`,
 		`function Invoke-ComFinalizerBarrier`,
-		`function Wait-ExcelProcessExit`,
+		`function Wait-ValidatorProcessExit`,
+		`function New-ValidatorCombinedException`,
 		`FinalReleaseComObject`,
-		`Get-Process -Id $excelProcessId -ErrorAction SilentlyContinue`,
-		`[DateTime]::UtcNow.AddSeconds($timeoutSeconds)`,
-		`$excelProcessId = Get-ExcelProcessId $excel`,
-		`$excelProcessExited = Wait-ExcelProcessExit $excelProcessId`,
+		`[void]$process.Handle`,
+		`$process.WaitForExit($timeoutMilliseconds)`,
+		`$acceptedExitCodes -notcontains $exitCode`,
+		`$excelProcessIdentity = Get-ExcelProcessIdentity $excel`,
+		`$exitResult = Wait-ValidatorProcessExit $excelProcessIdentity 15000 @(0)`,
+		`PATRIS_VALIDATOR_PROCESS_IDENTITY_PATH`,
+		`function cleanupExactOwnedProcess`,
+		`--self-test-process-safety`,
 		`validatorExcelProcessId`,
 		`validatorExcelProcessExited`,
+		`validatorExcelProcessExitCode`,
+		`validatorExcelProcessStartTimeUtc`,
+		`validatorExcelExecutablePath`,
 		`PATRIS_VALIDATOR_TIMEOUT_MS`,
 		`foreach ($fixture in @('2.4', '25.40', '12/3', '01.02', '001234'`,
 	} {
@@ -1755,7 +1768,7 @@ func TestDynamicCalculatorValidatorHandlesEmptyProductTable(t *testing.T) {
 	releaseCandidate := strings.LastIndex(source, `Release-ComObject $candidateBook`)
 	quitExcel := strings.LastIndex(source, `$excel.Quit()`)
 	releaseExcel := strings.LastIndex(source, `Release-ComObject $excel`)
-	waitForProcess := strings.LastIndex(source, `$excelProcessExited = Wait-ExcelProcessExit $excelProcessId`)
+	waitForProcess := strings.LastIndex(source, `$exitResult = Wait-ValidatorProcessExit $excelProcessIdentity 15000 @(0)`)
 	writeReport := strings.LastIndex(source, `[Console]::Out.WriteLine(($report | ConvertTo-Json`)
 	if closeReference < 0 || releaseReference < 0 || closeCandidate < 0 || releaseCandidate < 0 ||
 		quitExcel < 0 || releaseExcel < 0 || waitForProcess < 0 || writeReport < 0 {
@@ -1774,7 +1787,7 @@ func TestDynamicCalculatorValidatorHandlesEmptyProductTable(t *testing.T) {
 	}
 
 	barrierStart := strings.Index(source, `function Invoke-ComFinalizerBarrier`)
-	barrierEndRelative := strings.Index(source[barrierStart:], `function Wait-ExcelProcessExit`)
+	barrierEndRelative := strings.Index(source[barrierStart:], `function Test-RetryableExcelComRejection`)
 	if barrierStart < 0 || barrierEndRelative < 0 {
 		t.Fatal("native validator is missing the finalizer barrier function body")
 	}
@@ -1782,6 +1795,45 @@ func TestDynamicCalculatorValidatorHandlesEmptyProductTable(t *testing.T) {
 	if strings.Count(barrierBody, `[GC]::Collect()`) != 2 ||
 		strings.Count(barrierBody, `[GC]::WaitForPendingFinalizers()`) != 2 {
 		t.Fatal("native validator finalizer barrier must use two collect/finalizer passes")
+	}
+}
+
+func TestDynamicCalculatorValidatorProcessSafetyBehavior(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("validator process-safety behavior requires Windows job objects and PowerShell")
+	}
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skipf("node is unavailable: %v", err)
+	}
+	path := filepath.Join("..", "..", "scripts", "windows", "Validate-ExcelPriceCalculator.cjs")
+	command := exec.Command(node, path, "--self-test-process-safety")
+	output, err := command.CombinedOutput()
+	if err != nil {
+		t.Fatalf("validator process-safety self-test failed: %v\n%s", err, output)
+	}
+	var report struct {
+		Passed   bool `json:"passed"`
+		Behavior struct {
+			Passed                 bool `json:"passed"`
+			CrashExitRejected      bool `json:"crash_exit_rejected"`
+			ExactProcessHandleUsed bool `json:"exact_process_handle_used"`
+			DualFailurePreserved   bool `json:"dual_failure_preserved"`
+		} `json:"behavior"`
+		Timeout struct {
+			SpawnErrorCode     string `json:"spawn_error_code"`
+			GoneReadbackStatus string `json:"gone_readback_status"`
+		} `json:"timeout"`
+	}
+	if err := json.Unmarshal(output, &report); err != nil {
+		t.Fatalf("decode validator process-safety report: %v\n%s", err, output)
+	}
+	if !report.Passed || !report.Behavior.Passed || !report.Behavior.CrashExitRejected ||
+		!report.Behavior.ExactProcessHandleUsed || !report.Behavior.DualFailurePreserved ||
+		report.Timeout.SpawnErrorCode != "ETIMEDOUT" ||
+		(report.Timeout.GoneReadbackStatus != "already_exited" &&
+			report.Timeout.GoneReadbackStatus != "identity_mismatch_not_owned") {
+		t.Fatalf("validator process-safety report failed: %+v", report)
 	}
 }
 
