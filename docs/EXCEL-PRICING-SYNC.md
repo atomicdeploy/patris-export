@@ -10,11 +10,14 @@ credential.
 All routes are `POST` and accept JSON only:
 
 ```text
-/api/excel/pricing-sync/session
-/api/excel/pricing-sync/state
-/api/excel/pricing-sync/preview
-/api/excel/pricing-sync/apply
+/api/pricing-sync/session
+/api/pricing-sync/state
+/api/pricing-sync/preview
+/api/pricing-sync/apply
 ```
+
+These four generalized routes are the complete local pricing surface. No
+client-specific alias prefix is registered; unknown prefixes return `404`.
 
 The session route accepts `{}` and returns:
 
@@ -31,6 +34,26 @@ digitalogic-price-calculator/v1`. State, preview, and apply also send the
 short-lived token in `X-Patris-Excel-CSRF-Token`. The token is stored only as a
 SHA-256 hash in memory, expires after ten minutes, and is never a remote
 credential.
+
+One session/CSRF token and one revision-pinned state snapshot are reused across
+the bounded state pages. A pristine template schedules refresh-on-open after a
+short delay so every normal open becomes populated without blocking cell,
+keyboard, or Esc input. The visible sync button remains available for an
+explicit reload. Network waits are asynchronous and pump the Excel message loop. The workbook
+records separate phase timings for the
+session, local contract fetch, total product/site state fetch, every state page,
+reconcile, pricing computation, batch table write, hyperlink/formatting, Excel
+calculation, and save. Existing progress messages, request timeouts, and
+no-hard-failure refresh behavior remain in force.
+
+The observed pre-change baseline was 1,092 rows over five state pages with
+about 110 seconds in server fetch. The state route now validates the workbook's
+already-fetched canonical source identity without rebuilding the canonical
+catalog for each page; only the required five paged receiver calls remain.
+Rows are accumulated once in the cached in-memory snapshot, then written to
+the Products and SyncData tables as arrays before role-level formatting. The
+per-page and total timers make the next controlled run comparable without
+claiming a production improvement before deployment.
 
 The local surface accepts only a direct loopback peer and loopback request
 host. Proxy-forwarding markers and cross-origin requests are rejected.
@@ -182,8 +205,9 @@ Only global settings are writable from this template. An ambiguous catalog
 identity, an invalid per-page revision, or reconciliation counts that disagree
 with the returned rows is a hard failure. Across pages it also requires one
 unchanged dataset revision, source revision, ordered column-key list, total,
-page size, page count, and count document. A mismatch discards all fetched
-pages and retries the full snapshot at most three times; no partial catalog is
+page size, page count, and count document. A recognized cross-page snapshot
+drift discards all fetched pages and retries the full snapshot once; deterministic
+transport, schema, and integrity failures are not retried. No partial catalog is
 imported. Every supplied submitted, current, and reconciliation-source revision
 must agree with the local Patris contract; the legacy source revision remains a
 compatibility fallback when the newer current/reconciliation fields are absent.
@@ -224,15 +248,23 @@ Set the named environment variable in the protected Patris runtime
 environment. Never write its value into TOML/JSON/YAML, VBA, workbook cells,
 URLs, logs, or command arguments.
 
+Patris sends only the canonical transformed `patris.product-sync` envelope.
+Creation/publication/backfill policy is not transport data and no policy header
+is emitted. The authenticated WordPress receiver owns its local fail-closed
+gates, durable run/item ledger, bounded asynchronous worker, idempotency,
+retry, compensation, rollback, and backfill behavior. The bridge and workbook
+do not invent, transmit, or apply receiver publication policy.
+
 ## Workbook operator flow
 
 On the Persian `تنظیمات` sheet:
 
-1. Select **همگام‌سازی اکنون** on `محصولات`, or use refresh-on-open.
+1. Open the template and let its deferred refresh populate `محصولات`, or
+   select **همگام‌سازی اکنون** for an explicit reload.
 2. Review or edit the highlighted yuan/dollar rates, effective date, profit
    margin, or air-express shipping price. Editing one of those proposal cells
-   immediately creates a fresh preview and opens the explicit Persian apply
-   confirmation.
+   invalidates the previous preview without starting network or mutation work.
+   Select **پیش‌نمایش تغییرات** when the proposal is ready.
 3. Review every warning in that confirmation and approve it only when the
    proposed document is correct. The separate preview/apply buttons remain
    available as a manual fallback.

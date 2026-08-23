@@ -81,21 +81,57 @@ language = "fa"
 xlsx_language = "auto"
 xlsx_mode = "precalculated"
 xlsx_zebra_rows = true
+xlsx_template = "C:/approved/records.xlsx" # optional
+xlsx_target = "table:ExportProducts"
+xlsm_template = "C:/approved/pricing.xlsm"
+xlsm_target = "table:ExportProducts"
+xltm_template = "C:/approved/pricing.xltm"
+xltm_target = "name:ExportProducts"
 ```
 
 The environment equivalents are `PATRIS_EXPORT_XLSX_LANGUAGE`,
-`PATRIS_EXPORT_XLSX_MODE`, and `PATRIS_EXPORT_XLSX_ZEBRA_ROWS`.
+`PATRIS_EXPORT_XLSX_MODE`, `PATRIS_EXPORT_XLSX_ZEBRA_ROWS`,
+`PATRIS_EXPORT_XLSX_TEMPLATE`, `PATRIS_EXPORT_XLSX_TARGET`,
+`PATRIS_EXPORT_XLSM_TEMPLATE`, `PATRIS_EXPORT_XLSM_TARGET`,
+`PATRIS_EXPORT_XLTM_TEMPLATE`, and `PATRIS_EXPORT_XLTM_TARGET`.
 
 ## HTTP and Web UI
 
 ```text
 GET /api/records.xlsx?download=1&language=fa&mode=formula&zebra=1
 GET /api/records?format=xlsx&language=en&mode=precalculated&zebra=0&rtl=0
+GET /api/records.xlsm?download=1
+GET /api/records.xltm?download=1
 ```
 
 The Web UI download action sends its active language and the configured export
 mode/zebra preference to this route. Query values override the config for that
 one response.
+
+Without `xlsx_template`, `.xlsx` is generated macro-free from current records.
+When an XLSX template is configured, its paired explicit `table:Name` or
+`name:Name` target is mandatory: Patris populates and verifies that trusted
+local package atomically instead of ignoring or byte-copying it. XLSM uses the
+same explicit population contract and additionally requires the macro package,
+VBA project, relationships, and content types to remain intact. XLTM is
+blank-only and is never sent through a population code path. Template paths are
+server configuration; HTTP query parameters cannot supply paths or URLs.
+
+The `.xlsx` route generates a macro-free workbook populated with current
+records. The `.xlsm` route accepts no client path: it uses one configured local
+allowlisted workbook and one explicit `table:Name` or `name:Name` target. The
+server copies it to a sibling temporary package, batch-populates current rows,
+closes it, reopens it, verifies exact product codes/counts and the retained VBA,
+content types, relationships, formulas, defined names, drawings, sheets, and
+absence of external links/connections, then atomically finalizes it. Source and
+output SHA-256 values are returned in provenance headers.
+
+The `.xltm` route never populates data. Its configured target must contain a
+header plus zero initial product records/formulas. The copied template is
+reopened and reverified byte-for-byte before finalization; populated/rejected
+candidates and bake-data query attempts fail closed. Extension, macro part,
+main content type, and VBA relationship mismatches are rejected. An
+unconfigured macro route returns `404` instead of silently changing formats.
 
 ## Dynamic macro templates
 
@@ -134,16 +170,23 @@ macro-free snapshot and removes the search, sync, preview/apply buttons, their
 macro assignments, and the selection-highlighting controls. The logo, chart,
 tables, formulas, and synchronized values remain.
 
-Refresh-on-open and **همگام‌سازی اکنون** use only the local Patris companion:
+The deferred refresh-on-open and **همگام‌سازی اکنون** use only the local
+Patris companion. A pristine template defaults refresh-on-open to on; its
+asynchronous network phase keeps Excel interactive and populates the workbook
+automatically:
 
 ```text
 GET  http://127.0.0.1:18080/api/product-sync
-POST http://127.0.0.1:18080/api/excel/pricing-sync/state
-POST http://127.0.0.1:18080/api/excel/pricing-sync/preview
-POST http://127.0.0.1:18080/api/excel/pricing-sync/apply
+POST http://127.0.0.1:18080/api/pricing-sync/session
+POST http://127.0.0.1:18080/api/pricing-sync/snapshots
+GET  http://127.0.0.1:18080/api/pricing-sync/snapshots/{job_id}?wait=terminal
+GET  http://127.0.0.1:18080/api/pricing-sync/snapshots/{job_id}/payload
+GET  http://127.0.0.1:18080/api/pricing-sync/events
+POST http://127.0.0.1:18080/api/pricing-sync/preview
+POST http://127.0.0.1:18080/api/pricing-sync/apply
 ```
 
-The `/api/excel/pricing-sync/*` path is intentionally a private Excel adapter:
+The `/api/pricing-sync/*` path is an integration-neutral local companion surface:
 it handles the loopback session, CSRF token, and workbook-specific request
 validation. The WordPress endpoint and its response schemas are application
 neutral (`/wp-json/digitalogic/pricing/sync/*`); they are not an Excel API.
@@ -162,13 +205,25 @@ excluded. A WooCommerce-backed row uses `woo:<id>` as its technical sync key.
 A Patris-only row uses `patris:<exact-product-code>`. Names are never identity
 fallbacks, and an ambiguous identity blocks apply.
 
-Every state page carries the same SHA-256 `catalog.dataset_revision`, ordered
-column-key contract, reconciliation counts, source revision, page size, total,
-and page count. Excel discards the complete partial result and retries the
-snapshot up to three times if any one of those values changes, a page is
-missing or duplicated, or the final unique-key count differs from the declared
-total. It fails closed after the bounded retries instead of showing a
-cross-revision catalog.
+Each refresh uses `WinHttp.WinHttpRequest.5.1` `WithEvents` callbacks. It reads
+the product contract, creates a loopback session, starts one immutable snapshot,
+issues exactly one asynchronous terminal wait, and fetches the payload once.
+There is no `readyState`, sleep, `DoEvents`, job-status, or response-status
+polling path. Excel hashes the exact payload response bytes, requires the strong
+ETag and snapshot/state/source revisions to agree, validates the full projected
+row and integrity contract in memory, and only then performs a short
+rollback-protected atomic commit. Any cancellation, error, stale event, duplicate
+identity, digest mismatch, or unsafe warning retains the previous committed
+workbook generation.
+
+The durable semantic listener uses `/api/pricing-sync/events`, comment
+keepalives, numeric `Last-Event-ID`, bounded callback-driven reconnect, and the
+same loopback-only headers. A cursor is kept only with the exact in-memory
+session token that observed it. A newly minted session or any
+`replay_required` event clears the cursor and forces conditional validation or a
+`max_age_seconds=0` rebuild; reconnect never becomes recurring status polling.
+Escape and `Workbook_BeforeClose` cancel finite requests, the listener, and
+queued callbacks.
 
 The visible table is the reconciled union of Patris and WooCommerce rows.
 A WooCommerce-only row shows its WooCommerce `sku` in `کد کالا` when one
@@ -178,6 +233,62 @@ only the verified `woo:<id>` sync key in the hidden technical sheet. A visible
 SKU is never treated as a Patris identity or writeback key. Where a public page
 exists, the bold product name is the hyperlink and WooID remains in its own
 column.
+
+Product display names are normalized only when they end in the obsolete
+synthetic marker ` - WooID <digits>` (also accepting surrounding whitespace
+and en-dash/em-dash separators). The marker came from the former VBA hyperlink
+display-text builder. The normalizer does not change an embedded marker, a
+name without a separator, or any SKU/product-code source value.
+
+The workbook uses fixed font roles, never cell-content detection. Persian and
+mixed human-facing ranges and action shapes use the configured Persian font;
+ASCII-only SKU, Woo ID, numeric/date, URL, hash, and technical-ID ranges use the
+configured Latin font. Named settings default to:
+
+```text
+PersianFont=Yekan Bakh
+LatinFont=Segoe UI
+FontAuditMode=RepairAndWarn
+ValidateFontsOnOpen=Yes
+AllowFallback=No
+```
+
+`FontAuditMode` accepts only `Off`, `Warn`, `RepairAndWarn`, or `Strict`.
+Availability and fixed-map drift are reported separately. The default repairs
+mapped drift and warns without turning a refresh into a hard failure; strict
+validation fails on a missing configured font, a missing required font slot,
+or a forbidden Aptos/Calibri/Arial value.
+
+Excel's cell `Range.Font` COM model exposes only `Name` on this Office build.
+The builder does not claim unsupported COM slots passed: mapped cell styles are
+audited in the saved OpenXML package for an explicit family and no theme or
+forbidden Aptos/Calibri/Arial fallback. Drawing `Font2` objects expose the
+separate slots, so action shapes and chart text must read back `Name`,
+`NameComplexScript`, and `NameFarEast` exactly with Persian language ID 1065;
+the builder fails closed if Excel substitutes a font.
+
+Run the same package-level gate independently after a build:
+
+```powershell
+patris-export verify-workbook-fonts .\calculator.xltm
+```
+
+It reads `PersianFont` and `LatinFont` from their workbook-scoped named cells,
+then validates the fixed predefined cell/table map through `xl/styles.xml` and
+each DrawingML text run through explicit Latin, Far East, and complex-script
+typeface slots. Missing named configuration, mapped styles, theme schemes, or
+forbidden families are hard errors.
+
+The Settings sheet records separate elapsed seconds for session, contract,
+terminal snapshot/payload fetch, reconcile, pricing computation, table write,
+hyperlink/formatting, Excel calculation, and save. One finite operation keeps
+its loopback token through start, terminal wait, payload verification, and
+commit. The durable stream has its own in-memory session lifecycle.
+
+The workbook lineage is v260 → v268 → v270 → current v4. v4 retains the
+23-column sync/preview contract, v270 search and price behavior, generalized
+local pricing routes, phase diagnostics, nonfatal conditional-format handling,
+and the Dashboard print area through row 34.
 
 The three familiar calculator cards and table names remain:
 
@@ -195,11 +306,16 @@ percent is reported in Persian and is never silently selected.
 
 The price cards, hidden calculation inputs, and final-price formulas use only
 the live site-confirmed values. Editing a proposal cell invalidates every older
-preview, automatically opens a fresh preview plus one Persian confirmation, and
-does not affect displayed customer prices until the apply/readback transaction
-finishes. Product delivery gets a bounded ten-attempt retry window. On an
-uncertain response, Excel keeps the unchanged live values and preserves the
-same apply idempotency key for a safe retry. A success message is shown only
+preview and queues one nonmodal asynchronous preview callback, giving the local
+backend immediate feedback without changing live values. Repeated edits are
+coalesced; a busy finite operation retains one queued preview for its terminal
+callback rather than polling. Apply is never automatic: it still requires the
+explicit button, Unicode confirmation, current preview digest, `If-Match`, and
+the stable idempotency key. Displayed customer prices do not change until the
+apply/readback snapshot transaction finishes. A canonical-delivery mismatch may
+run one callback-driven repair before a new contract/session/snapshot sequence.
+On an uncertain response, Excel keeps the unchanged live values and preserves
+the same apply idempotency key for a safe retry. A success message is shown only
 after a fresh state readback matches the applied revision.
 
 The calculated price converts goods and freight independently through their
@@ -232,8 +348,13 @@ Enable macros only after reviewing:
 
 - `docs/examples/vba/JsonValue.cls`;
 - `docs/examples/vba/JsonRuntime.bas`;
+- `docs/examples/vba/AsyncWinHttpRequest.cls`;
+- `docs/examples/vba/PricingSseParser.cls`;
 - `docs/examples/vba/ProductCatalogSync.bas`;
 - `docs/examples/vba/ThisWorkbook.cls`.
+
+The builder binds Microsoft WinHTTP Services 5.1 by GUID and fails if the
+reference or either imported callback class is missing, broken, or misnamed.
 
 The Windows builder removes local absolute paths, neutralizes Office author
 metadata to `AtomicDeploy`, removes volatile core-property timestamps,

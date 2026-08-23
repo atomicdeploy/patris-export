@@ -102,6 +102,12 @@ type ExportConfig struct {
 	XLSXLanguage        string `json:"xlsx_language,omitempty" yaml:"xlsx_language,omitempty" toml:"xlsx_language,omitempty"`
 	XLSXMode            string `json:"xlsx_mode,omitempty" yaml:"xlsx_mode,omitempty" toml:"xlsx_mode,omitempty"`
 	XLSXZebraRows       bool   `json:"xlsx_zebra_rows" yaml:"xlsx_zebra_rows" toml:"xlsx_zebra_rows"`
+	XLSXTemplate        string `json:"xlsx_template,omitempty" yaml:"xlsx_template,omitempty" toml:"xlsx_template,omitempty"`
+	XLSXTarget          string `json:"xlsx_target,omitempty" yaml:"xlsx_target,omitempty" toml:"xlsx_target,omitempty"`
+	XLSMTemplate        string `json:"xlsm_template,omitempty" yaml:"xlsm_template,omitempty" toml:"xlsm_template,omitempty"`
+	XLSMTarget          string `json:"xlsm_target,omitempty" yaml:"xlsm_target,omitempty" toml:"xlsm_target,omitempty"`
+	XLTMTemplate        string `json:"xltm_template,omitempty" yaml:"xltm_template,omitempty" toml:"xltm_template,omitempty"`
+	XLTMTarget          string `json:"xltm_target,omitempty" yaml:"xltm_target,omitempty" toml:"xltm_target,omitempty"`
 }
 
 type EdgeConfig struct {
@@ -943,6 +949,24 @@ func ApplyEnv(cfg *Config) {
 	if value := os.Getenv("PATRIS_EXPORT_XLSX_ZEBRA_ROWS"); strings.TrimSpace(value) != "" {
 		cfg.Export.XLSXZebraRows = parseBool(value, cfg.Export.XLSXZebraRows)
 	}
+	if value := os.Getenv("PATRIS_EXPORT_XLSX_TEMPLATE"); strings.TrimSpace(value) != "" {
+		cfg.Export.XLSXTemplate = strings.TrimSpace(value)
+	}
+	if value := os.Getenv("PATRIS_EXPORT_XLSX_TARGET"); strings.TrimSpace(value) != "" {
+		cfg.Export.XLSXTarget = strings.TrimSpace(value)
+	}
+	if value := os.Getenv("PATRIS_EXPORT_XLSM_TEMPLATE"); strings.TrimSpace(value) != "" {
+		cfg.Export.XLSMTemplate = strings.TrimSpace(value)
+	}
+	if value := os.Getenv("PATRIS_EXPORT_XLSM_TARGET"); strings.TrimSpace(value) != "" {
+		cfg.Export.XLSMTarget = strings.TrimSpace(value)
+	}
+	if value := os.Getenv("PATRIS_EXPORT_XLTM_TEMPLATE"); strings.TrimSpace(value) != "" {
+		cfg.Export.XLTMTemplate = strings.TrimSpace(value)
+	}
+	if value := os.Getenv("PATRIS_EXPORT_XLTM_TARGET"); strings.TrimSpace(value) != "" {
+		cfg.Export.XLTMTarget = strings.TrimSpace(value)
+	}
 	if value := os.Getenv("PATRIS_EXPORT_CONVERT_WATCH"); strings.TrimSpace(value) != "" {
 		cfg.Convert.Watch = parseBool(value, cfg.Convert.Watch)
 	}
@@ -1109,6 +1133,12 @@ func normalize(cfg *Config) {
 	default:
 		cfg.Export.XLSXMode = "precalculated"
 	}
+	cfg.Export.XLSXTemplate = strings.TrimSpace(cfg.Export.XLSXTemplate)
+	cfg.Export.XLSXTarget = strings.TrimSpace(cfg.Export.XLSXTarget)
+	cfg.Export.XLSMTemplate = strings.TrimSpace(cfg.Export.XLSMTemplate)
+	cfg.Export.XLSMTarget = strings.TrimSpace(cfg.Export.XLSMTarget)
+	cfg.Export.XLTMTemplate = strings.TrimSpace(cfg.Export.XLTMTemplate)
+	cfg.Export.XLTMTarget = strings.TrimSpace(cfg.Export.XLTMTarget)
 	cfg.Export.Reconciliation = strings.ToLower(strings.TrimSpace(cfg.Export.Reconciliation))
 	switch cfg.Export.Reconciliation {
 	case "", "upsert_only":

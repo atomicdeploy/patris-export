@@ -9,6 +9,7 @@ import (
 	"path"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -19,6 +20,8 @@ import (
 
 	"github.com/atomicdeploy/patris-export/pkg/recordmap"
 )
+
+var terminalWooIDMarker = regexp.MustCompile(`(?i)[\p{Zs}\t]*[-\x{2013}\x{2014}][\p{Zs}\t]*WooID[\p{Zs}\t]+[0-9]+[\p{Zs}\t]*$`)
 
 const (
 	xlsxRecordsSheet  = "Records"
@@ -117,6 +120,9 @@ func WriteXLSX(path string, rows []map[string]interface{}, keyField string, valu
 		return err
 	}
 	options := normalizeXLSXOptions(values)
+	if !strings.EqualFold(filepath.Ext(path), ".xlsx") {
+		return fmt.Errorf("generated record export requires an .xlsx output; use the trusted XLSM or blank XLTM workflow for macro-enabled packages")
+	}
 	book := excelize.NewFile()
 	defer book.Close()
 	defaultSheet := book.GetSheetName(0)
@@ -577,12 +583,31 @@ func writeXLSXCell(book *excelize.File, sheet, cellName, field, keyField string,
 	case json.Number:
 		return writeXLSXDecimal(book, sheet, cellName, typed.String(), styles)
 	case string:
+		if isHumanProductNameField(field) {
+			typed = normalizeHumanProductName(typed)
+		}
 		return styles.text, book.SetCellStr(sheet, cellName, typed)
 	case time.Time:
 		return styles.text, book.SetCellStr(sheet, cellName, typed.UTC().Format(time.RFC3339Nano))
 	default:
 		return styles.wrapped, book.SetCellStr(sheet, cellName, cell(value))
 	}
+}
+
+func isHumanProductNameField(field string) bool {
+	switch strings.ToLower(strings.TrimSpace(field)) {
+	case "name", "product_name":
+		return true
+	default:
+		return strings.TrimSpace(field) == "نام کالا"
+	}
+}
+
+// normalizeHumanProductName removes only a synthetic terminal WooID marker
+// from a display name. It intentionally does not touch identifiers, SKUs, or
+// embedded/non-terminal text.
+func normalizeHumanProductName(value string) string {
+	return terminalWooIDMarker.ReplaceAllString(value, "")
 }
 
 func writeXLSXUint(book *excelize.File, sheet, cellName string, value uint64, styles xlsxStyles) (int, error) {

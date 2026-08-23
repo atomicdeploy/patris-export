@@ -50,6 +50,9 @@ const SYNC_DATA_HEADERS = Object.freeze([
   'وضعیت انتشار',
   'هشدار قیمت',
   'نوع ردیف',
+  'مبلغ منبع قیمت',
+  'ارز منبع قیمت',
+  'نوع منبع قیمت',
 ]);
 
 const REGRESSION_ACCEPTANCE = Object.freeze({
@@ -85,7 +88,7 @@ function usage() {
     `  --candidate PATH       Workbook/template to validate (default: ${defaultCandidate})`,
     `  --reference PATH       Archived calculator baseline (default: ${defaultReference})`,
     '  --sync                 Run ProductCatalogSync.RefreshAllData silently before validation',
-    '  --no-sync              Validate an already-synced workbook without running macros',
+    '  --no-sync              Validate without running the live synchronization macro',
     '  --strict-reference     Fail on every comparable weight/rate difference from the archive',
     '  --json                 Print the complete machine-readable report',
     '  --timeout-ms NUMBER    Excel validation timeout in milliseconds (default: 240000)',
@@ -179,6 +182,9 @@ function structurallyMatchesDynamicPriceFormula(formula) {
     'SYNCDATA,7,FALSE)',
     'SYNCDATA,10,FALSE)',
     'SYNCDATA,20,FALSE)',
+    'SYNCDATA,21,FALSE)',
+    'SYNCDATA,22,FALSE)',
+    'SYNCDATA,23,FALSE)',
   ];
   const settingsSheet = '\u062A\u0646\u0638\u06CC\u0645\u0627\u062A';
   const hasRoundingReference = normalized.includes(`${settingsSheet}!R15C2`)
@@ -222,8 +228,79 @@ function buildFailures(report, options) {
     `candidate headers must exactly match the canonical Persian contract: ${JSON.stringify(report.candidate.headers)}`,
   );
   failUnless(
+    report.candidate.config.autoSyncOnOpen === 'بله',
+    `canonical template must default automatic synchronization to بله; got ${JSON.stringify(report.candidate.config.autoSyncOnOpen)}`,
+  );
+  failUnless(
     sameArray(report.syncData.headers, SYNC_DATA_HEADERS),
     `SyncData headers changed: ${JSON.stringify(report.syncData.headers)}`,
+  );
+  failUnless(
+    Array.isArray(report.branding)
+      && report.branding.length === 3
+      && report.branding.every((sheet) => (
+        sameFiniteNumber(sheet.row1Height, 60, 0.01)
+        && sheet.logoFound === true
+        && typeof sheet.centerDeltaPoints === 'number'
+        && sheet.centerDeltaPoints <= 0.75
+      )),
+    `branding rows/logos are not 60pt and vertically centered: ${JSON.stringify(report.branding)}`,
+  );
+  failUnless(
+    report.searchLiteral.numberFormat === '@'
+      && Array.isArray(report.searchLiteral.samples)
+      && report.searchLiteral.samples.length === 6
+      && report.searchLiteral.samples.every((sample) => (
+        sample.input === sample.value
+        && sample.input === sample.text
+        && sample.valueType === 'String'
+        && sample.input === sample.reopenValue
+        && sample.input === sample.reopenText
+        && sample.reopenValueType === 'String'
+        && sample.reopenNumberFormat === '@'
+      )),
+    `the product search input did not preserve all literal-text fixtures: ${JSON.stringify(report.searchLiteral)}`,
+  );
+  failUnless(
+    report.statusSummary.mixed.includes('3 ')
+      && report.statusSummary.mixed.includes('2 ')
+      && !report.statusSummary.mixed.includes('0 ')
+      && report.statusSummary.allZero.length > 0
+      && report.statusSummary.auditMixed.includes('2 ')
+      && !report.statusSummary.auditMixed.includes('0 ')
+      && report.statusSummary.auditAllZero.length > 0
+      && !report.statusSummary.auditAllZero.includes('0 '),
+    `zero-count status or audit categories were not omitted: ${JSON.stringify(report.statusSummary)}`,
+  );
+  failUnless(
+    report.fontAudit.passed === true
+      && report.fontAudit.persianFont === 'Yekan Bakh'
+      && report.fontAudit.latinFont === 'Segoe UI'
+      && report.fontAudit.auditMode === 'RepairAndWarn'
+      && report.fontAudit.validateOnOpen === 'Yes'
+      && report.fontAudit.allowFallback === 'No'
+      && report.fontAudit.invalidModeRejected === true
+      && report.fontAudit.missingConfigRejected === true
+      && report.fontAudit.missingFontRejected === true
+      && report.fontAudit.driftRepaired === true
+      && report.fontAudit.dialogPassed === true
+      && report.fontAudit.friendlyError.length > 0
+      && !report.fontAudit.friendlyError.includes('RefreshPricingState')
+      && !report.fontAudit.friendlyError.includes('[pricing state]')
+      && !report.fontAudit.friendlyError.toLowerCase().includes('http')
+      && report.fontAudit.priceSlots.some((slot) => (
+        slot.name === 'Name' && slot.supported === true && slot.value === 'Segoe UI'
+      ))
+      && report.fontAudit.priceSlots.every((slot) => (
+        slot.supported === false || slot.value === 'Segoe UI'
+      )),
+    `the fixed font policy or hard font audit failed: ${JSON.stringify(report.fontAudit)}`,
+  );
+  failUnless(
+    report.titleDirection.latinRows > 0
+      && report.titleDirection.persianRows > 0
+      && report.titleDirection.mismatches === 0,
+    `product-name reading order does not follow title script: ${JSON.stringify(report.titleDirection)}`,
   );
   failUnless(
     report.syncData.sheetVisibility === 2,
@@ -460,8 +537,35 @@ function buildFailures(report, options) {
     `product search did not wrap to the first result: ${JSON.stringify(report.search)}`,
   );
   failUnless(
+    report.search.firstColumn === report.search.expectedColumn
+      && report.search.secondColumn === report.search.expectedColumn,
+    `Enter/F3 search did not leave the price cell selected: ${JSON.stringify(report.search)}`,
+  );
+  failUnless(
+    report.search.expectedYellowCellCount > 0
+      && report.search.firstYellowCellCount === report.search.expectedYellowCellCount
+      && report.search.secondYellowCellCount === report.search.expectedYellowCellCount
+      && report.search.wrapYellowCellCount === report.search.expectedYellowCellCount,
+    `the selected search result is not highlighted across the full row under manual calculation: ${JSON.stringify(report.search)}`,
+  );
+  failUnless(
     report.search.clearedCaption === report.search.baseCaption,
     `clearing product search did not reset the button caption: ${JSON.stringify(report.search)}`,
+  );
+  failUnless(
+    report.transientPricePreview.found === true
+      && report.transientPricePreview.row > 0
+      && report.transientPricePreview.markerRow === report.transientPricePreview.row
+      && sameFiniteNumber(
+        report.transientPricePreview.selectedValue,
+        report.transientPricePreview.expected,
+        0.01,
+      )
+      && report.transientPricePreview.grayFont === true
+      && report.transientPricePreview.yellowCellCount
+        === report.transientPricePreview.expectedYellowCellCount
+      && report.transientPricePreview.resetValue === null,
+    `zero-stock projected price preview is not transient, gray, and independently correct: ${JSON.stringify(report.transientPricePreview)}`,
   );
   failUnless(
     report.regressions.relay109032.present
@@ -550,7 +654,13 @@ function printHumanReport(report) {
     `  Formula: present=${report.candidate.priceFormulaRows}, structural=${report.candidate.structuralFormulaRows}, mismatches=${report.candidate.priceMismatchRows}, Woo parity=${report.candidate.wooComparableRows - report.candidate.wooParityMismatchRows}/${report.candidate.wooComparableRows}`,
   );
   console.log(
-    `  Search: query=${report.search.query}, results=${report.search.total}, rows=${report.search.firstRow}->${report.search.secondRow}->${report.search.wrapRow}, scroll=${report.search.firstScrollColumn}/${report.search.secondScrollColumn}`,
+    `  Search: query=${report.search.query}, results=${report.search.total}, rows=${report.search.firstRow}->${report.search.secondRow}->${report.search.wrapRow}, yellow=${report.search.firstYellowCellCount}/${report.search.expectedYellowCellCount}, scroll=${report.search.firstScrollColumn}/${report.search.secondScrollColumn}`,
+  );
+  console.log(
+    `  Presentation: branding=${report.branding.length} sheets, title direction mismatches=${report.titleDirection.mismatches}, fonts=${report.fontAudit.persianFont}/${report.fontAudit.latinFont}`,
+  );
+  console.log(
+    `  Zero-stock preview: code=${report.transientPricePreview.code}, value=${report.transientPricePreview.selectedValue}, reset=${report.transientPricePreview.resetValue}`,
   );
   console.log(
     `  Fail-closed: unsafe source-only=${report.candidate.sourceOnlyUnsafeRows}, incorrectly priced=${report.candidate.sourceOnlyUnsafePricedRows}, missing expected=${report.candidate.missingExpectedPriceRows}`,
@@ -576,12 +686,15 @@ $ErrorActionPreference = 'Stop'
 $candidatePath = $env:PATRIS_VALIDATOR_CANDIDATE
 $referencePath = $env:PATRIS_VALIDATOR_REFERENCE
 $runSync = $env:PATRIS_VALIDATOR_SYNC -eq '1'
+$validationTimeoutMilliseconds = [int]$env:PATRIS_VALIDATOR_TIMEOUT_MS
 $invariant = [System.Globalization.CultureInfo]::InvariantCulture
 
 function Release-ComObject([object]$value) {
-    if ($null -ne $value -and [Runtime.InteropServices.Marshal]::IsComObject($value)) {
-        [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($value)
-    }
+    try {
+        if ($null -ne $value -and [Runtime.InteropServices.Marshal]::IsComObject($value)) {
+            [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($value)
+        }
+    } catch {}
 }
 
 function Matrix-Value([object]$matrix, [int]$rows, [int]$columns, [int]$row, [int]$column) {
@@ -670,11 +783,330 @@ function Sheet-Scalar([object]$book, [int]$sheetIndex, [string]$address) {
     }
 }
 
+function Reset-SelectedProductRow([object]$excel, [object]$book) {
+    $eventsWereEnabled = [bool]$excel.EnableEvents
+    $table = $null
+    $dataRange = $null
+    try {
+        $excel.EnableEvents = $false
+        foreach ($nameText in @('SelectedProductRow', 'ProjectedPricePreviewRow')) {
+            $definedName = $null
+            $marker = $null
+            try {
+                $definedName = $book.Names.Item($nameText)
+                $marker = $definedName.RefersToRange
+                $marker.Value2 = 0
+            } finally {
+                Release-ComObject $marker
+                Release-ComObject $definedName
+            }
+        }
+        $table = Find-Table $book 'Products'
+        $dataRange = $table.DataBodyRange
+        if ($null -ne $dataRange) {
+            [void]$dataRange.Calculate()
+        }
+    } finally {
+        $excel.EnableEvents = $eventsWereEnabled
+        Release-ComObject $dataRange
+        Release-ComObject $table
+    }
+}
+
+function Test-BrandingLayout([object]$book) {
+    $contracts = @(
+        [pscustomobject]@{ SheetIndex = 1; Anchor = 'B1:B2' },
+        [pscustomobject]@{ SheetIndex = 2; Anchor = 'B1:B2' },
+        [pscustomobject]@{ SheetIndex = 3; Anchor = 'A1:A2' }
+    )
+    $results = @()
+    foreach ($contract in $contracts) {
+        $sheet = $null
+        $anchor = $null
+        $logo = $null
+        try {
+            $sheet = $book.Worksheets.Item([int]$contract.SheetIndex)
+            $anchor = $sheet.Range([string]$contract.Anchor)
+            for ($shapeIndex = 1; $shapeIndex -le $sheet.Shapes.Count; $shapeIndex++) {
+                $candidate = $sheet.Shapes.Item($shapeIndex)
+                # Excel exposes SVG logos as msoGraphic (28) and raster logos
+                # as msoPicture (13). Both are valid branded picture shapes.
+                if ([int]$candidate.Type -eq 13 -or [int]$candidate.Type -eq 28) {
+                    $logo = $candidate
+                    break
+                }
+                Release-ComObject $candidate
+            }
+            $rowHeight = [double]$sheet.Rows.Item(1).RowHeight
+            $logoFound = $null -ne $logo
+            $centerDelta = $null
+            if ($logoFound) {
+                $anchorCenter = [double]$anchor.Top + ([double]$anchor.Height / 2)
+                $logoCenter = [double]$logo.Top + ([double]$logo.Height / 2)
+                $centerDelta = [Math]::Abs($anchorCenter - $logoCenter)
+            }
+            $results += [pscustomobject]@{
+                sheet = [string]$sheet.Name
+                row1Height = $rowHeight
+                logoFound = $logoFound
+                centerDeltaPoints = $centerDelta
+            }
+        } finally {
+            Release-ComObject $logo
+            Release-ComObject $anchor
+            Release-ComObject $sheet
+        }
+    }
+    return @($results)
+}
+
+function Test-SearchLiteralText([object]$excel, [object]$book) {
+    $definedName = $null
+    $input = $null
+    $eventsWereEnabled = [bool]$excel.EnableEvents
+    try {
+        $definedName = $book.Names.Item('ProductSearchQuery')
+        $input = $definedName.RefersToRange
+        $savedValue = $input.Value2
+        $samples = @()
+        $macro = "'$($book.Name.Replace("'", "''"))'!ProductCatalogSync.PreserveSearchLiteral"
+        $copyExtension = switch ([int]$book.FileFormat) {
+            51 { '.xlsx' }
+            52 { '.xlsm' }
+            53 { '.xltm' }
+            default { '.xlsm' }
+        }
+        $excel.EnableEvents = $false
+        foreach ($fixture in @('2.4', '25.40', '12/3', '01.02', '001234', '۱۲۳۴')) {
+            $reopenPath = Join-Path ([System.IO.Path]::GetTempPath()) (
+                'patris-search-literal-' + [Guid]::NewGuid().ToString('N') +
+                $copyExtension
+            )
+            $reopenBook = $null
+            $reopenName = $null
+            $reopenInput = $null
+            $input.NumberFormat = '@'
+            $input.Value2 = $fixture
+            [void]$excel.Run($macro)
+            try {
+                $book.SaveCopyAs($reopenPath)
+                $reopenBook = $excel.Workbooks.Open($reopenPath, 0, $true)
+                $reopenName = $reopenBook.Names.Item('ProductSearchQuery')
+                $reopenInput = $reopenName.RefersToRange
+                $samples += [pscustomobject]@{
+                    input = $fixture
+                    value = [Convert]::ToString($input.Value2, $invariant)
+                    text = [Convert]::ToString($input.Text, $invariant)
+                    valueType = if ($null -eq $input.Value2) {
+                        ''
+                    } else {
+                        [string]$input.Value2.GetType().Name
+                    }
+                    reopenValue = [Convert]::ToString($reopenInput.Value2, $invariant)
+                    reopenText = [Convert]::ToString($reopenInput.Text, $invariant)
+                    reopenValueType = if ($null -eq $reopenInput.Value2) {
+                        ''
+                    } else {
+                        [string]$reopenInput.Value2.GetType().Name
+                    }
+                    reopenNumberFormat = [Convert]::ToString(
+                        $reopenInput.NumberFormat,
+                        $invariant
+                    )
+                }
+            } finally {
+                Release-ComObject $reopenInput
+                Release-ComObject $reopenName
+                if ($null -ne $reopenBook) {
+                    $reopenBook.Close($false)
+                }
+                Release-ComObject $reopenBook
+                Remove-Item -LiteralPath $reopenPath -Force -ErrorAction SilentlyContinue
+            }
+        }
+        return [pscustomobject]@{
+            numberFormat = [Convert]::ToString($input.NumberFormat, $invariant)
+            samples = @($samples)
+        }
+    } finally {
+        if ($null -ne $input) {
+            $input.Value2 = $savedValue
+        }
+        $excel.EnableEvents = $eventsWereEnabled
+        Release-ComObject $input
+        Release-ComObject $definedName
+    }
+}
+
+function Test-FontAudit([object]$excel, [object]$book) {
+    $settings = $null
+    $table = $null
+    $priceDataRange = $null
+    $priceColumn = $null
+    $savedPersianFont = $null
+    $savedAuditMode = $null
+    $savedPriceFont = $null
+    try {
+        $settings = $book.Worksheets.Item(3)
+        $table = Find-Table $book 'Products'
+        $priceDataRange = $table.ListColumns.Item(1).DataBodyRange
+        if ($null -ne $priceDataRange) {
+            $priceColumn = $priceDataRange.Cells.Item(1, 1)
+        }
+        $macro = "'$($book.Name.Replace("'", "''"))'!ProductCatalogSync.AuditFontsForValidation"
+        $passed = [bool]$excel.Run($macro)
+        $dialogMacro = "'$($book.Name.Replace("'", "''"))'!ProductCatalogSync.AuditMessageDialogForValidation"
+        $friendlyMacro = "'$($book.Name.Replace("'", "''"))'!ProductCatalogSync.FriendlyStatusErrorForValidation"
+        $dialogPassed = [bool]$excel.Run($dialogMacro)
+        $friendlyError = [Convert]::ToString(
+            $excel.Run(
+                $friendlyMacro,
+                'RefreshPricingState [pricing state]: HTTP 500 internal error'
+            ),
+            $invariant
+        )
+        $policyFixtureMacro = "'$($book.Name.Replace("'", "''"))'!ProductCatalogSync.ValidateFontPolicyFixturesForValidation"
+        $policyFixturesPassed = [bool]$excel.Run($policyFixtureMacro)
+        $savedPersianFont = $settings.Range('B39').Value2
+        $savedAuditMode = $settings.Range('B41').Value2
+        $driftRepaired = $false
+        $priceSlots = @()
+        if ($null -ne $priceColumn) {
+            $savedPriceFont = $priceColumn.Font.Name
+            $priceColumn.Font.Name = 'Arial'
+            $repairMacro = "'$($book.Name.Replace("'", "''"))'!ProductCatalogSync.RepairFontDriftForValidation"
+            $driftRepaired = [bool]$excel.Run($repairMacro) -and
+                [Convert]::ToString($priceColumn.Font.Name, $invariant) -eq 'Segoe UI'
+            $priceSlots = @(
+                foreach ($slot in @('Name', 'NameComplexScript', 'NameFarEast')) {
+                    try {
+                        $slotValue = [Convert]::ToString($priceColumn.Font.$slot, $invariant)
+                        [pscustomobject]@{
+                            name = $slot
+                            supported = $slot -eq 'Name' -or -not [string]::IsNullOrWhiteSpace($slotValue)
+                            value = $slotValue
+                        }
+                    } catch {
+                        [pscustomobject]@{
+                            name = $slot
+                            supported = $false
+                            value = ''
+                        }
+                    }
+                }
+            )
+        }
+
+        return [pscustomobject]@{
+            passed = $passed
+            persianFont = [Convert]::ToString($settings.Range('B39').Value2, $invariant)
+            latinFont = [Convert]::ToString($settings.Range('B40').Value2, $invariant)
+            auditMode = [Convert]::ToString($settings.Range('B41').Value2, $invariant)
+            validateOnOpen = [Convert]::ToString($settings.Range('B42').Value2, $invariant)
+            allowFallback = [Convert]::ToString($settings.Range('B43').Value2, $invariant)
+            invalidModeRejected = $policyFixturesPassed
+            missingConfigRejected = $policyFixturesPassed
+            missingFontRejected = $policyFixturesPassed
+            driftRepaired = $driftRepaired
+            dialogPassed = $dialogPassed
+            friendlyError = $friendlyError
+            priceSlots = $priceSlots
+        }
+    } finally {
+        if ($null -ne $settings) {
+            if ($null -ne $savedPersianFont) {
+                $settings.Range('B39').Value2 = $savedPersianFont
+            }
+            if ($null -ne $savedAuditMode) {
+                $settings.Range('B41').Value2 = $savedAuditMode
+            }
+        }
+        if ($null -ne $priceColumn -and $null -ne $savedPriceFont) {
+            $priceColumn.Font.Name = $savedPriceFont
+        }
+        Release-ComObject $priceColumn
+        Release-ComObject $priceDataRange
+        Release-ComObject $table
+        Release-ComObject $settings
+    }
+}
+
+function Test-StatusSummaryFormatter([object]$excel, [object]$book) {
+    $bookName = $book.Name.Replace("'", "''")
+    $statusMacro = "'$bookName'!ProductCatalogSync.FormatStatusSummaryForValidation"
+    $auditMacro = "'$bookName'!ProductCatalogSync.FormatFontAuditSummaryForValidation"
+    return [pscustomobject]@{
+        mixed = [Convert]::ToString($excel.Run($statusMacro, 0, 0, 3, 0, 2, 0, 0), $invariant)
+        allZero = [Convert]::ToString($excel.Run($statusMacro, 0, 0, 0, 0, 0, 0, 0), $invariant)
+        auditMixed = [Convert]::ToString($excel.Run($auditMacro, 2, 0), $invariant)
+        auditAllZero = [Convert]::ToString($excel.Run($auditMacro, 0, 0), $invariant)
+    }
+}
+
+function Test-ProductTitleDirection([object]$book) {
+    $table = Find-Table $book 'Products'
+    $titleColumn = $null
+    $cell = $null
+    $latinRows = 0
+    $persianRows = 0
+    $mismatches = 0
+    $samples = @()
+    try {
+        $titleColumn = $table.ListColumns.Item(8).DataBodyRange
+        if ($null -eq $titleColumn) {
+            return [pscustomobject]@{
+                latinRows = 0
+                persianRows = 0
+                mismatches = 0
+                samples = @()
+            }
+        }
+        for ($row = 1; $row -le $titleColumn.Rows.Count; $row++) {
+            $cell = $titleColumn.Cells.Item($row, 1)
+            $title = [Convert]::ToString($cell.Value2, $invariant).Trim()
+            if ($title.Length -gt 0) {
+                $containsPersian = [regex]::IsMatch(
+                    $title,
+                    '[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF\uFB50-\uFDFF\uFE70-\uFEFF]'
+                )
+                $expected = if ($containsPersian) { -5004 } else { -5003 }
+                if ($containsPersian) {
+                    $persianRows += 1
+                } else {
+                    $latinRows += 1
+                }
+                $actual = [int]$cell.ReadingOrder
+                if ($actual -ne $expected) {
+                    $mismatches += 1
+                    if ($samples.Count -lt 20) {
+                        $samples += "row=$([int]$cell.Row), expected=$expected, actual=$actual, title=$title"
+                    }
+                }
+            }
+            Release-ComObject $cell
+            $cell = $null
+        }
+        return [pscustomobject]@{
+            latinRows = $latinRows
+            persianRows = $persianRows
+            mismatches = $mismatches
+            samples = $samples
+        }
+    } finally {
+        Release-ComObject $cell
+        Release-ComObject $titleColumn
+        Release-ComObject $table
+    }
+}
+
 function Read-Products([object]$book) {
     $table = Find-Table $book 'Products'
+    $tableRange = $null
     $headerRange = $null
     $dataRange = $null
     try {
+        $tableRange = $table.Range
+        $tableFirstColumn = [int]$tableRange.Column
         $headerRange = $table.HeaderRowRange
         $headerColumns = $headerRange.Columns.Count
         $headerValues = $headerRange.Value2
@@ -701,6 +1133,9 @@ function Read-Products([object]$book) {
                 } else { $null }
                 $rate = if ($columnCount -ge 5) {
                     Matrix-Value $values $rowCount $columnCount $row 5
+                } else { $null }
+                $stock = if ($columnCount -ge 6) {
+                    Matrix-Value $values $rowCount $columnCount $row 6
                 } else { $null }
                 $productCode = if ($columnCount -ge 7) {
                     Normalized-Code (Matrix-Value $values $rowCount $columnCount $row 7)
@@ -755,6 +1190,7 @@ function Read-Products([object]$book) {
                         Price = $price
                         Weight = $weight
                         Rate = $rate
+                        Stock = $stock
                         Formula = $formula
                     }
                 }
@@ -770,13 +1206,18 @@ function Read-Products([object]$book) {
         )
         return [pscustomobject]@{
             Headers = $headers
-            TableAddress = [string]$table.Range.Address($false, $false)
+            TableAddress = [string]$tableRange.Address($false, $false)
+            TableFirstColumn = $tableFirstColumn
+            TableColumnCount = if ($null -ne $dataRange) {
+                [int]$dataRange.Columns.Count
+            } else { 0 }
             Rows = @($rows)
             FormulaSignatures = $signatures
         }
     } finally {
         Release-ComObject $dataRange
         Release-ComObject $headerRange
+        Release-ComObject $tableRange
         Release-ComObject $table
     }
 }
@@ -858,6 +1299,7 @@ function Select-SearchQuery([object[]]$productRows) {
 function Read-SearchButtonState(
     [object]$excel,
     [object]$searchButton,
+    [object]$table,
     [int]$expectedScrollColumn
 ) {
     $caption = [Convert]::ToString(
@@ -865,6 +1307,45 @@ function Read-SearchButtonState(
         $invariant
     )
     $captionMatch = [regex]::Match($caption, '\((\d+)/(\d+)\)$')
+    $dataRange = $null
+    $selectedTableRow = $null
+    $selectedCell = $null
+    $displayFormat = $null
+    $interior = $null
+    $activeRow = [int]$excel.ActiveCell.Row
+    $activeColumn = [int]$excel.ActiveCell.Column
+    $yellowCellCount = 0
+    $tableColumnCount = 0
+    try {
+        $dataRange = $table.DataBodyRange
+        if ($null -ne $dataRange) {
+            $tableColumnCount = [int]$dataRange.Columns.Count
+            $rowIndex = $activeRow - [int]$dataRange.Row + 1
+            if ($rowIndex -ge 1 -and $rowIndex -le [int]$dataRange.Rows.Count) {
+                $selectedTableRow = $dataRange.Rows.Item($rowIndex)
+                for ($column = 1; $column -le $tableColumnCount; $column++) {
+                    $selectedCell = $selectedTableRow.Cells.Item(1, $column)
+                    $displayFormat = $selectedCell.DisplayFormat
+                    $interior = $displayFormat.Interior
+                    if ([int]$interior.Color -eq 13432063) {
+                        $yellowCellCount += 1
+                    }
+                    Release-ComObject $interior
+                    Release-ComObject $displayFormat
+                    Release-ComObject $selectedCell
+                    $interior = $null
+                    $displayFormat = $null
+                    $selectedCell = $null
+                }
+            }
+        }
+    } finally {
+        Release-ComObject $interior
+        Release-ComObject $displayFormat
+        Release-ComObject $selectedCell
+        Release-ComObject $selectedTableRow
+        Release-ComObject $dataRange
+    }
     return [pscustomobject]@{
         Caption = $caption
         Ordinal = if ($captionMatch.Success) {
@@ -873,7 +1354,11 @@ function Read-SearchButtonState(
         Total = if ($captionMatch.Success) {
             [int]$captionMatch.Groups[2].Value
         } else { 0 }
-        Row = [int]$excel.ActiveCell.Row
+        Row = $activeRow
+        Column = $activeColumn
+        ExpectedColumn = [int]$table.Range.Column
+        YellowCellCount = $yellowCellCount
+        ExpectedYellowCellCount = $tableColumnCount
         ScrollColumn = [int]$excel.ActiveWindow.ScrollColumn
         ExpectedScrollColumn = $expectedScrollColumn
     }
@@ -903,6 +1388,13 @@ function Test-ProductSearch(
                 expectedSecondRow = 0
                 firstScrollColumn = 0
                 secondScrollColumn = 0
+                firstColumn = 0
+                secondColumn = 0
+                expectedColumn = [int]$table.Range.Column
+                firstYellowCellCount = 0
+                secondYellowCellCount = 0
+                wrapYellowCellCount = 0
+                expectedYellowCellCount = [int]$table.ListColumns.Count
                 expectedScrollColumn = [Math]::Max(
                     1,
                     [int]$table.Range.Column - 1
@@ -921,6 +1413,11 @@ function Test-ProductSearch(
         $expectedScrollColumn = [Math]::Max(1, [int]$table.Range.Column - 1)
         $macroBookName = ([string]$book.Name).Replace("'", "''")
         $searchMacro = "'$macroBookName'!ProductCatalogSync.SearchProducts"
+        $focusMacro = "'$macroBookName'!ProductCatalogSync.FocusProductSearch"
+        $registerMacro = "'$macroBookName'!ProductCatalogSync.RegisterSearchHotkey"
+        $unregisterMacro = "'$macroBookName'!ProductCatalogSync.UnregisterSearchHotkey"
+        $refreshEnterMacro = "'$macroBookName'!ProductCatalogSync.RefreshSearchEnterHotkey"
+        $enterMacro = "'$macroBookName'!ProductCatalogSync.HandleProductSearchEnter"
         $clearMacro = "'$macroBookName'!ProductCatalogSync.ClearProductSearch"
         $baseCaption = [Convert]::ToString(
             $searchButton.TextFrame2.TextRange.Text,
@@ -928,16 +1425,24 @@ function Test-ProductSearch(
         )
 
         $eventsWereEnabled = [bool]$excel.EnableEvents
+        $calculationWas = [int]$excel.Calculation
         try {
+            $excel.Calculation = -4135
+            [void]$book.Activate()
+            [void]$sheet.Activate()
+            [void]$excel.Run($registerMacro)
+            [void]$excel.Run($focusMacro)
             $excel.EnableEvents = $false
             $queryRange.Value2 = $query
         } finally {
             $excel.EnableEvents = $eventsWereEnabled
         }
-        [void]$excel.Run($searchMacro)
-        $first = Read-SearchButtonState $excel $searchButton $expectedScrollColumn
-        [void]$excel.Run($searchMacro)
-        $second = Read-SearchButtonState $excel $searchButton $expectedScrollColumn
+        [void]$excel.Run($refreshEnterMacro)
+        [void]$excel.Run($enterMacro)
+        $first = Read-SearchButtonState $excel $searchButton $table $expectedScrollColumn
+        [void]$excel.Run($refreshEnterMacro)
+        [void]$excel.Run($enterMacro)
+        $second = Read-SearchButtonState $excel $searchButton $table $expectedScrollColumn
 
         $wrap = $null
         if ($first.Total -ge 2 -and $first.Total -le 50) {
@@ -945,14 +1450,16 @@ function Test-ProductSearch(
                 [void]$excel.Run($searchMacro)
             }
             [void]$excel.Run($searchMacro)
-            $wrap = Read-SearchButtonState $excel $searchButton $expectedScrollColumn
+            $wrap = Read-SearchButtonState $excel $searchButton $table $expectedScrollColumn
         }
 
         [void]$excel.Run($clearMacro)
+        [void]$excel.Run($unregisterMacro)
         $clearedCaption = [Convert]::ToString(
             $searchButton.TextFrame2.TextRange.Text,
             $invariant
         )
+        $excel.Calculation = $calculationWas
         return [pscustomobject]@{
             query = $query
             total = $first.Total
@@ -965,6 +1472,15 @@ function Test-ProductSearch(
             expectedSecondRow = [int]$expectedRows[1].Row
             firstScrollColumn = $first.ScrollColumn
             secondScrollColumn = $second.ScrollColumn
+            firstColumn = $first.Column
+            secondColumn = $second.Column
+            expectedColumn = $first.ExpectedColumn
+            firstYellowCellCount = $first.YellowCellCount
+            secondYellowCellCount = $second.YellowCellCount
+            wrapYellowCellCount = if ($null -ne $wrap) {
+                $wrap.YellowCellCount
+            } else { 0 }
+            expectedYellowCellCount = $first.ExpectedYellowCellCount
             expectedScrollColumn = $expectedScrollColumn
             wrapOrdinal = if ($null -ne $wrap) { $wrap.Ordinal } else { 0 }
             wrapRow = if ($null -ne $wrap) { $wrap.Row } else { 0 }
@@ -972,6 +1488,9 @@ function Test-ProductSearch(
             clearedCaption = $clearedCaption
         }
     } finally {
+        if ($null -ne $excel -and $null -ne $calculationWas) {
+            try { $excel.Calculation = $calculationWas } catch {}
+        }
         Release-ComObject $searchButton
         Release-ComObject $queryRange
         Release-ComObject $sheet
@@ -1002,6 +1521,8 @@ function Read-SyncData([object]$book) {
         if ($null -ne $dataRange) {
             $rowCount = $dataRange.Rows.Count
             $columnCount = $dataRange.Columns.Count
+            $dataFirstRow = [int]$dataRange.Row
+            $dataFirstColumn = [int]$dataRange.Column
             $values = $dataRange.Value2
             for ($row = 1; $row -le $rowCount; $row++) {
                 $code = Normalized-Code (
@@ -1009,6 +1530,8 @@ function Read-SyncData([object]$book) {
                 )
                 if ($code.Length -gt 0) {
                     $rows += [pscustomobject]@{
+                        Row = $dataFirstRow + $row - 1
+                        FirstColumn = $dataFirstColumn
                         Code = $code
                         Currency = [Convert]::ToString(
                             (Matrix-Value $values $rowCount $columnCount $row 2),
@@ -1038,6 +1561,15 @@ function Read-SyncData([object]$book) {
                         ).Trim()
                         RowKind = [Convert]::ToString(
                             (Matrix-Value $values $rowCount $columnCount $row 20),
+                            $invariant
+                        ).Trim()
+                        PriceSourceAmount = Matrix-Value $values $rowCount $columnCount $row 21
+                        PriceSourceCurrency = [Convert]::ToString(
+                            (Matrix-Value $values $rowCount $columnCount $row 22),
+                            $invariant
+                        ).Trim()
+                        PriceSourceKind = [Convert]::ToString(
+                            (Matrix-Value $values $rowCount $columnCount $row 23),
                             $invariant
                         ).Trim()
                     }
@@ -1074,6 +1606,277 @@ function Currency-Factor-Or-Null([object]$currencyValue, [object]$syncRow) {
         'IRR' { return 0.1 }
         'IRT' { return 1.0 }
         default { return $null }
+    }
+}
+
+function Round-ProjectedPrice([decimal]$value, [int]$digits) {
+    $quantum = [decimal]1
+    for ($index = 0; $index -lt $digits; $index++) {
+        $quantum *= [decimal]10
+    }
+    return [Math]::Round(
+        $value / $quantum,
+        0,
+        [System.MidpointRounding]::AwayFromZero
+    ) * $quantum
+}
+
+function Expected-ProjectedPrice(
+    [object]$productRow,
+    [object]$syncRow,
+    [int]$roundingDigits
+) {
+    $amount = Numeric-Or-Null $syncRow.PriceSourceAmount
+    if ($null -eq $amount -or $amount -le 0) { return $null }
+    $currency = [Convert]::ToString(
+        $syncRow.PriceSourceCurrency,
+        $invariant
+    ).Trim().ToUpperInvariant()
+    $kind = [Convert]::ToString(
+        $syncRow.PriceSourceKind,
+        $invariant
+    ).Trim().ToLowerInvariant()
+    $profitPercent = Numeric-Or-Null $syncRow.ProfitPercent
+
+    switch ($kind) {
+        'sale_price_direct' {
+            if ($currency -ne 'IRR' -or ([decimal]$amount % [decimal]10) -ne 0) {
+                return $null
+            }
+            return [decimal]$amount / [decimal]10
+        }
+        'partner_price' {
+            if ($currency -ne 'IRR' -or $null -eq $profitPercent -or $profitPercent -lt 0) {
+                return $null
+            }
+            $unrounded = (
+                ([decimal]$amount / [decimal]10) *
+                ([decimal]1 + ([decimal]$profitPercent / [decimal]100))
+            )
+            return Round-ProjectedPrice $unrounded $roundingDigits
+        }
+        'foreign_price' {
+            $factor = Currency-Factor-Or-Null $currency $syncRow
+            $weight = Numeric-Or-Null $productRow.Weight
+            $shipping = Numeric-Or-Null $syncRow.Shipping
+            $shippingFactor = Currency-Factor-Or-Null $syncRow.ShippingCurrency $syncRow
+            if ($null -eq $factor -or $factor -le 0 -or
+                $null -eq $weight -or $weight -lt 0 -or
+                $null -eq $shipping -or $shipping -lt 0 -or
+                $null -eq $shippingFactor -or $shippingFactor -le 0 -or
+                $null -eq $profitPercent -or $profitPercent -lt 0) {
+                return $null
+            }
+            $unrounded = (
+                ([decimal]$amount * [decimal]$factor) +
+                (([decimal]$weight / [decimal]1000) *
+                    [decimal]$shipping * [decimal]$shippingFactor)
+            ) * (
+                [decimal]1 + ([decimal]$profitPercent / [decimal]100)
+            )
+            return Round-ProjectedPrice $unrounded $roundingDigits
+        }
+        default { return $null }
+    }
+}
+
+function Test-TransientPricePreview(
+    [object]$excel,
+    [object]$book,
+    [object]$productSnapshot,
+    [object]$syncDictionary,
+    [int]$roundingDigits
+) {
+    $sheet = $null
+    $syncSheet = $null
+    $priceCell = $null
+    $rateCell = $null
+    $wooPriceCell = $null
+    $selectedRowRange = $null
+    $selectedCell = $null
+    $displayFormat = $null
+    $font = $null
+    $interior = $null
+    $definedName = $null
+    $marker = $null
+    $savedRate = $null
+    $savedWooPrice = $null
+    $injected = $false
+    $eventsWereEnabled = [bool]$excel.EnableEvents
+    try {
+        [void](Reset-SelectedProductRow $excel $book)
+        $sheet = $book.Worksheets.Item(1)
+        $syncSheet = $book.Worksheets.Item(4)
+        $productRows = @($productSnapshot.Rows)
+        $tableFirstColumn = [int]$productSnapshot.TableFirstColumn
+        $tableColumnCount = [int]$productSnapshot.TableColumnCount
+        if ($productRows.Count -eq 0 -or $tableFirstColumn -le 0 -or
+            $tableColumnCount -le 0) {
+            return [pscustomobject]@{
+                found = $false
+                row = 0
+                code = ''
+                expected = $null
+                selectedValue = $null
+                markerRow = 0
+                grayFont = $false
+                fontColor = $null
+                yellowCellCount = 0
+                expectedYellowCellCount = 0
+                resetValue = $null
+            }
+        }
+        $candidate = $null
+        $expected = $null
+        foreach ($row in $productRows) {
+            $stock = Numeric-Or-Null $row.Stock
+            if ($null -eq $stock -or $stock -gt 0) {
+                continue
+            }
+            if (-not $syncDictionary.Values.ContainsKey([string]$row.Code)) {
+                continue
+            }
+            $syncRow = $syncDictionary.Values[[string]$row.Code]
+            $projected = Expected-ProjectedPrice $row $syncRow $roundingDigits
+            if ($null -ne $projected -and $projected -gt 0) {
+                $priceCell = $sheet.Cells.Item(
+                    [int]$row.Row,
+                    $tableFirstColumn
+                )
+                $rateCell = $sheet.Cells.Item(
+                    [int]$row.Row,
+                    $tableFirstColumn + 4
+                )
+                $wooPriceCell = $syncSheet.Cells.Item(
+                    [int]$syncRow.Row,
+                    [int]$syncRow.FirstColumn + 9
+                )
+                $savedRate = $rateCell.Value2
+                $savedWooPrice = $wooPriceCell.Value2
+                $excel.EnableEvents = $false
+                [void]$rateCell.ClearContents()
+                [void]$wooPriceCell.ClearContents()
+                [void](Reset-SelectedProductRow $excel $book)
+                [void]$priceCell.Calculate()
+                if ($null -eq (Numeric-Or-Null $priceCell.Value2)) {
+                    $candidate = $row
+                    $expected = [double]$projected
+                    $injected = $true
+                    break
+                }
+                $rateCell.Value2 = $savedRate
+                $wooPriceCell.Value2 = $savedWooPrice
+                [void]$priceCell.Calculate()
+                Release-ComObject $wooPriceCell
+                Release-ComObject $rateCell
+                Release-ComObject $priceCell
+                $wooPriceCell = $null
+                $rateCell = $null
+                $priceCell = $null
+            }
+        }
+        if ($null -eq $candidate) {
+            return [pscustomobject]@{
+                found = $false
+                row = 0
+                code = ''
+                expected = $null
+                selectedValue = $null
+                markerRow = 0
+                grayFont = $false
+                fontColor = $null
+                yellowCellCount = 0
+                expectedYellowCellCount = 0
+                resetValue = $null
+            }
+        }
+
+        [void]$book.Activate()
+        $sheet = $book.Worksheets.Item(1)
+        [void]$sheet.Activate()
+        $excel.EnableEvents = $true
+        [void]$priceCell.Select()
+        [void]$priceCell.Calculate()
+        $selectedValue = Numeric-Or-Null $priceCell.Value2
+
+        $definedName = $book.Names.Item('ProjectedPricePreviewRow')
+        $marker = $definedName.RefersToRange
+        $markerRow = [int]$marker.Value2
+
+        $displayFormat = $priceCell.DisplayFormat
+        $font = $displayFormat.Font
+        $fontColor = [long]$font.Color
+        $red = [int]($fontColor -band 255)
+        $green = [int](($fontColor -shr 8) -band 255)
+        $blue = [int](($fontColor -shr 16) -band 255)
+        $channelMaximum = [Math]::Max($red, [Math]::Max($green, $blue))
+        $channelMinimum = [Math]::Min($red, [Math]::Min($green, $blue))
+        $channelAverage = ($red + $green + $blue) / 3
+        $grayFont = (
+            ($channelMaximum - $channelMinimum) -le 24 -and
+            $channelAverage -ge 64 -and $channelAverage -le 192
+        )
+        Release-ComObject $font
+        Release-ComObject $displayFormat
+        $font = $null
+        $displayFormat = $null
+
+        $selectedRowRange = $priceCell.Resize(1, $tableColumnCount)
+        $yellowCellCount = 0
+        for ($column = 1; $column -le $selectedRowRange.Columns.Count; $column++) {
+            $selectedCell = $selectedRowRange.Cells.Item(1, $column)
+            $displayFormat = $selectedCell.DisplayFormat
+            $interior = $displayFormat.Interior
+            if ([int]$interior.Color -eq 13432063) {
+                $yellowCellCount += 1
+            }
+            Release-ComObject $interior
+            Release-ComObject $displayFormat
+            Release-ComObject $selectedCell
+            $interior = $null
+            $displayFormat = $null
+            $selectedCell = $null
+        }
+        $expectedYellowCellCount = [int]$selectedRowRange.Columns.Count
+
+        [void](Reset-SelectedProductRow $excel $book)
+        [void]$priceCell.Calculate()
+        $resetValue = Numeric-Or-Null $priceCell.Value2
+        return [pscustomobject]@{
+            found = $true
+            row = [int]$candidate.Row
+            code = [string]$candidate.Code
+            expected = $expected
+            selectedValue = $selectedValue
+            markerRow = $markerRow
+            grayFont = $grayFont
+            fontColor = $fontColor
+            yellowCellCount = $yellowCellCount
+            expectedYellowCellCount = $expectedYellowCellCount
+            resetValue = $resetValue
+        }
+    } finally {
+        try {
+            $excel.EnableEvents = $false
+            if ($injected -and $null -ne $rateCell -and $null -ne $wooPriceCell) {
+                $rateCell.Value2 = $savedRate
+                $wooPriceCell.Value2 = $savedWooPrice
+            }
+            [void](Reset-SelectedProductRow $excel $book)
+        } catch {}
+        $excel.EnableEvents = $eventsWereEnabled
+        Release-ComObject $marker
+        Release-ComObject $definedName
+        Release-ComObject $interior
+        Release-ComObject $font
+        Release-ComObject $displayFormat
+        Release-ComObject $selectedCell
+        Release-ComObject $selectedRowRange
+        Release-ComObject $wooPriceCell
+        Release-ComObject $rateCell
+        Release-ComObject $priceCell
+        Release-ComObject $syncSheet
+        Release-ComObject $sheet
     }
 }
 
@@ -1163,6 +1966,8 @@ $candidateBook = $null
 $referenceBook = $null
 $syncRan = $false
 $syncSucceeded = $false
+$syncOperation = ''
+$syncError = ''
 try {
     $excel = New-Object -ComObject Excel.Application
     $excel.Visible = $false
@@ -1170,11 +1975,10 @@ try {
     $excel.AskToUpdateLinks = $false
     $excel.EnableEvents = $false
 
-    if ($runSync) {
-        $excel.AutomationSecurity = 1
-    } else {
-        $excel.AutomationSecurity = 3
-    }
+    # The validator always runs local audit/fixture macros embedded in the
+    # candidate. --no-sync suppresses only RefreshAllData; disabling every
+    # macro here made the remaining validation path impossible by definition.
+    $excel.AutomationSecurity = 1
 
     if ([IO.Path]::GetExtension($candidatePath).ToLowerInvariant() -eq '.xltm') {
         $candidateBook = $excel.Workbooks.Add($candidatePath)
@@ -1184,12 +1988,53 @@ try {
 
     if ($runSync) {
         $macroBookName = ([string]$candidateBook.Name).Replace("'", "''")
-        $syncSucceeded = [bool]$excel.Run(
+        [void]$excel.Run(
             "'$macroBookName'!ProductCatalogSync.RefreshAllDataForValidation"
         )
         $syncRan = $true
+        $syncDeadline = [DateTime]::UtcNow.AddMilliseconds(
+            [Math]::Max(1000, $validationTimeoutMilliseconds - 30000)
+        )
+        while (-not [bool]$excel.Run(
+            "'$macroBookName'!ProductCatalogSync.AsyncPricingIdleForValidation"
+        )) {
+            if ([DateTime]::UtcNow -ge $syncDeadline) {
+                try {
+                    [void]$excel.Run(
+                        "'$macroBookName'!ProductCatalogSync.CancelActivePricingOperations"
+                    )
+                } catch {}
+                throw 'Asynchronous live synchronization did not reach a terminal callback before the validator deadline.'
+            }
+            # This waits only in the out-of-process native harness. The VBA
+            # client itself never polls WinHTTP readiness or HTTP job status.
+            Start-Sleep -Milliseconds 50
+        }
+        $syncOperation = [Convert]::ToString(
+            $excel.Run(
+                "'$macroBookName'!ProductCatalogSync.LastPricingOperationForValidation"
+            ),
+            $invariant
+        )
+        $syncSucceeded = [bool]$excel.Run(
+            "'$macroBookName'!ProductCatalogSync.LastPricingOperationSucceededForValidation"
+        )
+        $syncError = [Convert]::ToString(
+            $excel.Run(
+                "'$macroBookName'!ProductCatalogSync.LastPricingOperationErrorForValidation"
+            ),
+            $invariant
+        )
+        if (-not $syncSucceeded) {
+            $syncFailureStatus = [Convert]::ToString(
+                (Sheet-Scalar $candidateBook 3 'B6'),
+                $invariant
+            )
+            throw "Live synchronization '$syncOperation' failed before validation: $syncFailureStatus $syncError"
+        }
     }
     $excel.CalculateFullRebuild()
+    Reset-SelectedProductRow $excel $candidateBook
     $candidateSyncStatus = [Convert]::ToString(
         (Sheet-Scalar $candidateBook 3 'B6'),
         $invariant
@@ -1199,10 +2044,20 @@ try {
         $invariant
     )
 
+    $brandingLayout = Test-BrandingLayout $candidateBook
+    $searchLiteral = Test-SearchLiteralText $excel $candidateBook
+    $statusSummary = Test-StatusSummaryFormatter $excel $candidateBook
     $candidateProducts = Read-Products $candidateBook
+    $titleDirection = Test-ProductTitleDirection $candidateBook
+    $fontAudit = Test-FontAudit $excel $candidateBook
     $candidateSearch = Test-ProductSearch $excel $candidateBook $candidateProducts.Rows
+    Reset-SelectedProductRow $excel $candidateBook
     $candidateSyncData = Read-SyncData $candidateBook
     $candidateConfig = [pscustomobject]@{
+        autoSyncOnOpen = [Convert]::ToString(
+            (Sheet-Scalar $candidateBook 3 'B5'),
+            $invariant
+        )
         yuan = Numeric-Or-Null (Sheet-Scalar $candidateBook 3 'B10')
         usd = Numeric-Or-Null (Sheet-Scalar $candidateBook 3 'B11')
         shipping = Numeric-Or-Null (Sheet-Scalar $candidateBook 3 'B14')
@@ -1226,6 +2081,8 @@ try {
     $candidateDictionary = Row-Dictionary $candidateProducts.Rows
     $candidateProductDictionary = ProductCode-Dictionary $candidateProducts.Rows
     $syncDictionary = Row-Dictionary $candidateSyncData.Rows
+    $transientPricePreview = Test-TransientPricePreview $excel $candidateBook $candidateProducts $syncDictionary ([int]$candidateConfig.roundingDigits)
+    Reset-SelectedProductRow $excel $candidateBook
     $referenceDictionary = ProductCode-Dictionary $referenceProducts.Rows
     $missingProductCodes = 0
     $extraSyncCodes = 0
@@ -1507,6 +2364,8 @@ try {
             requested = $runSync
             ran = $syncRan
             succeeded = $syncSucceeded
+            operation = $syncOperation
+            error = $syncError
         }
         candidate = [pscustomobject]@{
             path = $candidatePath
@@ -1575,6 +2434,12 @@ try {
         }
         errors = $errors
         search = $candidateSearch
+        branding = $brandingLayout
+        searchLiteral = $searchLiteral
+        statusSummary = $statusSummary
+        titleDirection = $titleDirection
+        fontAudit = $fontAudit
+        transientPricePreview = $transientPricePreview
         comparison = [pscustomobject]@{
             overlapRows = $overlapRows
             weightComparable = $weightComparable
@@ -1669,6 +2534,7 @@ function main() {
           PATRIS_VALIDATOR_CANDIDATE: options.candidate,
           PATRIS_VALIDATOR_REFERENCE: options.reference,
           PATRIS_VALIDATOR_SYNC: options.sync ? '1' : '0',
+          PATRIS_VALIDATOR_TIMEOUT_MS: String(options.timeoutMs),
         },
         maxBuffer: 16 * 1024 * 1024,
         timeout: options.timeoutMs,

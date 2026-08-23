@@ -342,7 +342,7 @@ func TestPostRefreshWaitRequiresSingleJSONContentType(t *testing.T) {
 	}
 }
 
-func TestPostRefreshWaitCancellationWhilePermitIsBusy(t *testing.T) {
+func TestPostRefreshWaitReturnsBusyWithoutQueueing(t *testing.T) {
 	const secret = "refresh-wait-test-secret"
 	t.Setenv(refreshWaitTestSecretEnv, secret)
 
@@ -358,24 +358,24 @@ func TestPostRefreshWaitCancellationWhilePermitIsBusy(t *testing.T) {
 	defer func() { <-srv.excelPricing.permit }()
 
 	request := newAuthenticatedRefreshWaitRequest(t, srv, `{"delivery":"wait"}`)
-	ctx, cancel := context.WithCancel(request.Context())
-	cancel()
-	request = request.WithContext(ctx)
 	recorder := httptest.NewRecorder()
 	srv.router.ServeHTTP(recorder, request)
 
-	if recorder.Code != http.StatusRequestTimeout {
-		t.Fatalf("cancelled wait status = %d: %s", recorder.Code, recorder.Body.String())
+	if recorder.Code != http.StatusTooManyRequests || recorder.Header().Get("Retry-After") != "1" {
+		t.Fatalf("busy wait status = %d: %s", recorder.Code, recorder.Body.String())
 	}
-	var response refreshWaitResponse
+	var response struct {
+		Code         string `json:"code"`
+		RetryAfterMS int    `json:"retry_after_ms"`
+	}
 	if err := json.NewDecoder(recorder.Body).Decode(&response); err != nil {
 		t.Fatal(err)
 	}
-	if response.Refreshed || response.Delivered || response.Code != "request_cancelled" {
-		t.Fatalf("unexpected cancelled wait response: %+v", response)
+	if response.Code != "pricing_busy" || response.RetryAfterMS != 1000 {
+		t.Fatalf("unexpected busy wait response: %+v", response)
 	}
 	if calls.Load() != 0 {
-		t.Fatalf("cancelled wait refresh reached receiver %d time(s)", calls.Load())
+		t.Fatalf("busy wait refresh reached receiver %d time(s)", calls.Load())
 	}
 }
 

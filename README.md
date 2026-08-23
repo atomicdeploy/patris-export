@@ -573,6 +573,8 @@ curl http://localhost:8080/api/records?format=csv -o kala.csv
 curl http://localhost:8080/api/records.csv -o kala.csv
 curl -H "Accept: text/csv" http://localhost:8080/api/records -o kala.csv
 curl 'http://localhost:8080/api/records.xlsx?download=1' -o kala.xlsx
+curl 'http://localhost:8080/api/records.xlsm?download=1' -o pricing.xlsm
+curl 'http://localhost:8080/api/records.xltm?download=1' -o pricing.xltm
 ```
 
 Add `download=1` to ask the API for an attachment filename, for example
@@ -585,6 +587,16 @@ source revision, generated time, and warnings. Headers follow the active UI
 language by default. Use `language=en|fa`, `mode=precalculated|formula`,
 `zebra=0|1`, and `rtl=0|1` on the HTTP route, or the equivalent CLI/config
 settings described in [Excel export](docs/EXCEL-EXPORT.md).
+
+The `.xlsx` response is generated macro-free with current records unless an
+allowlisted `export.xlsx_template` and explicit `export.xlsx_target` are both
+configured; in that case the trusted XLSX is populated and verified rather
+than copied or ignored. For `.xlsm`, Patris copies a configured trusted workbook
+to a temporary file, populates its explicit configured table or workbook named
+range with current records, closes, reopens, verifies package preservation and
+record identity, and only then finalizes the download. `.xltm` is a configured
+trusted blank template: any initial product row or request to bake data fails
+closed. Browser requests cannot supply a filesystem path or URL.
 
 The viewer data grid keeps selection keyed by `Code` across sorting and
 filtering, exposes accessible row and header command menus through right-click,
@@ -617,12 +629,15 @@ source/window/page metadata. It explicitly refuses `kala.db` and the primary
 product database. See [Recent-sales aggregate API](docs/RECENT-SALES-API.md).
 
 The canonical macro workbook uses the loopback-only `POST
-/api/excel/pricing-sync/{session,state,preview,apply}` companion to read,
+/api/pricing-sync/{session,state,preview,apply}` companion to read,
 preview, and explicitly apply global pricing settings without storing the
 remote credential. Patris injects the protected product-sync credential and
 exact canonical source identity, then regenerates, delivers, and verifies the
 canonical product contract after apply. See [Excel pricing-settings
 companion](docs/EXCEL-PRICING-SYNC.md).
+
+No client-specific pricing-route aliases are registered; unknown prefixes
+return `404`.
 
 `POST /api/refresh` forces the same source snapshot refresh used by the Web UI,
 WebSocket, IPC, and embedded-library `refresh` command. This gives desktop and

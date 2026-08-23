@@ -1,10 +1,12 @@
 package server
 
 import (
+	"archive/zip"
 	"bytes"
 	"encoding/csv"
 	"encoding/json"
 	"fmt"
+	"io"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
@@ -547,6 +549,277 @@ func TestServerJSON(t *testing.T) {
 	})
 }
 
+func TestOfficeRecordDownloadsEnforceDistinctTrustedContracts(t *testing.T) {
+	tmpDir := t.TempDir()
+	datasetPath := filepath.Join(tmpDir, "records.json")
+	if err := os.WriteFile(datasetPath, []byte(`{"1":{"Code":"1","Name":"Fixture"}}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	xlsxPath := createServerXLSXPackage(t)
+	xlsmPath := createServerMacroPackage(t, ".xlsm", false)
+	xltmPath := createServerMacroPackage(t, ".xltm", false)
+	xltmBytes, err := os.ReadFile(xltmPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := appconfig.Default()
+	cfg.Export.XLSXTemplate = xlsxPath
+	cfg.Export.XLSXTarget = "table:ExportProducts"
+	cfg.Export.XLSMTemplate = xlsmPath
+	cfg.Export.XLSMTarget = "table:ExportProducts"
+	cfg.Export.XLTMTemplate = xltmPath
+	cfg.Export.XLTMTarget = "table:ExportProducts"
+	configPath := filepath.Join(tmpDir, "config.json")
+	configBytes, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configPath, configBytes, 0600); err != nil {
+		t.Fatal(err)
+	}
+	manager, err := appconfig.Load(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv, err := NewServerWithOptions(datasetPath, nil, Options{Config: manager})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer srv.Close()
+
+	xlsxRequest := httptest.NewRequest(http.MethodGet, "/api/records.xlsx?download=1", nil)
+	xlsxResponse := httptest.NewRecorder()
+	srv.router.ServeHTTP(xlsxResponse, xlsxRequest)
+	if xlsxResponse.Code != http.StatusOK {
+		t.Fatalf("XLSX status = %d: %s", xlsxResponse.Code, xlsxResponse.Body.String())
+	}
+	if got := xlsxResponse.Header().Get("Content-Type"); got != "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" {
+		t.Fatalf("XLSX content type = %q", got)
+	}
+	if xlsxResponse.Header().Get("X-Patris-Office-Record-Count") != "1" ||
+		xlsxResponse.Header().Get("X-Patris-Office-Source-SHA256") == "" ||
+		xlsxResponse.Header().Get("X-Patris-Office-Source-SHA256") == xlsxResponse.Header().Get("X-Patris-Office-Output-SHA256") {
+		t.Fatalf("XLSX provenance headers = %+v", xlsxResponse.Header())
+	}
+	xlsxBook, err := excelize.OpenReader(bytes.NewReader(xlsxResponse.Body.Bytes()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer xlsxBook.Close()
+	if code, _ := xlsxBook.GetCellValue("Records", "A2", excelize.Options{RawCellValue: true}); code != "1" {
+		t.Fatalf("populated XLSX code = %q, want 1", code)
+	}
+
+	xlsmRequest := httptest.NewRequest(http.MethodGet, "/api/records.xlsm?download=1", nil)
+	xlsmResponse := httptest.NewRecorder()
+	srv.router.ServeHTTP(xlsmResponse, xlsmRequest)
+	if xlsmResponse.Code != http.StatusOK {
+		t.Fatalf("XLSM status = %d: %s", xlsmResponse.Code, xlsmResponse.Body.String())
+	}
+	if got := xlsmResponse.Header().Get("Content-Type"); got != "application/vnd.ms-excel.sheet.macroEnabled.12" {
+		t.Fatalf("XLSM content type = %q", got)
+	}
+	if xlsmResponse.Header().Get("X-Patris-Office-Record-Count") != "1" ||
+		xlsmResponse.Header().Get("X-Patris-Office-Source-SHA256") == "" ||
+		xlsmResponse.Header().Get("X-Patris-Office-Source-SHA256") == xlsmResponse.Header().Get("X-Patris-Office-Output-SHA256") {
+		t.Fatalf("XLSM provenance headers = %+v", xlsmResponse.Header())
+	}
+	xlsmBook, err := excelize.OpenReader(bytes.NewReader(xlsmResponse.Body.Bytes()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer xlsmBook.Close()
+	if code, _ := xlsmBook.GetCellValue("Records", "A2", excelize.Options{RawCellValue: true}); code != "1" {
+		t.Fatalf("populated XLSM code = %q, want 1", code)
+	}
+
+	xltmRequest := httptest.NewRequest(http.MethodGet, "/api/records.xltm?download=1", nil)
+	xltmResponse := httptest.NewRecorder()
+	srv.router.ServeHTTP(xltmResponse, xltmRequest)
+	if xltmResponse.Code != http.StatusOK {
+		t.Fatalf("XLTM status = %d: %s", xltmResponse.Code, xltmResponse.Body.String())
+	}
+	if got := xltmResponse.Header().Get("Content-Type"); got != "application/vnd.ms-excel.template.macroEnabled.12" {
+		t.Fatalf("XLTM content type = %q", got)
+	}
+	if xltmResponse.Header().Get("X-Patris-Template-Data-Empty") != "true" ||
+		xltmResponse.Header().Get("X-Patris-Office-Record-Count") != "0" ||
+		!bytes.Equal(xltmResponse.Body.Bytes(), xltmBytes) {
+		t.Fatal("XLTM was not served as the verified byte-identical blank template")
+	}
+
+	for _, requestPath := range []string{
+		"/api/records.xlsx?path=C%3A%5Cclient%5Csupplied.xlsx",
+		"/api/records.xlsm?template_path=C%3A%5Cclient%5Csupplied.xlsm",
+		"/api/records.xltm?source_url=https%3A%2F%2Fexample.invalid%2Ftemplate.xltm",
+	} {
+		response := httptest.NewRecorder()
+		srv.router.ServeHTTP(response, httptest.NewRequest(http.MethodGet, requestPath, nil))
+		if response.Code != http.StatusBadRequest {
+			t.Fatalf("client Office source %q status = %d, want 400", requestPath, response.Code)
+		}
+	}
+	bakeResponse := httptest.NewRecorder()
+	srv.router.ServeHTTP(bakeResponse, httptest.NewRequest(http.MethodGet, "/api/records.xltm?include_data=true", nil))
+	if bakeResponse.Code != http.StatusConflict || bakeResponse.Header().Get("X-Patris-Template-Data-Empty") != "required" {
+		t.Fatalf("XLTM bake attempt status=%d marker=%q", bakeResponse.Code, bakeResponse.Header().Get("X-Patris-Template-Data-Empty"))
+	}
+}
+
+func createServerXLSXPackage(t *testing.T) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "trusted.xlsx")
+	book := excelize.NewFile()
+	if err := book.SetSheetName("Sheet1", "Records"); err != nil {
+		t.Fatal(err)
+	}
+	if err := book.SetCellStr("Records", "A1", "Code"); err != nil {
+		t.Fatal(err)
+	}
+	if err := book.SetCellStr("Records", "B1", "Name"); err != nil {
+		t.Fatal(err)
+	}
+	if err := book.AddTable("Records", &excelize.Table{Range: "A1:B2", Name: "ExportProducts", StyleName: "TableStyleMedium2"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := book.SaveAs(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := book.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func TestXLTMDownloadRejectsConfiguredTemplateWithInitialData(t *testing.T) {
+	tmpDir := t.TempDir()
+	datasetPath := filepath.Join(tmpDir, "records.json")
+	if err := os.WriteFile(datasetPath, []byte(`{"1":{"Code":"1","Name":"Fixture"}}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := appconfig.Default()
+	cfg.Export.XLTMTemplate = createServerMacroPackage(t, ".xltm", true)
+	cfg.Export.XLTMTarget = "table:ExportProducts"
+	configPath := filepath.Join(tmpDir, "config.json")
+	data, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configPath, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	manager, err := appconfig.Load(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv, err := NewServerWithOptions(datasetPath, nil, Options{Config: manager})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer srv.Close()
+	response := httptest.NewRecorder()
+	srv.router.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/records.xltm", nil))
+	if response.Code != http.StatusUnprocessableEntity || !strings.Contains(response.Body.String(), "must remain data-empty") {
+		t.Fatalf("populated XLTM status=%d body=%q, want fail-closed 422", response.Code, response.Body.String())
+	}
+}
+
+func serverTestVBAProject(t *testing.T) []byte {
+	t.Helper()
+	candidates, err := filepath.Glob(filepath.Join("..", "..", "docs", "examples", "*.xltm"))
+	if err != nil || len(candidates) != 1 {
+		t.Fatalf("locate tracked macro fixture: candidates=%v error=%v", candidates, err)
+	}
+	archive, err := zip.OpenReader(candidates[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer archive.Close()
+	for _, entry := range archive.File {
+		if entry.Name != "xl/vbaProject.bin" {
+			continue
+		}
+		reader, err := entry.Open()
+		if err != nil {
+			t.Fatal(err)
+		}
+		value, readErr := io.ReadAll(reader)
+		_ = reader.Close()
+		if readErr != nil || len(value) == 0 {
+			t.Fatalf("read vbaProject.bin: bytes=%d error=%v", len(value), readErr)
+		}
+		return value
+	}
+	t.Fatal("tracked macro fixture has no vbaProject.bin")
+	return nil
+}
+
+func createServerMacroPackage(t *testing.T, extension string, populated bool) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "trusted"+extension)
+	book := excelize.NewFile()
+	if err := book.SetSheetName("Sheet1", "Records"); err != nil {
+		t.Fatal(err)
+	}
+	if err := book.SetCellStr("Records", "A1", "Code"); err != nil {
+		t.Fatal(err)
+	}
+	if err := book.SetCellStr("Records", "B1", "Name"); err != nil {
+		t.Fatal(err)
+	}
+	if populated {
+		_ = book.SetCellStr("Records", "A2", "INITIAL")
+	}
+	if err := book.AddTable("Records", &excelize.Table{Range: "A1:B2", Name: "ExportProducts", StyleName: "TableStyleMedium2"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := book.AddVBAProject(serverTestVBAProject(t)); err != nil {
+		t.Fatal(err)
+	}
+	if err := book.SaveAs(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := book.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func TestMacroEnabledRecordDownloadRequiresConfiguredMatchingTemplate(t *testing.T) {
+	tmpDir := t.TempDir()
+	datasetPath := filepath.Join(tmpDir, "records.json")
+	if err := os.WriteFile(datasetPath, []byte(`{"1":{"Code":"1"}}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	srv, err := NewServer(datasetPath, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer srv.Close()
+	for _, format := range []string{"xlsm", "xltm"} {
+		request := httptest.NewRequest(http.MethodGet, "/api/records."+format, nil)
+		recorder := httptest.NewRecorder()
+		srv.router.ServeHTTP(recorder, request)
+		if recorder.Code != http.StatusNotFound {
+			t.Fatalf("%s status = %d, want 404", format, recorder.Code)
+		}
+	}
+}
+
+func TestBrowserConfigRedactsOfficeTemplatePaths(t *testing.T) {
+	cfg := appconfig.Default()
+	cfg.Export.XLSXTemplate = `C:\private\records.xlsx`
+	cfg.Export.XLSXTarget = `table:ExportProducts`
+	cfg.Export.XLSMTemplate = `C:\private\records.xlsm`
+	cfg.Export.XLSMTarget = `table:ExportProducts`
+	cfg.Export.XLTMTemplate = `C:\private\records.xltm`
+	cfg.Export.XLTMTarget = `name:ExportProducts`
+	got := browserConfig(cfg)
+	if got.Export.XLSXTemplate != "" || got.Export.XLSXTarget != "" || got.Export.XLSMTemplate != "" || got.Export.XLSMTarget != "" || got.Export.XLTMTemplate != "" || got.Export.XLTMTarget != "" {
+		t.Fatalf("browser config exposed Office template paths: %+v", got.Export)
+	}
+}
+
 func TestBrowserConfigRedactsAndPreservesProtectedMySQLConnectionConfig(t *testing.T) {
 	tmpDir := t.TempDir()
 	configPath := filepath.Join(tmpDir, "patris-export.json")
@@ -557,10 +830,22 @@ func TestBrowserConfigRedactsAndPreservesProtectedMySQLConnectionConfig(t *testi
 	const protectedDSN = "protected-dsn-test-value"
 	const protectedCAPath = "C:/protected/mysql/private-ca-path.pem"
 	const protectedServerName = "private-db.internal.example"
+	const protectedXLSXPath = "C:/protected/templates/records.xlsx"
+	const protectedXLSXTarget = "table:ExportProducts"
+	const protectedXLSMPath = "C:/protected/templates/records.xlsm"
+	const protectedXLSMTarget = "table:ExportProducts"
+	const protectedXLTMPath = "C:/protected/templates/records.xltm"
+	const protectedXLTMTarget = "name:ExportProducts"
 	if err := manager.Update(func(cfg *appconfig.Config) {
 		cfg.Export.MySQLDSN = protectedDSN
 		cfg.Export.MySQLTLSCAFile = protectedCAPath
 		cfg.Export.MySQLTLSServerName = protectedServerName
+		cfg.Export.XLSXTemplate = protectedXLSXPath
+		cfg.Export.XLSXTarget = protectedXLSXTarget
+		cfg.Export.XLSMTemplate = protectedXLSMPath
+		cfg.Export.XLSMTarget = protectedXLSMTarget
+		cfg.Export.XLTMTemplate = protectedXLTMPath
+		cfg.Export.XLTMTarget = protectedXLTMTarget
 	}); err != nil {
 		t.Fatalf("store protected MySQL config: %v", err)
 	}
@@ -586,6 +871,9 @@ func TestBrowserConfigRedactsAndPreservesProtectedMySQLConnectionConfig(t *testi
 			protectedDSN,
 			protectedCAPath,
 			protectedServerName,
+			protectedXLSXPath,
+			protectedXLSMPath,
+			protectedXLTMPath,
 			`"mysql_dsn"`,
 			`"mysql_tls_ca_file"`,
 			`"mysql_tls_server_name"`,
@@ -621,6 +909,12 @@ func TestBrowserConfigRedactsAndPreservesProtectedMySQLConnectionConfig(t *testi
 	clientConfig.Export.MySQLDSN = "browser-supplied-dsn-must-be-ignored"
 	clientConfig.Export.MySQLTLSCAFile = "browser-supplied-ca-must-be-ignored.pem"
 	clientConfig.Export.MySQLTLSServerName = "browser-supplied-name.invalid"
+	clientConfig.Export.XLSXTemplate = "C:/browser/replacement.xlsx"
+	clientConfig.Export.XLSXTarget = "table:BrowserReplacement"
+	clientConfig.Export.XLSMTemplate = "C:/browser/replacement.xlsm"
+	clientConfig.Export.XLSMTarget = "table:BrowserReplacement"
+	clientConfig.Export.XLTMTemplate = "C:/browser/replacement.xltm"
+	clientConfig.Export.XLTMTarget = "name:BrowserReplacement"
 	body, err := json.Marshal(clientConfig)
 	if err != nil {
 		t.Fatalf("marshal browser update: %v", err)
@@ -632,11 +926,21 @@ func TestBrowserConfigRedactsAndPreservesProtectedMySQLConnectionConfig(t *testi
 	}
 	assertRedacted(t, json.RawMessage(put.Body.Bytes()))
 	if got := manager.Get(); got.Export.MySQLDSN != protectedDSN || got.Export.MySQLTLSCAFile != protectedCAPath ||
-		got.Export.MySQLTLSServerName != protectedServerName || got.UI.Theme != "dark" {
-		t.Fatalf("browser update did not preserve protected MySQL config and apply UI setting: DSN=%t CA=%t name=%t theme=%q",
+		got.Export.MySQLTLSServerName != protectedServerName ||
+		got.Export.XLSXTemplate != protectedXLSXPath || got.Export.XLSXTarget != protectedXLSXTarget ||
+		got.Export.XLSMTemplate != protectedXLSMPath || got.Export.XLSMTarget != protectedXLSMTarget ||
+		got.Export.XLTMTemplate != protectedXLTMPath || got.Export.XLTMTarget != protectedXLTMTarget ||
+		got.UI.Theme != "dark" {
+		t.Fatalf("browser update did not preserve protected server config and apply UI setting: DSN=%t CA=%t name=%t xlsx=%t xlsx_target=%t xlsm=%t xlsm_target=%t xltm=%t xltm_target=%t theme=%q",
 			got.Export.MySQLDSN == protectedDSN,
 			got.Export.MySQLTLSCAFile == protectedCAPath,
 			got.Export.MySQLTLSServerName == protectedServerName,
+			got.Export.XLSXTemplate == protectedXLSXPath,
+			got.Export.XLSXTarget == protectedXLSXTarget,
+			got.Export.XLSMTemplate == protectedXLSMPath,
+			got.Export.XLSMTarget == protectedXLSMTarget,
+			got.Export.XLTMTemplate == protectedXLTMPath,
+			got.Export.XLTMTarget == protectedXLTMTarget,
 			got.UI.Theme,
 		)
 	}

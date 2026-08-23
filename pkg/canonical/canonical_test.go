@@ -306,6 +306,27 @@ func TestKalaProfileTransformsPersianFixtureWithoutRawBoundaryFields(t *testing.
 	}
 }
 
+func TestKalaProfileKeepsPositiveWeightAndPriceCalculationAtZeroStock(t *testing.T) {
+	code := "ZERO-STOCK-QUALIFIES"
+	cfg, provider := canonicalTestConfig(code)
+	rows := []map[string]interface{}{{
+		"Code": code, "Name": "کالای ناموجود", "Sharh1": "24.5",
+		"Sharh2": "گرم 240", "ALLANBAR": 0, "ANBAR": []interface{}{0, 0},
+	}}
+	products, envelope := Transform(context.Background(), rows, `C:\Patris\kala.db`, cfg, provider, time.Date(2026, 8, 12, 0, 0, 0, 0, time.UTC))
+	if len(products) != 1 || len(envelope.Products) != 1 {
+		t.Fatalf("zero-stock qualified product counts rows=%d envelope=%d", len(products), len(envelope.Products))
+	}
+	product := products[0]
+	if fmt.Sprint(product["total_stock"]) != "0" || fmt.Sprint(product["foreign_price"]) != "24.5" ||
+		fmt.Sprint(product["weight_grams"]) != "240" || fmt.Sprint(product["final_price"]) != "2009410" {
+		t.Fatalf("zero stock suppressed a valid weight/price calculation: %#v", product)
+	}
+	if envelope.Products[0].TotalStock == nil || *envelope.Products[0].TotalStock != 0 || envelope.Products[0].FinalPrice == nil {
+		t.Fatalf("canonical envelope lost qualified zero-stock pricing: %+v", envelope.Products[0])
+	}
+}
+
 func TestKalaProfileOmitsUnavailableStandalonePricingAndIntegrationFields(t *testing.T) {
 	cfg := DefaultConfig()
 	provider := pricingcatalog.NewProvider(pricingcatalog.Config{Mode: pricingcatalog.ModeNone})
@@ -613,7 +634,7 @@ func TestDigitalogicProfilePrefetches1002CodesInThreeBatchRequests(t *testing.T)
 	rows := make([]map[string]interface{}, 1002)
 	for index := range rows {
 		rows[index] = map[string]interface{}{
-			"Code": fmt.Sprintf("P-%04d", index), "Sharh1": "0 0 0 24.5", "Sharh2": "240 Ú¯Ø±Ù…", "ALLANBAR": 1,
+			"Code": fmt.Sprintf("P-%04d", index), "Sharh1": "0 0 0 24.5", "Sharh2": "240 گرم", "ALLANBAR": 1,
 		}
 	}
 	products, _ := Transform(context.Background(), rows, "kala.db", cfg, pricingcatalog.NewProvider(cfg.Pricing), time.Now())

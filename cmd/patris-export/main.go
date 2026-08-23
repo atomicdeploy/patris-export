@@ -279,7 +279,7 @@ Set GITHUB_TOKEN for private repositories and higher API rate limits.`,
 	updateCmd.Flags().String("api-url", "", "Update from a Patris Export API base URL using /api/update/manifest")
 	updateCmd.Flags().String("manifest-url", "", "Update from an explicit Patris Export executable manifest URL")
 
-	rootCmd.AddCommand(convertCmd, infoCmd, companyCmd, viewCmd, serveCmd, stubCmd, ipcCmd, tuiCmd, updateCmd, newVerifyCommand(), newLicenseCommand())
+	rootCmd.AddCommand(convertCmd, infoCmd, companyCmd, viewCmd, serveCmd, stubCmd, ipcCmd, tuiCmd, updateCmd, newVerifyCommand(), newVerifyWorkbookFontsCommand(), newLicenseCommand())
 
 	if err := rootCmd.Execute(); err != nil {
 		nativeui.ShowNativeDependencyError(err)
@@ -576,7 +576,7 @@ func effectiveConfig(cmd *cobra.Command) (*appconfig.Manager, appconfig.Config) 
 	if strings.TrimSpace(cfg.Transform.MappingFile) != "" {
 		loaded, err := recordmap.LoadFile(cfg.Transform.MappingFile)
 		if err != nil {
-			errorColor.Printf("âŒ Failed to load transform mapping: %v\n", err)
+			errorColor.Printf("❌ Failed to load transform mapping: %v\n", err)
 			os.Exit(1)
 		}
 		cfg.Transform = recordmap.Merge(cfg.Transform, loaded)
@@ -887,7 +887,20 @@ func writeConvertOutput(dbFile string, result recordpipe.Result, useStdout bool,
 			ZebraRows:    cfg.Export.XLSXZebraRows,
 			ColumnLabels: cfg.ColumnLabels,
 		})
-		if err := recordsink.WriteXLSX(outputFile, result.Rows, result.KeyField, xlsxOptions); err != nil {
+		templatePath := strings.TrimSpace(cfg.Export.XLSXTemplate)
+		target := strings.TrimSpace(cfg.Export.XLSXTarget)
+		if (templatePath == "") != (target == "") {
+			return fmt.Errorf("configured XLSX template and explicit target must be supplied together")
+		}
+		if templatePath != "" {
+			_, err := recordsink.PopulateTrustedXLSX(outputFile, result.Rows, result.KeyField, xlsxOptions, recordsink.TrustedOfficeContract{
+				TemplatePath: templatePath,
+				Target:       target,
+			})
+			if err != nil {
+				return fmt.Errorf("populate configured XLSX template: %w", err)
+			}
+		} else if err := recordsink.WriteXLSX(outputFile, result.Rows, result.KeyField, xlsxOptions); err != nil {
 			return err
 		}
 	case "sqlite":
@@ -1527,7 +1540,7 @@ func runServe(cmd *cobra.Command, args []string) {
 	}
 	addr = cfg.Addr()
 	if err := configManager.Replace(cfg); err != nil {
-		errorColor.Printf("âŒ Failed to save effective config: %v\n", err)
+		errorColor.Printf("❌ Failed to save effective config: %v\n", err)
 		os.Exit(1)
 	}
 

@@ -27,7 +27,7 @@ const excelPricingTestSecret = "excel-pricing-test-secret-value"
 
 func TestExcelPricingSessionRequiresDirectLoopbackAndNoProxyEvidence(t *testing.T) {
 	server := newExcelPricingTestServer(t, "http://127.0.0.1:9/wp-json/digitalogic/patris/product-sync")
-	request := newExcelPricingRequest(http.MethodPost, "/api/excel/pricing-sync/session", `{}`)
+	request := newExcelPricingRequest(http.MethodPost, "/api/pricing-sync/session", `{}`)
 	request.RemoteAddr = "203.0.113.10:4000"
 	response := httptest.NewRecorder()
 	server.router.ServeHTTP(response, request)
@@ -35,7 +35,7 @@ func TestExcelPricingSessionRequiresDirectLoopbackAndNoProxyEvidence(t *testing.
 		t.Fatalf("remote session status=%d, want 403: %s", response.Code, response.Body.String())
 	}
 
-	request = newExcelPricingRequest(http.MethodPost, "/api/excel/pricing-sync/session", `{}`)
+	request = newExcelPricingRequest(http.MethodPost, "/api/pricing-sync/session", `{}`)
 	request.Header.Set("X-Forwarded-For", "127.0.0.1")
 	response = httptest.NewRecorder()
 	server.router.ServeHTTP(response, request)
@@ -43,7 +43,7 @@ func TestExcelPricingSessionRequiresDirectLoopbackAndNoProxyEvidence(t *testing.
 		t.Fatalf("proxy-marked session status=%d, want 403: %s", response.Code, response.Body.String())
 	}
 
-	request = newExcelPricingRequest(http.MethodPost, "/api/excel/pricing-sync/session", `{}`)
+	request = newExcelPricingRequest(http.MethodPost, "/api/pricing-sync/session", `{}`)
 	request.Header.Set("Origin", "https://evil.example")
 	response = httptest.NewRecorder()
 	server.router.ServeHTTP(response, request)
@@ -57,6 +57,36 @@ func TestExcelPricingSessionRequiresDirectLoopbackAndNoProxyEvidence(t *testing.
 	}
 	if values := response.Header().Values("Access-Control-Allow-Origin"); len(values) != 0 {
 		t.Fatalf("pricing surface emitted CORS allowance: %v", values)
+	}
+}
+
+func TestPricingSyncUsesGeneralRouteAndDoesNotExposeExcelAlias(t *testing.T) {
+	server := newExcelPricingTestServer(t, "http://127.0.0.1:9/wp-json/digitalogic/patris/product-sync")
+
+	canonical := newExcelPricingRequest(http.MethodPost, "/api/pricing-sync/session", `{}`)
+	canonicalResponse := httptest.NewRecorder()
+	server.router.ServeHTTP(canonicalResponse, canonical)
+	if canonicalResponse.Code != http.StatusOK {
+		t.Fatalf("canonical route status=%d: %s", canonicalResponse.Code, canonicalResponse.Body.String())
+	}
+
+	for _, legacyPath := range []string{
+		"/api/excel/pricing-sync/session",
+		"/api/excel/pricing-sync/state",
+		"/api/excel/pricing-sync/preview",
+		"/api/excel/pricing-sync/apply",
+		"/api/spreadsheet/pricing-sync/session",
+		"/api/spreadsheet/pricing-sync/state",
+		"/api/spreadsheet/pricing-sync/preview",
+		"/api/spreadsheet/pricing-sync/apply",
+		"/spreadsheet/pricing-sync/state",
+	} {
+		legacy := newExcelPricingRequest(http.MethodPost, legacyPath, `{}`)
+		legacyResponse := httptest.NewRecorder()
+		server.router.ServeHTTP(legacyResponse, legacy)
+		if legacyResponse.Code != http.StatusNotFound {
+			t.Fatalf("legacy client-named path %q status=%d, want 404: %s", legacyPath, legacyResponse.Code, legacyResponse.Body.String())
+		}
 	}
 }
 
@@ -90,7 +120,7 @@ func TestExcelPricingStateInjectsProtectedCredentialAndCanonicalSource(t *testin
 	token := openExcelPricingSession(t, server)
 	request := authenticatedExcelPricingRequest(
 		http.MethodPost,
-		"/api/excel/pricing-sync/state",
+		"/api/pricing-sync/state",
 		validExcelPricingStateBody(source, 1, 250),
 		token,
 	)
@@ -117,8 +147,8 @@ func TestExcelPricingStateInjectsProtectedCredentialAndCanonicalSource(t *testin
 	if !ok || remoteSource["id"] != source.ID || remoteSource["dataset"] != source.Dataset || remoteSource["revision"] != source.Revision {
 		t.Fatalf("remote source=%#v, want %#v", received["source"], source)
 	}
-	if canonicalCalls.Load() != 0 {
-		t.Fatalf("read-only state rebuilt canonical source %d time(s), want 0", canonicalCalls.Load())
+	if canonicalCalls.Load() != 1 {
+		t.Fatalf("read-only state validated canonical source %d time(s), want 1", canonicalCalls.Load())
 	}
 }
 
@@ -127,7 +157,7 @@ func TestExcelPricingStateRejectsPageSizeAboveBound(t *testing.T) {
 	token := openExcelPricingSession(t, server)
 	request := authenticatedExcelPricingRequest(
 		http.MethodPost,
-		"/api/excel/pricing-sync/state",
+		"/api/pricing-sync/state",
 		validExcelPricingStateBody(excelPricingStateSourceForTest(), 1, 251),
 		token,
 	)
@@ -156,7 +186,7 @@ func TestExcelPricingStateRequiresExpectedSourceIdentity(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			request := authenticatedExcelPricingRequest(
 				http.MethodPost,
-				"/api/excel/pricing-sync/state",
+				"/api/pricing-sync/state",
 				body,
 				token,
 			)
@@ -199,7 +229,7 @@ func TestExcelPricingMutationRejectsCallerSuppliedSource(t *testing.T) {
 	}
 	token := openExcelPricingSession(t, server)
 	request := authenticatedExcelPricingRequest(
-		http.MethodPost, "/api/excel/pricing-sync/preview", string(body), token,
+		http.MethodPost, "/api/pricing-sync/preview", string(body), token,
 	)
 	request.Header.Set("Idempotency-Key", "excel-preview-source-0001")
 	request.Header.Set("If-Match", `"`+stateRevision+`"`)
@@ -266,7 +296,7 @@ func TestExcelPricingPreviewPreservesOptimisticHeadersAndRejectsDrift(t *testing
 	server.excelPricing.canonical = canonicalProjectionSequence(source)
 	token := openExcelPricingSession(t, server)
 	body := validExcelPricingMutationBody("preview", "excel-preview-0001", stateRevision, "", "")
-	request := authenticatedExcelPricingRequest(http.MethodPost, "/api/excel/pricing-sync/preview", body, token)
+	request := authenticatedExcelPricingRequest(http.MethodPost, "/api/pricing-sync/preview", body, token)
 	request.Header.Set("Idempotency-Key", "excel-preview-0001")
 	request.Header.Set("If-Match", `"`+stateRevision+`"`)
 	response := httptest.NewRecorder()
@@ -275,7 +305,7 @@ func TestExcelPricingPreviewPreservesOptimisticHeadersAndRejectsDrift(t *testing
 		t.Fatalf("preview status=%d: %s", response.Code, response.Body.String())
 	}
 
-	drift := authenticatedExcelPricingRequest(http.MethodPost, "/api/excel/pricing-sync/preview", body, token)
+	drift := authenticatedExcelPricingRequest(http.MethodPost, "/api/pricing-sync/preview", body, token)
 	drift.Header.Set("Idempotency-Key", "different-key")
 	drift.Header.Set("If-Match", `"`+stateRevision+`"`)
 	response = httptest.NewRecorder()
@@ -296,9 +326,7 @@ func TestExcelPricingMutationRejectsNullChangesAndUppercaseRevision(t *testing.T
 	}))
 	defer remote.Close()
 	server := newExcelPricingTestServer(t, remote.URL+"/wp-json/digitalogic/patris/product-sync")
-	server.excelPricing.canonical = canonicalProjectionSequence(canonical.Source{
-		ID: "source", Dataset: "dataset", Revision: excelPricingRevisionForTest("source"),
-	})
+	server.excelPricing.canonical = canonicalProjectionSequence(excelPricingStateSourceForTest())
 	token := openExcelPricingSession(t, server)
 	stateRevision := excelPricingRevisionForTest("settings")
 
@@ -317,7 +345,7 @@ func TestExcelPricingMutationRejectsNullChangesAndUppercaseRevision(t *testing.T
 		),
 	} {
 		t.Run(name, func(t *testing.T) {
-			request := authenticatedExcelPricingRequest(http.MethodPost, "/api/excel/pricing-sync/preview", body, token)
+			request := authenticatedExcelPricingRequest(http.MethodPost, "/api/pricing-sync/preview", body, token)
 			request.Header.Set("Idempotency-Key", "excel-preview-0002")
 			headerRevision := stateRevision
 			if name == "uppercase revision" {
@@ -338,7 +366,7 @@ func TestExcelPricingMutationRejectsNullChangesAndUppercaseRevision(t *testing.T
 	for _, leading := range []string{".", ":", "_", "-"} {
 		idempotency := leading + "excel-preview-0003"
 		body := validExcelPricingMutationBody("preview", idempotency, stateRevision, "", "")
-		request := authenticatedExcelPricingRequest(http.MethodPost, "/api/excel/pricing-sync/preview", body, token)
+		request := authenticatedExcelPricingRequest(http.MethodPost, "/api/pricing-sync/preview", body, token)
 		request.Header.Set("Idempotency-Key", idempotency)
 		request.Header.Set("If-Match", `"`+stateRevision+`"`)
 		response := httptest.NewRecorder()
@@ -425,7 +453,7 @@ func TestExcelPricingMutationRequiresCompleteAtomicSettingsAndClientContext(t *t
 			}
 			request := authenticatedExcelPricingRequest(
 				http.MethodPost,
-				"/api/excel/pricing-sync/preview",
+				"/api/pricing-sync/preview",
 				string(body),
 				token,
 			)
@@ -527,7 +555,13 @@ func TestExcelPricingApplyRegeneratesDispatchesAndRefetchesState(t *testing.T) {
 	}
 	token := openExcelPricingSession(t, server)
 	body := validExcelPricingMutationBody("apply", "excel-apply-0001", stateRevision, previewDigest, "APPLY")
-	request := authenticatedExcelPricingRequest(http.MethodPost, "/api/excel/pricing-sync/apply", body, token)
+	bindExcelPricingPreviewForTest(t, server, body)
+	server.excelPricing.snapshots.mu.Lock()
+	server.excelPricing.snapshots.cache["pre-apply"] = &excelPricingSnapshot{
+		stateRevision: excelPricingRevisionForTest("stale-settings"),
+	}
+	server.excelPricing.snapshots.mu.Unlock()
+	request := authenticatedExcelPricingRequest(http.MethodPost, "/api/pricing-sync/apply", body, token)
 	request.Header.Set("Idempotency-Key", "excel-apply-0001")
 	request.Header.Set("If-Match", `"`+stateRevision+`"`)
 	response := httptest.NewRecorder()
@@ -538,9 +572,58 @@ func TestExcelPricingApplyRegeneratesDispatchesAndRefetchesState(t *testing.T) {
 	if dispatched.Load() != 1 || remoteCalls.Load() != 2 {
 		t.Fatalf("dispatch=%d remote_calls=%d, want 1/2", dispatched.Load(), remoteCalls.Load())
 	}
+	server.excelPricing.snapshots.mu.Lock()
+	_, staleCacheRemained := server.excelPricing.snapshots.cache["pre-apply"]
+	server.excelPricing.snapshots.mu.Unlock()
+	if staleCacheRemained {
+		t.Fatal("successful apply did not invalidate the pre-apply snapshot cache")
+	}
 	if !strings.Contains(response.Body.String(), excelPricingApplySchema) ||
 		strings.Contains(response.Body.String(), excelPricingTestSecret) {
 		t.Fatalf("unsafe or wrong apply response: %s", response.Body.String())
+	}
+	server.excelPricing.snapshots.mu.Lock()
+	server.excelPricing.snapshots.cache["post-apply"] = &excelPricingSnapshot{
+		stateRevision: stateRevision,
+	}
+	server.excelPricing.snapshots.mu.Unlock()
+	replayRequest := authenticatedExcelPricingRequest(http.MethodPost, "/api/pricing-sync/apply", body, token)
+	replayRequest.Header.Set("Idempotency-Key", "excel-apply-0001")
+	replayRequest.Header.Set("If-Match", `"`+stateRevision+`"`)
+	replayResponse := httptest.NewRecorder()
+	server.router.ServeHTTP(replayResponse, replayRequest)
+	if replayResponse.Code != http.StatusOK || replayResponse.Body.String() != response.Body.String() {
+		t.Fatalf("apply replay status=%d body=%s", replayResponse.Code, replayResponse.Body.String())
+	}
+	if dispatched.Load() != 1 || remoteCalls.Load() != 2 {
+		t.Fatalf("apply replay repeated effects: dispatch=%d remote=%d", dispatched.Load(), remoteCalls.Load())
+	}
+	server.excelPricing.snapshots.mu.Lock()
+	_, replayPreservedCache := server.excelPricing.snapshots.cache["post-apply"]
+	server.excelPricing.snapshots.mu.Unlock()
+	if !replayPreservedCache {
+		t.Fatal("idempotent apply replay invalidated cache without a new mutation")
+	}
+
+	var conflictingPayload map[string]interface{}
+	if err := json.Unmarshal([]byte(body), &conflictingPayload); err != nil {
+		t.Fatal(err)
+	}
+	conflictingPayload["settings"].(map[string]interface{})["dollar_price"] = float64(187892)
+	conflictingBody, _ := json.Marshal(conflictingPayload)
+	conflictRequest := authenticatedExcelPricingRequest(
+		http.MethodPost, "/api/pricing-sync/apply", string(conflictingBody), token,
+	)
+	conflictRequest.Header.Set("Idempotency-Key", "excel-apply-0001")
+	conflictRequest.Header.Set("If-Match", `"`+stateRevision+`"`)
+	conflictResponse := httptest.NewRecorder()
+	server.router.ServeHTTP(conflictResponse, conflictRequest)
+	if conflictResponse.Code != http.StatusConflict ||
+		!strings.Contains(conflictResponse.Body.String(), "idempotency_conflict") {
+		t.Fatalf("apply idempotency conflict status=%d: %s", conflictResponse.Code, conflictResponse.Body.String())
+	}
+	if dispatched.Load() != 1 || remoteCalls.Load() != 2 {
+		t.Fatalf("conflicting apply repeated effects: dispatch=%d remote=%d", dispatched.Load(), remoteCalls.Load())
 	}
 }
 
@@ -574,7 +657,13 @@ func TestExcelPricingApplyRejectsAmbiguousDeferredProductSync(t *testing.T) {
 		excelPricingRevisionForTest("preview"),
 		"APPLY",
 	)
-	request := authenticatedExcelPricingRequest(http.MethodPost, "/api/excel/pricing-sync/apply", body, token)
+	bindExcelPricingPreviewForTest(t, server, body)
+	server.excelPricing.snapshots.mu.Lock()
+	server.excelPricing.snapshots.cache["pre-failed-verification"] = &excelPricingSnapshot{
+		stateRevision: excelPricingRevisionForTest("stale-before-failed-verification"),
+	}
+	server.excelPricing.snapshots.mu.Unlock()
+	request := authenticatedExcelPricingRequest(http.MethodPost, "/api/pricing-sync/apply", body, token)
 	request.Header.Set("Idempotency-Key", "excel-apply-0002")
 	request.Header.Set("If-Match", `"`+stateRevision+`"`)
 	response := httptest.NewRecorder()
@@ -584,6 +673,12 @@ func TestExcelPricingApplyRejectsAmbiguousDeferredProductSync(t *testing.T) {
 	}
 	if remoteCalls.Load() != 1 {
 		t.Fatalf("remote calls=%d, want apply only and no state readback", remoteCalls.Load())
+	}
+	server.excelPricing.snapshots.mu.Lock()
+	_, staleCacheRemained := server.excelPricing.snapshots.cache["pre-failed-verification"]
+	server.excelPricing.snapshots.mu.Unlock()
+	if staleCacheRemained {
+		t.Fatal("remote apply success retained stale cache after local verification failure")
 	}
 }
 
@@ -626,7 +721,8 @@ func TestExcelPricingApplyAcceptsMissingDeferredProductSync(t *testing.T) {
 		excelPricingRevisionForTest("preview"),
 		"APPLY",
 	)
-	request := authenticatedExcelPricingRequest(http.MethodPost, "/api/excel/pricing-sync/apply", body, token)
+	bindExcelPricingPreviewForTest(t, server, body)
+	request := authenticatedExcelPricingRequest(http.MethodPost, "/api/pricing-sync/apply", body, token)
 	request.Header.Set("Idempotency-Key", "excel-apply-0003")
 	request.Header.Set("If-Match", `"`+stateRevision+`"`)
 	response := httptest.NewRecorder()
@@ -651,13 +747,11 @@ func TestExcelPricingRemoteErrorsAndRedirectsAreSecretSafe(t *testing.T) {
 	}))
 	defer remote.Close()
 	server := newExcelPricingTestServer(t, remote.URL+"/wp-json/digitalogic/patris/product-sync")
-	server.excelPricing.canonical = canonicalProjectionSequence(canonical.Source{
-		ID: "source", Dataset: "dataset", Revision: excelPricingRevisionForTest("source"),
-	})
+	server.excelPricing.canonical = canonicalProjectionSequence(excelPricingStateSourceForTest())
 	token := openExcelPricingSession(t, server)
 	request := authenticatedExcelPricingRequest(
 		http.MethodPost,
-		"/api/excel/pricing-sync/state",
+		"/api/pricing-sync/state",
 		validExcelPricingStateBody(excelPricingStateSourceForTest(), 1, 1),
 		token,
 	)
@@ -680,13 +774,11 @@ func TestExcelPricingRejectsNonJSONRemoteSuccess(t *testing.T) {
 	}))
 	defer remote.Close()
 	server := newExcelPricingTestServer(t, remote.URL+"/wp-json/digitalogic/patris/product-sync")
-	server.excelPricing.canonical = canonicalProjectionSequence(canonical.Source{
-		ID: "source", Dataset: "dataset", Revision: excelPricingRevisionForTest("source"),
-	})
+	server.excelPricing.canonical = canonicalProjectionSequence(excelPricingStateSourceForTest())
 	token := openExcelPricingSession(t, server)
 	request := authenticatedExcelPricingRequest(
 		http.MethodPost,
-		"/api/excel/pricing-sync/state",
+		"/api/pricing-sync/state",
 		validExcelPricingStateBody(excelPricingStateSourceForTest(), 1, 1),
 		token,
 	)
@@ -725,14 +817,12 @@ func TestExcelPricingBoundsTimeoutsAndMessageSizes(t *testing.T) {
 	}))
 	defer remote.Close()
 	server := newExcelPricingTestServer(t, remote.URL+"/wp-json/digitalogic/patris/product-sync")
-	server.excelPricing.canonical = canonicalProjectionSequence(canonical.Source{
-		ID: "source", Dataset: "dataset", Revision: excelPricingRevisionForTest("source"),
-	})
+	server.excelPricing.canonical = canonicalProjectionSequence(excelPricingStateSourceForTest())
 	token := openExcelPricingSession(t, server)
 
 	oversized := authenticatedExcelPricingRequest(
 		http.MethodPost,
-		"/api/excel/pricing-sync/state",
+		"/api/pricing-sync/state",
 		`{"schema":"`+excelPricingLocalRequestSchema+`","padding":"`+
 			strings.Repeat("x", excelPricingMaxRequestBytes)+`"}`,
 		token,
@@ -748,7 +838,7 @@ func TestExcelPricingBoundsTimeoutsAndMessageSizes(t *testing.T) {
 
 	request := authenticatedExcelPricingRequest(
 		http.MethodPost,
-		"/api/excel/pricing-sync/state",
+		"/api/pricing-sync/state",
 		validExcelPricingStateBody(excelPricingStateSourceForTest(), 1, 1),
 		token,
 	)
@@ -810,6 +900,7 @@ func newExcelPricingTestServer(t *testing.T, productSyncURL string) *Server {
 		t.Fatal(err)
 	}
 	state := newExcelPricingState()
+	state.canonical = canonicalProjectionSequence(excelPricingStateSourceForTest())
 	server := &Server{
 		router:       mux.NewRouter(),
 		config:       manager,
@@ -822,7 +913,7 @@ func newExcelPricingTestServer(t *testing.T, productSyncURL string) *Server {
 
 func openExcelPricingSession(t *testing.T, server *Server) string {
 	t.Helper()
-	request := newExcelPricingRequest(http.MethodPost, "/api/excel/pricing-sync/session", `{}`)
+	request := newExcelPricingRequest(http.MethodPost, "/api/pricing-sync/session", `{}`)
 	response := httptest.NewRecorder()
 	server.router.ServeHTTP(response, request)
 	if response.Code != http.StatusOK {
@@ -889,6 +980,20 @@ func validExcelPricingMutationBody(operation, idempotency, stateRevision, previe
 	}
 	encoded, _ := json.Marshal(payload)
 	return string(encoded)
+}
+
+func bindExcelPricingPreviewForTest(t *testing.T, server *Server, applyBody string) {
+	t.Helper()
+	var request excelPricingLocalRequest
+	if err := json.Unmarshal([]byte(applyBody), &request); err != nil {
+		t.Fatal(err)
+	}
+	if !server.excelPricing.mutations.bindPreview(
+		request.PreviewDigest,
+		excelPricingPreviewBindingFingerprint(request),
+	) {
+		t.Fatal("preview binding unexpectedly conflicted")
+	}
 }
 
 func validExcelPricingStateBody(source canonical.Source, page, limit int) string {

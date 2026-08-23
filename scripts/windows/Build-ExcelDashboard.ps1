@@ -36,7 +36,21 @@ if (-not (Test-Path -LiteralPath $LogoPath -PathType Leaf)) {
 $vbaModulePath = Join-Path $repoRoot 'docs\examples\vba\ProductCatalogSync.bas'
 $jsonRuntimePath = Join-Path $repoRoot 'docs\examples\vba\JsonRuntime.bas'
 $jsonValuePath = Join-Path $repoRoot 'docs\examples\vba\JsonValue.cls'
+$asyncWinHttpRequestPath = Join-Path $repoRoot 'docs\examples\vba\AsyncWinHttpRequest.cls'
+$pricingSseParserPath = Join-Path $repoRoot 'docs\examples\vba\PricingSseParser.cls'
 $thisWorkbookPath = Join-Path $repoRoot 'docs\examples\vba\ThisWorkbook.cls'
+foreach ($requiredVbaSource in @(
+    $vbaModulePath,
+    $jsonRuntimePath,
+    $jsonValuePath,
+    $asyncWinHttpRequestPath,
+    $pricingSseParserPath,
+    $thisWorkbookPath
+)) {
+    if (-not (Test-Path -LiteralPath $requiredVbaSource -PathType Leaf)) {
+        throw "Required VBA source is missing: $requiredVbaSource"
+    }
+}
 $excelSecurityPath = 'HKCU:\Software\Microsoft\Office\16.0\Excel\Security'
 $excelSecurityPathExisted = Test-Path $excelSecurityPath
 if (-not $excelSecurityPathExisted) {
@@ -61,6 +75,75 @@ function Set-SectionStyle($Range, [string]$Fill, [string]$FontColor = 'FFFFFF', 
     $Range.VerticalAlignment = -4108
 }
 
+function Set-RangeFontSlots($Range, [string]$FontName) {
+    $Range.Font.Name = $FontName
+    # Excel's cell Font COM model exposes only Name on some Office builds.
+    # Attempt the per-script slots when the host implements them; drawing
+    # Font2 objects below always receive and validate all three slots.
+    try { $Range.Font.NameComplexScript = $FontName } catch {}
+    try { $Range.Font.NameFarEast = $FontName } catch {}
+}
+
+function Assert-RangeFontSlots($Range, [string]$FontName, [string]$Role) {
+    foreach ($slot in @('Name', 'NameComplexScript', 'NameFarEast')) {
+        try {
+            $actual = [string]$Range.Font.$slot
+        }
+        catch {
+            if ($slot -eq 'Name') { throw }
+            continue
+        }
+        # This Office build returns an empty value for unsupported cell
+        # complex/Far-East slots instead of throwing. Do not claim those slots
+        # passed here; the saved package is audited through styles.xml.
+        if ($slot -ne 'Name' -and [string]::IsNullOrWhiteSpace($actual)) {
+            continue
+        }
+        if ([string]::IsNullOrWhiteSpace($actual) -or $actual -cne $FontName) {
+            throw "Font policy failed for $Role ($slot='$actual', expected '$FontName')."
+        }
+        if ($actual -match '^(?i:Aptos|Calibri|Arial)$') {
+            throw "Font policy found forbidden font '$actual' in $Role/$slot."
+        }
+    }
+}
+
+function Assert-ShapeFontSlots($Shape, [string]$FontName, [string]$Role) {
+    foreach ($slot in @('Name', 'NameComplexScript', 'NameFarEast')) {
+        $actual = [string]$Shape.TextFrame2.TextRange.Font.$slot
+        if ([string]::IsNullOrWhiteSpace($actual) -or $actual -cne $FontName) {
+            throw "Font policy failed for $Role ($slot='$actual', expected '$FontName')."
+        }
+        if ($actual -match '^(?i:Aptos|Calibri|Arial)$') {
+            throw "Font policy found forbidden font '$actual' in $Role/$slot."
+        }
+    }
+    $languageID = [int]$Shape.TextFrame2.TextRange.LanguageID
+    if ($languageID -ne 1065) {
+        throw "Font policy failed for $Role (LanguageID='$languageID', expected '1065')."
+    }
+    $legacyName = [string]$Shape.TextFrame.Characters().Font.Name
+    if ([string]::IsNullOrWhiteSpace($legacyName) -or $legacyName -cne $FontName) {
+        throw "Font policy failed for $Role legacy TextFrame (Name='$legacyName', expected '$FontName')."
+    }
+}
+
+function Assert-FontFamilyAvailable([string]$FontName, [string]$Role) {
+    Add-Type -AssemblyName System.Drawing
+    $installedFonts = [Drawing.Text.InstalledFontCollection]::new()
+    try {
+        $available = @($installedFonts.Families | Where-Object {
+            $_.Name -ceq $FontName
+        }).Count -gt 0
+    }
+    finally {
+        $installedFonts.Dispose()
+    }
+    if (-not $available) {
+        throw "Configured $Role font '$FontName' is not installed; fallback is disabled."
+    }
+}
+
 function Set-OfficeTextFont(
     $TextRange,
     [double]$Size,
@@ -71,8 +154,9 @@ function Set-OfficeTextFont(
     # Office keeps separate Latin, Far East, and complex-script font slots.
     # Persian shapes and chart labels use the complex-script slot, so setting
     # only Font.Name can silently fall back to Calibri/Aptos.
-    try { $TextRange.Font.NameComplexScript = 'Yekan Bakh' } catch {}
-    try { $TextRange.Font.NameFarEast = 'Yekan Bakh' } catch {}
+    $TextRange.LanguageID = 1065
+    $TextRange.Font.NameComplexScript = 'Yekan Bakh'
+    $TextRange.Font.NameFarEast = 'Yekan Bakh'
     $TextRange.Font.Size = $Size
     $TextRange.Font.Bold = $Bold
     if (-not [string]::IsNullOrWhiteSpace($Color)) {
@@ -87,14 +171,223 @@ function Add-ActionButton($Sheet, [string]$Text, [string]$Macro, $Anchor, [doubl
     $shape.TextFrame2.TextRange.Text = $Text
     Set-OfficeTextFont $shape.TextFrame2.TextRange 11 $true 'FFFFFF'
     # Older Excel rendering paths still consult the legacy TextFrame slot.
-    try { $shape.TextFrame.Characters().Font.Name = 'Yekan Bakh' } catch {}
+    try {
+        $shape.TextFrame.Characters().Font.Name = 'Yekan Bakh'
+        $shape.TextFrame.Characters().Font.NameComplexScript = 'Yekan Bakh'
+        $shape.TextFrame.Characters().Font.NameFarEast = 'Yekan Bakh'
+    } catch {}
     $shape.TextFrame2.VerticalAnchor = 3
     $shape.TextFrame2.TextRange.ParagraphFormat.Alignment = 2
     $shape.OnAction = $Macro
     return $shape
 }
 
-function Add-BrandLogo($Sheet, [string]$Path, $Anchor, [double]$Width = 208, [double]$Height = 48) {
+function Add-DigitalogicMessageForm($Workbook) {
+    $component = $Workbook.VBProject.VBComponents.Add(3)
+    $component.Name = 'DigitalogicMessage'
+    $designer = $component.Designer
+    $component.Properties.Item('Caption').Value = 'Digitalogic'
+    $component.Properties.Item('Width').Value = 430
+    $component.Properties.Item('Height').Value = 230
+    $component.Properties.Item('BackColor').Value = ConvertTo-OleColor 'F7F9FC'
+    $component.Properties.Item('BorderStyle').Value = 1
+    $component.Properties.Item('StartUpPosition').Value = 1
+
+    $header = $designer.Controls.Add('Forms.Label.1', 'lblHeader', $true)
+    $header.Left = 0
+    $header.Top = 0
+    $header.Width = 424
+    $header.Height = 48
+    $header.BackStyle = 1
+    $header.BackColor = ConvertTo-OleColor '14324A'
+    $header.Caption = ''
+    $header.SpecialEffect = 0
+
+    $brand = $designer.Controls.Add('Forms.Label.1', 'lblBrand', $true)
+    $brand.Left = 18
+    $brand.Top = 15
+    $brand.Width = 104
+    $brand.Height = 18
+    $brand.BackStyle = 0
+    $brand.Caption = 'DIGITALOGIC'
+    $brand.ForeColor = ConvertTo-OleColor 'D8E4EE'
+
+    $title = $designer.Controls.Add('Forms.Label.1', 'lblTitle', $true)
+    $title.Left = 126
+    $title.Top = 10
+    $title.Width = 274
+    $title.Height = 28
+    $title.BackStyle = 0
+    $title.Caption = ''
+    $title.ForeColor = ConvertTo-OleColor 'FFFFFF'
+    $title.TextAlign = 3
+
+    $accent = $designer.Controls.Add('Forms.Label.1', 'lblAccent', $true)
+    $accent.Left = 398
+    $accent.Top = 68
+    $accent.Width = 4
+    $accent.Height = 82
+    $accent.BackStyle = 1
+    $accent.BackColor = ConvertTo-OleColor 'F2A900'
+    $accent.Caption = ''
+    $accent.SpecialEffect = 0
+
+    $message = $designer.Controls.Add('Forms.Label.1', 'lblMessage', $true)
+    $message.Left = 28
+    $message.Top = 66
+    $message.Width = 356
+    $message.Height = 88
+    $message.BackStyle = 0
+    $message.Caption = ''
+    $message.ForeColor = ConvertTo-OleColor '213547'
+    $message.TextAlign = 3
+    $message.WordWrap = $true
+
+    $footer = $designer.Controls.Add('Forms.Label.1', 'lblFooter', $true)
+    $footer.Left = 28
+    $footer.Top = 182
+    $footer.Width = 138
+    $footer.Height = 16
+    $footer.BackStyle = 0
+    $footer.Caption = 'DIGITALOGIC'
+    $footer.ForeColor = ConvertTo-OleColor '7A8793'
+
+    $secondary = $designer.Controls.Add('Forms.CommandButton.1', 'cmdSecondary', $true)
+    $secondary.Left = 180
+    $secondary.Top = 170
+    $secondary.Width = 96
+    $secondary.Height = 32
+    $secondary.Caption = ''
+    $secondary.BackColor = ConvertTo-OleColor 'E8EDF2'
+    $secondary.ForeColor = ConvertTo-OleColor '294154'
+
+    $primary = $designer.Controls.Add('Forms.CommandButton.1', 'cmdPrimary', $true)
+    $primary.Left = 288
+    $primary.Top = 170
+    $primary.Width = 110
+    $primary.Height = 32
+    $primary.Caption = ''
+    $primary.BackColor = ConvertTo-OleColor '0168CD'
+    $primary.ForeColor = ConvertTo-OleColor 'FFFFFF'
+
+    $formCode = @'
+Option Explicit
+
+Private mDialogResult As Long
+
+Public Property Get DialogResult() As Long
+    DialogResult = mDialogResult
+End Property
+
+Public Sub Configure(ByVal message As String, ByVal title As String, _
+                     ByVal messageType As Long, ByVal okText As String, _
+                     ByVal yesText As String, ByVal noText As String, _
+                     ByVal persianFont As String, ByVal latinFont As String)
+    ' MSForms stores the native window caption through an ANSI path on some
+    ' Windows installations. Keep that chrome ASCII-only and show the Persian
+    ' title in the Unicode-safe in-form header below.
+    Me.Caption = "DIGITALOGIC - Price Sync"
+    lblTitle.Caption = title
+    lblMessage.Caption = message
+    lblBrand.Caption = "DIGITALOGIC"
+    lblFooter.Caption = "DIGITALOGIC"
+    mDialogResult = 0
+    cmdPrimary.Default = True
+    cmdSecondary.Cancel = True
+
+    ApplyFonts persianFont, latinFont
+    If (messageType And 4) = 4 Then
+        cmdPrimary.Caption = yesText
+        cmdSecondary.Caption = noText
+        cmdSecondary.Visible = True
+        cmdPrimary.Left = 288
+    Else
+        cmdPrimary.Caption = okText
+        cmdSecondary.Visible = False
+        cmdPrimary.Left = 288
+    End If
+
+    If (messageType And 16) = 16 Then
+        lblAccent.BackColor = RGB(190, 45, 55)
+    ElseIf (messageType And 48) = 48 Then
+        lblAccent.BackColor = RGB(242, 169, 0)
+    Else
+        lblAccent.BackColor = RGB(1, 104, 205)
+    End If
+End Sub
+
+Private Sub ApplyFonts(ByVal persianFont As String, _
+                       ByVal latinFont As String)
+    lblTitle.Font.Name = persianFont
+    lblTitle.Font.Size = 12
+    lblTitle.Font.Bold = True
+    lblMessage.Font.Name = persianFont
+    lblMessage.Font.Size = 10.5
+    cmdPrimary.Font.Name = persianFont
+    cmdPrimary.Font.Size = 10
+    cmdPrimary.Font.Bold = True
+    cmdSecondary.Font.Name = persianFont
+    cmdSecondary.Font.Size = 10
+    lblBrand.Font.Name = latinFont
+    lblBrand.Font.Size = 8.5
+    lblBrand.Font.Bold = True
+    lblFooter.Font.Name = latinFont
+    lblFooter.Font.Size = 8
+End Sub
+
+Public Function ValidateFonts(ByVal persianFont As String, _
+                              ByVal latinFont As String) As Boolean
+    ValidateFonts = _
+        StrComp(lblTitle.Font.Name, persianFont, vbTextCompare) = 0 And _
+        StrComp(lblMessage.Font.Name, persianFont, vbTextCompare) = 0 And _
+        StrComp(cmdPrimary.Font.Name, persianFont, vbTextCompare) = 0 And _
+        StrComp(cmdSecondary.Font.Name, persianFont, vbTextCompare) = 0 And _
+        StrComp(lblBrand.Font.Name, latinFont, vbTextCompare) = 0 And _
+        StrComp(lblFooter.Font.Name, latinFont, vbTextCompare) = 0
+End Function
+
+Private Sub cmdPrimary_Click()
+    If cmdSecondary.Visible Then
+        mDialogResult = 6
+    Else
+        mDialogResult = 1
+    End If
+    Unload Me
+End Sub
+
+Private Sub cmdSecondary_Click()
+    mDialogResult = 7
+    Unload Me
+End Sub
+
+Private Sub UserForm_QueryClose(Cancel As Integer, CloseMode As Integer)
+    If CloseMode = 0 Then
+        If cmdSecondary.Visible Then
+            mDialogResult = 7
+        Else
+            mDialogResult = 1
+        End If
+        Cancel = False
+    End If
+End Sub
+'@
+    $component.CodeModule.AddFromString($formCode)
+
+    foreach ($control in @($header, $brand, $title, $accent, $message, $footer, $secondary, $primary)) {
+        Release-ComObject $control
+    }
+    Release-ComObject $designer
+    return $component
+}
+
+function Add-BrandLogo(
+    $Sheet,
+    [string]$Path,
+    $Anchor,
+    [double]$Width = 208,
+    [double]$Height = 48,
+    [bool]$CenterVertically = $false
+) {
     $shape = $Sheet.Shapes.AddPicture(
         $Path,
         $false,
@@ -106,6 +399,9 @@ function Add-BrandLogo($Sheet, [string]$Path, $Anchor, [double]$Width = 208, [do
     )
     $shape.AlternativeText = 'نشان رسمی دیجیتالاجیک'
     $shape.LockAspectRatio = -1
+    if ($CenterVertically) {
+        $shape.Top = $Anchor.Top + (($Anchor.Height - $shape.Height) / 2)
+    }
     return $shape
 }
 
@@ -143,6 +439,48 @@ function Set-ZipEntryText($Archive, [string]$EntryName, [string]$Text) {
     finally {
         $writer.Dispose()
     }
+}
+
+function Set-ZipEntryBytes($Archive, [string]$EntryName, [byte[]]$Bytes) {
+    $existing = $Archive.GetEntry($EntryName)
+    if ($null -ne $existing) {
+        $existing.Delete()
+    }
+    $entry = $Archive.CreateEntry($EntryName, [IO.Compression.CompressionLevel]::Optimal)
+    $entry.LastWriteTime = [DateTimeOffset]::new(1980, 1, 1, 0, 0, 0, [TimeSpan]::Zero)
+    $stream = $entry.Open()
+    try {
+        $stream.Write($Bytes, 0, $Bytes.Length)
+    }
+    finally {
+        $stream.Dispose()
+    }
+}
+
+function Replace-ByteSequence(
+    [byte[]]$Bytes,
+    [byte[]]$Needle,
+    [byte[]]$Replacement
+) {
+    if ($Needle.Length -ne $Replacement.Length) {
+        throw 'Binary metadata replacement must preserve byte length.'
+    }
+    $replacements = 0
+    for ($index = 0; $index -le $Bytes.Length - $Needle.Length; $index++) {
+        $matched = $true
+        for ($offset = 0; $offset -lt $Needle.Length; $offset++) {
+            if ($Bytes[$index + $offset] -ne $Needle[$offset]) {
+                $matched = $false
+                break
+            }
+        }
+        if ($matched) {
+            [Array]::Copy($Replacement, 0, $Bytes, $index, $Replacement.Length)
+            $replacements++
+            $index += $Needle.Length - 1
+        }
+    }
+    return $replacements
 }
 
 function Remove-ExcelPrivatePackageMetadata([string]$Path) {
@@ -196,6 +534,93 @@ function Remove-ExcelPrivatePackageMetadata([string]$Path) {
         }
         Set-ZipEntryText $archive 'docProps/app.xml' $applicationXml.OuterXml
 
+        # UserForms add an MSForms cache reference containing the Windows user
+        # profile. Replace only that fixed-length profile prefix in both ANSI
+        # and UTF-16 records so the compiled VBA stream remains structurally
+        # unchanged while the distributed package stays workstation-neutral.
+        $vbaEntry = $archive.GetEntry('xl/vbaProject.bin')
+        if ($null -ne $vbaEntry) {
+            $vbaStream = $vbaEntry.Open()
+            $vbaBytesStream = [IO.MemoryStream]::new()
+            try {
+                $vbaStream.CopyTo($vbaBytesStream)
+            }
+            finally {
+                $vbaStream.Dispose()
+            }
+            $vbaBytes = $vbaBytesStream.ToArray()
+            $vbaBytesStream.Dispose()
+            $userProfile = [Environment]::GetFolderPath('UserProfile')
+            $neutralProfile = 'C:\ProgramData'
+            if ($neutralProfile.Length -lt $userProfile.Length) {
+                $neutralProfile = $neutralProfile.PadRight($userProfile.Length, '_')
+            }
+            elseif ($neutralProfile.Length -gt $userProfile.Length) {
+                $neutralProfile = $neutralProfile.Substring(0, $userProfile.Length)
+            }
+            $ascii = [Text.Encoding]::ASCII
+            $unicode = [Text.Encoding]::Unicode
+            $vbaReplacements = Replace-ByteSequence $vbaBytes `
+                ($ascii.GetBytes($userProfile)) ($ascii.GetBytes($neutralProfile))
+            $vbaReplacements += Replace-ByteSequence $vbaBytes `
+                ($unicode.GetBytes($userProfile)) ($unicode.GetBytes($neutralProfile))
+            $profileLeaf = [IO.Path]::GetFileName($userProfile.TrimEnd('\'))
+            if (-not [string]::IsNullOrWhiteSpace($profileLeaf)) {
+                $neutralUser = 'User'
+                if ($neutralUser.Length -lt $profileLeaf.Length) {
+                    $neutralUser = $neutralUser.PadRight($profileLeaf.Length, '_')
+                }
+                elseif ($neutralUser.Length -gt $profileLeaf.Length) {
+                    $neutralUser = $neutralUser.Substring(0, $profileLeaf.Length)
+                }
+                $profileAppDataFragment = "Users\$profileLeaf\AppData"
+                $neutralAppDataFragment = "Users\$neutralUser\AppData"
+                $vbaReplacements += Replace-ByteSequence $vbaBytes `
+                    ($ascii.GetBytes($profileAppDataFragment)) `
+                    ($ascii.GetBytes($neutralAppDataFragment))
+                $vbaReplacements += Replace-ByteSequence $vbaBytes `
+                    ($unicode.GetBytes($profileAppDataFragment)) `
+                    ($unicode.GetBytes($neutralAppDataFragment))
+            }
+            if ($vbaReplacements -gt 0) {
+                Set-ZipEntryBytes $archive 'xl/vbaProject.bin' $vbaBytes
+            }
+        }
+
+        # Excel can omit the DrawingML language slot even after applying the
+        # correct typeface through COM. Normalize chart/drawing text metadata
+        # so Persian rendering never falls back to an Office default font.
+        $drawingTextEntries = @($archive.Entries | Where-Object {
+            $_.FullName -match '^xl/(charts|drawings)/.+\.xml$'
+        } | ForEach-Object { $_.FullName })
+        foreach ($drawingTextEntry in $drawingTextEntries) {
+            $drawingXml = [Xml.XmlDocument]::new()
+            $drawingXml.PreserveWhitespace = $true
+            $drawingXml.LoadXml((Get-ZipEntryText $archive $drawingTextEntry))
+            $changed = $false
+            foreach ($fontNode in @($drawingXml.SelectNodes(
+                "//*[local-name()='defRPr' or local-name()='rPr']"
+            ))) {
+                $fontChildren = @($fontNode.SelectNodes(
+                    "./*[local-name()='latin' or local-name()='ea' or local-name()='cs']"
+                ))
+                if ($fontChildren.Count -eq 0) { continue }
+                if ($fontNode.GetAttribute('lang') -cne 'fa-IR') {
+                    $fontNode.SetAttribute('lang', 'fa-IR')
+                    $changed = $true
+                }
+                foreach ($fontChild in $fontChildren) {
+                    if ($fontChild.GetAttribute('typeface') -cne 'Yekan Bakh') {
+                        $fontChild.SetAttribute('typeface', 'Yekan Bakh')
+                        $changed = $true
+                    }
+                }
+            }
+            if ($changed) {
+                Set-ZipEntryText $archive $drawingTextEntry $drawingXml.OuterXml
+            }
+        }
+
         $fixedTimestamp = [DateTimeOffset]::new(1980, 1, 1, 0, 0, 0, [TimeSpan]::Zero)
         foreach ($entry in $archive.Entries) {
             $entry.LastWriteTime = $fixedTimestamp
@@ -231,6 +656,9 @@ function Remove-ExcelPrivatePackageMetadata([string]$Path) {
         $archive.Dispose()
     }
 }
+
+Assert-FontFamilyAvailable 'Yekan Bakh' 'Persian'
+Assert-FontFamilyAvailable 'Segoe UI' 'Latin'
 
 New-Item -ItemType Directory -Force (Split-Path -Parent $OutputPath) | Out-Null
 New-Item -ItemType Directory -Force (Split-Path -Parent $DistributionCopyPath) | Out-Null
@@ -277,6 +705,7 @@ try {
     # available for audit, but is collapsed by default.
     $priceList.Activate()
     $excel.ActiveWindow.DisplayGridlines = $false
+    $priceList.Rows.Item(1).RowHeight = 60
     $priceList.Range('B1:K2').Interior.Color = ConvertTo-OleColor 'FFFFFF'
     $priceList.Range('E1:K2').Merge()
     $priceList.Range('E1').Value2 = 'لیست قیمت دیجیتالاجیک'
@@ -286,14 +715,15 @@ try {
     $priceList.Range('E1').Font.Color = ConvertTo-OleColor '2F414B'
     $priceList.Range('E1').HorizontalAlignment = -4152
     $priceList.Range('E1').VerticalAlignment = -4108
-    [void](Add-BrandLogo $priceList $LogoPath $priceList.Range('B1') 190 43)
+    [void](Add-BrandLogo $priceList $LogoPath $priceList.Range('B1:B2') 190 43 $true)
 
     $priceList.Rows(3).RowHeight = 32
-    $priceList.Range('B3').Value2 = 'جست‌وجوی کالا (F2)'
+    $priceList.Range('B3').Value2 = 'جست‌وجوی کالا (F2/F3)'
     $priceList.Range('B3').Font.Bold = $true
     $priceList.Range('B3').Font.Color = ConvertTo-OleColor '0168CD'
     $priceList.Range('B3').VerticalAlignment = -4108
     $priceList.Range('C3:E3').Merge()
+    $priceList.Range('C3:E3').NumberFormat = '@'
     $priceList.Range('C3').Interior.Color = ConvertTo-OleColor 'FFFFFF'
     $priceList.Range('C3:E3').Borders.Color = ConvertTo-OleColor '0168CD'
     $priceList.Range('C3:E3').Borders.Weight = 2
@@ -356,7 +786,7 @@ try {
     $priceList.Columns('H').ColumnWidth = 17
     $priceList.Columns('I').ColumnWidth = 48
     $priceList.Columns('J').ColumnWidth = 17
-    $priceList.Columns('K').ColumnWidth = 30
+    $priceList.Columns('K').ColumnWidth = 36
     $priceList.Columns('L').ColumnWidth = 2.5
     $priceList.Columns('M:O').ColumnWidth = 15
     $priceList.Columns('O').ColumnWidth = 24
@@ -372,8 +802,6 @@ try {
     $priceList.Columns('B:C').ReadingOrder = -5003
     $priceList.Columns('F:H').ReadingOrder = -5003
     $priceList.Columns('J').ReadingOrder = -5003
-    $priceList.Columns('H').Font.Name = 'Yekan Bakh'
-    $priceList.Columns('J').Font.Name = 'Yekan Bakh'
     $priceList.Columns('D').Hidden = $true
     $priceList.Columns('B').Font.Bold = $true
     $priceList.Columns('B:C').HorizontalAlignment = -4152
@@ -485,12 +913,15 @@ try {
         'دسته‌بندی',
         'وضعیت انتشار',
         'هشدار قیمت',
-        'نوع ردیف'
+        'نوع ردیف',
+        'مبلغ منبع قیمت',
+        'ارز منبع قیمت',
+        'نوع منبع قیمت'
     )
     for ($column = 0; $column -lt $syncHeaders.Count; $column++) {
         $syncData.Cells.Item(1, $column + 1).Value2 = $syncHeaders[$column]
     }
-    $syncTable = $syncData.ListObjects.Add(1, $syncData.Range('A1:T2'), $null, 1)
+    $syncTable = $syncData.ListObjects.Add(1, $syncData.Range('A1:W2'), $null, 1)
     $syncTable.Name = 'SyncData'
     $syncTable.TableStyle = 'TableStyleMedium2'
     [void]$syncTable.DataBodyRange.Delete()
@@ -499,6 +930,7 @@ try {
     # Dashboard: compact, formula-backed operating view of the live table.
     $dashboard.Activate()
     $excel.ActiveWindow.DisplayGridlines = $false
+    $dashboard.Rows.Item(1).RowHeight = 60
     $dashboard.Columns('A').ColumnWidth = 2.5
     $dashboard.Columns('B').ColumnWidth = 22
     $dashboard.Columns('C').ColumnWidth = 8
@@ -512,7 +944,7 @@ try {
     $dashboard.Range('E1').Font.Color = ConvertTo-OleColor '2F414B'
     $dashboard.Range('E1').HorizontalAlignment = -4152
     $dashboard.Range('E1').VerticalAlignment = -4108
-    [void](Add-BrandLogo $dashboard $LogoPath $dashboard.Range('B1') 190 43)
+    [void](Add-BrandLogo $dashboard $LogoPath $dashboard.Range('B1:B2') 190 43 $true)
 
     $dashboardCards = @(
         @{ Header = 'B4:C4'; Value = 'B5:C6'; Label = 'تعداد کالاها'; Formula = '=COUNTA(Products[نام کالا])'; Format = '#,##0' },
@@ -523,7 +955,7 @@ try {
         @{ Header = 'D8:E8'; Value = 'D9:E10'; Label = 'کالاهای موجود'; Formula = '=COUNTIF(Products[موجودی کل],">0")'; Format = '#,##0' },
         @{ Header = 'F8:G8'; Value = 'F9:G10'; Label = 'کالاهای ناموجود'; Formula = '=COUNTIFS(Products[نام کالا],"<>",Products[موجودی کل],0)'; Format = '#,##0' },
         @{ Header = 'H8:I8'; Value = 'H9:I10'; Label = 'دسته‌بندی‌های فعال'; Formula = '=IFERROR(SUMPRODUCT((Products[دسته‌بندی]<>"")/COUNTIF(Products[دسته‌بندی],Products[دسته‌بندی]&"")),0)'; Format = '#,##0' },
-        @{ Header = 'B12:E12'; Value = 'B13:E14'; Label = 'ارزش فروش موجودی (تومان)'; Formula = '=IFERROR(SUMPRODUCT(Products[قیمت فروش (تومان)],Products[موجودی کل]),0)'; Format = '#,##0' },
+        @{ Header = 'B12:E12'; Value = 'B13:E14'; Label = 'ارزش فروش موجودی (تومان)'; Formula = '=IFERROR(SUMPRODUCT((Products[موجودی کل]>0)*Products[قیمت فروش (تومان)]*Products[موجودی کل]),0)'; Format = '#,##0' },
         @{ Header = 'F12:G12'; Value = 'F13:G14'; Label = 'بهای یوآن'; Formula = "=IF('تنظیمات'!B10="""","""",'تنظیمات'!B10)"; Format = '#,##0' },
         @{ Header = 'H12:I12'; Value = 'H13:I14'; Label = 'حاشیه سود'; Formula = "=IF('تنظیمات'!B13="""","""",'تنظیمات'!B13)"; Format = '0%' }
     )
@@ -590,6 +1022,30 @@ try {
     $dashboard.Range('B26:C26').Font.Bold = $true
     $dashboard.Range('C27:C29').NumberFormat = '#,##0'
     $dashboard.Range('C27:C29').ReadingOrder = -5003
+
+    # Operator-facing legend for the conditional state colors applied to the
+    # selling-price column after every live synchronization.
+    $dashboard.Range('B31:C31').Merge()
+    $dashboard.Range('B31').Value2 = 'وضعیت محاسبه قیمت'
+    Set-SectionStyle $dashboard.Range('B31:C31') '2F414B' 'FFFFFF' 10
+    $dashboard.Range('B32').Value2 = 'قیمت آماده'
+    $dashboard.Range('B33').Value2 = 'دارای هشدار'
+    $dashboard.Range('B34').Value2 = 'قیمت محاسبه‌نشده'
+    # Keep the three counts mutually exclusive and aligned with the three
+    # conditional-format rules on the selling-price cells.
+    $dashboard.Range('C33').Formula = '=COUNTIFS(SyncData[هشدار قیمت],"<>",SyncData[قیمت محاسباتی کالا],">0")'
+    $dashboard.Range('C32').Formula = '=COUNTIFS(Products[نام کالا],"<>",Products[قیمت فروش (تومان)],">0")-C33'
+    $dashboard.Range('C34').Formula = '=COUNTA(Products[نام کالا])-C32-C33'
+    $dashboard.Range('B32:C32').Interior.Color = ConvertTo-OleColor 'E2EFDA'
+    $dashboard.Range('B32:C32').Font.Color = ConvertTo-OleColor '006100'
+    $dashboard.Range('B33:C33').Interior.Color = ConvertTo-OleColor 'FFF2CC'
+    $dashboard.Range('B33:C33').Font.Color = ConvertTo-OleColor '9C6500'
+    $dashboard.Range('B34:C34').Interior.Color = ConvertTo-OleColor 'F4CCCC'
+    $dashboard.Range('B34:C34').Font.Color = ConvertTo-OleColor '9C0006'
+    $dashboard.Range('B31:C34').Borders.Color = ConvertTo-OleColor 'A9CFE4'
+    $dashboard.Range('B32:B34').Font.Bold = $true
+    $dashboard.Range('C32:C34').NumberFormat = '#,##0'
+    $dashboard.Range('C32:C34').ReadingOrder = -5003
     $chartObject = $dashboard.ChartObjects().Add(
         $dashboard.Range('E21').Left,
         $dashboard.Range('E21').Top,
@@ -605,18 +1061,15 @@ try {
     $chart.Legend.Position = -4107
     try { $chart.ChartArea.Font.Name = 'Yekan Bakh' } catch {}
     try { $chart.ChartTitle.Font.Name = 'Yekan Bakh' } catch {}
-    try {
-        Set-OfficeTextFont $chart.ChartTitle.Format.TextFrame2.TextRange 14 $true '2F414B'
-    } catch {}
+    Set-OfficeTextFont $chart.ChartTitle.Format.TextFrame2.TextRange 14 $true '2F414B'
     try { $chart.Legend.Font.Name = 'Yekan Bakh' } catch {}
-    try {
-        Set-OfficeTextFont $chart.Legend.Format.TextFrame2.TextRange 10 $false '2F414B'
-    } catch {}
+    Set-OfficeTextFont $chart.Legend.Format.TextFrame2.TextRange 10 $false '2F414B'
     $excel.ActiveWindow.Zoom = 90
 
     # Settings stays because it is useful, but every visible label is Persian.
     $settings.Activate()
     $excel.ActiveWindow.DisplayGridlines = $false
+    $settings.Rows.Item(1).RowHeight = 60
     $settings.Columns('A').ColumnWidth = 40
     $settings.Columns('B:F').ColumnWidth = 16
     $settings.Range('A1:F2').Interior.Color = ConvertTo-OleColor 'FFFFFF'
@@ -628,16 +1081,18 @@ try {
     $settings.Range('C1').Font.Color = ConvertTo-OleColor '2F414B'
     $settings.Range('C1').HorizontalAlignment = -4152
     $settings.Range('C1').VerticalAlignment = -4108
-    [void](Add-BrandLogo $settings $LogoPath $settings.Range('A1') 160 36)
+    [void](Add-BrandLogo $settings $LogoPath $settings.Range('A1:A2') 160 36 $true)
 
     $settings.Range('A3').Value2 = 'نشانی سرویس محصولات'
     $settings.Range('B3:F3').Merge()
     $settings.Range('B3').Value2 = 'http://127.0.0.1:18080/api/product-sync'
     $settings.Range('A4').Value2 = 'نشانی پل امن قیمت‌گذاری'
     $settings.Range('B4:F4').Merge()
-    $settings.Range('B4').Value2 = 'http://127.0.0.1:18080/api/excel/pricing-sync/state'
+    $settings.Range('B4').Value2 = 'http://127.0.0.1:18080/api/pricing-sync/state'
     $settings.Range('A5').Value2 = 'همگام‌سازی خودکار هنگام بازشدن'
     $settings.Range('B5:F5').Merge()
+    # The network phase keeps Excel interactive and commits only after the
+    # snapshot is validated, so normal opens can populate themselves safely.
     $settings.Range('B5').Value2 = 'بله'
     $settings.Range('B5').Validation.Delete()
     $settings.Range('B5').Validation.Add(3, 1, 1, 'بله,خیر')
@@ -671,7 +1126,7 @@ try {
         $settings.Range("B${row}:F${row}").NumberFormat = '#,##0'
     }
     $settings.Range('B13').NumberFormat = '0%'
-    $settings.Range('B14').NumberFormat = 'General'
+    $settings.Range('B14').NumberFormat = '0.############'
     $settings.Range('B15').NumberFormat = '0'
     $settings.Range('A10:A15').Font.Bold = $true
     $settings.Range('A10:F15').Borders.Color = ConvertTo-OleColor 'B9CCF4'
@@ -687,11 +1142,16 @@ try {
         $settings.Cells.Item($row, 1).Value2 = $proposalLabels[$rowOffset]
         $settings.Range("B${row}:F${row}").Merge()
     }
+    $settings.Range('B20:F20').UnMerge()
+    $settings.Range('B20:C20').Merge()
+    $settings.Range('D20').Value2 = 'تاریخ مؤثر دلار'
+    $settings.Range('E20:F20').Merge()
+    $settings.Range('D20').Font.Bold = $true
     foreach ($row in @(18, 19)) {
         $settings.Range("B${row}:F${row}").NumberFormat = '#,##0'
     }
     $settings.Range('B21').NumberFormat = '0%'
-    $settings.Range('B22').NumberFormat = 'General'
+    $settings.Range('B22').NumberFormat = '0.############'
     $settings.Range('A18:A23').Font.Bold = $true
     $settings.Range('A18:F23').Borders.Color = ConvertTo-OleColor 'B9CCF4'
     $settings.Range('B18:F23').Interior.Color = ConvertTo-OleColor 'FFF8E7'
@@ -730,6 +1190,7 @@ try {
     $settings.Range('B26').Validation.ErrorTitle = 'تعداد رقم نامعتبر'
     $settings.Range('B26').Validation.ErrorMessage = 'تعداد رقم گردکردن باید عددی صحیح از صفر تا ۹ باشد.'
     $settings.Range('B26').Validation.ShowError = $true
+    $settings.Range('A27:F27').ClearContents()
     $settings.Range('A3:A26').WrapText = $true
     $settings.Rows.Item(14).RowHeight = 30
     $settings.Rows.Item(22).RowHeight = 30
@@ -737,22 +1198,77 @@ try {
     [void](Add-ActionButton $settings 'پیش‌نمایش تغییرات' 'ProductCatalogSync.PreviewPricingChanges' $settings.Range('A28') $settings.Range('A28:C29').Width $settings.Range('A28:C29').Height)
     [void](Add-ActionButton $settings 'اعمال تغییرات تأییدشده' 'ProductCatalogSync.ApplyPricingChanges' $settings.Range('D28') $settings.Range('D28:F29').Width $settings.Range('D28:F29').Height)
 
+    $settings.Range('A31:F36').ClearContents()
+
+    $settings.Range('A38:F38').Merge()
+    $settings.Range('A38').Value2 = 'سیاست قلم'
+    Set-SectionStyle $settings.Range('A38:F38') 'DDE8FC' '242424' 12
+    $fontPolicy = @(
+        @{ Row = 39; Label = 'قلم فارسی و متن‌های ترکیبی'; Value = 'Yekan Bakh'; Name = 'PersianFont' },
+        @{ Row = 40; Label = 'قلم لاتین و شناسه‌های فنی'; Value = 'Segoe UI'; Name = 'LatinFont' },
+        @{ Row = 41; Label = 'حالت ممیزی قلم'; Value = 'RepairAndWarn'; Name = 'FontAuditMode' },
+        @{ Row = 42; Label = 'اعتبارسنجی قلم هنگام بازشدن'; Value = 'Yes'; Name = 'ValidateFontsOnOpen' },
+        @{ Row = 43; Label = 'اجازه قلم جایگزین'; Value = 'No'; Name = 'AllowFallback' }
+    )
+    foreach ($setting in $fontPolicy) {
+        $row = $setting.Row
+        $settings.Cells.Item($row, 1).Value2 = $setting.Label
+        $settings.Range("B${row}:F${row}").Merge()
+        $settings.Range("B${row}").Value2 = $setting.Value
+        $settings.Range("B${row}:F${row}").NumberFormat = '@'
+        $settings.Range("B${row}:F${row}").Interior.Color = ConvertTo-OleColor 'FFF8E7'
+        $settings.Range("A${row}:F${row}").Borders.Color = ConvertTo-OleColor 'B9CCF4'
+        [void]$workbook.Names.Add($setting.Name, $settings.Range("B${row}"))
+    }
+    $settings.Range('B41').Validation.Add(3, 1, 1, 'Off,Warn,RepairAndWarn,Strict')
+    $settings.Range('B42').Validation.Add(3, 1, 1, 'Yes,No')
+    $settings.Range('B43').Validation.Add(3, 1, 1, 'Yes,No')
+
+    $settings.Range('A45:F45').Merge()
+    $settings.Range('A45').Value2 = 'زمان‌بندی مرحله‌های همگام‌سازی (ثانیه)'
+    Set-SectionStyle $settings.Range('A45:F45') 'DDE8FC' '242424' 12
+    $phaseLabels = @(
+        'دریافت نشست محلی',
+        'دریافت قرارداد',
+        'دریافت وضعیت محصول و سایت',
+        'جزئیات دریافت صفحه‌ها',
+        'تطبیق رکوردها',
+        'محاسبه قیمت',
+        'نوشتن گروهی جدول',
+        'پیوندها و قالب‌بندی',
+        'محاسبه اکسل',
+        'ذخیره فایل'
+    )
+    for ($rowOffset = 0; $rowOffset -lt $phaseLabels.Count; $rowOffset++) {
+        $row = 46 + $rowOffset
+        $settings.Cells.Item($row, 1).Value2 = $phaseLabels[$rowOffset]
+        $settings.Range("B${row}:F${row}").Merge()
+        $settings.Range("B${row}:F${row}").ClearContents()
+        $settings.Range("B${row}:F${row}").NumberFormat = if ($row -eq 49) { '@' } else { '0.000' }
+        $settings.Range("B${row}:F${row}").Interior.Color = ConvertTo-OleColor 'F6F6F6'
+        $settings.Range("A${row}:F${row}").Borders.Color = ConvertTo-OleColor 'B9CCF4'
+    }
+    $settings.Range('A39:A55').Font.Bold = $true
+    $settings.Range('A38:A55').WrapText = $true
+
     # Hidden base values, state/shipping revisions, and preview metadata are
     # runtime-only conflict guards. The template itself persists no live values.
     $settings.Range('G18:G22').ClearContents()
     $settings.Range('G14:G15').ClearContents()
     $settings.Range('G26:G28').ClearContents()
     $settings.Range('H14:H17').ClearContents()
-    $settings.Range('G30:G47').ClearContents()
+    $settings.Range('G30:G55').ClearContents()
     $settings.Range('G30').Value2 = 0
+    $settings.Range('G48').Value2 = 0
     [void]$workbook.Names.Add('SelectedProductRow', $settings.Range('G30'))
+    [void]$workbook.Names.Add('ProjectedPricePreviewRow', $settings.Range('G48'))
     $settings.Columns('G').Hidden = $true
     $settings.Columns('H').Hidden = $true
 
     # Never format only the first column of several adjacent merged rows.
     # Excel silently coalesces those rows into one large MergeArea, which
     # makes every setting except the first one inaccessible to VBA.
-    foreach ($row in @((10..15) + (18..23) + 26)) {
+    foreach ($row in @((10..15) + 18 + 19 + (21..23) + 26 + (39..43) + (46..55))) {
         $mergeCell = $settings.Range("B${row}")
         $mergeArea = $mergeCell.MergeArea
         try {
@@ -767,17 +1283,80 @@ try {
             Release-ComObject $mergeCell
         }
     }
+    foreach ($dateMergeAddress in @('B20:C20', 'E20:F20')) {
+        $mergeCell = $settings.Range($dateMergeAddress.Split(':')[0])
+        $mergeArea = $mergeCell.MergeArea
+        try {
+            $actualMergeAddress = $mergeArea.Address($false, $false)
+            if ($actualMergeAddress -cne $dateMergeAddress) {
+                throw "Settings date field has MergeArea $actualMergeAddress; expected $dateMergeAddress."
+            }
+        }
+        finally {
+            Release-ComObject $mergeArea
+            Release-ComObject $mergeCell
+        }
+    }
+
+    # Apply the fixed role map after all cells/shapes exist. Font selection is
+    # role-based only; no content inspection or numeric font variant is used.
+    Set-RangeFontSlots $priceList.Range('B1:K6') 'Yekan Bakh'
+    Set-RangeFontSlots $priceList.Range('B6:C6,F6:H6,J6') 'Segoe UI'
+    Set-RangeFontSlots $priceList.Range('I6,K6') 'Yekan Bakh'
+    Set-RangeFontSlots $dashboard.Range('B1:I34') 'Yekan Bakh'
+    Set-RangeFontSlots $dashboard.Range('B5:C6,D5:E6,F5:G6,H5:I6,B9:C10,D9:E10,F9:G10,H9:I10,B13:E14,F13:G14,H13:I14,C22:C24,C27:C29,C32:C34') 'Segoe UI'
+    Set-RangeFontSlots $settings.Range('A1:F55') 'Yekan Bakh'
+    Set-RangeFontSlots $settings.Range('B3:F4,B7:F7,B10:F15,B18:F22,B24:F26,B39:F43,B46:F55') 'Segoe UI'
+    Set-RangeFontSlots $syncData.Range('A1:W1') 'Yekan Bakh'
+    Set-RangeFontSlots $syncData.Range('A2:P2,U2:W2') 'Segoe UI'
+    Set-RangeFontSlots $syncData.Range('Q2:T2') 'Yekan Bakh'
+    foreach ($sheet in @($priceList, $dashboard, $settings)) {
+        for ($shapeIndex = 1; $shapeIndex -le $sheet.Shapes.Count; $shapeIndex++) {
+            $shape = $sheet.Shapes.Item($shapeIndex)
+            try {
+                $shapeAction = ''
+                try { $shapeAction = [string]$shape.OnAction } catch {}
+                if (-not [string]::IsNullOrWhiteSpace($shapeAction)) {
+                    Set-OfficeTextFont $shape.TextFrame2.TextRange 11 $true 'FFFFFF'
+                    try {
+                        $shape.TextFrame.Characters().Font.Name = 'Yekan Bakh'
+                        $shape.TextFrame.Characters().Font.NameComplexScript = 'Yekan Bakh'
+                        $shape.TextFrame.Characters().Font.NameFarEast = 'Yekan Bakh'
+                    } catch {}
+                    Assert-ShapeFontSlots $shape 'Yekan Bakh' "action shape $($shape.Name)"
+                }
+            }
+            finally { Release-ComObject $shape }
+        }
+    }
+
+    if ([double]$priceList.Columns('B').ColumnWidth -lt 20) {
+        throw "Products column B is narrower than the required 20-character minimum."
+    }
+    if ([double]$priceList.Columns('K').ColumnWidth -lt 34) {
+        throw "Products column K is narrower than the required 34-character minimum."
+    }
+    Assert-RangeFontSlots $priceList.Range('B5:K5') 'Yekan Bakh' 'Products headers'
+    Assert-RangeFontSlots $priceList.Range('C3:E3') 'Yekan Bakh' 'search input'
+    Assert-RangeFontSlots $priceList.Range('B6:C6') 'Segoe UI' 'price and weight roles'
+    Assert-RangeFontSlots $priceList.Range('H6,J6') 'Segoe UI' 'SKU and Woo ID roles'
+    Assert-RangeFontSlots $priceList.Range('I6,K6') 'Yekan Bakh' 'name and category roles'
+    Assert-RangeFontSlots $dashboard.Range('B1:I4') 'Yekan Bakh' 'dashboard text'
+    Assert-RangeFontSlots $dashboard.Range('C22:C24') 'Segoe UI' 'dashboard counts'
+    Assert-RangeFontSlots $settings.Range('A1:F2') 'Yekan Bakh' 'settings text'
+    Assert-RangeFontSlots $settings.Range('B39:F43') 'Segoe UI' 'font policy values'
+    Assert-RangeFontSlots $syncData.Range('A1:W1') 'Yekan Bakh' 'SyncData headers'
 
     $priceList.PageSetup.PrintArea = '$B$1:$O$30'
     $priceList.PageSetup.Orientation = 2
     $priceList.PageSetup.Zoom = $false
     $priceList.PageSetup.FitToPagesWide = 1
     $priceList.PageSetup.FitToPagesTall = 1
-    $settings.PageSetup.PrintArea = '$A$1:$F$29'
+    $settings.PageSetup.PrintArea = '$A$1:$F$55'
     $settings.PageSetup.Zoom = $false
     $settings.PageSetup.FitToPagesWide = 1
     $settings.PageSetup.FitToPagesTall = 1
-    $dashboard.PageSetup.PrintArea = '$B$1:$I$32'
+    $dashboard.PageSetup.PrintArea = '$B$1:$I$34'
     $dashboard.PageSetup.Zoom = $false
     $dashboard.PageSetup.FitToPagesWide = 1
     $dashboard.PageSetup.FitToPagesTall = 1
@@ -786,10 +1365,78 @@ try {
     $excel.ActiveWindow.DisplayRightToLeft = $true
     $excel.ActiveWindow.Zoom = 90
 
-    # Import the auditable checked-in parser/runtime, dashboard module, and open event.
+    # Early binding is required for WinHttp.WinHttpRequest WithEvents callbacks.
+    # Fail closed if the registered 5.1 type library cannot be resolved exactly.
+    $winHttpReference = $null
+    try {
+        $winHttpReference = $workbook.VBProject.References.AddFromGuid(
+            '{662901FC-6951-4854-9EB2-D9A2570F2B2E}',
+            5,
+            1
+        )
+        if (
+            [string]$winHttpReference.Guid -ine '{662901FC-6951-4854-9EB2-D9A2570F2B2E}' -or
+            [int]$winHttpReference.Major -ne 5 -or
+            [int]$winHttpReference.Minor -ne 1 -or
+            [bool]$winHttpReference.IsBroken
+        ) {
+            throw 'The Microsoft WinHTTP Services 5.1 reference is missing or broken.'
+        }
+    }
+    catch {
+        throw "Could not bind Microsoft WinHTTP Services 5.1: $($_.Exception.Message)"
+    }
+    finally {
+        Release-ComObject $winHttpReference
+    }
+
+    # Import the auditable checked-in parser/runtime, callback classes,
+    # dashboard module, and workbook events. Import errors are fatal.
     [void]$workbook.VBProject.VBComponents.Import($jsonValuePath)
     [void]$workbook.VBProject.VBComponents.Import($jsonRuntimePath)
+    $asyncComponent = $workbook.VBProject.VBComponents.Import($asyncWinHttpRequestPath)
+    $sseParserComponent = $workbook.VBProject.VBComponents.Import($pricingSseParserPath)
+    foreach ($classContract in @(
+        @{
+            Component = $asyncComponent
+            Name = 'AsyncWinHttpRequest'
+            Required = 'Private WithEvents mHttp As WinHttp.WinHttpRequest'
+        },
+        @{
+            Component = $sseParserComponent
+            Name = 'PricingSseParser'
+            Required = 'Public Function Feed(ByVal Chunk As Variant) As Collection'
+        }
+    )) {
+        $component = $classContract.Component
+        if ($null -eq $component -or
+            [string]$component.Name -cne $classContract.Name -or
+            [int]$component.Type -ne 2) {
+            throw "Imported VBA class '$($classContract.Name)' has the wrong identity or type."
+        }
+        $codeModule = $component.CodeModule
+        try {
+            $lineCount = [int]$codeModule.CountOfLines
+            if ($lineCount -lt 1) {
+                throw "Imported VBA class '$($classContract.Name)' is empty."
+            }
+            $classSource = [string]$codeModule.Lines(1, $lineCount)
+            if ($classSource.IndexOf(
+                    [string]$classContract.Required,
+                    [StringComparison]::Ordinal
+                ) -lt 0) {
+                throw "Imported VBA class '$($classContract.Name)' failed its source contract."
+            }
+        }
+        finally {
+            Release-ComObject $codeModule
+        }
+    }
+    Release-ComObject $asyncComponent
+    Release-ComObject $sseParserComponent
     [void]$workbook.VBProject.VBComponents.Import($vbaModulePath)
+    $messageFormComponent = Add-DigitalogicMessageForm $workbook
+    Release-ComObject $messageFormComponent
     $thisWorkbookComponent = $workbook.VBProject.VBComponents.Item('ThisWorkbook')
     $thisWorkbookCode = Get-Content -Raw -Encoding UTF8 $thisWorkbookPath
     $thisWorkbookComponent.CodeModule.AddFromString($thisWorkbookCode)
@@ -800,15 +1447,26 @@ try {
         $excel.Run("'$($workbook.Name)'!ProductCatalogSync.ValidateWorkbook")
     }
     catch {
+        $validationError = $_
         # Preserve the failed package at the requested diagnostic path so the
         # native VBA editor can identify the exact compile location.
-        $workbook.SaveAs($OutputPath, 53)
-        $workbook.Save()
-        throw
+        try {
+            $workbook.SaveAs($OutputPath, 53)
+            $workbook.Save()
+        }
+        catch {
+            Write-Warning ("Could not preserve the failed diagnostic workbook: " + $_.Exception.Message)
+        }
+        throw "ValidateWorkbook failed before packaging: $($validationError.Exception.Message)"
     }
     # 53 = xlOpenXMLTemplateMacroEnabled (.xltm). Opening the canonical file
     # creates a separate workbook instance for any later Save As operation.
-    $workbook.SaveAs($OutputPath, 53)
+    try {
+        $workbook.SaveAs($OutputPath, 53)
+    }
+    catch {
+        throw "Saving the verified macro-enabled template failed: $($_.Exception.Message)"
+    }
     $workbook.Save()
 
     $priceList.ExportAsFixedFormat(0, (Join-Path $PreviewDirectory 'price-list.pdf'))

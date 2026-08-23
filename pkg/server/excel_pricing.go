@@ -110,11 +110,13 @@ type excelPricingSession struct {
 }
 
 type excelPricingState struct {
-	mu       sync.Mutex
-	sessions map[[sha256.Size]byte]excelPricingSession
-	now      func() time.Time
-	permit   chan struct{}
-	client   *http.Client
+	mu        sync.Mutex
+	sessions  map[[sha256.Size]byte]excelPricingSession
+	now       func() time.Time
+	permit    chan struct{}
+	client    *http.Client
+	snapshots *excelPricingSnapshotStore
+	mutations *excelPricingMutationLedger
 
 	canonical func(context.Context) (recordpipe.Result, error)
 	dispatch  func(context.Context, updateout.Config, updateout.Event) (updateout.DeliveryResult, error)
@@ -128,7 +130,7 @@ type excelPricingRemoteResponse struct {
 }
 
 func newExcelPricingState() *excelPricingState {
-	return &excelPricingState{
+	state := &excelPricingState{
 		sessions: make(map[[sha256.Size]byte]excelPricingSession),
 		now:      time.Now,
 		permit:   make(chan struct{}, 1),
@@ -139,6 +141,9 @@ func newExcelPricingState() *excelPricingState {
 		},
 		dispatch: updateout.DispatchWithResult,
 	}
+	state.snapshots = newExcelPricingSnapshotStore(state.now)
+	state.mutations = newExcelPricingMutationLedger(state.now)
+	return state
 }
 
 func (s *Server) handlePostExcelPricingSession(w http.ResponseWriter, r *http.Request) {
@@ -225,13 +230,58 @@ func (s *Server) handleExcelPricingOperation(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
+	mutationFingerprint := ""
+	mutationReserved := false
+	if operation == "preview" || operation == "apply" {
+		mutationFingerprint = excelPricingMutationFingerprint(local)
+		begin, replayStatus, replayBody := s.excelPricing.mutations.begin(
+			operation,
+			local.IdempotencyKey,
+			mutationFingerprint,
+		)
+		switch begin {
+		case excelPricingMutationBeginReplay:
+			w.Header().Set("Content-Type", "application/json; charset=utf-8")
+			w.WriteHeader(replayStatus)
+			_, _ = w.Write(replayBody)
+			return
+		case excelPricingMutationBeginRunning:
+			writeExcelPricingBusy(w, "pricing_busy")
+			return
+		case excelPricingMutationBeginConflict:
+			writeExcelPricingError(w, http.StatusConflict, "idempotency_conflict")
+			return
+		case excelPricingMutationBeginNew:
+			mutationReserved = true
+		}
+		defer func() {
+			if mutationReserved {
+				s.excelPricing.mutations.abort(operation, local.IdempotencyKey, mutationFingerprint)
+			}
+		}()
+		if operation == "apply" {
+			exists, matches := s.excelPricing.mutations.previewMatch(
+				local.PreviewDigest,
+				excelPricingPreviewBindingFingerprint(local),
+			)
+			if !exists {
+				writeExcelPricingError(w, http.StatusConflict, "preview_required")
+				return
+			}
+			if !matches {
+				writeExcelPricingError(w, http.StatusConflict, "preview_binding_conflict")
+				return
+			}
+		}
+	}
+
 	operationContext, cancel := context.WithTimeout(r.Context(), excelPricingOperationTimeout)
 	defer cancel()
 	select {
 	case s.excelPricing.permit <- struct{}{}:
 		defer func() { <-s.excelPricing.permit }()
-	case <-operationContext.Done():
-		writeExcelPricingError(w, http.StatusRequestTimeout, "request_cancelled")
+	default:
+		writeExcelPricingBusy(w, "pricing_busy")
 		return
 	}
 
@@ -242,7 +292,12 @@ func (s *Server) handleExcelPricingOperation(w http.ResponseWriter, r *http.Requ
 	}
 	var source canonical.Source
 	if operation == "state" {
-		if !s.excelPricingStateSourceMatches(local.Source, cfg) {
+		matches, err := s.excelPricingStateSourceMatches(operationContext, local.Source, cfg)
+		if err != nil {
+			writeExcelPricingError(w, http.StatusServiceUnavailable, "canonical_source_unavailable")
+			return
+		}
+		if !matches {
 			writeExcelPricingError(w, http.StatusConflict, "canonical_source_mismatch")
 			return
 		}
@@ -268,10 +323,39 @@ func (s *Server) handleExcelPricingOperation(w http.ResponseWriter, r *http.Requ
 	}
 
 	if operation == "apply" {
+		// The remote mutation may already be committed even if local canonical
+		// delivery or readback fails. Shared serialization guarantees there is no
+		// concurrent snapshot build, so invalidate warm reuse immediately after
+		// the successful remote apply response.
+		s.excelPricing.snapshots.publishPricingStateInvalidated(remote.stateRevision)
 		if err := s.completeExcelPricingApply(operationContext, cfg, remote); err != nil {
 			writeExcelPricingError(w, http.StatusBadGateway, "post_apply_verification_failed")
 			return
 		}
+		s.excelPricing.snapshots.publishPricingStateVerified(remote.stateRevision)
+	} else if operation == "preview" {
+		previewDigest, present, err := excelPricingPreviewDigest(remote.body)
+		if err != nil {
+			writeExcelPricingError(w, http.StatusBadGateway, "remote_contract_invalid")
+			return
+		}
+		if present && !s.excelPricing.mutations.bindPreview(
+			previewDigest,
+			excelPricingPreviewBindingFingerprint(local),
+		) {
+			writeExcelPricingError(w, http.StatusConflict, "preview_digest_conflict")
+			return
+		}
+	}
+	if mutationReserved {
+		s.excelPricing.mutations.complete(
+			operation,
+			local.IdempotencyKey,
+			mutationFingerprint,
+			remote.status,
+			remote.body,
+		)
+		mutationReserved = false
 	}
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(remote.status)
@@ -320,16 +404,19 @@ func (s *Server) excelPricingCanonical(ctx context.Context, cfg appconfig.Config
 	return result.SyncEnvelope(nil), nil
 }
 
-func (s *Server) excelPricingStateSourceMatches(source *canonical.Source, cfg appconfig.Config) bool {
+func (s *Server) excelPricingStateSourceMatches(
+	ctx context.Context,
+	source *canonical.Source,
+	cfg appconfig.Config,
+) (bool, error) {
 	if source == nil || !isSHA256Revision(source.Revision) {
-		return false
+		return false, nil
 	}
-	sourcePath := strings.TrimSpace(s.currentDBPath())
-	if sourcePath == "" {
-		return false
+	contract, err := s.excelPricingCanonical(ctx, cfg)
+	if err != nil {
+		return false, err
 	}
-	expected := canonical.SourceIdentity(sourcePath, cfg.Canonical.SourceID, source.Revision)
-	return *source == expected
+	return *source == contract.Source, nil
 }
 
 func buildExcelPricingRemoteRequest(operation string, local excelPricingLocalRequest, source canonical.Source) excelPricingRemoteRequest {
