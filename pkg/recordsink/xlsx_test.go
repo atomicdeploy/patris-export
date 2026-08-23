@@ -1072,8 +1072,10 @@ func TestDynamicCalculatorVBASourceGuardsLivePricingBeforeMutation(t *testing.T)
 	showSync := strings.Index(macroFreeExport, "syncSheetValue.Visible = xlSheetVisible")
 	copySheets := strings.Index(macroFreeExport, "ThisWorkbook.Worksheets.Copy")
 	restoreSource := strings.Index(macroFreeExport, "syncSheetValue.Visible = originalSyncVisibility")
+	verifySuccessRestore := strings.Index(macroFreeExport, "If syncSheetValue.Visible <> originalSyncVisibility Then")
 	restoreCopy := strings.Index(macroFreeExport, "copyBook.Worksheets(syncSheetName).Visible = originalSyncVisibility")
-	if showSync < 0 || copySheets <= showSync || restoreSource <= copySheets || restoreCopy <= restoreSource {
+	if showSync < 0 || copySheets <= showSync || restoreSource <= copySheets ||
+		verifySuccessRestore <= restoreSource || restoreCopy <= verifySuccessRestore {
 		t.Fatal("macro-free export must expose SyncData only for the collection copy and restore both workbooks afterward")
 	}
 	captureSaved := strings.Index(macroFreeExport, "sourceWasSaved = ThisWorkbook.Saved")
