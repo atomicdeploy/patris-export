@@ -216,6 +216,14 @@ rollback-protected atomic commit. Any cancellation, error, stale event, duplicat
 identity, digest mismatch, or unsafe warning retains the previous committed
 workbook generation.
 
+Failed snapshot jobs retain their existing top-level compatibility code and may
+also include a bounded `failure` object with schema
+`patris.pricing-snapshot-failure/v1`. Its reviewed `stage` and `code` values
+distinguish revision fetch, terminal subscription, snapshot start, terminal
+wait/match, remote terminal, payload validation, remote configuration, and
+local projection failures. No URL, credential, response body, request/build
+identifier, source identity, or row data is copied into this diagnostic.
+
 The durable semantic listener uses `/api/pricing-sync/events`, comment
 keepalives, numeric `Last-Event-ID`, bounded callback-driven reconnect, and the
 same loopback-only headers. A cursor is kept only with the exact in-memory
