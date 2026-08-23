@@ -169,8 +169,8 @@ func TestExcelPricingSnapshotAggregatesCachesAndServesETag(t *testing.T) {
 		t.Fatal(err)
 	}
 	if payload.Schema != excelPricingSnapshotPayloadSchema ||
-		payload.Projection != excelPricingSnapshotProjectionFull ||
-		len(payload.RowFields) != 0 ||
+		payload.Projection != excelPricingSnapshotProjectionExcel ||
+		len(payload.RowFields) != len(excelPricingSnapshotExcelRowFields) ||
 		payload.StateRevision != stateRevision ||
 		payload.Integrity.RowCount != len(rows) ||
 		payload.Integrity.DistinctSyncKeys != len(rows) ||
@@ -188,7 +188,7 @@ func TestExcelPricingSnapshotAggregatesCachesAndServesETag(t *testing.T) {
 	}
 	var state struct {
 		Catalog struct {
-			Rows       []map[string]interface{}       `json:"rows"`
+			Rows       [][]json.RawMessage            `json:"rows"`
 			Pagination excelPricingSnapshotPagination `json:"pagination"`
 		} `json:"catalog"`
 	}
@@ -410,10 +410,10 @@ func TestExcelPricingSnapshotReadyReplayPublishesReturnedCachedJob(t *testing.T)
 	}
 }
 
-func TestExcelPricingSnapshotExcelV1UsesPositionalRowsAndSeparateCache(t *testing.T) {
+func TestExcelPricingSnapshotUsesOnlyExcelPositionalRows(t *testing.T) {
 	source := excelPricingStateSourceForTest()
-	stateRevision := excelPricingRevisionForTest("excel-v1-state")
-	datasetRevision := excelPricingRevisionForTest("excel-v1-dataset")
+	stateRevision := excelPricingRevisionForTest("excel-state")
+	datasetRevision := excelPricingRevisionForTest("excel-dataset")
 	row := excelPricingSnapshotFullRowForTest(1)
 	var remoteCalls atomic.Int32
 	remote := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -426,12 +426,12 @@ func TestExcelPricingSnapshotExcelV1UsesPositionalRowsAndSeparateCache(t *testin
 	defer remote.Close()
 	server := newExcelPricingTestServer(t, remote.URL+"/wp-json/digitalogic/patris/product-sync")
 	token := openExcelPricingSession(t, server)
-	requestID := "snapshot-excel-v1-test-0001"
+	requestID := "snapshot-excel-test-0001"
 	start := authenticatedExcelPricingRequest(
 		http.MethodPost,
 		"/api/pricing-sync/snapshots",
 		validExcelPricingSnapshotStartBodyWithProjection(
-			source, requestID, "fa", 30, "", excelPricingSnapshotProjectionExcelV1,
+			source, requestID, "fa", 30, "", excelPricingSnapshotProjectionExcel,
 		),
 		token,
 	)
@@ -439,11 +439,11 @@ func TestExcelPricingSnapshotExcelV1UsesPositionalRowsAndSeparateCache(t *testin
 	startResponse := httptest.NewRecorder()
 	server.router.ServeHTTP(startResponse, start)
 	if startResponse.Code != http.StatusAccepted {
-		t.Fatalf("excel-v1 start=%d: %s", startResponse.Code, startResponse.Body.String())
+		t.Fatalf("excel start=%d: %s", startResponse.Code, startResponse.Body.String())
 	}
 	jobID := excelPricingSnapshotJobIDForTest(t, startResponse.Body.Bytes())
 	status := waitForExcelPricingSnapshotStatus(t, server, token, jobID, "ready")
-	if status["projection"] != excelPricingSnapshotProjectionExcelV1 {
+	if status["projection"] != excelPricingSnapshotProjectionExcel {
 		t.Fatalf("job projection=%#v", status["projection"])
 	}
 	payloadRequest := authenticatedExcelPricingRequest(
@@ -452,17 +452,17 @@ func TestExcelPricingSnapshotExcelV1UsesPositionalRowsAndSeparateCache(t *testin
 	payloadResponse := httptest.NewRecorder()
 	server.router.ServeHTTP(payloadResponse, payloadRequest)
 	if payloadResponse.Code != http.StatusOK {
-		t.Fatalf("excel-v1 payload=%d: %s", payloadResponse.Code, payloadResponse.Body.String())
+		t.Fatalf("excel payload=%d: %s", payloadResponse.Code, payloadResponse.Body.String())
 	}
 	var payload excelPricingSnapshotPayload
 	if err := json.Unmarshal(payloadResponse.Body.Bytes(), &payload); err != nil {
 		t.Fatal(err)
 	}
-	if payload.Projection != excelPricingSnapshotProjectionExcelV1 ||
-		len(payload.RowFields) != len(excelPricingSnapshotExcelV1RowFields) {
-		t.Fatalf("excel-v1 payload contract=%+v", payload)
+	if payload.Projection != excelPricingSnapshotProjectionExcel ||
+		len(payload.RowFields) != len(excelPricingSnapshotExcelRowFields) {
+		t.Fatalf("excel payload contract=%+v", payload)
 	}
-	for index, field := range excelPricingSnapshotExcelV1RowFields {
+	for index, field := range excelPricingSnapshotExcelRowFields {
 		if payload.RowFields[index] != field {
 			t.Fatalf("row_fields[%d]=%q, want %q", index, payload.RowFields[index], field)
 		}
@@ -477,7 +477,7 @@ func TestExcelPricingSnapshotExcelV1UsesPositionalRowsAndSeparateCache(t *testin
 		t.Fatal(err)
 	}
 	if len(state.Catalog.Rows) != 1 ||
-		len(state.Catalog.Rows[0]) != len(excelPricingSnapshotExcelV1RowFields) {
+		len(state.Catalog.Rows[0]) != len(excelPricingSnapshotExcelRowFields) {
 		t.Fatalf("projected rows=%d fields=%d", len(state.Catalog.Rows), len(state.Catalog.Rows[0]))
 	}
 	fieldIndex := make(map[string]int, len(payload.RowFields))
@@ -495,19 +495,14 @@ func TestExcelPricingSnapshotExcelV1UsesPositionalRowsAndSeparateCache(t *testin
 	if payload.Integrity.StateDigest != excelPricingSnapshotDigest(payload.State) ||
 		payloadResponse.Header().Get("ETag") !=
 			excelPricingSnapshotETag(excelPricingSnapshotDigest(payloadResponse.Body.Bytes())) {
-		t.Fatal("excel-v1 integrity or strong ETag mismatch")
+		t.Fatal("excel integrity or strong ETag mismatch")
 	}
-	if excelPricingSnapshotCacheKey(source, "fa", excelPricingSnapshotProjectionFull) ==
-		excelPricingSnapshotCacheKey(source, "fa", excelPricingSnapshotProjectionExcelV1) {
-		t.Fatal("full and excel-v1 projections shared a cache key")
-	}
-
 	invalidID := "snapshot-invalid-projection-0001"
 	invalid := authenticatedExcelPricingRequest(
 		http.MethodPost,
 		"/api/pricing-sync/snapshots",
 		validExcelPricingSnapshotStartBodyWithProjection(
-			source, invalidID, "fa", 0, "", "unknown-v1",
+			source, invalidID, "fa", 0, "", "full",
 		),
 		token,
 	)
@@ -517,9 +512,10 @@ func TestExcelPricingSnapshotExcelV1UsesPositionalRowsAndSeparateCache(t *testin
 	if invalidResponse.Code != http.StatusBadRequest || remoteCalls.Load() != 1 {
 		t.Fatalf("invalid projection status=%d remote=%d", invalidResponse.Code, remoteCalls.Load())
 	}
+
 }
 
-func TestExcelPricingSnapshotExcelV1PayloadSizeForRepresentativeCatalog(t *testing.T) {
+func TestExcelPricingSnapshotPayloadForRepresentativeCatalog(t *testing.T) {
 	source := excelPricingStateSourceForTest()
 	rows := make([]map[string]interface{}, excelPricingSnapshotPageSize*4+37)
 	rawRows := make([]json.RawMessage, len(rows))
@@ -552,28 +548,13 @@ func TestExcelPricingSnapshotExcelV1PayloadSizeForRepresentativeCatalog(t *testi
 		pageRevisions[page] = excelPricingRevisionForTest("size-page-" + strconv.Itoa(page+1))
 	}
 	now := time.Date(2026, 8, 16, 0, 0, 0, 0, time.UTC)
-	full, err := buildExcelPricingSnapshot(
-		first, source, rawRows, pageRevisions, excelPricingSnapshotProjectionFull, now,
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
 	excel, err := buildExcelPricingSnapshot(
-		first, source, rawRows, pageRevisions, excelPricingSnapshotProjectionExcelV1, now,
+		first, source, rawRows, pageRevisions, excelPricingSnapshotProjectionExcel, now,
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Logf(
-		"representative payload rows=%d bytes: full=%d excel-v1=%d reduction=%.1f%%",
-		len(rows),
-		len(full.body),
-		len(excel.body),
-		100*(1-float64(len(excel.body))/float64(len(full.body))),
-	)
-	if len(excel.body)*2 >= len(full.body) {
-		t.Fatalf("excel-v1 payload=%d is not less than half of full=%d", len(excel.body), len(full.body))
-	}
+	t.Logf("representative Living payload rows=%d bytes=%d", len(rows), len(excel.body))
 	var payload excelPricingSnapshotPayload
 	if err := json.Unmarshal(excel.body, &payload); err != nil {
 		t.Fatal(err)
@@ -588,11 +569,11 @@ func TestExcelPricingSnapshotExcelV1PayloadSizeForRepresentativeCatalog(t *testi
 	}
 	if len(state.Catalog.Rows) != len(rows) || len(state.Catalog.Rows[0]) != 26 ||
 		payload.Integrity.RowCount != len(rows) || payload.Integrity.DistinctSyncKeys != len(rows) {
-		t.Fatalf("excel-v1 representative contract failed: rows=%d fields=%d integrity=%+v", len(state.Catalog.Rows), len(state.Catalog.Rows[0]), payload.Integrity)
+		t.Fatalf("excel representative contract failed: rows=%d fields=%d integrity=%+v", len(state.Catalog.Rows), len(state.Catalog.Rows[0]), payload.Integrity)
 	}
 }
 
-func TestExcelPricingSnapshotExcelV1RejectsInvalidLeanRows(t *testing.T) {
+func TestExcelPricingSnapshotRejectsInvalidExcelRowsAndRemovedDialects(t *testing.T) {
 	base := excelPricingSnapshotFullRowForTest(1)
 	tests := map[string]func(map[string]interface{}){
 		"missing status": func(row map[string]interface{}) {
@@ -617,9 +598,9 @@ func TestExcelPricingSnapshotExcelV1RejectsInvalidLeanRows(t *testing.T) {
 				t.Fatal(err)
 			}
 			if _, _, err := projectExcelPricingSnapshotRows(
-				[]json.RawMessage{encoded}, excelPricingSnapshotProjectionExcelV1,
+				[]json.RawMessage{encoded}, excelPricingSnapshotProjectionExcel,
 			); err == nil {
-				t.Fatal("invalid excel-v1 row was accepted")
+				t.Fatal("invalid excel row was accepted")
 			}
 		})
 	}
@@ -628,10 +609,10 @@ func TestExcelPricingSnapshotExcelV1RejectsInvalidLeanRows(t *testing.T) {
 		t.Fatal(err)
 	}
 	full, fields, err := projectExcelPricingSnapshotRows(
-		[]json.RawMessage{encoded}, excelPricingSnapshotProjectionFull,
+		[]json.RawMessage{encoded}, "full",
 	)
-	if err != nil || len(full) != 1 || fields != nil || string(full[0]) != string(encoded) {
-		t.Fatalf("full projection changed: rows=%d fields=%v err=%v", len(full), fields, err)
+	if err == nil || full != nil || fields != nil {
+		t.Fatalf("removed full projection was accepted: rows=%d fields=%v err=%v", len(full), fields, err)
 	}
 }
 
@@ -2103,7 +2084,6 @@ func validExcelPricingSnapshotStartBodyWithProjection(
 ) string {
 	payload := excelPricingSnapshotStartRequest{
 		Schema:                excelPricingSnapshotRequestSchema,
-		SchemaVersion:         1,
 		ClientID:              excelPricingContractClientID,
 		Channel:               excelPricingContractChannel,
 		RequestID:             requestID,

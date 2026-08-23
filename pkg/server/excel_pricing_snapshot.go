@@ -22,16 +22,15 @@ import (
 )
 
 const (
-	excelPricingSnapshotRequestSchema     = "patris.pricing-snapshot-request/v1"
-	excelPricingSnapshotJobSchema         = "patris.pricing-snapshot-job/v1"
-	excelPricingSnapshotFailureSchema     = "patris.pricing-snapshot-failure/v1"
-	excelPricingSnapshotPayloadSchema     = "patris.pricing-snapshot/v1"
-	excelPricingSnapshotProjectionFull    = "full"
-	excelPricingSnapshotProjectionExcelV1 = "excel-v1"
+	excelPricingSnapshotRequestSchema   = "patris.pricing-snapshot-request"
+	excelPricingSnapshotJobSchema       = "patris.pricing-snapshot-job"
+	excelPricingSnapshotFailureSchema   = "patris.pricing-snapshot-failure"
+	excelPricingSnapshotPayloadSchema   = "patris.pricing-snapshot"
+	excelPricingSnapshotProjectionExcel = "excel"
+	excelPricingSnapshotEventSchema     = "patris.pricing-state-event"
 
 	excelPricingSnapshotStageRemoteConfiguration = "remote_configuration"
 	excelPricingSnapshotStageLocalProjection     = "local_projection"
-	excelPricingSnapshotEventSchema              = "patris.pricing-state-event/v1"
 
 	excelPricingSnapshotPageSize         = 250
 	excelPricingSnapshotMaxPages         = 8
@@ -47,7 +46,6 @@ const (
 
 type excelPricingSnapshotStartRequest struct {
 	Schema                string           `json:"schema"`
-	SchemaVersion         int              `json:"schema_version"`
 	ClientID              string           `json:"client_id"`
 	Channel               string           `json:"channel"`
 	RequestID             string           `json:"request_id"`
@@ -150,6 +148,11 @@ type excelPricingStateChangeEvent struct {
 	Reason                   string                        `json:"reason,omitempty"`
 	OccurredAt               time.Time                     `json:"occurred_at"`
 	JobID                    string                        `json:"job_id,omitempty"`
+	RequestID                string                        `json:"request_id,omitempty"`
+	Status                   string                        `json:"status,omitempty"`
+	Code                     string                        `json:"code,omitempty"`
+	PreviewDigest            string                        `json:"preview_digest,omitempty"`
+	ReadbackRequired         bool                          `json:"readback_required,omitempty"`
 	Source                   *canonical.Source             `json:"source,omitempty"`
 	SourceChangeToken        string                        `json:"source_change_token,omitempty"`
 	CatalogRevision          string                        `json:"catalog_revision,omitempty"`
@@ -203,7 +206,7 @@ type excelPricingSnapshotJob struct {
 	startGeneration       uint64
 }
 
-var excelPricingSnapshotExcelV1RowFields = []string{
+var excelPricingSnapshotExcelRowFields = []string{
 	"sync_key",
 	"reconciliation_status",
 	"patris_code",
@@ -1241,7 +1244,6 @@ func (s *Server) authorizeExcelPricingSnapshotRequest(r *http.Request) ([sha256.
 
 func validateExcelPricingSnapshotStartRequest(r *http.Request, request excelPricingSnapshotStartRequest) error {
 	if request.Schema != excelPricingSnapshotRequestSchema ||
-		request.SchemaVersion != 1 ||
 		request.ClientID != excelPricingContractClientID ||
 		request.Channel != excelPricingContractChannel ||
 		!excelPricingIdempotencyPattern.MatchString(request.RequestID) ||
@@ -1256,8 +1258,7 @@ func validateExcelPricingSnapshotStartRequest(r *http.Request, request excelPric
 	if request.Locale != "fa" && request.Locale != "fa_IR" {
 		return errors.New("snapshot locale is invalid")
 	}
-	if request.Projection != "" && request.Projection != excelPricingSnapshotProjectionFull &&
-		request.Projection != excelPricingSnapshotProjectionExcelV1 {
+	if request.Projection != "" && request.Projection != excelPricingSnapshotProjectionExcel {
 		return errors.New("snapshot projection is invalid")
 	}
 	if request.MaxAgeSeconds < 0 ||
@@ -1484,6 +1485,40 @@ func (s *Server) notifyExcelPricingSourceChanged(sourceChangeToken string) {
 	if cancel != nil {
 		cancel()
 	}
+}
+
+func (s *Server) notifyExcelPricingRemoteSourceTransition(
+	transition excelPricingRemoteSourceTransition,
+) error {
+	if s == nil || s.excelPricing == nil || s.excelPricing.snapshots == nil ||
+		transition.EventID == 0 || !validExcelPricingRemoteSource(transition.Source) ||
+		!isSHA256Revision(transition.IdempotencyKey) {
+		return errExcelPricingRemoteRevision
+	}
+	// The authenticated remote source lifecycle is authoritative for both the
+	// canonical projection and its pricing assignment cache. Invalidate both
+	// synchronously before the bridge remembers the transition cursor for this
+	// process lifetime.
+	s.invalidateCanonicalProjection(true)
+	store := s.excelPricing.snapshots
+	store.mu.Lock()
+	previous := store.lastVerifiedChangeLocked()
+	cancel := store.invalidateGenerationLocked("snapshot_source_changed")
+	source := transition.Source
+	event := excelPricingStateChangeEvent{
+		Kind:              "source_changed",
+		Reason:            "upstream_source_" + transition.Change,
+		Source:            &source,
+		SourceChangeToken: transition.IdempotencyKey,
+		Stale:             true,
+	}
+	bindExcelPricingPreviousState(&event, previous)
+	store.publishChangeLocked(event)
+	store.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	return nil
 }
 
 func (store *excelPricingSnapshotStore) publishPricingStateInvalidated(stateRevision string) {
@@ -2057,16 +2092,15 @@ func (s *Server) collectExcelPricingSnapshotPages(
 			jobID, "fetching_remote", pageNumber-1, totalPages, len(allRows),
 		)
 		local := excelPricingLocalRequest{
-			Schema:        excelPricingLocalRequestSchema,
-			SchemaVersion: 1,
-			Operation:     "state",
-			ClientID:      excelPricingContractClientID,
-			Channel:       excelPricingContractChannel,
-			RequestID:     excelPricingSnapshotPageRequestID(jobID, pageNumber),
-			Source:        &request.Source,
-			Page:          pageNumber,
-			Limit:         excelPricingSnapshotPageSize,
-			Locale:        request.Locale,
+			Schema:    excelPricingLocalRequestSchema,
+			Operation: "state",
+			ClientID:  excelPricingContractClientID,
+			Channel:   excelPricingContractChannel,
+			RequestID: excelPricingSnapshotPageRequestID(jobID, pageNumber),
+			Source:    &request.Source,
+			Page:      pageNumber,
+			Limit:     excelPricingSnapshotPageSize,
+			Locale:    request.Locale,
 		}
 		remoteRequest := buildExcelPricingRemoteRequest("state", local, request.Source)
 		remote, err := s.forwardExcelPricing(ctx, cfg, "state", remoteRequest, local)
@@ -2519,26 +2553,18 @@ func buildExcelPricingSnapshotFromRemoteResult(
 		return nil, errExcelPricingRemoteSnapshotIntegrity
 	}
 
-	var rows []json.RawMessage
-	var rowFields []string
-	switch projection {
-	case excelPricingSnapshotProjectionFull:
-		rows = append([]json.RawMessage(nil), result.Rows...)
-	case excelPricingSnapshotProjectionExcelV1:
-		if len(result.ProjectedRows) != len(result.Rows) ||
-			len(result.ProjectedRowFields) != len(excelPricingSnapshotExcelV1RowFields) {
-			return nil, errExcelPricingRemoteSnapshotIntegrity
-		}
-		for index, expected := range excelPricingSnapshotExcelV1RowFields {
-			if result.ProjectedRowFields[index] != expected {
-				return nil, errExcelPricingRemoteSnapshotIntegrity
-			}
-		}
-		rows = append([]json.RawMessage(nil), result.ProjectedRows...)
-		rowFields = append([]string(nil), result.ProjectedRowFields...)
-	default:
+	if projection != excelPricingSnapshotProjectionExcel ||
+		len(result.ProjectedRows) != len(result.Rows) ||
+		len(result.ProjectedRowFields) != len(excelPricingSnapshotExcelRowFields) {
 		return nil, errExcelPricingRemoteSnapshotConfiguration
 	}
+	for index, expected := range excelPricingSnapshotExcelRowFields {
+		if result.ProjectedRowFields[index] != expected {
+			return nil, errExcelPricingRemoteSnapshotIntegrity
+		}
+	}
+	rows := append([]json.RawMessage(nil), result.ProjectedRows...)
+	rowFields := append([]string(nil), result.ProjectedRowFields...)
 
 	var reconciliation excelPricingRemoteSnapshotReconciliation
 	if json.Unmarshal(remote.Reconciliation, &reconciliation) != nil {
@@ -2976,18 +3002,15 @@ func excelPricingSnapshotCacheKey(source canonical.Source, locale, projection st
 }
 
 func excelPricingSnapshotProjection(projection string) string {
-	if projection == excelPricingSnapshotProjectionExcelV1 {
-		return excelPricingSnapshotProjectionExcelV1
-	}
-	return excelPricingSnapshotProjectionFull
+	return excelPricingSnapshotProjectionExcel
 }
 
 func projectExcelPricingSnapshotRows(
 	rows []json.RawMessage,
 	projection string,
 ) ([]json.RawMessage, []string, error) {
-	if projection != excelPricingSnapshotProjectionExcelV1 {
-		return rows, nil, nil
+	if projection != excelPricingSnapshotProjectionExcel {
+		return nil, nil, errors.New("snapshot projection is invalid")
 	}
 	projected := make([]json.RawMessage, len(rows))
 	nullValue := json.RawMessage("null")
@@ -3004,8 +3027,8 @@ func projectExcelPricingSnapshotRows(
 		default:
 			return nil, nil, errors.New("snapshot projection row status is invalid")
 		}
-		lean := make([]json.RawMessage, len(excelPricingSnapshotExcelV1RowFields))
-		for fieldIndex, field := range excelPricingSnapshotExcelV1RowFields {
+		lean := make([]json.RawMessage, len(excelPricingSnapshotExcelRowFields))
+		for fieldIndex, field := range excelPricingSnapshotExcelRowFields {
 			if raw, exists := object[field]; exists && len(raw) > 0 {
 				if !excelPricingSnapshotScalarJSON(raw) {
 					return nil, nil, errors.New("snapshot projection field is not scalar")
@@ -3021,7 +3044,7 @@ func projectExcelPricingSnapshotRows(
 		}
 		projected[index] = encoded
 	}
-	return projected, append([]string(nil), excelPricingSnapshotExcelV1RowFields...), nil
+	return projected, append([]string(nil), excelPricingSnapshotExcelRowFields...), nil
 }
 
 func excelPricingSnapshotScalarJSON(raw json.RawMessage) bool {

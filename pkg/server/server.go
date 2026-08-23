@@ -220,6 +220,10 @@ func NewServerWithOptions(dbPath string, charMap converter.CharMapping, options 
 		s.version = version.Current()
 	}
 	s.excelPricing.canonical = s.canonicalRecordResultContext
+	s.excelPricing.applyJobs = newExcelPricingApplyJobStore(
+		excelPricingApplyJobStatePath(options.Config, dbPath),
+		s.excelPricing.now,
+	)
 	s.excelPricingRemote = newExcelPricingRemoteEventsBridge(s)
 	s.excelPricing.snapshotRevisionCurrent = s.excelPricingRemote.revisionCurrent
 
@@ -243,6 +247,7 @@ func NewServerWithOptions(dbPath string, charMap converter.CharMapping, options 
 		s.configWatcher = w
 		s.excelPricingRemote.start(s.backgroundCtx, &s.backgroundWG)
 	}
+	s.recoverExcelPricingApplyFinalizers()
 
 	return s, nil
 }
@@ -265,6 +270,8 @@ func (s *Server) setupRoutes() {
 	s.router.HandleFunc("/api/pricing-sync/state", s.handlePostExcelPricingState).Methods("POST")
 	s.router.HandleFunc("/api/pricing-sync/preview", s.handlePostExcelPricingPreview).Methods("POST")
 	s.router.HandleFunc("/api/pricing-sync/apply", s.handlePostExcelPricingApply).Methods("POST")
+	s.router.HandleFunc("/api/pricing-sync/jobs/{identifier}", s.handleGetExcelPricingApplyJob).Methods("GET")
+	s.router.HandleFunc("/api/pricing-sync/jobs/{identifier}", s.handleDeleteExcelPricingApplyJob).Methods("DELETE")
 	s.router.HandleFunc("/api/pricing-sync/snapshots", s.handlePostExcelPricingSnapshot).Methods("POST")
 	s.router.HandleFunc("/api/pricing-sync/events", s.handleGetExcelPricingEvents).Methods("GET")
 	s.router.HandleFunc("/api/pricing-sync/snapshots/{job_id}", s.handleGetExcelPricingSnapshot).Methods("GET")

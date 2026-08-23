@@ -9,6 +9,15 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Added
 
+- Pricing apply now uses a durable asynchronous job ledger, suffix-free local
+  status/cancel routes, authenticated WordPress terminal events, and exact
+  request/source/preview binding. A lost admission response is recovered only
+  by the original request ID, and canonical delivery/readback completes once
+  before Excel receives a verified terminal event.
+- The Excel template releases its UI after apply admission, preserves the last
+  confirmed prices while work is active, reconciles status only on the bounded
+  lost-response/connect/cancel paths, and starts a fresh exact-revision import
+  only after verified terminal success.
 - Canonical pricing now exposes the first `Sharh1` slot independently as
   `partner_price_source`, supports the `domestic` / `خرید داخلی` route with an
   explicit zero IRR/kg rate, and provides a default-off
@@ -16,6 +25,9 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Changed
 
+- Excel pricing now uses one Living, suffix-free snapshot/event contract with
+  exactly the 26 scalar fields consumed by the workbook. Removed schema,
+  projection, and WebSocket dialects fail closed instead of being translated.
 - Pricing now falls through only after testing a complete route: foreign CNY
   requires positive weight and an enabled non-domestic freight assignment;
   partner price adds margin without freight and forces domestic shipping; the

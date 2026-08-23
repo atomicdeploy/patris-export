@@ -223,7 +223,7 @@ or accepted. Snapshot-start and terminal-event semantics are unchanged.
 
 Failed snapshot jobs retain their existing top-level compatibility code and may
 also include a bounded `failure` object with schema
-`patris.pricing-snapshot-failure/v1`. Its reviewed `stage` and `code` values
+`patris.pricing-snapshot-failure`. Its reviewed `stage` and `code` values
 distinguish revision fetch, terminal subscription, snapshot start, terminal
 wait/match, remote terminal, payload validation, remote configuration, and
 local projection failures. No URL, credential, response body, request/build

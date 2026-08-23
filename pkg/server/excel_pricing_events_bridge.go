@@ -33,10 +33,16 @@ type excelPricingRemoteBridgeDependencies struct {
 		uint64,
 		func(uint64),
 		func(excelPricingRemoteRevision) error,
+		func(excelPricingRemoteSourceTransition) error,
 		func(excelPricingRemoteSnapshotTerminalEvent) error,
+		func(excelPricingRemoteApplyTerminalEvent) error,
+		func(context.Context) error,
 	) error
-	apply func(excelPricingRemoteRevision) error
-	logf  func(string, ...interface{})
+	apply          func(excelPricingRemoteRevision) error
+	applySource    func(excelPricingRemoteSourceTransition) error
+	applyTerminal  func(excelPricingRemoteApplyTerminalEvent) error
+	reconcileApply func(context.Context) error
+	logf           func(string, ...interface{})
 }
 
 // excelPricingRemoteEventsBridge owns the production lifecycle around the
@@ -87,7 +93,10 @@ func newExcelPricingRemoteEventsBridge(server *Server) *excelPricingRemoteEvents
 			initialCursor uint64,
 			onCursor func(uint64),
 			onRevision func(excelPricingRemoteRevision) error,
+			onSourceTransition func(excelPricingRemoteSourceTransition) error,
 			onTerminal func(excelPricingRemoteSnapshotTerminalEvent) error,
+			onApplyTerminal func(excelPricingRemoteApplyTerminalEvent) error,
+			onConnected func(context.Context) error,
 		) error {
 			return runExcelPricingRemoteEvents(
 				ctx,
@@ -96,11 +105,17 @@ func newExcelPricingRemoteEventsBridge(server *Server) *excelPricingRemoteEvents
 				initialCursor,
 				onCursor,
 				onRevision,
+				onSourceTransition,
 				onTerminal,
+				onApplyTerminal,
+				onConnected,
 			)
 		},
-		apply: server.notifyExcelPricingRemoteRevisionChanged,
-		logf:  log.Printf,
+		apply:          server.notifyExcelPricingRemoteRevisionChanged,
+		applySource:    server.notifyExcelPricingRemoteSourceTransition,
+		applyTerminal:  server.acceptExcelPricingRemoteApplyTerminal,
+		reconcileApply: server.reconcileExcelPricingApplyJobsOnConnect,
+		logf:           log.Printf,
 	})
 }
 
@@ -346,8 +361,20 @@ func (bridge *excelPricingRemoteEventsBridge) runGeneration(
 		func(revision excelPricingRemoteRevision) error {
 			return bridge.acceptRevision(epoch, source, revision)
 		},
+		func(transition excelPricingRemoteSourceTransition) error {
+			return bridge.acceptSourceTransition(epoch, source, transition)
+		},
 		func(event excelPricingRemoteSnapshotTerminalEvent) error {
 			return bridge.acceptSnapshotTerminal(epoch, source, event)
+		},
+		func(event excelPricingRemoteApplyTerminalEvent) error {
+			return bridge.acceptApplyTerminal(epoch, source, event)
+		},
+		func(callbackContext context.Context) error {
+			if bridge.dependencies.reconcileApply == nil {
+				return nil
+			}
+			return bridge.dependencies.reconcileApply(callbackContext)
 		},
 	)
 	if err != nil && ctx.Err() == nil && bridge.generationCurrent(epoch) {
@@ -355,6 +382,42 @@ func (bridge *excelPricingRemoteEventsBridge) runGeneration(
 		// response, or credential in production diagnostics.
 		bridge.dependencies.logf("Pricing event subscriber stopped before cancellation")
 	}
+}
+
+func (bridge *excelPricingRemoteEventsBridge) acceptSourceTransition(
+	epoch uint64,
+	source canonical.Source,
+	transition excelPricingRemoteSourceTransition,
+) error {
+	if bridge == nil || bridge.dependencies.applySource == nil {
+		return errExcelPricingRemoteBridgeStale
+	}
+	bridge.mu.Lock()
+	if epoch == 0 || bridge.epoch != epoch || transition.EventID == 0 ||
+		transition.EventID <= bridge.cursor ||
+		!validExcelPricingRemoteSourceTransition(transition.Name, source, transition) {
+		bridge.mu.Unlock()
+		return errExcelPricingRemoteBridgeStale
+	}
+	// Synchronously invalidate the old local generation before accepting the
+	// remote cursor. A failure here deliberately leaves the old cursor intact,
+	// so the transition is replayed rather than silently skipped.
+	if err := bridge.dependencies.applySource(transition); err != nil {
+		bridge.mu.Unlock()
+		return err
+	}
+	bridge.cursor = transition.EventID
+	bridge.acknowledged = true
+	bridge.verifiedRevision.Store(nil)
+	bridge.epoch++
+	bridge.mu.Unlock()
+
+	// The replacement generation rematerializes the canonical source and opens
+	// a fresh authenticated subscriber at the accepted transition cursor. Its
+	// connected frame must then pass the authoritative conditional revision
+	// validation before any later cursor can advance.
+	bridge.signal()
+	return nil
 }
 
 func (bridge *excelPricingRemoteEventsBridge) generationCurrent(epoch uint64) bool {
@@ -429,6 +492,22 @@ func (bridge *excelPricingRemoteEventsBridge) acceptSnapshotTerminal(
 	return bridge.terminals.publishAuthenticated(event)
 }
 
+func (bridge *excelPricingRemoteEventsBridge) acceptApplyTerminal(
+	epoch uint64,
+	source canonical.Source,
+	event excelPricingRemoteApplyTerminalEvent,
+) error {
+	if bridge == nil || bridge.dependencies.applyTerminal == nil {
+		return errExcelPricingRemoteBridgeStale
+	}
+	bridge.mu.Lock()
+	defer bridge.mu.Unlock()
+	if epoch == 0 || bridge.epoch != epoch || event.Source != source {
+		return errExcelPricingRemoteBridgeStale
+	}
+	return bridge.dependencies.applyTerminal(event)
+}
+
 func (bridge *excelPricingRemoteEventsBridge) clearVerifiedRevision(epoch uint64) {
 	if bridge == nil || epoch == 0 {
 		return
@@ -463,6 +542,9 @@ func (bridge *excelPricingRemoteEventsBridge) revisionCurrent(
 }
 
 func (bridge *excelPricingRemoteEventsBridge) persistCursor(epoch, cursor uint64) {
+	// This cursor is intentionally process-memory state. A process restart begins
+	// at zero and relies on authenticated replay plus idempotent local acceptance;
+	// apply terminal effects are separately deduplicated by their disk ledger.
 	bridge.mu.Lock()
 	defer bridge.mu.Unlock()
 	if epoch == 0 || bridge.epoch != epoch || !bridge.acknowledged {

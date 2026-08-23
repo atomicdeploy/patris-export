@@ -27,14 +27,14 @@ import (
 )
 
 const (
-	excelPricingLocalRequestSchema  = "patris.excel-pricing-companion-request/v1"
-	excelPricingSessionSchema       = "patris.excel-pricing-companion-session/v1"
-	excelPricingRemoteRequestSchema = "digitalogic.pricing-sync-request/v1"
-	excelPricingStateSchema         = "digitalogic.pricing-sync-state/v1"
-	excelPricingPreviewSchema       = "digitalogic.pricing-sync-preview/v1"
-	excelPricingApplySchema         = "digitalogic.pricing-sync-apply/v1"
+	excelPricingLocalRequestSchema  = "patris.excel-pricing-companion-request"
+	excelPricingSessionSchema       = "patris.excel-pricing-companion-session"
+	excelPricingRemoteRequestSchema = "digitalogic.pricing-sync-request"
+	excelPricingStateSchema         = "digitalogic.pricing-sync-state"
+	excelPricingPreviewSchema       = "digitalogic.pricing-sync-preview"
+	excelPricingApplySchema         = "digitalogic.pricing-sync-apply"
 	excelPricingClientHeader        = "X-Patris-Excel-Client"
-	excelPricingClientID            = "digitalogic-price-calculator/v1"
+	excelPricingClientID            = "digitalogic-price-calculator"
 	excelPricingContractClientID    = "digitalogic-price-calculator"
 	excelPricingContractChannel     = "excel-workbook"
 	excelPricingCSRFHeader          = "X-Patris-Excel-CSRF-Token"
@@ -68,7 +68,6 @@ type excelPricingSettings struct {
 
 type excelPricingLocalRequest struct {
 	Schema                string                `json:"schema"`
-	SchemaVersion         int                   `json:"schema_version"`
 	Operation             string                `json:"operation"`
 	ClientID              string                `json:"client_id"`
 	Channel               string                `json:"channel"`
@@ -87,7 +86,6 @@ type excelPricingLocalRequest struct {
 
 type excelPricingRemoteRequest struct {
 	Schema                string                `json:"schema"`
-	SchemaVersion         int                   `json:"schema_version"`
 	Operation             string                `json:"operation"`
 	ClientID              string                `json:"client_id"`
 	Channel               string                `json:"channel"`
@@ -117,6 +115,7 @@ type excelPricingState struct {
 	client    *http.Client
 	snapshots *excelPricingSnapshotStore
 	mutations *excelPricingMutationLedger
+	applyJobs *excelPricingApplyJobStore
 
 	canonical func(context.Context) (recordpipe.Result, error)
 	dispatch  func(context.Context, updateout.Config, updateout.Event) (updateout.DeliveryResult, error)
@@ -233,9 +232,26 @@ func (s *Server) handleExcelPricingOperation(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
+	if operation == "apply" {
+		exists, matches := s.excelPricing.mutations.previewMatch(
+			local.PreviewDigest,
+			excelPricingPreviewBindingFingerprint(local),
+		)
+		if !exists {
+			writeExcelPricingError(w, http.StatusConflict, "preview_required")
+			return
+		}
+		if !matches {
+			writeExcelPricingError(w, http.StatusConflict, "preview_binding_conflict")
+			return
+		}
+		s.handleExcelPricingApplyAdmission(w, r, local)
+		return
+	}
+
 	mutationFingerprint := ""
 	mutationReserved := false
-	if operation == "preview" || operation == "apply" {
+	if operation == "preview" {
 		mutationFingerprint = excelPricingMutationFingerprint(local)
 		begin, replayStatus, replayBody := s.excelPricing.mutations.begin(
 			operation,
@@ -262,20 +278,6 @@ func (s *Server) handleExcelPricingOperation(w http.ResponseWriter, r *http.Requ
 				s.excelPricing.mutations.abort(operation, local.IdempotencyKey, mutationFingerprint)
 			}
 		}()
-		if operation == "apply" {
-			exists, matches := s.excelPricing.mutations.previewMatch(
-				local.PreviewDigest,
-				excelPricingPreviewBindingFingerprint(local),
-			)
-			if !exists {
-				writeExcelPricingError(w, http.StatusConflict, "preview_required")
-				return
-			}
-			if !matches {
-				writeExcelPricingError(w, http.StatusConflict, "preview_binding_conflict")
-				return
-			}
-		}
 	}
 
 	operationContext, cancel := context.WithTimeout(r.Context(), excelPricingOperationTimeout)
@@ -325,19 +327,7 @@ func (s *Server) handleExcelPricingOperation(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	if operation == "apply" {
-		// The remote mutation may already be committed even if local canonical
-		// delivery or readback fails. Shared serialization guarantees there is no
-		// concurrent snapshot build, so invalidate warm reuse immediately after
-		// the successful remote apply response.
-		s.invalidateCanonicalProjection(true)
-		s.excelPricing.snapshots.publishPricingStateInvalidated(remote.stateRevision)
-		if err := s.completeExcelPricingApply(operationContext, cfg, remote); err != nil {
-			writeExcelPricingError(w, http.StatusBadGateway, "post_apply_verification_failed")
-			return
-		}
-		s.excelPricing.snapshots.publishPricingStateVerified(remote.stateRevision)
-	} else if operation == "preview" {
+	if operation == "preview" {
 		previewDigest, present, err := excelPricingPreviewDigest(remote.body)
 		if err != nil {
 			writeExcelPricingError(w, http.StatusBadGateway, "remote_contract_invalid")
@@ -426,7 +416,6 @@ func (s *Server) excelPricingStateSourceMatches(
 func buildExcelPricingRemoteRequest(operation string, local excelPricingLocalRequest, source canonical.Source) excelPricingRemoteRequest {
 	request := excelPricingRemoteRequest{
 		Schema:                excelPricingRemoteRequestSchema,
-		SchemaVersion:         1,
 		Operation:             operation,
 		ClientID:              local.ClientID,
 		Channel:               local.Channel,
@@ -472,7 +461,7 @@ func (s *Server) forwardExcelPricing(
 	}
 	request.Header.Set("Accept", "application/json")
 	request.Header.Set("Content-Type", "application/json")
-	request.Header.Set("User-Agent", "patris-export-excel-companion/1")
+	request.Header.Set("User-Agent", "patris-export-excel-companion")
 	request.Header.Set(updateout.ProductSyncSecretHeader, secret)
 	if operation == "preview" || operation == "apply" {
 		request.Header.Set("Idempotency-Key", local.IdempotencyKey)
@@ -535,10 +524,20 @@ func (s *Server) completeExcelPricingApply(
 	ctx context.Context,
 	cfg appconfig.Config,
 	applied excelPricingRemoteResponse,
+	expectedSource canonical.Source,
+	beforeDispatch func(string) error,
 ) error {
 	contract, err := s.excelPricingCanonical(ctx, cfg)
 	if err != nil {
 		return err
+	}
+	if expectedSource != (canonical.Source{}) && contract.Source != expectedSource {
+		return errors.New("canonical source changed before pricing apply delivery")
+	}
+	if beforeDispatch != nil {
+		if err := beforeDispatch(contract.EventID); err != nil {
+			return err
+		}
 	}
 	event := updateout.Event{
 		Type:             "update",
@@ -565,11 +564,10 @@ func (s *Server) completeExcelPricingApply(
 	}
 
 	stateRequest := excelPricingLocalRequest{
-		Schema:        excelPricingLocalRequestSchema,
-		SchemaVersion: 1,
-		Operation:     "state",
-		ClientID:      excelPricingContractClientID,
-		Channel:       excelPricingContractChannel,
+		Schema:    excelPricingLocalRequestSchema,
+		Operation: "state",
+		ClientID:  excelPricingContractClientID,
+		Channel:   excelPricingContractChannel,
 		RequestID: "excel-state-readback-" +
 			strings.TrimPrefix(applied.stateRevision, "sha256:")[:32],
 		Page:   1,
@@ -605,7 +603,6 @@ func excelPricingDeliveryComplete(result updateout.DeliveryResult, eventID strin
 
 func validateExcelPricingLocalRequest(r *http.Request, operation string, request excelPricingLocalRequest) error {
 	if request.Schema != excelPricingLocalRequestSchema ||
-		request.SchemaVersion != 1 ||
 		request.Operation != operation ||
 		request.ClientID != excelPricingContractClientID ||
 		request.Channel != excelPricingContractChannel ||
