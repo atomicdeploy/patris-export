@@ -163,8 +163,10 @@ performs one authenticated conditional revision validation, replaces its
 process-memory cursor, and reconnects. It neither treats the retired frame as a
 successful state change nor replays it indefinitely within that process.
 
-The bridge's `Last-Event-ID` cursor is process-memory state, not a disk-durable
-checkpoint. After a full companion restart it begins at zero. Retained source
+The bridge's outbound WordPress `Last-Event-ID` cursor is process-memory state,
+not a disk-durable checkpoint. After a full companion restart it begins at zero
+and the subscriber sends that zero explicitly; omitting the header would mean a
+new tail-only subscription and could skip retained terminal events. Retained source
 transitions are therefore validated from their intrinsic old/new relationship,
 accepted idempotently, rematerialized, and followed by authenticated conditional
 revision validation. A retained `invalid_event` reset can repeat once after a
