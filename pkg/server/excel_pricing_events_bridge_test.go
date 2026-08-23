@@ -658,6 +658,127 @@ func TestExcelPricingRemoteEventsBridgeCursorRequiresSuccessfulApplyAndAllowsRes
 	}
 }
 
+func TestExcelPricingRemoteEventsBridgeIdenticalCompositeDoesNotCancelActiveSnapshot(t *testing.T) {
+	server := &Server{excelPricing: newExcelPricingState()}
+	store := server.excelPricing.snapshots
+	source := excelPricingRemoteTestSource()
+	revision := excelPricingRemoteRevision{
+		Source:                source,
+		StateRevision:         excelPricingRemoteTestRevision("1"),
+		CatalogRevision:       excelPricingRemoteTestRevision("2"),
+		PricingStateRevision:  excelPricingRemoteTestRevision("3"),
+		PricingPolicyRevision: excelPricingRemoteTestRevision("4"),
+		ETag:                  `"` + excelPricingRemoteTestRevision("1") + `"`,
+		Cause:                 "initial_validation",
+		IdempotencyKey:        excelPricingRemoteTestRevision("5"),
+		EventID:               1,
+		ValidationOrigin:      "connected",
+	}
+	applyCalls := 0
+	bridge := newExcelPricingRemoteEventsBridgeWithDependencies(excelPricingRemoteBridgeDependencies{
+		apply: func(candidate excelPricingRemoteRevision) error {
+			applyCalls++
+			return server.notifyExcelPricingRemoteRevisionChanged(candidate)
+		},
+	})
+	bridge.mu.Lock()
+	bridge.epoch = 1
+	bridge.mu.Unlock()
+
+	store.mu.Lock()
+	initialGeneration := store.generation
+	store.mu.Unlock()
+	if err := bridge.acceptRevision(1, source, revision); err != nil {
+		t.Fatalf("accept initial revision: %v", err)
+	}
+	store.mu.Lock()
+	establishedGeneration := store.generation
+	establishedEvents := len(store.events)
+	store.mu.Unlock()
+	if applyCalls != 1 || establishedGeneration != initialGeneration+1 {
+		t.Fatalf("initial composite apply_calls=%d generation=%d want=%d",
+			applyCalls, establishedGeneration, initialGeneration+1)
+	}
+
+	jobContext, cancelJob := context.WithCancel(context.Background())
+	defer cancelJob()
+	store.mu.Lock()
+	store.jobs["active-revision-replay"] = &excelPricingSnapshotJob{
+		id:              "active-revision-replay",
+		status:          "running",
+		startGeneration: store.generation,
+		cancel:          cancelJob,
+	}
+	store.activeJobID = "active-revision-replay"
+	store.mu.Unlock()
+
+	replay := revision
+	replay.Cause = "reconnect_validation"
+	replay.IdempotencyKey = excelPricingRemoteTestRevision("6")
+	replay.EventID = 9
+	replay.ValidationOrigin = "reconnect"
+	if err := bridge.acceptRevision(1, source, replay); err != nil {
+		t.Fatalf("accept identical replay: %v", err)
+	}
+	bridge.persistCursor(1, replay.EventID)
+	select {
+	case <-jobContext.Done():
+		t.Fatal("identical composite replay cancelled the active snapshot")
+	default:
+	}
+	store.mu.Lock()
+	replayGeneration := store.generation
+	replayEvents := len(store.events)
+	replayJobStatus := store.jobs["active-revision-replay"].status
+	store.mu.Unlock()
+	_, cursor, acknowledged := excelPricingRemoteBridgeState(bridge)
+	if applyCalls != 1 || replayGeneration != establishedGeneration ||
+		replayEvents != establishedEvents || replayJobStatus != "running" ||
+		cursor != replay.EventID || !acknowledged {
+		t.Fatalf("identical replay apply_calls=%d generation=%d events=%d job=%s cursor=%d acknowledged=%v",
+			applyCalls, replayGeneration, replayEvents, replayJobStatus, cursor, acknowledged)
+	}
+
+	changed := replay
+	changed.StateRevision = excelPricingRemoteTestRevision("7")
+	changed.PricingStateRevision = excelPricingRemoteTestRevision("8")
+	changed.ETag = `"` + changed.StateRevision + `"`
+	changed.EventID++
+	if err := bridge.acceptRevision(1, source, changed); err != nil {
+		t.Fatalf("accept changed composite: %v", err)
+	}
+	select {
+	case <-jobContext.Done():
+	case <-time.After(excelPricingRemoteBridgeTestTimeout):
+		t.Fatal("changed composite did not cancel the active snapshot")
+	}
+	store.mu.Lock()
+	changedGeneration := store.generation
+	changedEvents := len(store.events)
+	changedJobStatus := store.jobs["active-revision-replay"].status
+	store.mu.Unlock()
+	if applyCalls != 2 || changedGeneration != establishedGeneration+1 ||
+		changedEvents != establishedEvents+2 || changedJobStatus != "cancelling" {
+		t.Fatalf("changed composite apply_calls=%d generation=%d events=%d job=%s",
+			applyCalls, changedGeneration, changedEvents, changedJobStatus)
+	}
+
+	changedReplay := changed
+	changedReplay.Cause = "replayed_changed_composite"
+	changedReplay.EventID++
+	if err := bridge.acceptRevision(1, source, changedReplay); err != nil {
+		t.Fatalf("accept changed-composite replay: %v", err)
+	}
+	store.mu.Lock()
+	finalGeneration := store.generation
+	finalEvents := len(store.events)
+	store.mu.Unlock()
+	if applyCalls != 2 || finalGeneration != changedGeneration || finalEvents != changedEvents {
+		t.Fatalf("changed replay reapplied: calls=%d generation=%d events=%d",
+			applyCalls, finalGeneration, finalEvents)
+	}
+}
+
 func TestResolveExcelPricingRemoteBridgeConfigTracksOnlySubscriberInputs(t *testing.T) {
 	cfg := appconfig.Default()
 	cfg.SendUpdates = excelPricingRemoteTestConfig(t, "https://digitalogic.example")

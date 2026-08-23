@@ -382,6 +382,14 @@ func (bridge *excelPricingRemoteEventsBridge) acceptRevision(
 	if epoch == 0 || bridge.epoch != epoch || revision.Source != source {
 		return errExcelPricingRemoteBridgeStale
 	}
+	// A reconnect validates the authoritative composite before replaying queued
+	// frames. Treat an identical authenticated composite as an acknowledgement,
+	// not a state change: reapplying it would advance the local generation and
+	// cancel a snapshot that already fetched the same revision.
+	if sameExcelPricingRemoteCompositeRevision(bridge.verifiedRevision.Load(), revision) {
+		bridge.acknowledged = true
+		return nil
+	}
 	bridge.verifiedRevision.Store(nil)
 	if err := bridge.dependencies.apply(revision); err != nil {
 		return err
@@ -390,6 +398,19 @@ func (bridge *excelPricingRemoteEventsBridge) acceptRevision(
 	verified := revision
 	bridge.verifiedRevision.Store(&verified)
 	return nil
+}
+
+func sameExcelPricingRemoteCompositeRevision(
+	previous *excelPricingRemoteRevision,
+	current excelPricingRemoteRevision,
+) bool {
+	return previous != nil &&
+		previous.Source == current.Source &&
+		previous.StateRevision == current.StateRevision &&
+		previous.CatalogRevision == current.CatalogRevision &&
+		previous.PricingStateRevision == current.PricingStateRevision &&
+		previous.PricingPolicyRevision == current.PricingPolicyRevision &&
+		previous.ETag == current.ETag
 }
 
 func (bridge *excelPricingRemoteEventsBridge) acceptSnapshotTerminal(
