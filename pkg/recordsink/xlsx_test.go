@@ -1054,6 +1054,26 @@ func TestDynamicCalculatorVBASourceGuardsLivePricingBeforeMutation(t *testing.T)
 	if strings.Contains(kickHandler, "DispatchAsyncRequest") {
 		t.Fatal("safe dispatch kick must not run a WinHTTP state transition directly")
 	}
+	macroFreeExport := section("Private Sub ExportMacroFreeCopy", "Private Sub RemoveMacroOnlyUI")
+	for _, required := range []string{
+		"Set syncSheetValue = SyncSheet()",
+		"originalSyncVisibility = syncSheetValue.Visible",
+		"syncSheetValue.Visible = xlSheetVisible",
+		"ThisWorkbook.Worksheets.Copy",
+		"copyBook.Worksheets(syncSheetName).Visible = originalSyncVisibility",
+		"If syncVisibilityChanged And Not syncSheetValue Is Nothing Then",
+	} {
+		if !strings.Contains(macroFreeExport, required) {
+			t.Fatalf("macro-free export can omit or expose SyncData: %s", required)
+		}
+	}
+	showSync := strings.Index(macroFreeExport, "syncSheetValue.Visible = xlSheetVisible")
+	copySheets := strings.Index(macroFreeExport, "ThisWorkbook.Worksheets.Copy")
+	restoreSource := strings.Index(macroFreeExport, "syncSheetValue.Visible = originalSyncVisibility")
+	restoreCopy := strings.Index(macroFreeExport, "copyBook.Worksheets(syncSheetName).Visible = originalSyncVisibility")
+	if showSync < 0 || copySheets <= showSync || restoreSource <= copySheets || restoreCopy <= restoreSource {
+		t.Fatal("macro-free export must expose SyncData only for the collection copy and restore both workbooks afterward")
+	}
 	saveResume := section("Private Sub ResumeQualifiedSchedulesAfterSaveAs", "Public Sub RefreshAllData")
 	for _, required := range []string{
 		"mAsyncDispatchPending.Count > 0",
