@@ -1734,6 +1734,9 @@ func TestDynamicCalculatorValidatorHandlesEmptyProductTable(t *testing.T) {
 		`function Get-ExcelProcessId`,
 		`function Invoke-ComFinalizerBarrier`,
 		`function Wait-ExcelProcessExit`,
+		`FinalReleaseComObject`,
+		`Get-Process -Id $excelProcessId -ErrorAction SilentlyContinue`,
+		`[DateTime]::UtcNow.AddSeconds($timeoutSeconds)`,
 		`$excelProcessId = Get-ExcelProcessId $excel`,
 		`$excelProcessExited = Wait-ExcelProcessExit $excelProcessId`,
 		`validatorExcelProcessId`,
@@ -1768,6 +1771,17 @@ func TestDynamicCalculatorValidatorHandlesEmptyProductTable(t *testing.T) {
 	postQuitBarrierRelative := strings.Index(source[releaseExcel:], `Invoke-ComFinalizerBarrier`)
 	if preQuitBarrier < releaseCandidate || postQuitBarrierRelative < 0 || releaseExcel+postQuitBarrierRelative > waitForProcess {
 		t.Fatal("native validator must run finalizer barriers after workbook release and after Excel release")
+	}
+
+	barrierStart := strings.Index(source, `function Invoke-ComFinalizerBarrier`)
+	barrierEndRelative := strings.Index(source[barrierStart:], `function Wait-ExcelProcessExit`)
+	if barrierStart < 0 || barrierEndRelative < 0 {
+		t.Fatal("native validator is missing the finalizer barrier function body")
+	}
+	barrierBody := source[barrierStart : barrierStart+barrierEndRelative]
+	if strings.Count(barrierBody, `[GC]::Collect()`) != 2 ||
+		strings.Count(barrierBody, `[GC]::WaitForPendingFinalizers()`) != 2 {
+		t.Fatal("native validator finalizer barrier must use two collect/finalizer passes")
 	}
 }
 
