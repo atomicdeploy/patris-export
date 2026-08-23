@@ -3136,8 +3136,24 @@ function runProcessSafetySelfTest() {
     fs.writeFileSync(scriptPath, `\uFEFF${content}\n`, 'utf8');
     return scriptPath;
   };
-  const exitSevenChild = writeScript('exit-seven.ps1', 'Start-Sleep -Seconds 2\nexit 7');
-  const exitZeroChild = writeScript('exit-zero.ps1', 'Start-Sleep -Seconds 2\nexit 0');
+  const gatedExitChild = (releaseVariable, exitCode) => String.raw`
+$deadline = [DateTime]::UtcNow.AddSeconds(30)
+while (-not (Test-Path -LiteralPath $env:${releaseVariable} -PathType Leaf)) {
+    if ([DateTime]::UtcNow -ge $deadline) { exit 99 }
+    Start-Sleep -Milliseconds 50
+}
+exit ${exitCode}
+`;
+  const exitSevenRelease = path.join(tempDirectory, 'release-exit-seven');
+  const exitZeroRelease = path.join(tempDirectory, 'release-exit-zero');
+  const exitSevenChild = writeScript(
+    'exit-seven.ps1',
+    gatedExitChild('PATRIS_SELFTEST_EXIT_SEVEN_RELEASE', 7),
+  );
+  const exitZeroChild = writeScript(
+    'exit-zero.ps1',
+    gatedExitChild('PATRIS_SELFTEST_EXIT_ZERO_RELEASE', 0),
+  );
   const longChild = writeScript('long-child.ps1', 'Start-Sleep -Seconds 60\nexit 0');
   const startChild = String.raw`
 function Start-HiddenSelfTestChild([string]$scriptPath) {
@@ -3168,6 +3184,7 @@ $explicitJobAssignmentPassed = $false
 $crashChild = Start-HiddenSelfTestChild $env:PATRIS_SELFTEST_EXIT_SEVEN
 $crashIdentity = Get-ValidatorProcessIdentityById $crashChild.Id 'powershell.exe'
 $explicitJobAssignmentPassed = Add-ValidatorProcessToJob $jobHandle $crashIdentity
+[IO.File]::WriteAllText($env:PATRIS_SELFTEST_EXIT_SEVEN_RELEASE, 'release')
 try {
     try {
         [void](Wait-ValidatorProcessExit $crashIdentity 5000 @(0))
@@ -3187,6 +3204,7 @@ $explicitJobAssignmentPassed = $explicitJobAssignmentPassed -and (Add-ValidatorP
 $secondChild = Start-HiddenSelfTestChild $env:PATRIS_SELFTEST_LONG_CHILD
 $secondIdentity = Get-ValidatorProcessIdentityById $secondChild.Id 'powershell.exe'
 $explicitJobAssignmentPassed = $explicitJobAssignmentPassed -and (Add-ValidatorProcessToJob $jobHandle $secondIdentity)
+[IO.File]::WriteAllText($env:PATRIS_SELFTEST_EXIT_ZERO_RELEASE, 'release')
 try {
     $firstResult = Wait-ValidatorProcessExit $firstIdentity 5000 @(0)
     $identityHandlePassed = (
@@ -3228,7 +3246,9 @@ $dualFailurePassed = (
       behaviorScript,
       {
         PATRIS_SELFTEST_EXIT_SEVEN: exitSevenChild,
+        PATRIS_SELFTEST_EXIT_SEVEN_RELEASE: exitSevenRelease,
         PATRIS_SELFTEST_EXIT_ZERO: exitZeroChild,
+        PATRIS_SELFTEST_EXIT_ZERO_RELEASE: exitZeroRelease,
         PATRIS_SELFTEST_LONG_CHILD: longChild,
       },
       20000,
