@@ -470,6 +470,10 @@ Private Sub ExportMacroFreeCopy(ByVal outputPath As String)
     Set copyBook = ActiveWorkbook
     If syncVisibilityChanged Then
         syncSheetValue.Visible = originalSyncVisibility
+        If syncSheetValue.Visible <> originalSyncVisibility Then
+            Err.Raise vbObjectError + 2182, "ExportMacroFreeCopy", _
+                      "SyncData visibility could not be restored."
+        End If
         syncVisibilityChanged = False
     End If
     copyBook.Worksheets(syncSheetName).Visible = originalSyncVisibility
@@ -482,7 +486,8 @@ CleanExit:
     Application.DisplayAlerts = previousAlerts
     Application.EnableEvents = previousEvents
     Application.ScreenUpdating = previousScreenUpdating
-    If sourceWasSaved Then ThisWorkbook.Saved = True
+    If sourceWasSaved And Not syncVisibilityChanged Then _
+        ThisWorkbook.Saved = True
     If savedErrorNumber <> 0 Then
         Err.Raise savedErrorNumber, "ExportMacroFreeCopy", _
                   savedErrorDescription
@@ -495,7 +500,8 @@ Failed:
     On Error Resume Next
     If syncVisibilityChanged And Not syncSheetValue Is Nothing Then
         syncSheetValue.Visible = originalSyncVisibility
-        syncVisibilityChanged = False
+        If syncSheetValue.Visible = originalSyncVisibility Then _
+            syncVisibilityChanged = False
     End If
     If Not copyBook Is Nothing Then copyBook.Close SaveChanges:=False
     Set copyBook = Nothing

@@ -1079,13 +1079,15 @@ func TestDynamicCalculatorVBASourceGuardsLivePricingBeforeMutation(t *testing.T)
 	captureSaved := strings.Index(macroFreeExport, "sourceWasSaved = ThisWorkbook.Saved")
 	cleanExit := strings.Index(macroFreeExport, "CleanExit:")
 	failedHandler := strings.Index(macroFreeExport, "Failed:")
-	savedRestores := strings.Count(macroFreeExport, "If sourceWasSaved Then ThisWorkbook.Saved = True")
-	savedRestore := strings.Index(macroFreeExport, "If sourceWasSaved Then ThisWorkbook.Saved = True")
-	lastVisibilityRestore := strings.LastIndex(macroFreeExport, "syncSheetValue.Visible = originalSyncVisibility")
+	savedRestores := strings.Count(macroFreeExport, "If sourceWasSaved And Not syncVisibilityChanged Then")
+	savedRestore := strings.Index(macroFreeExport, "If sourceWasSaved And Not syncVisibilityChanged Then")
+	lastVisibilityRestore := strings.LastIndex(macroFreeExport, "        syncSheetValue.Visible = originalSyncVisibility")
+	verifiedVisibilityRestore := strings.LastIndex(macroFreeExport, "If syncSheetValue.Visible = originalSyncVisibility Then")
 	resumeCleanExit := strings.LastIndex(macroFreeExport, "Resume CleanExit")
 	if captureSaved < 0 || captureSaved >= showSync || cleanExit <= restoreCopy || failedHandler <= cleanExit ||
 		savedRestores != 1 || savedRestore <= cleanExit || savedRestore >= failedHandler ||
-		lastVisibilityRestore <= failedHandler || resumeCleanExit <= lastVisibilityRestore {
+		lastVisibilityRestore <= failedHandler || verifiedVisibilityRestore <= lastVisibilityRestore ||
+		resumeCleanExit <= verifiedVisibilityRestore {
 		t.Fatal("macro-free export must preserve the source workbook's original Saved state on success and failure")
 	}
 	saveResume := section("Private Sub ResumeQualifiedSchedulesAfterSaveAs", "Public Sub RefreshAllData")
