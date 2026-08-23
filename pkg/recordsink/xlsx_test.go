@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -1706,7 +1708,10 @@ func TestDynamicCalculatorValidatorHandlesEmptyProductTable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	source := string(content)
+	// Git may materialize this CJS file with CRLF on Windows runners. Normalize
+	// before order-sensitive source checks so checkout policy cannot change the
+	// safety verdict.
+	source := strings.ReplaceAll(string(content), "\r\n", "\n")
 	for _, required := range []string{
 		`$priceDataRange = $table.ListColumns.Item(1).DataBodyRange`,
 		`if ($null -ne $priceDataRange) {`,
@@ -1730,12 +1735,265 @@ func TestDynamicCalculatorValidatorHandlesEmptyProductTable(t *testing.T) {
 		`Invoke-ExcelBusyRetry`,
 		`Start-Sleep -Milliseconds 100`,
 		`closing the validator Excel process`,
+		`public const uint JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`,
+		`AssignProcessToJobObject`,
+		`IsProcessInJob`,
+		`MoveFileEx`,
+		`MOVEFILE_REPLACE_EXISTING`,
+		`function New-ValidatorKillOnCloseJob`,
+		`function Add-ValidatorProcessToJob`,
+		`function Get-ExcelProcessIdentity`,
+		`function Get-ValidatorProcessIdentityById`,
+		`$pathDeadline = [DateTime]::UtcNow.AddSeconds(5)`,
+		`executable identity was not readable within 5 seconds`,
+		`function Invoke-ComFinalizerBarrier`,
+		`function Wait-ValidatorProcessExit`,
+		`function New-ValidatorCombinedException`,
+		`FinalReleaseComObject`,
+		`[void]$process.Handle`,
+		`$process.WaitForExit($timeoutMilliseconds)`,
+		`$acceptedExitCodes -notcontains $exitCode`,
+		`$excelProcessIdentity = Get-ExcelProcessIdentity $excel`,
+		`$excelProcessAssignedToJob = Add-ValidatorProcessToJob $validatorJobHandle $excelProcessIdentity`,
+		`Write-ValidatorProcessIdentity $excelProcessIdentity $env:PATRIS_VALIDATOR_PROCESS_IDENTITY_PATH $false`,
+		`Write-ValidatorProcessIdentity $excelProcessIdentity $env:PATRIS_VALIDATOR_PROCESS_IDENTITY_PATH $excelProcessAssignedToJob`,
+		`$exitResult = Wait-ValidatorProcessExit $excelProcessIdentity 15000 @(0)`,
+		`PATRIS_VALIDATOR_PROCESS_IDENTITY_PATH`,
+		`function cleanupExactOwnedProcess`,
+		`function resolveAbnormalValidatorCleanup`,
+		`Preserve the same abnormal/unproven evidence invariant even for`,
+		`function finalizeValidatorTempDirectory`,
+		`preservedRecoveryDirectory = finalizeValidatorTempDirectory(`,
+		`abnormalCleanupOutcome,`,
+		`pre_identity_timeout_evidence_preserved`,
+		`pre_identity_recovery_message_present`,
+		`recovery_evidence_preserved_on_cleanup_failure`,
+		`Recovery evidence preserved for exact-process remediation:`,
+		`Scoped Excel cleanup is unproven:`,
+		`--self-test-process-safety`,
+		`--self-test-native-excel-timeout`,
+		`gatedExitChild`,
+		`Wait-SelfTestChildReady`,
+		`PATRIS_SELFTEST_EXIT_SEVEN_READY`,
+		`PATRIS_SELFTEST_EXIT_SEVEN_RELEASE`,
+		`PATRIS_SELFTEST_EXIT_ZERO_READY`,
+		`PATRIS_SELFTEST_EXIT_ZERO_RELEASE`,
+		`missing_readiness_rejected`,
+		`malformed_readiness_rejected`,
+		`stale_readiness_rejected`,
+		`validatorExcelProcessId`,
+		`validatorExcelProcessAssignedToJob`,
+		`validatorExcelProcessExited`,
+		`validatorExcelProcessExitCode`,
+		`validatorExcelProcessStartTimeUtc`,
+		`validatorExcelExecutablePath`,
 		`PATRIS_VALIDATOR_TIMEOUT_MS`,
+		`VALIDATOR_HOST_STARTUP_CLEANUP_GRACE_MS`,
 		`foreach ($fixture in @('2.4', '25.40', '12/3', '01.02', '001234'`,
 	} {
 		if !strings.Contains(source, required) {
 			t.Fatalf("native validator is missing the empty-table guard: %s", required)
 		}
+	}
+	validatorMainStart := strings.LastIndex(source, `function main() {`)
+	validatorResultErrorRelative := -1
+	if validatorMainStart >= 0 {
+		validatorResultErrorRelative = strings.Index(source[validatorMainStart:], `if (result.error) {`)
+	}
+	if validatorMainStart < 0 || validatorResultErrorRelative < 0 {
+		t.Fatal("native validator is missing its Node host cleanup boundary")
+	}
+	validatorHostCleanup := source[validatorMainStart : validatorMainStart+validatorResultErrorRelative]
+	finalizeCall := strings.Index(validatorHostCleanup, `preservedRecoveryDirectory = finalizeValidatorTempDirectory(`)
+	tempDirectoryArgument := -1
+	abnormalOutcomeArgument := -1
+	if finalizeCall >= 0 {
+		tempDirectoryArgument = strings.Index(validatorHostCleanup[finalizeCall:], `tempDirectory,`)
+		abnormalOutcomeArgument = strings.Index(validatorHostCleanup[finalizeCall:], `abnormalCleanupOutcome,`)
+	}
+	if finalizeCall < 0 || tempDirectoryArgument < 0 || abnormalOutcomeArgument < 0 ||
+		tempDirectoryArgument >= abnormalOutcomeArgument {
+		t.Fatal("native validator must preserve exact-process recovery evidence when abnormal cleanup fails")
+	}
+	if strings.Contains(validatorHostCleanup, `fs.rmSync(tempDirectory`) {
+		t.Fatal("native validator must not unconditionally delete exact-process recovery evidence")
+	}
+	nativeTimeoutStart := strings.Index(source, `function runNativeExcelTimeoutSelfTest() {`)
+	nativeTimeoutEndRelative := -1
+	if nativeTimeoutStart >= 0 {
+		nativeTimeoutEndRelative = strings.Index(source[nativeTimeoutStart:], `function main() {`)
+	}
+	if nativeTimeoutStart < 0 || nativeTimeoutEndRelative < 0 {
+		t.Fatal("native validator is missing its opt-in Excel timeout control boundary")
+	}
+	nativeTimeoutBody := source[nativeTimeoutStart : nativeTimeoutStart+nativeTimeoutEndRelative]
+	if !strings.Contains(nativeTimeoutBody, `resolveAbnormalValidatorCleanup(`) ||
+		!strings.Contains(nativeTimeoutBody, `finalizeValidatorTempDirectory(tempDirectory, abnormalCleanupOutcome)`) ||
+		strings.Contains(nativeTimeoutBody, `fs.rmSync(tempDirectory`) {
+		t.Fatal("native Excel timeout control must preserve evidence unless exact cleanup is proven")
+	}
+
+	powershellStart := strings.Index(source, "const powershell = String.raw`")
+	if powershellStart < 0 {
+		t.Fatal("native validator is missing its bounded main PowerShell body")
+	}
+	powershellEndRelative := strings.Index(source[powershellStart:], "const ownedProcessCleanupPowerShell = String.raw`")
+	if powershellEndRelative < 0 {
+		t.Fatal("native validator is missing its bounded main PowerShell body")
+	}
+	mainPowerShell := source[powershellStart : powershellStart+powershellEndRelative]
+	closeReference := strings.LastIndex(mainPowerShell, `$referenceBook.Close($false)`)
+	releaseReference := strings.LastIndex(mainPowerShell, `Release-ComObject $referenceBook`)
+	closeCandidate := strings.LastIndex(mainPowerShell, `$candidateBook.Close($false)`)
+	releaseCandidate := strings.LastIndex(mainPowerShell, `Release-ComObject $candidateBook`)
+	quitExcel := strings.LastIndex(mainPowerShell, `$excel.Quit()`)
+	releaseExcel := strings.LastIndex(mainPowerShell, `Release-ComObject $excel`)
+	waitForProcess := strings.LastIndex(mainPowerShell, `$exitResult = Wait-ValidatorProcessExit $excelProcessIdentity 15000 @(0)`)
+	writeReport := strings.LastIndex(mainPowerShell, `[Console]::Out.WriteLine(($report | ConvertTo-Json`)
+	getExcelIdentity := strings.LastIndex(mainPowerShell, `$excelProcessIdentity = Get-ExcelProcessIdentity $excel`)
+	writeUnassignedIdentity := strings.LastIndex(mainPowerShell, `Write-ValidatorProcessIdentity $excelProcessIdentity $env:PATRIS_VALIDATOR_PROCESS_IDENTITY_PATH $false`)
+	assignExcelJob := strings.LastIndex(mainPowerShell, `$excelProcessAssignedToJob = Add-ValidatorProcessToJob $validatorJobHandle $excelProcessIdentity`)
+	writeAssignedIdentity := strings.LastIndex(mainPowerShell, `Write-ValidatorProcessIdentity $excelProcessIdentity $env:PATRIS_VALIDATOR_PROCESS_IDENTITY_PATH $excelProcessAssignedToJob`)
+	runtimeStart := strings.Index(mainPowerShell, "$excel = $null\n$workbooks = $null")
+	firstWorkbooksUse := -1
+	if runtimeStart >= 0 {
+		firstWorkbooksUseRelative := strings.Index(mainPowerShell[runtimeStart:], `$excel.Workbooks`)
+		if firstWorkbooksUseRelative >= 0 {
+			firstWorkbooksUse = runtimeStart + firstWorkbooksUseRelative
+		}
+	}
+	if closeReference < 0 || releaseReference < 0 || closeCandidate < 0 || releaseCandidate < 0 ||
+		quitExcel < 0 || releaseExcel < 0 || waitForProcess < 0 || writeReport < 0 ||
+		getExcelIdentity < 0 || writeUnassignedIdentity < 0 || assignExcelJob < 0 || writeAssignedIdentity < 0 ||
+		runtimeStart < 0 || firstWorkbooksUse < 0 {
+		t.Fatal("native validator is missing explicit Excel teardown markers")
+	}
+	if !(getExcelIdentity < writeUnassignedIdentity && writeUnassignedIdentity < assignExcelJob &&
+		assignExcelJob < writeAssignedIdentity && writeAssignedIdentity < firstWorkbooksUse &&
+		firstWorkbooksUse < closeReference) {
+		t.Fatal("native validator must persist exact Excel identity, explicitly job-fence it, confirm the fence, then use the workbook")
+	}
+	if !(closeReference < releaseReference && releaseReference < closeCandidate &&
+		closeCandidate < releaseCandidate && releaseCandidate < quitExcel &&
+		quitExcel < releaseExcel && releaseExcel < waitForProcess && waitForProcess < writeReport) {
+		t.Fatal("native validator must close/release workbooks before Quit, release Excel, wait for exact PID, then report")
+	}
+
+	preQuitBarrier := strings.LastIndex(mainPowerShell[:quitExcel], `Invoke-ComFinalizerBarrier`)
+	postQuitBarrierRelative := strings.Index(mainPowerShell[releaseExcel:], `Invoke-ComFinalizerBarrier`)
+	if preQuitBarrier < releaseCandidate || postQuitBarrierRelative < 0 || releaseExcel+postQuitBarrierRelative > waitForProcess {
+		t.Fatal("native validator must run finalizer barriers after workbook release and after Excel release")
+	}
+
+	barrierStart := strings.Index(source, `function Invoke-ComFinalizerBarrier`)
+	barrierEndRelative := strings.Index(source[barrierStart:], `function Test-RetryableExcelComRejection`)
+	if barrierStart < 0 || barrierEndRelative < 0 {
+		t.Fatal("native validator is missing the finalizer barrier function body")
+	}
+	barrierBody := source[barrierStart : barrierStart+barrierEndRelative]
+	if strings.Count(barrierBody, `[GC]::Collect()`) != 2 ||
+		strings.Count(barrierBody, `[GC]::WaitForPendingFinalizers()`) != 2 {
+		t.Fatal("native validator finalizer barrier must use two collect/finalizer passes")
+	}
+}
+
+func TestDynamicCalculatorValidatorProcessSafetyBehavior(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("validator process-safety behavior requires Windows job objects and PowerShell")
+	}
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skipf("node is unavailable: %v", err)
+	}
+	path := filepath.Join("..", "..", "scripts", "windows", "Validate-ExcelPriceCalculator.cjs")
+	command := exec.Command(node, path, "--self-test-process-safety")
+	output, err := command.CombinedOutput()
+	if err != nil {
+		t.Fatalf("validator process-safety self-test failed: %v\n%s", err, output)
+	}
+	var report struct {
+		Passed                                    bool `json:"passed"`
+		PreIdentityTimeoutEvidencePreserved       bool `json:"pre_identity_timeout_evidence_preserved"`
+		PreIdentityRecoveryMessagePresent         bool `json:"pre_identity_recovery_message_present"`
+		RecoveryEvidencePreservedOnCleanupFailure bool `json:"recovery_evidence_preserved_on_cleanup_failure"`
+		Behavior                                  struct {
+			Passed                        bool `json:"passed"`
+			CrashExitRejected             bool `json:"crash_exit_rejected"`
+			ExactProcessHandleUsed        bool `json:"exact_process_handle_used"`
+			DualFailurePreserved          bool `json:"dual_failure_preserved"`
+			ExplicitJobAssignmentVerified bool `json:"explicit_job_assignment_verified"`
+			MissingReadinessRejected      bool `json:"missing_readiness_rejected"`
+			MalformedReadinessRejected    bool `json:"malformed_readiness_rejected"`
+			StaleReadinessRejected        bool `json:"stale_readiness_rejected"`
+		} `json:"behavior"`
+		Timeout struct {
+			SpawnErrorCode     string `json:"spawn_error_code"`
+			AssignedToJob      bool   `json:"assigned_to_job"`
+			FirstCleanupStatus string `json:"first_cleanup_status"`
+			GoneReadbackStatus string `json:"gone_readback_status"`
+		} `json:"timeout"`
+	}
+	if err := json.Unmarshal(output, &report); err != nil {
+		t.Fatalf("decode validator process-safety report: %v\n%s", err, output)
+	}
+	if !report.Passed || !report.PreIdentityTimeoutEvidencePreserved ||
+		!report.PreIdentityRecoveryMessagePresent ||
+		!report.RecoveryEvidencePreservedOnCleanupFailure ||
+		!report.Behavior.Passed || !report.Behavior.CrashExitRejected ||
+		!report.Behavior.ExactProcessHandleUsed || !report.Behavior.DualFailurePreserved ||
+		!report.Behavior.ExplicitJobAssignmentVerified || !report.Behavior.MissingReadinessRejected ||
+		!report.Behavior.MalformedReadinessRejected || !report.Behavior.StaleReadinessRejected ||
+		!report.Timeout.AssignedToJob ||
+		report.Timeout.SpawnErrorCode != "ETIMEDOUT" ||
+		report.Timeout.FirstCleanupStatus != "already_exited" ||
+		report.Timeout.GoneReadbackStatus != "already_exited" {
+		t.Fatalf("validator process-safety report failed: %+v", report)
+	}
+}
+
+func TestDynamicCalculatorValidatorNativeExcelTimeoutBehavior(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("native Excel timeout behavior requires Windows and Microsoft Excel")
+	}
+	if os.Getenv("PATRIS_RUN_NATIVE_EXCEL_TIMEOUT_TEST") != "1" {
+		t.Skip("set PATRIS_RUN_NATIVE_EXCEL_TIMEOUT_TEST=1 on an Excel host to run the destructive-timeout control")
+	}
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skipf("node is unavailable: %v", err)
+	}
+	validator := filepath.Join("..", "..", "scripts", "windows", "Validate-ExcelPriceCalculator.cjs")
+	command := exec.Command(node, validator, "--self-test-native-excel-timeout")
+	output, err := command.CombinedOutput()
+	if err != nil {
+		t.Fatalf("validator native Excel timeout self-test failed: %v\n%s", err, output)
+	}
+	var report struct {
+		Passed  bool `json:"passed"`
+		Control struct {
+			Passed        bool   `json:"passed"`
+			AssignedToJob bool   `json:"assigned_to_job"`
+			ExitCode      int    `json:"exit_code"`
+			Executable    string `json:"executable_path"`
+		} `json:"control"`
+		Timeout struct {
+			SpawnErrorCode     string `json:"spawn_error_code"`
+			AssignedToJob      bool   `json:"assigned_to_job"`
+			Executable         string `json:"executable_path"`
+			FirstCleanupStatus string `json:"first_cleanup_status"`
+			GoneReadbackStatus string `json:"gone_readback_status"`
+		} `json:"timeout"`
+	}
+	if err := json.Unmarshal(output, &report); err != nil {
+		t.Fatalf("decode native Excel timeout report: %v\n%s", err, output)
+	}
+	if !report.Passed || !report.Control.Passed || !report.Control.AssignedToJob ||
+		report.Control.ExitCode != 0 || !strings.EqualFold(filepath.Base(report.Control.Executable), "EXCEL.EXE") ||
+		report.Timeout.SpawnErrorCode != "ETIMEDOUT" || !report.Timeout.AssignedToJob ||
+		!strings.EqualFold(filepath.Base(report.Timeout.Executable), "EXCEL.EXE") ||
+		report.Timeout.FirstCleanupStatus != "already_exited" ||
+		report.Timeout.GoneReadbackStatus != "already_exited" {
+		t.Fatalf("native Excel timeout report failed: %+v", report)
 	}
 }
 
