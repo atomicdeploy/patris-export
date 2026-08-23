@@ -185,6 +185,16 @@ func TestServerJSON(t *testing.T) {
 	})
 
 	t.Run("GET /api/records invalid format", func(t *testing.T) {
+		srv.dataSourceMu.Lock()
+		originalDataSource := srv.dataSource
+		srv.dataSource = nil
+		srv.dataSourceMu.Unlock()
+		defer func() {
+			srv.dataSourceMu.Lock()
+			srv.dataSource = originalDataSource
+			srv.dataSourceMu.Unlock()
+		}()
+
 		req := httptest.NewRequest("GET", "/api/records?format=parquet", nil)
 		w := httptest.NewRecorder()
 		srv.router.ServeHTTP(w, req)

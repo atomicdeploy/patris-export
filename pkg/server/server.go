@@ -694,6 +694,10 @@ func writeHTMLPartial(w http.ResponseWriter, page []byte) {
 // the configured trusted XLSM target, or returns only a verified blank XLTM.
 func (s *Server) handleGetRecords(w http.ResponseWriter, r *http.Request) {
 	format := requestedRecordsFormat(r)
+	if format == "" {
+		http.Error(w, "unsupported records format; use json, csv, xlsx, xlsm, or xltm", http.StatusBadRequest)
+		return
+	}
 	if format == "xltm" {
 		s.writeRecordsXLTM(w, r)
 		return
@@ -704,10 +708,6 @@ func (s *Server) handleGetRecords(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if format == "" {
-		http.Error(w, "unsupported records format; use json, csv, xlsx, xlsm, or xltm", http.StatusBadRequest)
-		return
-	}
 	if format == "csv" {
 		s.writeRecordsCSV(w, r, result.Rows, result.KeyField)
 		return
