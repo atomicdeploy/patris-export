@@ -3,6 +3,7 @@ package server
 import (
 	"bufio"
 	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"errors"
@@ -41,14 +42,18 @@ type excelPricingRemoteSnapshotFixture struct {
 	startHeldOnce  sync.Once
 	releaseOnce    sync.Once
 
-	mu            sync.Mutex
-	revisionCalls int
-	startCalls    int
-	bulkCalls     int
-	statusCalls   int
-	cancelCalls   int
-	legacyCalls   int
-	headerFailure string
+	mu                      sync.Mutex
+	revisionCalls           int
+	startCalls              int
+	bulkCalls               int
+	statusCalls             int
+	cancelCalls             int
+	legacyCalls             int
+	headerFailure           string
+	revisionIdentityCalls   int
+	revisionCompressedCalls int
+	payloadIdentityCalls    int
+	payloadCompressedCalls  int
 }
 
 type rejectingExcelPricingRemoteTerminalSource struct{}
@@ -137,6 +142,111 @@ func TestExcelPricingRemoteSnapshotColdCompletesFromTerminalEventOnly(t *testing
 		t.Fatalf("snapshot revision = %q", result.SnapshotRevision)
 	}
 	fixture.assertCalls(t, 1, 1, 1, 0, 0)
+}
+
+func TestExcelPricingRemoteSnapshotIdentityEncodingPreservesOriginETags(t *testing.T) {
+	t.Run("revision", func(t *testing.T) {
+		fixture := newExcelPricingRemoteSnapshotFixture(t, "cdn_rewritten_etag")
+		defer fixture.Close()
+
+		client := fixture.Client(t)
+		base := client.client.Transport
+		if base == nil {
+			base = http.DefaultTransport
+		}
+		autoDecompressed := false
+		client.client.Transport = excelPricingRemoteSnapshotRoundTripFunc(
+			func(request *http.Request) (*http.Response, error) {
+				clone := request.Clone(request.Context())
+				clone.Header = request.Header.Clone()
+				if clone.URL.Path == "/wp-json/digitalogic/pricing/sync/revision" {
+					clone.Header.Del("Accept-Encoding")
+				}
+				response, err := base.RoundTrip(clone)
+				if response != nil && clone.URL.Path == "/wp-json/digitalogic/pricing/sync/revision" {
+					autoDecompressed = response.Uncompressed
+				}
+				return response, err
+			},
+		)
+		if _, err := client.fetchRevision(context.Background()); !errors.Is(
+			err, errExcelPricingRemoteSnapshotProtocol,
+		) {
+			t.Fatalf("compressed representation revision error = %v", err)
+		}
+		if !autoDecompressed {
+			t.Fatal("control response was not transparently decompressed")
+		}
+
+		client = fixture.Client(t)
+		if _, err := client.fetchRevision(context.Background()); err != nil {
+			t.Fatalf("identity revision error = %v", err)
+		}
+		fixture.assertRepresentationCalls(t, 1, 1, 0, 0)
+	})
+
+	t.Run("immutable payload", func(t *testing.T) {
+		fixture := newExcelPricingRemoteSnapshotFixture(t, "cdn_rewritten_etag")
+		defer fixture.Close()
+
+		client := fixture.Client(t)
+		revision, err := client.fetchRevision(context.Background())
+		if err != nil {
+			t.Fatalf("revision error = %v", err)
+		}
+		build := fixture.buildResponse()
+		base := client.client.Transport
+		if base == nil {
+			base = http.DefaultTransport
+		}
+		autoDecompressed := false
+		client.client.Transport = excelPricingRemoteSnapshotRoundTripFunc(
+			func(request *http.Request) (*http.Response, error) {
+				clone := request.Clone(request.Context())
+				clone.Header = request.Header.Clone()
+				if strings.HasPrefix(clone.URL.Path, "/wp-json/digitalogic/pricing/sync/snapshots/") {
+					clone.Header.Del("Accept-Encoding")
+				}
+				response, err := base.RoundTrip(clone)
+				if response != nil && strings.HasPrefix(
+					clone.URL.Path, "/wp-json/digitalogic/pricing/sync/snapshots/",
+				) {
+					autoDecompressed = response.Uncompressed
+				}
+				return response, err
+			},
+		)
+		if _, err := client.fetchSnapshot(context.Background(), build, revision); !errors.Is(
+			err, errExcelPricingRemoteSnapshotProtocol,
+		) {
+			t.Fatalf("compressed representation payload error = %v", err)
+		}
+		if !autoDecompressed {
+			t.Fatal("control payload was not transparently decompressed")
+		}
+
+		client = fixture.Client(t)
+		if _, err := client.fetchSnapshot(context.Background(), build, revision); err != nil {
+			t.Fatalf("identity payload error = %v", err)
+		}
+		fixture.assertRepresentationCalls(t, 1, 0, 1, 1)
+	})
+
+	t.Run("collector keeps start and terminal semantics", func(t *testing.T) {
+		fixture := newExcelPricingRemoteSnapshotFixture(t, "cdn_rewritten_etag")
+		defer fixture.Close()
+
+		result, err := fixture.Client(t).Collect(context.Background(), fixture.requestID, 60)
+		if err != nil {
+			t.Fatalf("Collect() error = %v", err)
+		}
+		if result.CompositeStateRevision != fixture.revision.StateRevision ||
+			result.SnapshotRevision != fixture.payload.SnapshotRevision {
+			t.Fatalf("collector identity = %+v", result)
+		}
+		fixture.assertCalls(t, 1, 1, 1, 0, 0)
+		fixture.assertRepresentationCalls(t, 1, 0, 1, 0)
+	})
 }
 
 func TestExcelPricingSnapshotProductionCollectorUsesBulkAndPreservesCompositeIdentity(t *testing.T) {
@@ -1309,6 +1419,17 @@ func (fixture *excelPricingRemoteSnapshotFixture) handle(w http.ResponseWriter, 
 		if fixture.mode == "revision_wrong_content_type" {
 			w.Header().Set("Content-Type", "text/html; charset=UTF-8")
 		}
+		if fixture.mode == "cdn_rewritten_etag" {
+			body, err := json.Marshal(fixture.revision)
+			if err != nil {
+				http.Error(w, "revision fixture", http.StatusInternalServerError)
+				return
+			}
+			fixture.writeIdentityBoundRepresentation(
+				w, r, body, fixture.revision.StateRevision, "revision",
+			)
+			return
+		}
 		w.Header().Set("ETag", `"`+fixture.revision.StateRevision+`"`)
 		if fixture.mode == "revision_empty_body" {
 			return
@@ -1321,6 +1442,10 @@ func (fixture *excelPricingRemoteSnapshotFixture) handle(w http.ResponseWriter, 
 	case r.Method == http.MethodPost && r.URL.Path == "/wp-json/digitalogic/pricing/sync/snapshots":
 		fixture.mu.Lock()
 		fixture.startCalls++
+		if fixture.mode == "cdn_rewritten_etag" &&
+			r.Header.Get("Accept-Encoding") == excelPricingRemoteIdentityEncoding {
+			fixture.headerFailure = "snapshot start unexpectedly forced identity encoding"
+		}
 		fixture.mu.Unlock()
 		var request excelPricingRemoteSnapshotStartRequest
 		if json.NewDecoder(r.Body).Decode(&request) != nil || request.RequestID == "" ||
@@ -1343,7 +1468,8 @@ func (fixture *excelPricingRemoteSnapshotFixture) handle(w http.ResponseWriter, 
 			return
 		}
 		build := fixture.buildResponse()
-		if fixture.mode == "ready" || fixture.mode == "payload_wrong_content_type" ||
+		if fixture.mode == "ready" || fixture.mode == "cdn_rewritten_etag" ||
+			fixture.mode == "payload_wrong_content_type" ||
 			fixture.mode == "payload_empty_body" || fixture.mode == "payload_oversized_body" {
 			w.WriteHeader(http.StatusOK)
 			_ = json.NewEncoder(w).Encode(build)
@@ -1403,6 +1529,12 @@ func (fixture *excelPricingRemoteSnapshotFixture) handle(w http.ResponseWriter, 
 		fixture.mu.Lock()
 		fixture.bulkCalls++
 		fixture.mu.Unlock()
+		if fixture.mode == "cdn_rewritten_etag" {
+			fixture.writeIdentityBoundRepresentation(
+				w, r, fixture.payloadBody, fixture.payload.Digest, "payload",
+			)
+			return
+		}
 		if fixture.badETag {
 			w.Header().Set("ETag", `W/"`+fixture.payload.Digest+`"`)
 		} else {
@@ -1427,6 +1559,42 @@ func (fixture *excelPricingRemoteSnapshotFixture) handle(w http.ResponseWriter, 
 	default:
 		http.NotFound(w, r)
 	}
+}
+
+func (fixture *excelPricingRemoteSnapshotFixture) writeIdentityBoundRepresentation(
+	w http.ResponseWriter,
+	r *http.Request,
+	body []byte,
+	originRevision string,
+	kind string,
+) {
+	encoding := r.Header.Get("Accept-Encoding")
+	fixture.mu.Lock()
+	switch {
+	case kind == "revision" && encoding == excelPricingRemoteIdentityEncoding:
+		fixture.revisionIdentityCalls++
+	case kind == "revision" && strings.Contains(encoding, "gzip"):
+		fixture.revisionCompressedCalls++
+	case kind == "payload" && encoding == excelPricingRemoteIdentityEncoding:
+		fixture.payloadIdentityCalls++
+	case kind == "payload" && strings.Contains(encoding, "gzip"):
+		fixture.payloadCompressedCalls++
+	default:
+		fixture.headerFailure = "identity-bound response received an unexpected content encoding"
+	}
+	fixture.mu.Unlock()
+
+	if encoding == excelPricingRemoteIdentityEncoding {
+		w.Header().Set("ETag", `"`+originRevision+`"`)
+		_, _ = w.Write(body)
+		return
+	}
+
+	w.Header().Set("Content-Encoding", "gzip")
+	w.Header().Set("ETag", `"cdn-gzip-representation"`)
+	compressed := gzip.NewWriter(w)
+	_, _ = compressed.Write(body)
+	_ = compressed.Close()
 }
 
 func (fixture *excelPricingRemoteSnapshotFixture) validSourceQuery(query url.Values) bool {
@@ -1736,6 +1904,30 @@ func (fixture *excelPricingRemoteSnapshotFixture) assertCalls(
 		t.Fatalf("calls = revision:%d start:%d bulk:%d status:%d cancel:%d",
 			fixture.revisionCalls, fixture.startCalls, fixture.bulkCalls,
 			fixture.statusCalls, fixture.cancelCalls)
+	}
+	if fixture.headerFailure != "" {
+		t.Fatal(fixture.headerFailure)
+	}
+}
+
+func (fixture *excelPricingRemoteSnapshotFixture) assertRepresentationCalls(
+	t *testing.T,
+	revisionIdentity, revisionCompressed, payloadIdentity, payloadCompressed int,
+) {
+	t.Helper()
+	fixture.mu.Lock()
+	defer fixture.mu.Unlock()
+	if fixture.revisionIdentityCalls != revisionIdentity ||
+		fixture.revisionCompressedCalls != revisionCompressed ||
+		fixture.payloadIdentityCalls != payloadIdentity ||
+		fixture.payloadCompressedCalls != payloadCompressed {
+		t.Fatalf(
+			"representation calls = revision identity:%d compressed:%d payload identity:%d compressed:%d",
+			fixture.revisionIdentityCalls,
+			fixture.revisionCompressedCalls,
+			fixture.payloadIdentityCalls,
+			fixture.payloadCompressedCalls,
+		)
 	}
 	if fixture.headerFailure != "" {
 		t.Fatal(fixture.headerFailure)

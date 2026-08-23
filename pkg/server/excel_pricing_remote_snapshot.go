@@ -700,6 +700,7 @@ func (client *excelPricingRemoteSnapshotClient) fetchRevision(
 		return excelPricingRemoteSnapshotRevision{}, errExcelPricingRemoteSnapshotConfiguration
 	}
 	client.setRemoteHeaders(request, false)
+	request.Header.Set("Accept-Encoding", excelPricingRemoteIdentityEncoding)
 	response, err := client.client.Do(request)
 	if err != nil {
 		return excelPricingRemoteSnapshotRevision{}, errExcelPricingRemoteSnapshotUnavailable
@@ -825,6 +826,9 @@ func (client *excelPricingRemoteSnapshotClient) fetchSnapshot(
 		return nil, errExcelPricingRemoteSnapshotConfiguration
 	}
 	client.setRemoteHeaders(request, false)
+	// The payload ETag is the SHA-256 of the identity response bytes. Do not let
+	// automatic gzip negotiation substitute a representation-specific ETag.
+	request.Header.Set("Accept-Encoding", excelPricingRemoteIdentityEncoding)
 	response, err := client.client.Do(request)
 	if err != nil {
 		return nil, errExcelPricingRemoteSnapshotUnavailable

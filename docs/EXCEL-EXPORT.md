@@ -216,6 +216,11 @@ rollback-protected atomic commit. Any cancellation, error, stale event, duplicat
 identity, digest mismatch, or unsafe warning retains the previous committed
 workbook generation.
 
+The companion explicitly requests the HTTP `identity` representation for remote
+revision validation and immutable snapshot payload fetches. Their strong ETags
+bind the identity JSON bytes; an intermediary gzip validator is not substituted
+or accepted. Snapshot-start and terminal-event semantics are unchanged.
+
 Failed snapshot jobs retain their existing top-level compatibility code and may
 also include a bounded `failure` object with schema
 `patris.pricing-snapshot-failure/v1`. Its reviewed `stage` and `code` values
