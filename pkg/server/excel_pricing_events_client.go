@@ -25,6 +25,7 @@ const (
 	excelPricingRemoteRevisionSchema    = "digitalogic.pricing-sync-revision/v1"
 	excelPricingRemoteProjection        = "excel-v1"
 	excelPricingRemoteProjectionSchema  = "digitalogic.pricing-projection/excel-v1"
+	excelPricingRemoteIdentityEncoding  = "identity"
 
 	excelPricingRemoteEventsMaxFrameBytes = 64 << 10
 	excelPricingRemoteRevisionMaxBytes    = 64 << 10
@@ -569,6 +570,10 @@ func (client *excelPricingRemoteEventsClient) validateExcelPricingRemoteRevision
 		return errExcelPricingRemoteRevision
 	}
 	request.Header.Set("Accept", "application/json")
+	// Revision ETags bind the identity JSON bytes to state_revision. Selecting
+	// the identity representation prevents an intermediary from replacing that
+	// validator with a gzip-representation ETag before the fail-closed check.
+	request.Header.Set("Accept-Encoding", excelPricingRemoteIdentityEncoding)
 	request.Header.Set(excelPricingRemoteSecretHeader, client.secret)
 	request.Header.Set(excelPricingRemoteSourceIDHeader, client.source.ID)
 	request.Header.Set(excelPricingRemoteDatasetHeader, client.source.Dataset)

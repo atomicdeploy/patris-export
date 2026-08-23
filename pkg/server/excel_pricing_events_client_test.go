@@ -138,6 +138,7 @@ func TestExcelPricingRemoteEventsConnectValidateAndConsumePHPFrame(t *testing.T)
 		case "/wp-json/digitalogic/pricing/sync/revision":
 			revisionCalls.Add(1)
 			valid := r.Header.Get(excelPricingRemoteSecretHeader) == excelPricingRemoteTestSecret &&
+				r.Header.Get("Accept-Encoding") == excelPricingRemoteIdentityEncoding &&
 				r.Header.Get(excelPricingRemoteSourceIDHeader) == source.ID &&
 				r.Header.Get(excelPricingRemoteDatasetHeader) == source.Dataset &&
 				r.URL.Query().Get("source_id") == source.ID &&
