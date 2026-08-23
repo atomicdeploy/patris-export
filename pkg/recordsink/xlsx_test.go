@@ -1757,6 +1757,11 @@ func TestDynamicCalculatorValidatorHandlesEmptyProductTable(t *testing.T) {
 		`$exitResult = Wait-ValidatorProcessExit $excelProcessIdentity 15000 @(0)`,
 		`PATRIS_VALIDATOR_PROCESS_IDENTITY_PATH`,
 		`function cleanupExactOwnedProcess`,
+		`function finalizeValidatorTempDirectory`,
+		`preservedRecoveryDirectory = finalizeValidatorTempDirectory(`,
+		`abnormalCleanupError,`,
+		`recovery_evidence_preserved_on_cleanup_failure`,
+		`Recovery evidence preserved for exact-process remediation:`,
 		`--self-test-process-safety`,
 		`--self-test-native-excel-timeout`,
 		`gatedExitChild`,
@@ -1767,6 +1772,7 @@ func TestDynamicCalculatorValidatorHandlesEmptyProductTable(t *testing.T) {
 		`PATRIS_SELFTEST_EXIT_ZERO_RELEASE`,
 		`missing_readiness_rejected`,
 		`malformed_readiness_rejected`,
+		`stale_readiness_rejected`,
 		`validatorExcelProcessId`,
 		`validatorExcelProcessAssignedToJob`,
 		`validatorExcelProcessExited`,
@@ -1780,6 +1786,24 @@ func TestDynamicCalculatorValidatorHandlesEmptyProductTable(t *testing.T) {
 		if !strings.Contains(source, required) {
 			t.Fatalf("native validator is missing the empty-table guard: %s", required)
 		}
+	}
+	validatorMainStart := strings.LastIndex(source, `function main() {`)
+	validatorResultErrorRelative := -1
+	if validatorMainStart >= 0 {
+		validatorResultErrorRelative = strings.Index(source[validatorMainStart:], `if (result.error) {`)
+	}
+	if validatorMainStart < 0 || validatorResultErrorRelative < 0 {
+		t.Fatal("native validator is missing its Node host cleanup boundary")
+	}
+	validatorHostCleanup := source[validatorMainStart : validatorMainStart+validatorResultErrorRelative]
+	if !strings.Contains(validatorHostCleanup, `preservedRecoveryDirectory = finalizeValidatorTempDirectory(
+      tempDirectory,
+      abnormalCleanupError,
+    );`) {
+		t.Fatal("native validator must preserve exact-process recovery evidence when abnormal cleanup fails")
+	}
+	if strings.Contains(validatorHostCleanup, `fs.rmSync(tempDirectory`) {
+		t.Fatal("native validator must not unconditionally delete exact-process recovery evidence")
 	}
 
 	powershellStart := strings.Index(source, "const powershell = String.raw`")
@@ -1803,13 +1827,23 @@ func TestDynamicCalculatorValidatorHandlesEmptyProductTable(t *testing.T) {
 	writeUnassignedIdentity := strings.LastIndex(mainPowerShell, `Write-ValidatorProcessIdentity $excelProcessIdentity $env:PATRIS_VALIDATOR_PROCESS_IDENTITY_PATH $false`)
 	assignExcelJob := strings.LastIndex(mainPowerShell, `$excelProcessAssignedToJob = Add-ValidatorProcessToJob $validatorJobHandle $excelProcessIdentity`)
 	writeAssignedIdentity := strings.LastIndex(mainPowerShell, `Write-ValidatorProcessIdentity $excelProcessIdentity $env:PATRIS_VALIDATOR_PROCESS_IDENTITY_PATH $excelProcessAssignedToJob`)
+	runtimeStart := strings.Index(mainPowerShell, "$excel = $null\n$workbooks = $null")
+	firstWorkbooksUse := -1
+	if runtimeStart >= 0 {
+		firstWorkbooksUseRelative := strings.Index(mainPowerShell[runtimeStart:], `$excel.Workbooks`)
+		if firstWorkbooksUseRelative >= 0 {
+			firstWorkbooksUse = runtimeStart + firstWorkbooksUseRelative
+		}
+	}
 	if closeReference < 0 || releaseReference < 0 || closeCandidate < 0 || releaseCandidate < 0 ||
 		quitExcel < 0 || releaseExcel < 0 || waitForProcess < 0 || writeReport < 0 ||
-		getExcelIdentity < 0 || writeUnassignedIdentity < 0 || assignExcelJob < 0 || writeAssignedIdentity < 0 {
+		getExcelIdentity < 0 || writeUnassignedIdentity < 0 || assignExcelJob < 0 || writeAssignedIdentity < 0 ||
+		runtimeStart < 0 || firstWorkbooksUse < 0 {
 		t.Fatal("native validator is missing explicit Excel teardown markers")
 	}
 	if !(getExcelIdentity < writeUnassignedIdentity && writeUnassignedIdentity < assignExcelJob &&
-		assignExcelJob < writeAssignedIdentity && writeAssignedIdentity < closeReference) {
+		assignExcelJob < writeAssignedIdentity && writeAssignedIdentity < firstWorkbooksUse &&
+		firstWorkbooksUse < closeReference) {
 		t.Fatal("native validator must persist exact Excel identity, explicitly job-fence it, confirm the fence, then use the workbook")
 	}
 	if !(closeReference < releaseReference && releaseReference < closeCandidate &&
@@ -1851,8 +1885,9 @@ func TestDynamicCalculatorValidatorProcessSafetyBehavior(t *testing.T) {
 		t.Fatalf("validator process-safety self-test failed: %v\n%s", err, output)
 	}
 	var report struct {
-		Passed   bool `json:"passed"`
-		Behavior struct {
+		Passed                                    bool `json:"passed"`
+		RecoveryEvidencePreservedOnCleanupFailure bool `json:"recovery_evidence_preserved_on_cleanup_failure"`
+		Behavior                                  struct {
 			Passed                        bool `json:"passed"`
 			CrashExitRejected             bool `json:"crash_exit_rejected"`
 			ExactProcessHandleUsed        bool `json:"exact_process_handle_used"`
@@ -1860,6 +1895,7 @@ func TestDynamicCalculatorValidatorProcessSafetyBehavior(t *testing.T) {
 			ExplicitJobAssignmentVerified bool `json:"explicit_job_assignment_verified"`
 			MissingReadinessRejected      bool `json:"missing_readiness_rejected"`
 			MalformedReadinessRejected    bool `json:"malformed_readiness_rejected"`
+			StaleReadinessRejected        bool `json:"stale_readiness_rejected"`
 		} `json:"behavior"`
 		Timeout struct {
 			SpawnErrorCode     string `json:"spawn_error_code"`
@@ -1871,10 +1907,12 @@ func TestDynamicCalculatorValidatorProcessSafetyBehavior(t *testing.T) {
 	if err := json.Unmarshal(output, &report); err != nil {
 		t.Fatalf("decode validator process-safety report: %v\n%s", err, output)
 	}
-	if !report.Passed || !report.Behavior.Passed || !report.Behavior.CrashExitRejected ||
+	if !report.Passed || !report.RecoveryEvidencePreservedOnCleanupFailure ||
+		!report.Behavior.Passed || !report.Behavior.CrashExitRejected ||
 		!report.Behavior.ExactProcessHandleUsed || !report.Behavior.DualFailurePreserved ||
 		!report.Behavior.ExplicitJobAssignmentVerified || !report.Behavior.MissingReadinessRejected ||
-		!report.Behavior.MalformedReadinessRejected || !report.Timeout.AssignedToJob ||
+		!report.Behavior.MalformedReadinessRejected || !report.Behavior.StaleReadinessRejected ||
+		!report.Timeout.AssignedToJob ||
 		report.Timeout.SpawnErrorCode != "ETIMEDOUT" ||
 		report.Timeout.FirstCleanupStatus != "already_exited" ||
 		report.Timeout.GoneReadbackStatus != "already_exited" {

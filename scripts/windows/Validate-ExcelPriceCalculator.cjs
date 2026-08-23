@@ -1,6 +1,7 @@
 'use strict';
 
 const { spawnSync } = require('node:child_process');
+const { randomUUID } = require('node:crypto');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
@@ -3154,15 +3155,28 @@ function cleanupExactOwnedProcess(tempDirectory, identityPath) {
   return report;
 }
 
+function finalizeValidatorTempDirectory(tempDirectory, abnormalCleanupError) {
+  if (abnormalCleanupError) {
+    // The identity and cleanup script are the only deterministic recovery
+    // handle if the exact owned process could not be proven terminated. Keep
+    // the whole private temp directory so an operator can inspect or rerun the
+    // scoped cleanup instead of losing evidence while Excel may still exist.
+    return path.resolve(tempDirectory);
+  }
+  fs.rmSync(tempDirectory, { recursive: true, force: true });
+  return null;
+}
+
 function runProcessSafetySelfTest() {
   const tempDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'patris-validator-safety-'));
+  const readinessToken = randomUUID();
   const writeScript = (name, content) => {
     const scriptPath = path.join(tempDirectory, name);
     fs.writeFileSync(scriptPath, `\uFEFF${content}\n`, 'utf8');
     return scriptPath;
   };
   const gatedExitChild = (readyVariable, releaseVariable, exitCode) => String.raw`
-[IO.File]::WriteAllText($env:${readyVariable}, 'ready')
+[IO.File]::WriteAllText($env:${readyVariable}, $env:PATRIS_SELFTEST_READY_TOKEN)
 $deadline = [DateTime]::UtcNow.AddSeconds(30)
 while (-not (Test-Path -LiteralPath $env:${releaseVariable} -PathType Leaf)) {
     if ([DateTime]::UtcNow -ge $deadline) { exit 99 }
@@ -3197,7 +3211,7 @@ exit ${exitCode}
   const longChild = writeScript(
     'long-child.ps1',
     String.raw`
-[IO.File]::WriteAllText($env:PATRIS_SELFTEST_LONG_CHILD_READY, 'ready')
+[IO.File]::WriteAllText($env:PATRIS_SELFTEST_LONG_CHILD_READY, $env:PATRIS_SELFTEST_READY_TOKEN)
 Start-Sleep -Seconds 60
 exit 0
 `,
@@ -3218,6 +3232,7 @@ function Start-HiddenSelfTestChild([string]$scriptPath) {
 function Wait-SelfTestChildReady(
     [Diagnostics.Process]$process,
     [string]$readyPath,
+    [string]$expectedValue,
     [int]$timeoutMilliseconds = 5000
 ) {
     $deadline = [DateTime]::UtcNow.AddMilliseconds($timeoutMilliseconds)
@@ -3228,7 +3243,7 @@ function Wait-SelfTestChildReady(
         }
         if (Test-Path -LiteralPath $readyPath -PathType Leaf) {
             $value = [IO.File]::ReadAllText($readyPath)
-            if ($value -ceq 'ready') { return $true }
+            if ($value -ceq $expectedValue) { return $true }
             $malformed = $true
         }
         Start-Sleep -Milliseconds 25
@@ -3253,18 +3268,19 @@ $dualFailurePassed = $false
 $explicitJobAssignmentPassed = $false
 $missingReadinessRejected = $false
 $malformedReadinessRejected = $false
+$staleReadinessRejected = $false
 
 $readinessProbeProcess = [Diagnostics.Process]::GetCurrentProcess()
 try {
     try {
-        [void](Wait-SelfTestChildReady $readinessProbeProcess $env:PATRIS_SELFTEST_MISSING_READY_PROBE 100)
+        [void](Wait-SelfTestChildReady $readinessProbeProcess $env:PATRIS_SELFTEST_MISSING_READY_PROBE $env:PATRIS_SELFTEST_READY_TOKEN 100)
     }
     catch {
         $missingReadinessRejected = $_.Exception.Message -match 'did not publish readiness'
     }
     [IO.File]::WriteAllText($env:PATRIS_SELFTEST_MALFORMED_READY_PROBE, 'not-ready')
     try {
-        [void](Wait-SelfTestChildReady $readinessProbeProcess $env:PATRIS_SELFTEST_MALFORMED_READY_PROBE 100)
+        [void](Wait-SelfTestChildReady $readinessProbeProcess $env:PATRIS_SELFTEST_MALFORMED_READY_PROBE $env:PATRIS_SELFTEST_READY_TOKEN 100)
     }
     catch {
         $malformedReadinessRejected = $_.Exception.Message -match 'malformed readiness'
@@ -3275,7 +3291,8 @@ finally {
 }
 
 $crashChild = Start-HiddenSelfTestChild $env:PATRIS_SELFTEST_EXIT_SEVEN
-[void](Wait-SelfTestChildReady $crashChild $env:PATRIS_SELFTEST_EXIT_SEVEN_READY)
+[void](Wait-SelfTestChildReady $crashChild $env:PATRIS_SELFTEST_EXIT_SEVEN_READY $env:PATRIS_SELFTEST_READY_TOKEN)
+$staleReadinessRejected = [IO.File]::ReadAllText($env:PATRIS_SELFTEST_EXIT_SEVEN_READY) -ceq $env:PATRIS_SELFTEST_READY_TOKEN
 $crashIdentity = Get-ValidatorProcessIdentityById $crashChild.Id 'powershell.exe'
 $explicitJobAssignmentPassed = Add-ValidatorProcessToJob $jobHandle $crashIdentity
 [IO.File]::WriteAllText($env:PATRIS_SELFTEST_EXIT_SEVEN_RELEASE, 'release')
@@ -3293,11 +3310,11 @@ finally {
 }
 
 $firstChild = Start-HiddenSelfTestChild $env:PATRIS_SELFTEST_EXIT_ZERO
-[void](Wait-SelfTestChildReady $firstChild $env:PATRIS_SELFTEST_EXIT_ZERO_READY)
+[void](Wait-SelfTestChildReady $firstChild $env:PATRIS_SELFTEST_EXIT_ZERO_READY $env:PATRIS_SELFTEST_READY_TOKEN)
 $firstIdentity = Get-ValidatorProcessIdentityById $firstChild.Id 'powershell.exe'
 $explicitJobAssignmentPassed = $explicitJobAssignmentPassed -and (Add-ValidatorProcessToJob $jobHandle $firstIdentity)
 $secondChild = Start-HiddenSelfTestChild $env:PATRIS_SELFTEST_LONG_CHILD
-[void](Wait-SelfTestChildReady $secondChild $env:PATRIS_SELFTEST_LONG_CHILD_READY)
+[void](Wait-SelfTestChildReady $secondChild $env:PATRIS_SELFTEST_LONG_CHILD_READY $env:PATRIS_SELFTEST_READY_TOKEN)
 $secondIdentity = Get-ValidatorProcessIdentityById $secondChild.Id 'powershell.exe'
 $explicitJobAssignmentPassed = $explicitJobAssignmentPassed -and (Add-ValidatorProcessToJob $jobHandle $secondIdentity)
 [IO.File]::WriteAllText($env:PATRIS_SELFTEST_EXIT_ZERO_RELEASE, 'release')
@@ -3332,15 +3349,21 @@ $dualFailurePassed = (
 
 [ordered]@{
     passed = $crashRejected -and $identityHandlePassed -and $dualFailurePassed -and
-        $explicitJobAssignmentPassed -and $missingReadinessRejected -and $malformedReadinessRejected
+        $explicitJobAssignmentPassed -and $missingReadinessRejected -and $malformedReadinessRejected -and
+        $staleReadinessRejected
     crash_exit_rejected = $crashRejected
     exact_process_handle_used = $identityHandlePassed
     dual_failure_preserved = $dualFailurePassed
     explicit_job_assignment_verified = $explicitJobAssignmentPassed
     missing_readiness_rejected = $missingReadinessRejected
     malformed_readiness_rejected = $malformedReadinessRejected
+    stale_readiness_rejected = $staleReadinessRejected
 } | ConvertTo-Json -Compress
 `);
+    // A formerly valid marker must not satisfy a new child generation. The
+    // child replaces this stale value with the per-run nonce after its script
+    // has actually started.
+    fs.writeFileSync(exitSevenReady, 'ready', 'utf8');
     const behaviorResult = runPowerShellScript(
       behaviorScript,
       {
@@ -3354,6 +3377,7 @@ $dualFailurePassed = (
         PATRIS_SELFTEST_LONG_CHILD_READY: behaviorLongReady,
         PATRIS_SELFTEST_MISSING_READY_PROBE: missingReadyProbe,
         PATRIS_SELFTEST_MALFORMED_READY_PROBE: malformedReadyProbe,
+        PATRIS_SELFTEST_READY_TOKEN: readinessToken,
       },
       20000,
     );
@@ -3369,7 +3393,7 @@ ${processSafetyPowerShell}
 ${startChild}
 $jobHandle = New-ValidatorKillOnCloseJob
 $child = Start-HiddenSelfTestChild $env:PATRIS_SELFTEST_LONG_CHILD
-[void](Wait-SelfTestChildReady $child $env:PATRIS_SELFTEST_LONG_CHILD_READY)
+[void](Wait-SelfTestChildReady $child $env:PATRIS_SELFTEST_LONG_CHILD_READY $env:PATRIS_SELFTEST_READY_TOKEN)
 $identity = Get-ValidatorProcessIdentityById $child.Id 'powershell.exe'
 $assigned = Add-ValidatorProcessToJob $jobHandle $identity
 Write-ValidatorProcessIdentity $identity $env:PATRIS_VALIDATOR_PROCESS_IDENTITY_PATH $assigned
@@ -3382,6 +3406,7 @@ Start-Sleep -Seconds 60
       {
         PATRIS_SELFTEST_LONG_CHILD: longChild,
         PATRIS_SELFTEST_LONG_CHILD_READY: timeoutLongReady,
+        PATRIS_SELFTEST_READY_TOKEN: readinessToken,
         PATRIS_VALIDATOR_PROCESS_IDENTITY_PATH: timeoutIdentity,
       },
       10000,
@@ -3403,8 +3428,29 @@ Start-Sleep -Seconds 60
       );
     }
 
+    const evidenceDirectory = fs.mkdtempSync(
+      path.join(os.tmpdir(), 'patris-validator-recovery-evidence-'),
+    );
+    const evidenceIdentityPath = path.join(evidenceDirectory, 'excel-process-identity.json');
+    let recoveryEvidencePreserved = false;
+    try {
+      fs.writeFileSync(evidenceIdentityPath, '{"pid":1234}', 'utf8');
+      const preservedPath = finalizeValidatorTempDirectory(
+        evidenceDirectory,
+        new Error('simulated exact-process cleanup failure'),
+      );
+      recoveryEvidencePreserved = preservedPath === path.resolve(evidenceDirectory)
+        && fs.existsSync(evidenceIdentityPath);
+      if (!recoveryEvidencePreserved) {
+        throw new Error('failed cleanup did not preserve exact-process recovery evidence');
+      }
+    } finally {
+      fs.rmSync(evidenceDirectory, { recursive: true, force: true });
+    }
+
     return {
       passed: true,
+      recovery_evidence_preserved_on_cleanup_failure: recoveryEvidencePreserved,
       behavior,
       timeout: {
         spawn_error_code: timeoutResult.error.code,
@@ -3599,6 +3645,7 @@ function main() {
   let result;
   let abnormalCleanup = null;
   let abnormalCleanupError = null;
+  let preservedRecoveryDirectory = null;
   try {
     // Windows PowerShell 5.1 treats a BOM-less script as the active ANSI code
     // page. A UTF-8 BOM keeps the Persian literals used by the validator exact.
@@ -3641,7 +3688,10 @@ function main() {
       }
     }
   } finally {
-    fs.rmSync(tempDirectory, { recursive: true, force: true });
+    preservedRecoveryDirectory = finalizeValidatorTempDirectory(
+      tempDirectory,
+      abnormalCleanupError,
+    );
   }
 
   if (result.error) {
@@ -3656,6 +3706,9 @@ function main() {
     if (abnormalCleanupError) {
       console.error(`Scoped Excel cleanup failed: ${abnormalCleanupError.message}`);
     }
+    if (preservedRecoveryDirectory) {
+      console.error(`Recovery evidence preserved for exact-process remediation: ${preservedRecoveryDirectory}`);
+    }
     process.exitCode = 2;
     return;
   }
@@ -3668,6 +3721,9 @@ function main() {
     }
     if (abnormalCleanupError) {
       console.error(`Scoped Excel cleanup failed: ${abnormalCleanupError.message}`);
+    }
+    if (preservedRecoveryDirectory) {
+      console.error(`Recovery evidence preserved for exact-process remediation: ${preservedRecoveryDirectory}`);
     }
     process.exitCode = 2;
     return;
