@@ -1741,6 +1741,8 @@ func TestDynamicCalculatorValidatorHandlesEmptyProductTable(t *testing.T) {
 		`function Add-ValidatorProcessToJob`,
 		`function Get-ExcelProcessIdentity`,
 		`function Get-ValidatorProcessIdentityById`,
+		`$pathDeadline = [DateTime]::UtcNow.AddSeconds(5)`,
+		`executable identity was not readable within 5 seconds`,
 		`function Invoke-ComFinalizerBarrier`,
 		`function Wait-ValidatorProcessExit`,
 		`function New-ValidatorCombinedException`,
@@ -1758,8 +1760,13 @@ func TestDynamicCalculatorValidatorHandlesEmptyProductTable(t *testing.T) {
 		`--self-test-process-safety`,
 		`--self-test-native-excel-timeout`,
 		`gatedExitChild`,
+		`Wait-SelfTestChildReady`,
+		`PATRIS_SELFTEST_EXIT_SEVEN_READY`,
 		`PATRIS_SELFTEST_EXIT_SEVEN_RELEASE`,
+		`PATRIS_SELFTEST_EXIT_ZERO_READY`,
 		`PATRIS_SELFTEST_EXIT_ZERO_RELEASE`,
+		`missing_readiness_rejected`,
+		`malformed_readiness_rejected`,
 		`validatorExcelProcessId`,
 		`validatorExcelProcessAssignedToJob`,
 		`validatorExcelProcessExited`,
@@ -1851,6 +1858,8 @@ func TestDynamicCalculatorValidatorProcessSafetyBehavior(t *testing.T) {
 			ExactProcessHandleUsed        bool `json:"exact_process_handle_used"`
 			DualFailurePreserved          bool `json:"dual_failure_preserved"`
 			ExplicitJobAssignmentVerified bool `json:"explicit_job_assignment_verified"`
+			MissingReadinessRejected      bool `json:"missing_readiness_rejected"`
+			MalformedReadinessRejected    bool `json:"malformed_readiness_rejected"`
 		} `json:"behavior"`
 		Timeout struct {
 			SpawnErrorCode     string `json:"spawn_error_code"`
@@ -1864,7 +1873,8 @@ func TestDynamicCalculatorValidatorProcessSafetyBehavior(t *testing.T) {
 	}
 	if !report.Passed || !report.Behavior.Passed || !report.Behavior.CrashExitRejected ||
 		!report.Behavior.ExactProcessHandleUsed || !report.Behavior.DualFailurePreserved ||
-		!report.Behavior.ExplicitJobAssignmentVerified || !report.Timeout.AssignedToJob ||
+		!report.Behavior.ExplicitJobAssignmentVerified || !report.Behavior.MissingReadinessRejected ||
+		!report.Behavior.MalformedReadinessRejected || !report.Timeout.AssignedToJob ||
 		report.Timeout.SpawnErrorCode != "ETIMEDOUT" ||
 		report.Timeout.FirstCleanupStatus != "already_exited" ||
 		report.Timeout.GoneReadbackStatus != "already_exited" {

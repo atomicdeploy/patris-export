@@ -847,7 +847,29 @@ function Get-ValidatorProcessIdentityById(
     $process = [Diagnostics.Process]::GetProcessById($processId)
     try {
         [void]$process.Handle
-        $path = [string]$process.MainModule.FileName
+        $pathDeadline = [DateTime]::UtcNow.AddSeconds(5)
+        $path = ''
+        $pathError = $null
+        while ([string]::IsNullOrWhiteSpace($path)) {
+            if ($process.HasExited) {
+                throw "Process $processId exited before its executable identity was readable."
+            }
+            try {
+                $process.Refresh()
+                $path = [string]$process.MainModule.FileName
+            }
+            catch {
+                $pathError = $_.Exception
+            }
+            if (-not [string]::IsNullOrWhiteSpace($path)) { break }
+            if ([DateTime]::UtcNow -ge $pathDeadline) {
+                throw [InvalidOperationException]::new(
+                    "Process $processId executable identity was not readable within 5 seconds.",
+                    $pathError
+                )
+            }
+            Start-Sleep -Milliseconds 25
+        }
         $startTimeUtc = $process.StartTime.ToUniversalTime()
         if (-not [string]::IsNullOrWhiteSpace($expectedExecutableName) -and
             -not [IO.Path]::GetFileName($path).Equals(
@@ -3020,6 +3042,7 @@ $report | Add-Member -NotePropertyName validatorExcelExecutablePath -NotePropert
 const ownedProcessCleanupPowerShell = String.raw`
 $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
+${processSafetyPowerShell}
 $identityPath = $env:PATRIS_VALIDATOR_PROCESS_IDENTITY_PATH
 if ([string]::IsNullOrWhiteSpace($identityPath) -or
     -not (Test-Path -LiteralPath $identityPath -PathType Leaf)) {
@@ -3032,8 +3055,10 @@ $identity = Get-Content -LiteralPath $identityPath -Raw | ConvertFrom-Json
 $process = $null
 try {
     try {
-        $process = [Diagnostics.Process]::GetProcessById([int]$identity.pid)
-        [void]$process.Handle
+        $actualIdentity = Get-ValidatorProcessIdentityById (
+            [int]$identity.pid
+        ) ([IO.Path]::GetFileName([string]$identity.executable_path))
+        $process = [Diagnostics.Process]$actualIdentity.Process
     }
     catch [ArgumentException] {
         [ordered]@{ passed = $true; status = 'already_exited' } |
@@ -3041,8 +3066,8 @@ try {
         exit 0
     }
 
-    $actualStartTicks = $process.StartTime.ToUniversalTime().Ticks
-    $actualPath = [string]$process.MainModule.FileName
+    $actualStartTicks = [long]$actualIdentity.StartTimeUtcTicks
+    $actualPath = [string]$actualIdentity.ExecutablePath
     if ($actualStartTicks -ne [long]$identity.start_time_utc_ticks -or
         -not $actualPath.Equals(
             [string]$identity.executable_path,
@@ -3136,7 +3161,8 @@ function runProcessSafetySelfTest() {
     fs.writeFileSync(scriptPath, `\uFEFF${content}\n`, 'utf8');
     return scriptPath;
   };
-  const gatedExitChild = (releaseVariable, exitCode) => String.raw`
+  const gatedExitChild = (readyVariable, releaseVariable, exitCode) => String.raw`
+[IO.File]::WriteAllText($env:${readyVariable}, 'ready')
 $deadline = [DateTime]::UtcNow.AddSeconds(30)
 while (-not (Test-Path -LiteralPath $env:${releaseVariable} -PathType Leaf)) {
     if ([DateTime]::UtcNow -ge $deadline) { exit 99 }
@@ -3144,17 +3170,38 @@ while (-not (Test-Path -LiteralPath $env:${releaseVariable} -PathType Leaf)) {
 }
 exit ${exitCode}
 `;
+  const exitSevenReady = path.join(tempDirectory, 'ready-exit-seven');
   const exitSevenRelease = path.join(tempDirectory, 'release-exit-seven');
+  const exitZeroReady = path.join(tempDirectory, 'ready-exit-zero');
   const exitZeroRelease = path.join(tempDirectory, 'release-exit-zero');
+  const behaviorLongReady = path.join(tempDirectory, 'ready-long-behavior');
+  const timeoutLongReady = path.join(tempDirectory, 'ready-long-timeout');
+  const missingReadyProbe = path.join(tempDirectory, 'ready-missing-probe');
+  const malformedReadyProbe = path.join(tempDirectory, 'ready-malformed-probe');
   const exitSevenChild = writeScript(
     'exit-seven.ps1',
-    gatedExitChild('PATRIS_SELFTEST_EXIT_SEVEN_RELEASE', 7),
+    gatedExitChild(
+      'PATRIS_SELFTEST_EXIT_SEVEN_READY',
+      'PATRIS_SELFTEST_EXIT_SEVEN_RELEASE',
+      7,
+    ),
   );
   const exitZeroChild = writeScript(
     'exit-zero.ps1',
-    gatedExitChild('PATRIS_SELFTEST_EXIT_ZERO_RELEASE', 0),
+    gatedExitChild(
+      'PATRIS_SELFTEST_EXIT_ZERO_READY',
+      'PATRIS_SELFTEST_EXIT_ZERO_RELEASE',
+      0,
+    ),
   );
-  const longChild = writeScript('long-child.ps1', 'Start-Sleep -Seconds 60\nexit 0');
+  const longChild = writeScript(
+    'long-child.ps1',
+    String.raw`
+[IO.File]::WriteAllText($env:PATRIS_SELFTEST_LONG_CHILD_READY, 'ready')
+Start-Sleep -Seconds 60
+exit 0
+`,
+  );
   const startChild = String.raw`
 function Start-HiddenSelfTestChild([string]$scriptPath) {
     return Start-Process -FilePath 'powershell.exe' -ArgumentList @(
@@ -3166,6 +3213,30 @@ function Start-HiddenSelfTestChild([string]$scriptPath) {
         '-File',
         ('"' + $scriptPath + '"')
     ) -WindowStyle Hidden -PassThru
+}
+
+function Wait-SelfTestChildReady(
+    [Diagnostics.Process]$process,
+    [string]$readyPath,
+    [int]$timeoutMilliseconds = 5000
+) {
+    $deadline = [DateTime]::UtcNow.AddMilliseconds($timeoutMilliseconds)
+    $malformed = $false
+    while ([DateTime]::UtcNow -lt $deadline) {
+        if ($process.HasExited) {
+            throw "Self-test child $($process.Id) exited before publishing readiness."
+        }
+        if (Test-Path -LiteralPath $readyPath -PathType Leaf) {
+            $value = [IO.File]::ReadAllText($readyPath)
+            if ($value -ceq 'ready') { return $true }
+            $malformed = $true
+        }
+        Start-Sleep -Milliseconds 25
+    }
+    if ($malformed) {
+        throw "Self-test child $($process.Id) published malformed readiness."
+    }
+    throw "Self-test child $($process.Id) did not publish readiness within $timeoutMilliseconds ms."
 }
 `;
 
@@ -3180,8 +3251,31 @@ $crashRejected = $false
 $identityHandlePassed = $false
 $dualFailurePassed = $false
 $explicitJobAssignmentPassed = $false
+$missingReadinessRejected = $false
+$malformedReadinessRejected = $false
+
+$readinessProbeProcess = [Diagnostics.Process]::GetCurrentProcess()
+try {
+    try {
+        [void](Wait-SelfTestChildReady $readinessProbeProcess $env:PATRIS_SELFTEST_MISSING_READY_PROBE 100)
+    }
+    catch {
+        $missingReadinessRejected = $_.Exception.Message -match 'did not publish readiness'
+    }
+    [IO.File]::WriteAllText($env:PATRIS_SELFTEST_MALFORMED_READY_PROBE, 'not-ready')
+    try {
+        [void](Wait-SelfTestChildReady $readinessProbeProcess $env:PATRIS_SELFTEST_MALFORMED_READY_PROBE 100)
+    }
+    catch {
+        $malformedReadinessRejected = $_.Exception.Message -match 'malformed readiness'
+    }
+}
+finally {
+    $readinessProbeProcess.Dispose()
+}
 
 $crashChild = Start-HiddenSelfTestChild $env:PATRIS_SELFTEST_EXIT_SEVEN
+[void](Wait-SelfTestChildReady $crashChild $env:PATRIS_SELFTEST_EXIT_SEVEN_READY)
 $crashIdentity = Get-ValidatorProcessIdentityById $crashChild.Id 'powershell.exe'
 $explicitJobAssignmentPassed = Add-ValidatorProcessToJob $jobHandle $crashIdentity
 [IO.File]::WriteAllText($env:PATRIS_SELFTEST_EXIT_SEVEN_RELEASE, 'release')
@@ -3199,9 +3293,11 @@ finally {
 }
 
 $firstChild = Start-HiddenSelfTestChild $env:PATRIS_SELFTEST_EXIT_ZERO
+[void](Wait-SelfTestChildReady $firstChild $env:PATRIS_SELFTEST_EXIT_ZERO_READY)
 $firstIdentity = Get-ValidatorProcessIdentityById $firstChild.Id 'powershell.exe'
 $explicitJobAssignmentPassed = $explicitJobAssignmentPassed -and (Add-ValidatorProcessToJob $jobHandle $firstIdentity)
 $secondChild = Start-HiddenSelfTestChild $env:PATRIS_SELFTEST_LONG_CHILD
+[void](Wait-SelfTestChildReady $secondChild $env:PATRIS_SELFTEST_LONG_CHILD_READY)
 $secondIdentity = Get-ValidatorProcessIdentityById $secondChild.Id 'powershell.exe'
 $explicitJobAssignmentPassed = $explicitJobAssignmentPassed -and (Add-ValidatorProcessToJob $jobHandle $secondIdentity)
 [IO.File]::WriteAllText($env:PATRIS_SELFTEST_EXIT_ZERO_RELEASE, 'release')
@@ -3235,21 +3331,29 @@ $dualFailurePassed = (
 )
 
 [ordered]@{
-    passed = $crashRejected -and $identityHandlePassed -and $dualFailurePassed -and $explicitJobAssignmentPassed
+    passed = $crashRejected -and $identityHandlePassed -and $dualFailurePassed -and
+        $explicitJobAssignmentPassed -and $missingReadinessRejected -and $malformedReadinessRejected
     crash_exit_rejected = $crashRejected
     exact_process_handle_used = $identityHandlePassed
     dual_failure_preserved = $dualFailurePassed
     explicit_job_assignment_verified = $explicitJobAssignmentPassed
+    missing_readiness_rejected = $missingReadinessRejected
+    malformed_readiness_rejected = $malformedReadinessRejected
 } | ConvertTo-Json -Compress
 `);
     const behaviorResult = runPowerShellScript(
       behaviorScript,
       {
         PATRIS_SELFTEST_EXIT_SEVEN: exitSevenChild,
+        PATRIS_SELFTEST_EXIT_SEVEN_READY: exitSevenReady,
         PATRIS_SELFTEST_EXIT_SEVEN_RELEASE: exitSevenRelease,
         PATRIS_SELFTEST_EXIT_ZERO: exitZeroChild,
+        PATRIS_SELFTEST_EXIT_ZERO_READY: exitZeroReady,
         PATRIS_SELFTEST_EXIT_ZERO_RELEASE: exitZeroRelease,
         PATRIS_SELFTEST_LONG_CHILD: longChild,
+        PATRIS_SELFTEST_LONG_CHILD_READY: behaviorLongReady,
+        PATRIS_SELFTEST_MISSING_READY_PROBE: missingReadyProbe,
+        PATRIS_SELFTEST_MALFORMED_READY_PROBE: malformedReadyProbe,
       },
       20000,
     );
@@ -3265,6 +3369,7 @@ ${processSafetyPowerShell}
 ${startChild}
 $jobHandle = New-ValidatorKillOnCloseJob
 $child = Start-HiddenSelfTestChild $env:PATRIS_SELFTEST_LONG_CHILD
+[void](Wait-SelfTestChildReady $child $env:PATRIS_SELFTEST_LONG_CHILD_READY)
 $identity = Get-ValidatorProcessIdentityById $child.Id 'powershell.exe'
 $assigned = Add-ValidatorProcessToJob $jobHandle $identity
 Write-ValidatorProcessIdentity $identity $env:PATRIS_VALIDATOR_PROCESS_IDENTITY_PATH $assigned
@@ -3276,9 +3381,10 @@ Start-Sleep -Seconds 60
       timeoutScript,
       {
         PATRIS_SELFTEST_LONG_CHILD: longChild,
+        PATRIS_SELFTEST_LONG_CHILD_READY: timeoutLongReady,
         PATRIS_VALIDATOR_PROCESS_IDENTITY_PATH: timeoutIdentity,
       },
-      2000,
+      10000,
     );
     if (!timeoutResult.error || timeoutResult.error.code !== 'ETIMEDOUT') {
       throw new Error(`timeout self-test did not time out: ${JSON.stringify(timeoutResult.error)}`);
