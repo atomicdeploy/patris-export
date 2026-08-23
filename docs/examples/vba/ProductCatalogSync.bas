@@ -440,6 +440,7 @@ Private Sub ExportMacroFreeCopy(ByVal outputPath As String)
     Dim syncSheetName As String
     Dim originalSyncVisibility As XlSheetVisibility
     Dim syncVisibilityChanged As Boolean
+    Dim sourceWasSaved As Boolean
     Dim previousAlerts As Boolean
     Dim previousEvents As Boolean
     Dim previousScreenUpdating As Boolean
@@ -457,6 +458,7 @@ Private Sub ExportMacroFreeCopy(ByVal outputPath As String)
     Set syncSheetValue = SyncSheet()
     syncSheetName = syncSheetValue.Name
     originalSyncVisibility = syncSheetValue.Visible
+    sourceWasSaved = ThisWorkbook.Saved
     If originalSyncVisibility <> xlSheetVisible Then
         syncSheetValue.Visible = xlSheetVisible
         syncVisibilityChanged = True
@@ -480,6 +482,7 @@ CleanExit:
     Application.DisplayAlerts = previousAlerts
     Application.EnableEvents = previousEvents
     Application.ScreenUpdating = previousScreenUpdating
+    If sourceWasSaved Then ThisWorkbook.Saved = True
     If savedErrorNumber <> 0 Then
         Err.Raise savedErrorNumber, "ExportMacroFreeCopy", _
                   savedErrorDescription
@@ -492,6 +495,7 @@ Failed:
     On Error Resume Next
     If syncVisibilityChanged And Not syncSheetValue Is Nothing Then
         syncSheetValue.Visible = originalSyncVisibility
+        syncVisibilityChanged = False
     End If
     If Not copyBook Is Nothing Then copyBook.Close SaveChanges:=False
     Set copyBook = Nothing
