@@ -238,6 +238,7 @@ type excelPricingRemoteSnapshotTerminalEvent struct {
 }
 
 type excelPricingRemoteSnapshotTerminalSubscription interface {
+	Valid() bool
 	Wait(context.Context) (excelPricingRemoteSnapshotTerminalEvent, error)
 	Close()
 }
@@ -256,6 +257,7 @@ type excelPricingRemoteSnapshotTerminalSource interface {
 
 type excelPricingRemoteSnapshotTerminalHub struct {
 	mu       sync.Mutex
+	epoch    uint64
 	nextID   uint64
 	waiters  map[string]map[uint64]*excelPricingRemoteSnapshotHubSubscription
 	history  map[string]excelPricingRemoteSnapshotTerminalEvent
@@ -263,8 +265,14 @@ type excelPricingRemoteSnapshotTerminalHub struct {
 	lastSeen uint64
 }
 
+type excelPricingRemoteSnapshotTerminalLease struct {
+	hub   *excelPricingRemoteSnapshotTerminalHub
+	epoch uint64
+}
+
 type excelPricingRemoteSnapshotHubSubscription struct {
 	hub       *excelPricingRemoteSnapshotTerminalHub
+	epoch     uint64
 	requestID string
 	id        uint64
 	channel   chan excelPricingRemoteSnapshotTerminalEvent
@@ -467,12 +475,70 @@ func deriveExcelPricingRemoteSnapshotEndpoints(productSyncURL string) (excelPric
 
 func newExcelPricingRemoteSnapshotTerminalHub() *excelPricingRemoteSnapshotTerminalHub {
 	return &excelPricingRemoteSnapshotTerminalHub{
+		epoch:   1,
 		waiters: make(map[string]map[uint64]*excelPricingRemoteSnapshotHubSubscription),
 		history: make(map[string]excelPricingRemoteSnapshotTerminalEvent),
 	}
 }
 
+func (hub *excelPricingRemoteSnapshotTerminalHub) authenticatedLease() excelPricingRemoteSnapshotTerminalSource {
+	if hub == nil {
+		return nil
+	}
+	hub.mu.Lock()
+	epoch := hub.epoch
+	hub.mu.Unlock()
+	return &excelPricingRemoteSnapshotTerminalLease{hub: hub, epoch: epoch}
+}
+
+func (hub *excelPricingRemoteSnapshotTerminalHub) resetAuthenticatedEpoch() {
+	if hub == nil {
+		return
+	}
+	hub.mu.Lock()
+	defer hub.mu.Unlock()
+	hub.epoch++
+	if hub.epoch == 0 {
+		hub.epoch = 1
+	}
+	for _, waiters := range hub.waiters {
+		for _, subscription := range waiters {
+			close(subscription.channel)
+		}
+	}
+	hub.waiters = make(map[string]map[uint64]*excelPricingRemoteSnapshotHubSubscription)
+	hub.history = make(map[string]excelPricingRemoteSnapshotTerminalEvent)
+	hub.order = nil
+	hub.lastSeen = 0
+}
+
 func (hub *excelPricingRemoteSnapshotTerminalHub) Subscribe(
+	requestID string,
+	source canonical.Source,
+	stateRevision string,
+) (excelPricingRemoteSnapshotTerminalSubscription, error) {
+	if hub == nil {
+		return nil, errExcelPricingRemoteSnapshotConfiguration
+	}
+	hub.mu.Lock()
+	epoch := hub.epoch
+	hub.mu.Unlock()
+	return hub.subscribeAuthenticatedEpoch(epoch, requestID, source, stateRevision)
+}
+
+func (lease *excelPricingRemoteSnapshotTerminalLease) Subscribe(
+	requestID string,
+	source canonical.Source,
+	stateRevision string,
+) (excelPricingRemoteSnapshotTerminalSubscription, error) {
+	if lease == nil || lease.hub == nil || lease.epoch == 0 {
+		return nil, errExcelPricingRemoteSnapshotConfiguration
+	}
+	return lease.hub.subscribeAuthenticatedEpoch(lease.epoch, requestID, source, stateRevision)
+}
+
+func (hub *excelPricingRemoteSnapshotTerminalHub) subscribeAuthenticatedEpoch(
+	epoch uint64,
 	requestID string,
 	source canonical.Source,
 	stateRevision string,
@@ -483,9 +549,13 @@ func (hub *excelPricingRemoteSnapshotTerminalHub) Subscribe(
 	}
 	hub.mu.Lock()
 	defer hub.mu.Unlock()
+	if epoch == 0 || hub.epoch != epoch {
+		return nil, errExcelPricingRemoteSnapshotUnavailable
+	}
 	hub.nextID++
 	subscription := &excelPricingRemoteSnapshotHubSubscription{
 		hub:       hub,
+		epoch:     epoch,
 		requestID: requestID,
 		id:        hub.nextID,
 		channel:   make(chan excelPricingRemoteSnapshotTerminalEvent, 1),
@@ -548,15 +618,27 @@ func (subscription *excelPricingRemoteSnapshotHubSubscription) Wait(
 	if subscription == nil || subscription.channel == nil {
 		return excelPricingRemoteSnapshotTerminalEvent{}, errExcelPricingRemoteSnapshotConfiguration
 	}
+	if !subscription.Valid() {
+		return excelPricingRemoteSnapshotTerminalEvent{}, errExcelPricingRemoteSnapshotUnavailable
+	}
 	select {
 	case <-ctx.Done():
 		return excelPricingRemoteSnapshotTerminalEvent{}, ctx.Err()
 	case event, ok := <-subscription.channel:
-		if !ok {
+		if !ok || !subscription.Valid() {
 			return excelPricingRemoteSnapshotTerminalEvent{}, errExcelPricingRemoteSnapshotUnavailable
 		}
 		return event, nil
 	}
+}
+
+func (subscription *excelPricingRemoteSnapshotHubSubscription) Valid() bool {
+	if subscription == nil || subscription.hub == nil || subscription.epoch == 0 {
+		return false
+	}
+	subscription.hub.mu.Lock()
+	defer subscription.hub.mu.Unlock()
+	return subscription.hub.epoch == subscription.epoch
 }
 
 func (subscription *excelPricingRemoteSnapshotHubSubscription) Close() {
@@ -606,6 +688,12 @@ func (client *excelPricingRemoteSnapshotClient) Collect(
 		)
 	}
 	defer subscription.Close()
+	if !subscription.Valid() {
+		return nil, wrapExcelPricingRemoteSnapshotStage(
+			excelPricingRemoteSnapshotStageTerminalSubscription,
+			errExcelPricingRemoteSnapshotUnavailable,
+		)
+	}
 
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -624,6 +712,15 @@ func (client *excelPricingRemoteSnapshotClient) Collect(
 	}
 	build, status, err := client.startSnapshot(startContext, requestID, maxAgeSeconds, revision)
 	stopStart()
+	if !subscription.Valid() {
+		if build.BuildID != "" {
+			client.cancelSnapshot(build.CancelURL, build.BuildID)
+		}
+		return nil, wrapExcelPricingRemoteSnapshotStage(
+			excelPricingRemoteSnapshotStageTerminalWait,
+			errExcelPricingRemoteSnapshotUnavailable,
+		)
+	}
 	if err != nil {
 		if contextErr := ctx.Err(); contextErr != nil {
 			return nil, wrapExcelPricingRemoteSnapshotStage(
@@ -685,6 +782,13 @@ func (client *excelPricingRemoteSnapshotClient) Collect(
 			err,
 		)
 	}
+	if !subscription.Valid() {
+		client.cancelSnapshot(build.CancelURL, build.BuildID)
+		return nil, wrapExcelPricingRemoteSnapshotStage(
+			excelPricingRemoteSnapshotStageTerminalWait,
+			errExcelPricingRemoteSnapshotUnavailable,
+		)
+	}
 	return result, nil
 }
 
@@ -706,6 +810,9 @@ func (client *excelPricingRemoteSnapshotClient) fetchRevision(
 		return excelPricingRemoteSnapshotRevision{}, errExcelPricingRemoteSnapshotUnavailable
 	}
 	defer response.Body.Close()
+	if !excelPricingRemoteIdentityResponseEncoding(response.Header) {
+		return excelPricingRemoteSnapshotRevision{}, errExcelPricingRemoteSnapshotProtocol
+	}
 	if response.StatusCode != http.StatusOK {
 		return excelPricingRemoteSnapshotRevision{}, errExcelPricingRemoteSnapshotUnavailable
 	}
@@ -728,8 +835,8 @@ func (client *excelPricingRemoteSnapshotClient) fetchRevision(
 			payload.PricingStateRevision, payload.PricingPolicyRevision) {
 		return excelPricingRemoteSnapshotRevision{}, errExcelPricingRemoteSnapshotProtocol
 	}
-	etag := strings.TrimSpace(response.Header.Get("ETag"))
-	if !isStrongExcelPricingRevisionETag(etag, payload.StateRevision) {
+	etag, singleETag := excelPricingRemoteSingleETag(response.Header)
+	if !singleETag || !isStrongExcelPricingRevisionETag(etag, payload.StateRevision) {
 		return excelPricingRemoteSnapshotRevision{}, errExcelPricingRemoteSnapshotProtocol
 	}
 	return excelPricingRemoteSnapshotRevision{
@@ -834,6 +941,9 @@ func (client *excelPricingRemoteSnapshotClient) fetchSnapshot(
 		return nil, errExcelPricingRemoteSnapshotUnavailable
 	}
 	defer response.Body.Close()
+	if !excelPricingRemoteIdentityResponseEncoding(response.Header) {
+		return nil, errExcelPricingRemoteSnapshotProtocol
+	}
 	if response.StatusCode != http.StatusOK {
 		return nil, errExcelPricingRemoteSnapshotUnavailable
 	}
@@ -914,6 +1024,9 @@ func (client *excelPricingRemoteSnapshotClient) confirmSnapshotValidator(
 		return errExcelPricingRemoteSnapshotUnavailable
 	}
 	defer response.Body.Close()
+	if !excelPricingRemoteIdentityResponseEncoding(response.Header) {
+		return errExcelPricingRemoteSnapshotProtocol
+	}
 	if response.StatusCode != http.StatusNotModified {
 		return errExcelPricingRemoteSnapshotProtocol
 	}

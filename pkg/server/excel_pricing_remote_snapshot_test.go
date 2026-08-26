@@ -60,6 +60,13 @@ type excelPricingRemoteSnapshotFixture struct {
 
 type rejectingExcelPricingRemoteTerminalSource struct{}
 
+type pausedExcelPricingRemoteTerminalSource struct {
+	inner   excelPricingRemoteSnapshotTerminalSource
+	entered chan struct{}
+	resume  chan struct{}
+	once    sync.Once
+}
+
 type excelPricingRemoteSnapshotRoundTripFunc func(*http.Request) (*http.Response, error)
 
 type failingExcelPricingRemoteSnapshotReader struct{}
@@ -80,6 +87,30 @@ func (rejectingExcelPricingRemoteTerminalSource) Subscribe(
 	string,
 ) (excelPricingRemoteSnapshotTerminalSubscription, error) {
 	return nil, errors.New("private subscription implementation detail")
+}
+
+func (source *pausedExcelPricingRemoteTerminalSource) Subscribe(
+	requestID string,
+	snapshotSource canonical.Source,
+	stateRevision string,
+) (excelPricingRemoteSnapshotTerminalSubscription, error) {
+	source.once.Do(func() { close(source.entered) })
+	<-source.resume
+	return source.inner.Subscribe(requestID, snapshotSource, stateRevision)
+}
+
+func assertExcelPricingRemoteSnapshotStage(
+	t *testing.T,
+	err error,
+	wantStage string,
+	wantCode string,
+) {
+	t.Helper()
+	stage, code, ok := excelPricingRemoteSnapshotFailureDetails(err)
+	if !ok || stage != wantStage || code != wantCode {
+		t.Fatalf("failure details=(%q,%q,%v), want=(%q,%q,true): %v",
+			stage, code, ok, wantStage, wantCode, err)
+	}
 }
 
 func TestExcelPricingRemoteSnapshotReadyUsesOneBulkFetchWithoutStatusPolling(t *testing.T) {
@@ -249,6 +280,44 @@ func TestExcelPricingRemoteSnapshotIdentityEncodingPreservesOriginETags(t *testi
 		fixture.assertCalls(t, 1, 1, 1, 0, 0)
 		fixture.assertRepresentationCalls(t, 1, 0, 1, 0)
 	})
+}
+
+func TestExcelPricingRemoteSnapshotRejectsValidatorAndEncodingMetadataConflicts(t *testing.T) {
+	for name, fixtureCase := range map[string]struct {
+		mode        string
+		stage       string
+		code        string
+		revision    int
+		start       int
+		bulk        int
+		conditional int
+	}{
+		"duplicate revision ETag": {
+			mode: "revision_duplicate_etag", stage: excelPricingRemoteSnapshotStageRevisionFetch,
+			code: "snapshot_revision_fetch_protocol_failed", revision: 1,
+		},
+		"revision gzip metadata": {
+			mode: "revision_gzip_metadata", stage: excelPricingRemoteSnapshotStageRevisionFetch,
+			code: "snapshot_revision_fetch_protocol_failed", revision: 1,
+		},
+		"payload gzip metadata": {
+			mode: "payload_gzip_metadata", stage: excelPricingRemoteSnapshotStageSnapshotPayload,
+			code: "snapshot_payload_protocol_failed", revision: 1, start: 1, bulk: 1,
+		},
+		"fallback 304 gzip metadata": {
+			mode: "payload_missing_etag_gzip_confirmation", stage: excelPricingRemoteSnapshotStageSnapshotPayload,
+			code: "snapshot_payload_protocol_failed", revision: 1, start: 1, bulk: 2, conditional: 1,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			fixture := newExcelPricingRemoteSnapshotFixture(t, fixtureCase.mode)
+			defer fixture.Close()
+			_, err := fixture.Client(t).Collect(context.Background(), fixture.requestID, 60)
+			assertExcelPricingRemoteSnapshotStage(t, err, fixtureCase.stage, fixtureCase.code)
+			fixture.assertCalls(t, fixtureCase.revision, fixtureCase.start, fixtureCase.bulk, 0, 0)
+			fixture.assertConditionalPayloadCalls(t, fixtureCase.conditional)
+		})
+	}
 }
 
 func TestExcelPricingSnapshotProductionCollectorUsesBulkAndPreservesCompositeIdentity(t *testing.T) {
@@ -439,6 +508,47 @@ func TestExcelPricingSnapshotProductionCollectorColdTerminalAndCancel(t *testing
 		}
 		fixture.releaseHeldStart()
 		waitForExcelPricingSnapshotStatus(t, server, token, jobID, "cancelled")
+		fixture.assertCalls(t, 1, 1, 0, 0, 1)
+		fixture.assertNoLegacyStateCalls(t)
+	})
+
+	t.Run("configuration epoch change", func(t *testing.T) {
+		fixture := newExcelPricingRemoteSnapshotFixture(t, "cold_start_inflight")
+		defer fixture.Close()
+		fixture.acceptAnyID = true
+		server, token := newExcelPricingRemoteSnapshotProductionServer(t, fixture)
+		bridge := newExcelPricingRemoteEventsBridgeWithDependencies(excelPricingRemoteBridgeDependencies{
+			resolve:     excelPricingRemoteBridgeTestResolve,
+			fenceConfig: server.fenceExcelPricingRemoteConfiguration,
+		})
+		bridge.terminals = fixture.hub
+		bridge.reconcile(excelPricingRemoteBridgeTestConfig("generation-a"), false, false)
+		server.excelPricingRemote = bridge
+		server.excelPricing.snapshotRevisionCurrent = bridge.revisionCurrent
+
+		requestID := "snapshot-production-config-fence-0001"
+		request := authenticatedExcelPricingRequest(
+			http.MethodPost,
+			"/api/pricing-sync/snapshots",
+			validExcelPricingSnapshotStartBody(fixture.source, requestID, "fa", 0),
+			token,
+		)
+		request.Header.Set("Idempotency-Key", requestID)
+		response := httptest.NewRecorder()
+		server.router.ServeHTTP(response, request)
+		jobID := excelPricingSnapshotJobIDForTest(t, response.Body.Bytes())
+		select {
+		case <-fixture.startHeld:
+		case <-time.After(time.Second):
+			t.Fatal("remote cold build did not reach the in-flight response gate")
+		}
+
+		bridge.configChanged(excelPricingRemoteBridgeTestConfig("generation-b"))
+		fixture.releaseHeldStart()
+		status := waitForExcelPricingSnapshotStatus(t, server, token, jobID, "cancelled")
+		if status["code"] != "snapshot_remote_configuration_changed" {
+			t.Fatalf("configuration-fenced status=%#v", status)
+		}
 		fixture.assertCalls(t, 1, 1, 0, 0, 1)
 		fixture.assertNoLegacyStateCalls(t)
 	})
@@ -1382,6 +1492,105 @@ func TestExcelPricingRemoteSnapshotTerminalHubRejectsCursorRegressionAndConflict
 	}
 }
 
+func TestExcelPricingRemoteSnapshotTerminalHubRejectsQueuedTerminalAfterEpochReset(t *testing.T) {
+	fixture := newExcelPricingRemoteSnapshotFixture(t, "cold")
+	defer fixture.Close()
+	oldLease := fixture.hub.authenticatedLease()
+	oldSubscription, err := oldLease.Subscribe(
+		fixture.requestID, fixture.source, fixture.revision.StateRevision,
+	)
+	if err != nil {
+		t.Fatalf("old subscription: %v", err)
+	}
+	defer oldSubscription.Close()
+	oldTerminal := fixture.terminalEvent(9)
+	if err := fixture.hub.publishAuthenticated(oldTerminal); err != nil {
+		t.Fatalf("queue old terminal: %v", err)
+	}
+	fixture.hub.resetAuthenticatedEpoch()
+	if _, err := oldSubscription.Wait(t.Context()); !errors.Is(err, errExcelPricingRemoteSnapshotUnavailable) {
+		t.Fatalf("old queued terminal wait error = %v", err)
+	}
+
+	currentSubscription, err := fixture.hub.authenticatedLease().Subscribe(
+		fixture.requestID, fixture.source, fixture.revision.StateRevision,
+	)
+	if err != nil {
+		t.Fatalf("current subscription: %v", err)
+	}
+	defer currentSubscription.Close()
+	currentTerminal := fixture.terminalEvent(1)
+	if err := fixture.hub.publishAuthenticated(currentTerminal); err != nil {
+		t.Fatalf("queue current terminal: %v", err)
+	}
+	received, err := currentSubscription.Wait(t.Context())
+	if err != nil || received != currentTerminal {
+		t.Fatalf("current terminal=%+v err=%v", received, err)
+	}
+}
+
+func TestExcelPricingRemoteSnapshotCollectRejectsLeaseResetAfterRevisionFetch(t *testing.T) {
+	fixture := newExcelPricingRemoteSnapshotFixture(t, "ready")
+	defer fixture.Close()
+	bridge := newExcelPricingRemoteEventsBridgeWithDependencies(excelPricingRemoteBridgeDependencies{
+		resolve: excelPricingRemoteBridgeTestResolve,
+	})
+	bridge.reconcile(excelPricingRemoteBridgeTestConfig("generation-a"), false, false)
+	paused := &pausedExcelPricingRemoteTerminalSource{
+		inner: bridge.snapshotTerminals(), entered: make(chan struct{}), resume: make(chan struct{}),
+	}
+	client, err := newExcelPricingRemoteSnapshotClient(updateout.Config{
+		Enabled:              true,
+		URL:                  fixture.server.URL + "/wp-json/digitalogic/product-sync",
+		Method:               http.MethodPost,
+		Format:               "json",
+		Timeout:              "2s",
+		ProductSyncSecretEnv: excelPricingRemoteSnapshotTestSecretEnv,
+	}, fixture.source, excelPricingRemoteSnapshotClientOptions{
+		HTTPClient: fixture.server.Client(),
+		Terminals:  paused,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := make(chan error, 1)
+	go func() {
+		_, collectErr := client.Collect(t.Context(), fixture.requestID, 60)
+		result <- collectErr
+	}()
+	select {
+	case <-paused.entered:
+	case <-time.After(excelPricingRemoteBridgeTestTimeout):
+		t.Fatal("Collect did not reach terminal subscription after revision fetch")
+	}
+	bridge.reconcile(excelPricingRemoteBridgeTestConfig("generation-b"), false, false)
+	close(paused.resume)
+	select {
+	case collectErr := <-result:
+		assertExcelPricingRemoteSnapshotStage(t, collectErr, excelPricingRemoteSnapshotStageTerminalSubscription,
+			"snapshot_terminal_subscription_failed")
+	case <-time.After(excelPricingRemoteBridgeTestTimeout):
+		t.Fatal("old-epoch Collect did not fail after terminal lease reset")
+	}
+
+	current, err := bridge.snapshotTerminals().Subscribe(
+		fixture.requestID, fixture.source, fixture.revision.StateRevision,
+	)
+	if err != nil {
+		t.Fatalf("new epoch lease subscribe: %v", err)
+	}
+	defer current.Close()
+	terminal := fixture.terminalEvent(1)
+	if err := bridge.terminals.publishAuthenticated(terminal); err != nil {
+		t.Fatalf("publish new epoch terminal: %v", err)
+	}
+	accepted, err := current.Wait(t.Context())
+	if err != nil || accepted != terminal {
+		t.Fatalf("accepted=%+v err=%v", accepted, err)
+	}
+	fixture.assertCalls(t, 1, 0, 0, 0, 0)
+}
+
 func TestExcelPricingRemoteSnapshotAuthenticatedStreamAcknowledgesOnlyAfterWaiterAccepts(t *testing.T) {
 	fixture := newExcelPricingRemoteSnapshotFixture(t, "cold")
 	defer fixture.Close()
@@ -1397,7 +1606,7 @@ func TestExcelPricingRemoteSnapshotAuthenticatedStreamAcknowledgesOnlyAfterWaite
 	client := &excelPricingRemoteEventsClient{
 		source:     fixture.source,
 		onTerminal: fixture.hub.publishAuthenticated,
-		seen:       make(map[string]struct{}),
+		seen:       make(map[string]string),
 	}
 	event := fixture.terminalEvent(0)
 	data := mustMarshalExcelPricingRemoteSnapshotTestJSON(t, event)
@@ -1425,7 +1634,7 @@ func TestExcelPricingRemoteSnapshotAuthenticatedStreamAcknowledgesOnlyAfterWaite
 		onTerminal: func(excelPricingRemoteSnapshotTerminalEvent) error {
 			return errors.New("retain failed")
 		},
-		seen: make(map[string]struct{}),
+		seen: make(map[string]string),
 	}
 	if _, err := rejecting.handleExcelPricingRemoteFrame(context.Background(), body, true); !errors.Is(err, errExcelPricingRemoteProtocol) {
 		t.Fatalf("rejected frame error = %v", err)
@@ -1536,6 +1745,18 @@ func (fixture *excelPricingRemoteSnapshotFixture) handle(w http.ResponseWriter, 
 			)
 			return
 		}
+		if fixture.mode == "revision_duplicate_etag" {
+			w.Header().Add("ETag", `"`+fixture.revision.StateRevision+`"`)
+			w.Header().Add("ETag", `"`+testExcelPricingRevision('b')+`"`)
+			_ = json.NewEncoder(w).Encode(fixture.revision)
+			return
+		}
+		if fixture.mode == "revision_gzip_metadata" {
+			w.Header().Set("Content-Encoding", "gzip")
+			w.Header().Set("ETag", `"`+fixture.revision.StateRevision+`"`)
+			_ = json.NewEncoder(w).Encode(fixture.revision)
+			return
+		}
 		w.Header().Set("ETag", `"`+fixture.revision.StateRevision+`"`)
 		if fixture.mode == "revision_empty_body" {
 			return
@@ -1578,7 +1799,7 @@ func (fixture *excelPricingRemoteSnapshotFixture) handle(w http.ResponseWriter, 
 			fixture.mode == "payload_wrong_content_type" ||
 			fixture.mode == "payload_empty_body" || fixture.mode == "payload_oversized_body" ||
 			fixture.mode == "payload_present_empty_etag" || fixture.mode == "payload_duplicate_etag" ||
-			fixture.mode == "payload_wrong_strong_etag" ||
+			fixture.mode == "payload_wrong_strong_etag" || fixture.mode == "payload_gzip_metadata" ||
 			strings.HasPrefix(fixture.mode, "payload_missing_etag_") {
 			w.WriteHeader(http.StatusOK)
 			_ = json.NewEncoder(w).Encode(build)
@@ -1663,6 +1884,9 @@ func (fixture *excelPricingRemoteSnapshotFixture) handle(w http.ResponseWriter, 
 				w.Header().Add("ETag", `"`+fixture.payload.Digest+`"`)
 				w.Header().Add("ETag", `"`+fixture.payload.Digest+`"`)
 				w.WriteHeader(http.StatusNotModified)
+			case "payload_missing_etag_gzip_confirmation":
+				w.Header().Set("Content-Encoding", "gzip")
+				w.WriteHeader(http.StatusNotModified)
 			default:
 				http.Error(w, "unknown missing ETag mode", http.StatusInternalServerError)
 			}
@@ -1688,6 +1912,12 @@ func (fixture *excelPricingRemoteSnapshotFixture) handle(w http.ResponseWriter, 
 			fixture.writeIdentityBoundRepresentation(
 				w, r, fixture.payloadBody, fixture.payload.Digest, "payload",
 			)
+			return
+		}
+		if fixture.mode == "payload_gzip_metadata" {
+			w.Header().Set("Content-Encoding", "gzip")
+			w.Header().Set("ETag", `"`+fixture.payload.Digest+`"`)
+			_, _ = w.Write(fixture.payloadBody)
 			return
 		}
 		if fixture.badETag {
