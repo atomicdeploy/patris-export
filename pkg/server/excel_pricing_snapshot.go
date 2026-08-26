@@ -2885,6 +2885,11 @@ func validExcelPricingSnapshotFailure(stage, code string) bool {
 			code == "snapshot_payload_rows_or_reconciliation_failed" ||
 			code == "snapshot_payload_integrity_metadata_failed" ||
 			code == "snapshot_payload_digest_failed" ||
+			strings.HasPrefix(code, "snapshot_payload_page_digest_") ||
+			code == "snapshot_payload_page_revisions_digest_mismatch" ||
+			code == "snapshot_payload_catalog_metadata_digest_mismatch" ||
+			code == "snapshot_payload_state_digest_mismatch" ||
+			code == "snapshot_payload_snapshot_digest_mismatch" ||
 			code == "snapshot_payload_protocol_failed" ||
 			code == "snapshot_payload_configuration_failed" ||
 			code == "snapshot_payload_unavailable"

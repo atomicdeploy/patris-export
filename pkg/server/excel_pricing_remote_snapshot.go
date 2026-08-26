@@ -1354,6 +1354,10 @@ func validateExcelPricingRemoteSnapshotPayload(
 		return excelPricingRemoteSnapshotIntegrityFailure("integrity_metadata_failed")
 	}
 	if err := verifyExcelPricingRemoteSnapshotDigests(payload); err != nil {
+		var integrityErr *excelPricingRemoteSnapshotIntegrityError
+		if errors.As(err, &integrityErr) {
+			return err
+		}
 		return excelPricingRemoteSnapshotIntegrityFailure("digest_failed")
 	}
 	return nil
@@ -1470,21 +1474,21 @@ func verifyExcelPricingRemoteSnapshotDigests(payload excelPricingRemoteSnapshotP
 			Rows []json.RawMessage `json:"rows"`
 		}{page, payload.Catalog.Rows[start:end]})
 		if err != nil {
-			return errExcelPricingRemoteSnapshotIntegrity
+			return excelPricingRemoteSnapshotIntegrityFailure("page_digest_encoding_failed")
 		}
 		pageDigests = append(pageDigests, excelPricingSnapshotDigest(pageBody))
 	}
 	if len(pageDigests) != len(payload.PageDigests) {
-		return errExcelPricingRemoteSnapshotIntegrity
+		return excelPricingRemoteSnapshotIntegrityFailure("page_digest_count_failed")
 	}
 	for index := range pageDigests {
 		if pageDigests[index] != payload.PageDigests[index] {
-			return errExcelPricingRemoteSnapshotIntegrity
+			return excelPricingRemoteSnapshotIntegrityFailure("page_digest_mismatch")
 		}
 	}
 	pageRevisionBody, _ := marshalExcelPricingRemoteSnapshotJSON(payload.PageDigests)
 	if excelPricingSnapshotDigest(pageRevisionBody) != payload.Integrity.PageRevisionsDigest {
-		return errExcelPricingRemoteSnapshotIntegrity
+		return excelPricingRemoteSnapshotIntegrityFailure("page_revisions_digest_mismatch")
 	}
 	catalogMetadataBody, _ := marshalExcelPricingRemoteSnapshotJSON(struct {
 		DatasetRevision string          `json:"dataset_revision"`
@@ -1493,7 +1497,7 @@ func verifyExcelPricingRemoteSnapshotDigests(payload excelPricingRemoteSnapshotP
 		RowCount        int             `json:"row_count"`
 	}{payload.DatasetRevision, payload.Catalog.Columns, payload.Reconciliation, payload.RowCount})
 	if excelPricingSnapshotDigest(catalogMetadataBody) != payload.Integrity.CatalogMetadataDigest {
-		return errExcelPricingRemoteSnapshotIntegrity
+		return excelPricingRemoteSnapshotIntegrityFailure("catalog_metadata_digest_mismatch")
 	}
 	pricingRevision, _ := json.Marshal(payload.PricingStateRevision)
 	stateBody, _ := marshalExcelPricingRemoteSnapshotJSON([]json.RawMessage{
@@ -1502,7 +1506,7 @@ func verifyExcelPricingRemoteSnapshotDigests(payload excelPricingRemoteSnapshotP
 		mustMarshalExcelPricingRemoteSnapshotJSON(payload.MutationGuard),
 	})
 	if excelPricingSnapshotDigest(stateBody) != payload.Integrity.StateDigest {
-		return errExcelPricingRemoteSnapshotIntegrity
+		return excelPricingRemoteSnapshotIntegrityFailure("state_digest_mismatch")
 	}
 	snapshotBody, _ := marshalExcelPricingRemoteSnapshotJSON(struct {
 		SchemaVersion         int               `json:"schema_version"`
@@ -1525,7 +1529,7 @@ func verifyExcelPricingRemoteSnapshotDigests(payload excelPricingRemoteSnapshotP
 		payload.Reconciliation, payload.Settings, payload.PageDigests, payload.Catalog.Rows,
 	})
 	if excelPricingSnapshotDigest(snapshotBody) != payload.Digest {
-		return errExcelPricingRemoteSnapshotIntegrity
+		return excelPricingRemoteSnapshotIntegrityFailure("snapshot_digest_mismatch")
 	}
 	return nil
 }
