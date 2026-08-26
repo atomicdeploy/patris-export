@@ -86,9 +86,36 @@ try {
     $writebackMacro = "'$bookName'!ProductCatalogSync.ValidatePricingWritebackUIForValidation"
 
     $initialRows = [int]$table.ListRows.Count
+    if ($initialRows -eq 0) {
+        Write-Host 'stage=populate_live_data'
+        [void]$excel.Run("'$bookName'!ProductCatalogSync.RefreshAllDataForValidation")
+        $syncDeadline = [DateTime]::UtcNow.AddMinutes(5)
+        $idle = $false
+        while (-not $idle -and [DateTime]::UtcNow -lt $syncDeadline) {
+            try {
+                $idle = [bool]$excel.Run("'$bookName'!ProductCatalogSync.AsyncPricingIdleForValidation")
+            }
+            catch {
+                $idle = $false
+            }
+            if (-not $idle) {
+                Start-Sleep -Milliseconds 100
+            }
+        }
+        if (-not $idle) {
+            try { [void]$excel.Run("'$bookName'!ProductCatalogSync.CancelActivePricingOperations") } catch {}
+            throw 'Live population did not finish within five minutes.'
+        }
+        if (-not [bool]$excel.Run("'$bookName'!ProductCatalogSync.LastPricingOperationSucceededForValidation")) {
+            $syncError = [string]$excel.Run("'$bookName'!ProductCatalogSync.LastPricingOperationErrorForValidation")
+            $syncDiagnostic = [string]$excel.Run("'$bookName'!ProductCatalogSync.LastPricingOperationDiagnosticForValidation")
+            throw "Live population failed: $syncError; diagnostic=$syncDiagnostic"
+        }
+        $initialRows = [int]$table.ListRows.Count
+    }
     $initialAddress = [string]$table.Range.Address($false, $false)
-    if ($initialRows -ne 972) {
-        throw "Expected 972 rows; found $initialRows."
+    if ($initialRows -lt 1 -or $initialRows -gt 2000) {
+        throw "Expected a populated bounded table (1..2000 rows); found $initialRows."
     }
     Write-Host 'stage=initialize_progress'
     [void]$excel.Run($progressInitializeMacro)
