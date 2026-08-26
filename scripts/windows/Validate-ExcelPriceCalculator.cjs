@@ -1912,8 +1912,6 @@ function Test-ProductSearch(
         $focusMacro = "'$macroBookName'!ProductCatalogSync.FocusProductSearch"
         $registerMacro = "'$macroBookName'!ProductCatalogSync.RegisterSearchHotkey"
         $unregisterMacro = "'$macroBookName'!ProductCatalogSync.UnregisterSearchHotkey"
-        $refreshEnterMacro = "'$macroBookName'!ProductCatalogSync.RefreshSearchEnterHotkey"
-        $enterMacro = "'$macroBookName'!ProductCatalogSync.HandleProductSearchEnter"
         $clearMacro = "'$macroBookName'!ProductCatalogSync.ClearProductSearch"
         $baseCaption = [Convert]::ToString(
             $searchButton.TextFrame2.TextRange.Text,
@@ -1933,11 +1931,12 @@ function Test-ProductSearch(
         } finally {
             $excel.EnableEvents = $eventsWereEnabled
         }
-        [void]$excel.Run($refreshEnterMacro)
-        [void]$excel.Run($enterMacro)
+        # Invoke the search only from this top-level validator frame. The
+        # workbook's physical Enter handler is intentionally deferred through
+        # OnTime so it cannot be used as a synchronous automation shortcut.
+        [void]$excel.Run($searchMacro)
         $first = Read-SearchButtonState $excel $searchButton $table $expectedScrollColumn
-        [void]$excel.Run($refreshEnterMacro)
-        [void]$excel.Run($enterMacro)
+        [void]$excel.Run($searchMacro)
         $second = Read-SearchButtonState $excel $searchButton $table $expectedScrollColumn
 
         $wrap = $null
