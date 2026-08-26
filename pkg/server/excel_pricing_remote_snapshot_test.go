@@ -1626,7 +1626,25 @@ func (fixture *excelPricingRemoteSnapshotFixture) handle(w http.ResponseWriter, 
 	case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/wp-json/digitalogic/pricing/sync/builds/"):
 		fixture.mu.Lock()
 		fixture.statusCalls++
+		statusCalls := fixture.statusCalls
 		fixture.mu.Unlock()
+		if fixture.mode == "poll_ready" {
+			w.Header().Set("Content-Type", "application/json")
+			build := fixture.buildResponse()
+			if statusCalls < 2 {
+				build.Status = "running"
+				build.SnapshotToken = ""
+				build.Revision = ""
+				build.SnapshotRevision = ""
+				build.Digest = ""
+				build.SnapshotURL = ""
+				w.WriteHeader(http.StatusAccepted)
+			} else {
+				w.WriteHeader(http.StatusOK)
+			}
+			_ = json.NewEncoder(w).Encode(build)
+			return
+		}
 		http.Error(w, "status polling forbidden", http.StatusTeapot)
 	case r.Method == http.MethodDelete && r.URL.Path == "/wp-json/digitalogic/pricing/sync/builds/"+fixture.buildID:
 		fixture.mu.Lock()
