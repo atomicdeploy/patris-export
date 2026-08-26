@@ -767,7 +767,7 @@ func TestExcelPricingRemoteSnapshotCollectAnnotatesEveryRemoteStage(t *testing.T
 		fixture.finalizePayload()
 		_, err := fixture.Client(t).Collect(context.Background(), fixture.requestID, 60)
 		assertStage(t, err, excelPricingRemoteSnapshotStageSnapshotPayload,
-			"snapshot_payload_integrity_failed")
+			"snapshot_payload_columns_failed")
 	})
 }
 
@@ -792,6 +792,8 @@ func TestExcelPricingRemoteSnapshotStageCodeCoversConfigurationAndTransportClass
 			errExcelPricingRemoteSnapshotConfiguration, "snapshot_payload_configuration_failed"},
 		{"payload transport", excelPricingRemoteSnapshotStageSnapshotPayload,
 			errExcelPricingRemoteSnapshotUnavailable, "snapshot_payload_unavailable"},
+		{"payload exact integrity boundary", excelPricingRemoteSnapshotStageSnapshotPayload,
+			excelPricingRemoteSnapshotIntegrityFailure("digest_failed"), "snapshot_payload_digest_failed"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			err := wrapExcelPricingRemoteSnapshotStage(test.stage, test.cause)
@@ -942,6 +944,7 @@ func TestExcelPricingSnapshotFailureEvidenceRejectsUnreviewedValues(t *testing.T
 		{excelPricingRemoteSnapshotStageTerminalMatch, "snapshot_terminal_match_failed"},
 		{excelPricingRemoteSnapshotStageRemoteTerminal, "snapshot_remote_terminal_failed"},
 		{excelPricingRemoteSnapshotStageSnapshotPayload, "snapshot_payload_integrity_failed"},
+		{excelPricingRemoteSnapshotStageSnapshotPayload, "snapshot_payload_digest_failed"},
 		{excelPricingSnapshotStageRemoteConfiguration, "snapshot_remote_configuration_failed"},
 		{excelPricingSnapshotStageLocalProjection, "snapshot_local_projection_integrity_failed"},
 	} {

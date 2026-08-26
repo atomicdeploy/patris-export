@@ -2879,6 +2879,12 @@ func validExcelPricingSnapshotFailure(stage, code string) bool {
 		return code == "snapshot_remote_terminal_failed"
 	case excelPricingRemoteSnapshotStageSnapshotPayload:
 		return code == "snapshot_payload_integrity_failed" ||
+			code == "snapshot_payload_shape_or_counts_failed" ||
+			code == "snapshot_payload_mutation_guard_failed" ||
+			code == "snapshot_payload_columns_failed" ||
+			code == "snapshot_payload_rows_or_reconciliation_failed" ||
+			code == "snapshot_payload_integrity_metadata_failed" ||
+			code == "snapshot_payload_digest_failed" ||
 			code == "snapshot_payload_protocol_failed" ||
 			code == "snapshot_payload_configuration_failed" ||
 			code == "snapshot_payload_unavailable"

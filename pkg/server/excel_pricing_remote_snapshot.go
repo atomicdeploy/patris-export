@@ -64,6 +64,26 @@ type excelPricingRemoteSnapshotStageError struct {
 	cause error
 }
 
+// excelPricingRemoteSnapshotIntegrityError keeps the public response safe
+// while making the failed integrity boundary actionable in the local job
+// status. The code contains no payload data and is suitable for workbook
+// diagnostics and support logs.
+type excelPricingRemoteSnapshotIntegrityError struct {
+	code string
+}
+
+func (err *excelPricingRemoteSnapshotIntegrityError) Error() string {
+	return "remote pricing snapshot integrity validation failed: " + err.code
+}
+
+func (err *excelPricingRemoteSnapshotIntegrityError) Unwrap() error {
+	return errExcelPricingRemoteSnapshotIntegrity
+}
+
+func excelPricingRemoteSnapshotIntegrityFailure(code string) error {
+	return &excelPricingRemoteSnapshotIntegrityError{code: code}
+}
+
 func (err *excelPricingRemoteSnapshotStageError) Error() string {
 	if err == nil {
 		return "remote pricing snapshot stage failed"
@@ -126,6 +146,10 @@ func excelPricingRemoteSnapshotStageCode(stage string, cause error) string {
 	case excelPricingRemoteSnapshotStageRemoteTerminal:
 		return "snapshot_remote_terminal_failed"
 	case excelPricingRemoteSnapshotStageSnapshotPayload:
+		var integrityErr *excelPricingRemoteSnapshotIntegrityError
+		if errors.As(cause, &integrityErr) && integrityErr != nil && integrityErr.code != "" {
+			return "snapshot_payload_" + integrityErr.code
+		}
 		switch {
 		case errors.Is(cause, errExcelPricingRemoteSnapshotIntegrity):
 			return "snapshot_payload_integrity_failed"
@@ -1302,20 +1326,20 @@ func validateExcelPricingRemoteSnapshotPayload(
 		payload.Catalog.Pagination.Page != 1 || payload.Catalog.Pagination.Limit != payload.PageSize ||
 		payload.Catalog.Pagination.Total != payload.RowCount ||
 		payload.Catalog.Pagination.Pages != payload.PageCount || payload.Catalog.Pagination.HasMore {
-		return errExcelPricingRemoteSnapshotIntegrity
+		return excelPricingRemoteSnapshotIntegrityFailure("shape_or_counts_failed")
 	}
 	if payload.MutationGuard.ExpectedStateRevision != payload.PricingStateRevision ||
 		payload.MutationGuard.ExpectedStateRevision == payload.StateRevision ||
 		!validExcelPricingRemoteSnapshotMutation(payload.MutationGuard) {
-		return errExcelPricingRemoteSnapshotIntegrity
+		return excelPricingRemoteSnapshotIntegrityFailure("mutation_guard_failed")
 	}
 	if err := validateExcelPricingRemoteSnapshotColumns(payload.Catalog.Columns); err != nil {
-		return err
+		return excelPricingRemoteSnapshotIntegrityFailure("columns_failed")
 	}
 	reconciliation, err := validateExcelPricingRemoteSnapshotRows(payload.Catalog.Rows,
 		payload.Reconciliation, payload.Catalog.Reconciliation, source, payload.RowCount)
 	if err != nil {
-		return err
+		return excelPricingRemoteSnapshotIntegrityFailure("rows_or_reconciliation_failed")
 	}
 	if payload.Integrity.Algorithm != "sha256" ||
 		payload.Integrity.PayloadDigest != payload.Digest ||
@@ -1327,10 +1351,10 @@ func validateExcelPricingRemoteSnapshotPayload(
 		payload.Integrity.WarningCount != len(reconciliation.Warnings) ||
 		!validExcelPricingRemoteRevisionParts(payload.Integrity.StateDigest,
 			payload.Integrity.CatalogMetadataDigest, payload.Integrity.PageRevisionsDigest) {
-		return errExcelPricingRemoteSnapshotIntegrity
+		return excelPricingRemoteSnapshotIntegrityFailure("integrity_metadata_failed")
 	}
 	if err := verifyExcelPricingRemoteSnapshotDigests(payload); err != nil {
-		return err
+		return excelPricingRemoteSnapshotIntegrityFailure("digest_failed")
 	}
 	return nil
 }
