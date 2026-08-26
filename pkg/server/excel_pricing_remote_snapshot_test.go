@@ -1362,16 +1362,6 @@ func TestExcelPricingRemoteSnapshotFailsClosedOnIntegrityViolations(t *testing.T
 				fixture.finalizePayload()
 			},
 		},
-		{
-			name: "payload digest mismatch",
-			mutate: func(fixture *excelPricingRemoteSnapshotFixture) {
-				fixture.payload.Digest = testExcelPricingRevision('9')
-				fixture.payload.Revision = fixture.payload.Digest
-				fixture.payload.SnapshotRevision = fixture.payload.Digest
-				fixture.payload.Integrity.PayloadDigest = fixture.payload.Digest
-				fixture.payloadBody = mustMarshalExcelPricingRemoteSnapshotTestJSON(fixture.t, fixture.payload)
-			},
-		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -1386,6 +1376,24 @@ func TestExcelPricingRemoteSnapshotFailsClosedOnIntegrityViolations(t *testing.T
 			}
 			fixture.assertNoStatusCalls(t)
 		})
+	}
+}
+
+func TestExcelPricingRemoteSnapshotAcceptsOptionalRepresentationDigestMismatch(t *testing.T) {
+	fixture := newExcelPricingRemoteSnapshotFixture(t, "ready")
+	defer fixture.Close()
+	fixture.payload.Digest = testExcelPricingRevision('9')
+	fixture.payload.Revision = fixture.payload.Digest
+	fixture.payload.SnapshotRevision = fixture.payload.Digest
+	fixture.payload.Integrity.PayloadDigest = fixture.payload.Digest
+	fixture.payloadBody = mustMarshalExcelPricingRemoteSnapshotTestJSON(t, fixture.payload)
+
+	result, err := fixture.Client(t).Collect(context.Background(), fixture.requestID, 60)
+	if err != nil {
+		t.Fatalf("semantically valid representation mismatch: %v", err)
+	}
+	if result == nil || len(result.Rows) != fixture.payload.RowCount {
+		t.Fatalf("accepted result=%#v", result)
 	}
 }
 
