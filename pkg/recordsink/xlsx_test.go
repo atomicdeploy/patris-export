@@ -1591,7 +1591,7 @@ func TestDynamicCalculatorVBASourceGuardsLivePricingBeforeMutation(t *testing.T)
 		t.Fatal("routine no-result search status must remain inline and never open a modal dialog")
 	}
 	for _, required := range []string{
-		"If mCatalogCommitInProgress Or mSearchInProgress Then Exit Sub",
+		"If SearchOperationBusy() Then",
 		"mSearchInProgress = True",
 		"Application.EnableCancelKey = xlErrorHandler",
 		`SetSearchButtonCaption T("search_button") & " (0)"`,
