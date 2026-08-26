@@ -1800,6 +1800,22 @@ Private Sub HandleSnapshotWaitResponse(ByVal statusCode As Long, _
     SetSnapshotProgress mSnapshotCompletedPages, mSnapshotTotalPages, _
         mSnapshotRowCount
     If mSnapshotJobStatus <> "ready" Then
+        If LCase$(Trim$(mSnapshotJobCode)) = _
+           "snapshot_source_revision_conflict" And _
+           Not mOperationRepairAttempted Then
+            BeginRepairRequest
+            Exit Sub
+        End If
+        If IsSnapshotDriftCode(mSnapshotJobCode) And _
+           mOperationSnapshotRetryCount < 3 Then
+            mOperationSnapshotRetryCount = mOperationSnapshotRetryCount + 1
+            mSourceID = vbNullString
+            mSourceDataset = vbNullString
+            mSourceRevision = vbNullString
+            mOperationContractStartedAt = PhaseTimestamp()
+            BeginContractRequest "contract"
+            Exit Sub
+        End If
         RaiseSnapshotJobFailure mSnapshotJobCode
     End If
     BeginSnapshotPayloadRequest
@@ -4492,11 +4508,30 @@ Private Sub RaiseSnapshotJobFailure(ByVal errorCode As String)
     End Select
 End Sub
 
+Private Function IsSnapshotDriftCode(ByVal errorCode As String) As Boolean
+    Select Case LCase$(Trim$(errorCode))
+        Case "snapshot_source_changed", "snapshot_catalog_changed", _
+             "snapshot_pricing_state_changed", "snapshot_generation_changed", _
+             "snapshot_revision_changed", _
+             "digitalogic_reconciled_snapshot_changed"
+            IsSnapshotDriftCode = True
+        Case Else
+            IsSnapshotDriftCode = False
+    End Select
+End Function
+
 Private Function FriendlySnapshotFailure(ByVal errorCode As String) As String
     Select Case LCase$(Trim$(errorCode))
         Case "remote_unavailable", "remote_not_configured", _
              "canonical_source_unavailable"
             FriendlySnapshotFailure = T("pricing_service_unavailable")
+        Case "snapshot_source_revision_conflict"
+            FriendlySnapshotFailure = T("source_changed")
+        Case "snapshot_source_changed", "snapshot_catalog_changed", _
+             "snapshot_pricing_state_changed", "snapshot_generation_changed", _
+             "snapshot_revision_changed", _
+             "digitalogic_reconciled_snapshot_changed"
+            FriendlySnapshotFailure = T("snapshot_changed")
         Case Else
             FriendlySnapshotFailure = T("sync_retry")
     End Select
@@ -7860,6 +7895,10 @@ Private Function T(ByVal key As String) As String
             T = U("064206270644062800200641062706CC0644002006450639062A062806310020064606CC0633062A002E")
         Case "source_sync_failed"
             T = U("0647064506AF06270645200C06330627063206CC002006450646062806390020062F0627062F0647002006270646062C06270645002006460634062F002E")
+        Case "source_changed"
+            T = U("062F0627062F0647200C0647062706CC0020067E0627062A063106CC063300200647064606AF0627064500200647064506AF06270645200C06330627063206CC0020062A063A06CC06CC0631002006A90631062F061B002006280627063206CC0627062806CC0020062E0648062F06A906270631002006A9062706450644002006460634062F002E0020062F064806280627063106470020062A064406270634002006A9064606CC062F002E")
+        Case "snapshot_changed"
+            T = U("062F0627062F0647200C0647062706CC0020064206CC0645062A0020062F06310020062D06CC064600200647064506AF06270645200C06330627063206CC0020062A063A06CC06CC0631002006A90631062F002E002006280631062706CC0020062D06410638002006330627063206AF0627063106CC060C0020062F0627062F0647002006460627064206350020064806270631062F002006460634062F061B0020062F064806280627063106470020062A064406270634002006A9064606CC062F002E")
         Case "price_missing"
             T = U("064206CC0645062A00200645062D0627063306280647002006460634062F")
         Case "woo_missing"

@@ -39,11 +39,12 @@ const (
 )
 
 var (
-	errExcelPricingRemoteSnapshotConfiguration = errors.New("remote pricing snapshot configuration is invalid")
-	errExcelPricingRemoteSnapshotProtocol      = errors.New("remote pricing snapshot protocol violation")
-	errExcelPricingRemoteSnapshotIntegrity     = errors.New("remote pricing snapshot integrity validation failed")
-	errExcelPricingRemoteSnapshotRejected      = errors.New("remote pricing snapshot request was rejected")
-	errExcelPricingRemoteSnapshotUnavailable   = errors.New("remote pricing snapshot is unavailable")
+	errExcelPricingRemoteSnapshotConfiguration  = errors.New("remote pricing snapshot configuration is invalid")
+	errExcelPricingRemoteSnapshotProtocol       = errors.New("remote pricing snapshot protocol violation")
+	errExcelPricingRemoteSnapshotIntegrity      = errors.New("remote pricing snapshot integrity validation failed")
+	errExcelPricingRemoteSnapshotRejected       = errors.New("remote pricing snapshot request was rejected")
+	errExcelPricingRemoteSnapshotSourceConflict = errors.New("remote pricing snapshot source revision is behind the current Patris source")
+	errExcelPricingRemoteSnapshotUnavailable    = errors.New("remote pricing snapshot is unavailable")
 
 	excelPricingRemoteSnapshotIdentifierPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$`)
 )
@@ -86,6 +87,8 @@ func excelPricingRemoteSnapshotStageCode(stage string, cause error) string {
 	switch stage {
 	case excelPricingRemoteSnapshotStageRevisionFetch:
 		switch {
+		case errors.Is(cause, errExcelPricingRemoteSnapshotSourceConflict):
+			return "snapshot_source_revision_conflict"
 		case errors.Is(cause, errExcelPricingRemoteSnapshotProtocol),
 			errors.Is(cause, errExcelPricingRemoteSnapshotIntegrity):
 			return "snapshot_revision_fetch_protocol_failed"
@@ -707,6 +710,19 @@ func (client *excelPricingRemoteSnapshotClient) fetchRevision(
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
+		if response.StatusCode == http.StatusConflict &&
+			excelPricingRemoteJSONContentType(response.Header.Get("Content-Type")) {
+			body, readErr := readExcelPricingRemoteSnapshotBody(response.Body, excelPricingRemoteRevisionMaxBytes)
+			if readErr == nil {
+				var remoteError struct {
+					Code string `json:"code"`
+				}
+				if json.Unmarshal(body, &remoteError) == nil &&
+					remoteError.Code == "digitalogic_pricing_snapshot_source_revision_conflict" {
+					return excelPricingRemoteSnapshotRevision{}, errExcelPricingRemoteSnapshotSourceConflict
+				}
+			}
+		}
 		return excelPricingRemoteSnapshotRevision{}, errExcelPricingRemoteSnapshotUnavailable
 	}
 	if !excelPricingRemoteJSONContentType(response.Header.Get("Content-Type")) {

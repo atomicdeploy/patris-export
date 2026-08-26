@@ -2024,6 +2024,8 @@ func excelPricingRemoteSnapshotFailureCode(ctx context.Context, err error) strin
 			return excelPricingSnapshotContextCode(ctx)
 		}
 		return "remote_unavailable"
+	case errors.Is(err, errExcelPricingRemoteSnapshotSourceConflict):
+		return "snapshot_source_revision_conflict"
 	case errors.Is(err, errExcelPricingRemoteSnapshotProtocol),
 		errors.Is(err, errExcelPricingRemoteSnapshotIntegrity):
 		return "snapshot_integrity_failed"
