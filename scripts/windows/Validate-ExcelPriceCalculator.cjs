@@ -1037,9 +1037,20 @@ ${processSafetyPowerShell}
 
 $candidatePath = $env:PATRIS_VALIDATOR_CANDIDATE
 $referencePath = $env:PATRIS_VALIDATOR_REFERENCE
+$stagePath = $env:PATRIS_VALIDATOR_STAGE_PATH
 $runSync = $env:PATRIS_VALIDATOR_SYNC -eq '1'
 $validationTimeoutMilliseconds = [int]$env:PATRIS_VALIDATOR_TIMEOUT_MS
 $invariant = [System.Globalization.CultureInfo]::InvariantCulture
+
+function Set-ValidatorStage([string]$stage, [string]$detail = '') {
+    if ([string]::IsNullOrWhiteSpace($stagePath)) { return }
+    $payload = [ordered]@{
+        stage = $stage
+        detail = $detail
+        updated_at_utc = [DateTime]::UtcNow.ToString('o')
+    } | ConvertTo-Json -Compress
+    [IO.File]::WriteAllText($stagePath, $payload, [Text.UTF8Encoding]::new($false))
+}
 
 function Release-ComObject([object]$value) {
     try {
@@ -1357,10 +1368,13 @@ function Test-FontAudit([object]$excel, [object]$book) {
             $priceColumn = $priceDataRange.Cells.Item(1, 1)
         }
         $macro = "'$($book.Name.Replace("'", "''"))'!ProductCatalogSync.AuditFontsForValidation"
+        Set-ValidatorStage 'font_audit_macro'
         $passed = [bool]$excel.Run($macro)
         $dialogMacro = "'$($book.Name.Replace("'", "''"))'!ProductCatalogSync.AuditMessageDialogForValidation"
         $friendlyMacro = "'$($book.Name.Replace("'", "''"))'!ProductCatalogSync.FriendlyStatusErrorForValidation"
+        Set-ValidatorStage 'font_dialog_fixture'
         $dialogPassed = [bool]$excel.Run($dialogMacro)
+        Set-ValidatorStage 'font_friendly_error_fixture'
         $friendlyError = [Convert]::ToString(
             $excel.Run(
                 $friendlyMacro,
@@ -1369,6 +1383,7 @@ function Test-FontAudit([object]$excel, [object]$book) {
             $invariant
         )
         $policyFixtureMacro = "'$($book.Name.Replace("'", "''"))'!ProductCatalogSync.ValidateFontPolicyFixturesForValidation"
+        Set-ValidatorStage 'font_policy_fixtures'
         $policyFixturesPassed = [bool]$excel.Run($policyFixtureMacro)
         $savedPersianFont = $settings.Range('B39').Value2
         $savedAuditMode = $settings.Range('B41').Value2
@@ -1382,6 +1397,7 @@ function Test-FontAudit([object]$excel, [object]$book) {
             $savedPriceFont = $priceColumn.Font.Name
             $applyPriceFontMacro = "'$($book.Name.Replace("'", "''"))'!ProductCatalogSync.ApplyPriceDisplayFontSetting"
             $settings.Range('B44').Value2 = 'بله'
+            Set-ValidatorStage 'font_apply_fanum'
             [void]$excel.Run($applyPriceFontMacro)
             $faNumEnabled = [Convert]::ToString(
                 $priceColumn.Font.Name,
@@ -1432,15 +1448,18 @@ function Test-FontAudit([object]$excel, [object]$book) {
                 }
             }
             $settings.Range('B44').Value2 = 'خیر'
+            Set-ValidatorStage 'font_apply_segoe'
             [void]$excel.Run($applyPriceFontMacro)
             $faNumDisabled = [Convert]::ToString(
                 $priceColumn.Font.Name,
                 $invariant
             ) -eq 'Segoe UI'
             $settings.Range('B44').Value2 = 'بله'
+            Set-ValidatorStage 'font_reapply_fanum'
             [void]$excel.Run($applyPriceFontMacro)
             $priceColumn.Font.Name = 'Arial'
             $repairMacro = "'$($book.Name.Replace("'", "''"))'!ProductCatalogSync.RepairFontDriftForValidation"
+            Set-ValidatorStage 'font_repair_drift'
             $driftRepaired = [bool]$excel.Run($repairMacro) -and
                 [Convert]::ToString($priceColumn.Font.Name, $invariant) -eq 'Yekan Bakh FaNum'
         }
@@ -1478,6 +1497,7 @@ function Test-FontAudit([object]$excel, [object]$book) {
                 $settings.Range('B44').Value2 = $savedPriceDisplayFaNum
                 if ($null -ne $priceColumn) {
                     $restorePriceFontMacro = "'$($book.Name.Replace("'", "''"))'!ProductCatalogSync.ApplyPriceDisplayFontSetting"
+                    Set-ValidatorStage 'font_restore_original'
                     [void]$excel.Run($restorePriceFontMacro)
                 }
             }
@@ -2517,6 +2537,7 @@ $syncSucceeded = $false
 $syncOperation = ''
 $syncError = ''
 try {
+    Set-ValidatorStage 'creating_excel'
     $validatorJobHandle = New-ValidatorKillOnCloseJob
     $excel = New-Object -ComObject Excel.Application
     $excelProcessIdentity = Get-ExcelProcessIdentity $excel
@@ -2537,6 +2558,7 @@ try {
     # macro here made the remaining validation path impossible by definition.
     $excel.AutomationSecurity = 1
 
+    Set-ValidatorStage 'opening_candidate' $candidatePath
     if ([IO.Path]::GetExtension($candidatePath).ToLowerInvariant() -eq '.xltm') {
         $workbooks = $excel.Workbooks
         $candidateBook = $workbooks.Add($candidatePath)
@@ -2546,8 +2568,10 @@ try {
     }
     Release-ComObject $workbooks
     $workbooks = $null
+    Set-ValidatorStage 'candidate_opened' ([string]$candidateBook.Name)
 
     if ($runSync) {
+        Set-ValidatorStage 'starting_live_sync'
         $macroBookName = ([string]$candidateBook.Name).Replace("'", "''")
         [void]$excel.Run(
             "'$macroBookName'!ProductCatalogSync.RefreshAllDataForValidation"
@@ -2595,7 +2619,9 @@ try {
             )
             throw "Live synchronization '$syncOperation' failed before validation: $syncFailureStatus $syncError"
         }
+        Set-ValidatorStage 'live_sync_completed' $syncOperation
     }
+    Set-ValidatorStage 'calculating_candidate'
     $excel.CalculateFullRebuild()
     Reset-SelectedProductRow $excel $candidateBook
     $candidateSyncStatus = [Convert]::ToString(
@@ -2607,17 +2633,28 @@ try {
         $invariant
     )
 
+    Set-ValidatorStage 'checking_branding'
     $brandingLayout = Test-BrandingLayout $candidateBook
+    Set-ValidatorStage 'checking_literal_search'
     $searchLiteral = Test-SearchLiteralText $excel $candidateBook
+    Set-ValidatorStage 'checking_status_summary'
     $statusSummary = Test-StatusSummaryFormatter $excel $candidateBook
+    Set-ValidatorStage 'reading_candidate_products'
     $candidateProducts = Read-Products $candidateBook
+    Set-ValidatorStage 'checking_title_direction'
     $titleDirection = Test-ProductTitleDirection $candidateBook
+    Set-ValidatorStage 'checking_fonts'
     $fontAudit = Test-FontAudit $excel $candidateBook
+    Set-ValidatorStage 'checking_writeback_ui'
     $pricingWritebackUI = Test-PricingWritebackUI $excel $candidateBook
+    Set-ValidatorStage 'checking_progress_ui'
     $pricingProgressUI = Test-PricingProgressUI $excel $candidateBook
+    Set-ValidatorStage 'checking_product_search'
     $candidateSearch = Test-ProductSearch $excel $candidateBook $candidateProducts.Rows
+    Set-ValidatorStage 'checking_search_crash_regression'
     $searchRegression = Test-SearchCrashRegression $excel $candidateBook
     Reset-SelectedProductRow $excel $candidateBook
+    Set-ValidatorStage 'reading_candidate_sync_data'
     $candidateSyncData = Read-SyncData $candidateBook
     $candidateConfig = [pscustomobject]@{
         autoSyncOnOpen = [Convert]::ToString(
@@ -2633,13 +2670,16 @@ try {
         cardShipping = Numeric-Or-Null (Table-Scalar $candidateBook 'Shipping')
         cardProfit = Numeric-Or-Null (Table-Scalar $candidateBook 'Profit')
     }
+    Set-ValidatorStage 'checking_workbook_errors'
     $errors = Workbook-Errors $candidateBook
 
     $excel.AutomationSecurity = 3
+    Set-ValidatorStage 'opening_reference' $referencePath
     $workbooks = $excel.Workbooks
     $referenceBook = $workbooks.Open($referencePath, 0, $true)
     Release-ComObject $workbooks
     $workbooks = $null
+    Set-ValidatorStage 'reading_reference_products'
     $referenceProducts = Read-Products $referenceBook
     $referenceConfig = [pscustomobject]@{
         yuan = Numeric-Or-Null (Table-Scalar $referenceBook 'Yuan_Price')
@@ -2647,6 +2687,7 @@ try {
         profit = Numeric-Or-Null (Table-Scalar $referenceBook 'Profit')
     }
 
+    Set-ValidatorStage 'comparing_candidate_reference'
     $candidateDictionary = Row-Dictionary $candidateProducts.Rows
     $candidateProductDictionary = ProductCode-Dictionary $candidateProducts.Rows
     $syncDictionary = Row-Dictionary $candidateSyncData.Rows
@@ -2928,6 +2969,7 @@ try {
         }
     }
 
+    Set-ValidatorStage 'assembling_report'
     $report = [pscustomobject]@{
         sync = [pscustomobject]@{
             requested = $runSync
@@ -3034,6 +3076,7 @@ catch {
     $validationException = $_.Exception
 }
 finally {
+    Set-ValidatorStage 'cleanup_started'
     if ($null -ne $referenceBook) {
         try {
             [void](Invoke-ExcelBusyRetry {
@@ -3131,6 +3174,7 @@ $report | Add-Member -NotePropertyName validatorExcelProcessExited -NoteProperty
 $report | Add-Member -NotePropertyName validatorExcelProcessExitCode -NotePropertyValue $excelProcessExitCode
 $report | Add-Member -NotePropertyName validatorExcelProcessStartTimeUtc -NotePropertyValue $excelProcessIdentity.StartTimeUtc.ToString('o')
 $report | Add-Member -NotePropertyName validatorExcelExecutablePath -NotePropertyValue $excelProcessIdentity.ExecutablePath
+Set-ValidatorStage 'completed'
 [Console]::Out.WriteLine(($report | ConvertTo-Json -Depth 10 -Compress))
 `;
 
@@ -3879,11 +3923,13 @@ function main() {
   const tempDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'patris-excel-validator-'));
   const powershellPath = path.join(tempDirectory, 'validate.ps1');
   const processIdentityPath = path.join(tempDirectory, 'excel-process-identity.json');
+  const stagePath = path.join(tempDirectory, 'validator-stage.json');
   let result;
   let abnormalCleanup = null;
   let abnormalCleanupError = null;
   let abnormalCleanupOutcome = null;
   let preservedRecoveryDirectory = null;
+  let lastStage = null;
   try {
     // Windows PowerShell 5.1 treats a BOM-less script as the active ANSI code
     // page. A UTF-8 BOM keeps the Persian literals used by the validator exact.
@@ -3910,6 +3956,7 @@ function main() {
             PATRIS_VALIDATOR_SYNC: options.sync ? '1' : '0',
             PATRIS_VALIDATOR_TIMEOUT_MS: String(options.timeoutMs),
             PATRIS_VALIDATOR_PROCESS_IDENTITY_PATH: processIdentityPath,
+            PATRIS_VALIDATOR_STAGE_PATH: stagePath,
           },
           maxBuffer: 16 * 1024 * 1024,
           // The user-facing deadline governs workbook validation. Keep a bounded
@@ -3938,6 +3985,9 @@ function main() {
     abnormalCleanup = abnormalCleanupOutcome.report;
     abnormalCleanupError = abnormalCleanupOutcome.error;
   } finally {
+    try {
+      if (fs.existsSync(stagePath)) lastStage = JSON.parse(fs.readFileSync(stagePath, 'utf8'));
+    } catch {}
     preservedRecoveryDirectory = finalizeValidatorTempDirectory(
       tempDirectory,
       abnormalCleanupOutcome,
@@ -3950,6 +4000,7 @@ function main() {
         + `(${options.timeoutMs} ms validation deadline plus bounded COM startup/cleanup grace)`
       : '';
     console.error(`Excel validation could not run${suffix}: ${result.error.message}`);
+    if (lastStage) console.error(`Last completed validator checkpoint: ${JSON.stringify(lastStage)}`);
     if (abnormalCleanup) {
       console.error(`Scoped Excel cleanup: ${JSON.stringify(abnormalCleanup)}`);
     }
@@ -3964,6 +4015,7 @@ function main() {
   }
   if (result.status !== 0) {
     console.error('Excel validation process failed.');
+    if (lastStage) console.error(`Last completed validator checkpoint: ${JSON.stringify(lastStage)}`);
     if (result.stderr.trim()) console.error(result.stderr.trim());
     if (result.stdout.trim()) console.error(result.stdout.trim());
     if (abnormalCleanup) {

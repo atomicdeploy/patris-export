@@ -3515,7 +3515,8 @@ Private Sub RunSynchronousWritebackStep()
     Exit Sub
 
 InvalidResponse:
-    messageText = "پاسخ نامعتبر پل در مرحله " & mWritebackStage & _
+    messageText = U("067E06270633062E00200646062706450639062A062806310020067E06440020062F0631002006450631062D064406470020") & _
+                  mWritebackStage & _
                   " (HTTP " & CStr(statusCode) & ")"
     If Len(responseText) > 0 Then
         messageText = messageText & ": " & Left$(responseText, 200)
@@ -7569,7 +7570,15 @@ Private Sub EnforceConfiguredFontsAfterRefresh()
 End Sub
 
 Public Function AuditFontsForValidation() As Boolean
+    On Error GoTo AuditFailed
     AuditFontsForValidation = AuditConfiguredFonts(True, True)
+    Exit Function
+
+AuditFailed:
+    ' A validator fixture must report failure through its return value. Letting
+    ' an expected strict-audit error escape Excel.Run opens a hidden VBE modal
+    ' and strands the out-of-process validator until its host timeout.
+    AuditFontsForValidation = False
 End Function
 
 Public Function RepairFontDriftForValidation() As Boolean
