@@ -52,3 +52,33 @@ func TestExcelPricingRemoteSnapshotSourceConflictRemainsActionableForWorkbook(t 
 		t.Fatalf("public source-conflict code = %q", got)
 	}
 }
+
+func TestExcelPricingRemoteSnapshotBypassesAmbientProxy(t *testing.T) {
+	t.Setenv(excelPricingRemoteSnapshotTestSecretEnv, "test-only-secret")
+	transport := &http.Transport{Proxy: http.ProxyFromEnvironment}
+	client, err := newExcelPricingRemoteSnapshotClient(updateout.Config{
+		Enabled:              true,
+		URL:                  "https://digitalogic.invalid/wp-json/digitalogic/patris/product-sync",
+		Format:               "json",
+		Method:               http.MethodPost,
+		Mode:                 "changes",
+		ProductSyncSecretEnv: excelPricingRemoteSnapshotTestSecretEnv,
+	}, canonical.Source{
+		ID:       "patris-office",
+		Dataset:  "kala.db",
+		Revision: testExcelPricingRevision('a'),
+	}, excelPricingRemoteSnapshotClientOptions{
+		HTTPClient: &http.Client{Transport: transport},
+		Terminals:  newExcelPricingRemoteSnapshotTerminalHub(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	direct, ok := client.client.Transport.(*http.Transport)
+	if !ok || direct.Proxy != nil {
+		t.Fatalf("snapshot HTTP transport = %#v", client.client.Transport)
+	}
+	if transport.Proxy == nil {
+		t.Fatal("source transport was mutated")
+	}
+}

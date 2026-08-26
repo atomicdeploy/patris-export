@@ -158,6 +158,27 @@ type excelPricingRemoteRevisionResponse struct {
 	PageSize              int              `json:"page_size"`
 }
 
+// excelPricingRemoteDirectTransport keeps validator-bearing pricing traffic
+// off ambient machine proxies. Some HTTP intermediaries rewrite strong ETags
+// for a gzip representation even when the request explicitly asks for
+// identity bytes, which breaks If-Match and immutable payload verification.
+// The configured destination is already restricted to HTTPS (or loopback),
+// and custom test transports remain untouched.
+func excelPricingRemoteDirectTransport(base http.RoundTripper) http.RoundTripper {
+	if base == nil {
+		transport := http.DefaultTransport.(*http.Transport).Clone()
+		transport.Proxy = nil
+		return transport
+	}
+	transport, ok := base.(*http.Transport)
+	if !ok {
+		return base
+	}
+	clone := transport.Clone()
+	clone.Proxy = nil
+	return clone
+}
+
 func newExcelPricingRemoteEventsClient(
 	cfg updateout.Config,
 	source canonical.Source,
@@ -186,6 +207,7 @@ func newExcelPricingRemoteEventsClient(
 		}
 		dialer = &copyDialer
 	}
+	dialer.Proxy = nil
 
 	httpClient := options.HTTPClient
 	if httpClient == nil {
@@ -195,6 +217,7 @@ func newExcelPricingRemoteEventsClient(
 		}
 	}
 	copyHTTPClient := *httpClient
+	copyHTTPClient.Transport = excelPricingRemoteDirectTransport(copyHTTPClient.Transport)
 	// Never forward the machine credential to a redirected host or path.
 	copyHTTPClient.CheckRedirect = func(*http.Request, []*http.Request) error {
 		return http.ErrUseLastResponse

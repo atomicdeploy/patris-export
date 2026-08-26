@@ -338,6 +338,38 @@ func TestExcelPricingRemoteEventsReconnectUsesCursorAndConditionalRevisionGETWit
 	}
 }
 
+func TestExcelPricingRemoteClientsBypassAmbientProxy(t *testing.T) {
+	transport := &http.Transport{Proxy: http.ProxyFromEnvironment}
+	direct, ok := excelPricingRemoteDirectTransport(transport).(*http.Transport)
+	if !ok || direct == transport || direct.Proxy != nil {
+		t.Fatalf("direct transport = %#v", direct)
+	}
+	if transport.Proxy == nil {
+		t.Fatal("source transport was mutated")
+	}
+
+	source := excelPricingRemoteTestSource()
+	client, err := newExcelPricingRemoteEventsClient(
+		excelPricingRemoteTestConfig(t, "https://digitalogic.invalid"),
+		source,
+		excelPricingRemoteEventsOptions{
+			WebSocketDialer: &websocket.Dialer{Proxy: http.ProxyFromEnvironment},
+			HTTPClient:      &http.Client{Transport: transport},
+			OnRevision:      func(excelPricingRemoteRevision) error { return nil },
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if client.dialer.Proxy != nil {
+		t.Fatal("websocket dialer retained the ambient proxy")
+	}
+	clientTransport, ok := client.httpClient.Transport.(*http.Transport)
+	if !ok || clientTransport.Proxy != nil {
+		t.Fatalf("event HTTP transport = %#v", client.httpClient.Transport)
+	}
+}
+
 func TestExcelPricingRemoteEventsStreamResetTriggersOneConditionalValidation(t *testing.T) {
 	source := excelPricingRemoteTestSource()
 	state := excelPricingRemoteTestRevision("4")

@@ -426,6 +426,7 @@ func newExcelPricingRemoteSnapshotClient(
 		client = &http.Client{Timeout: excelPricingRemoteTimeout(cfg.Timeout)}
 	}
 	copyClient := *client
+	copyClient.Transport = excelPricingRemoteDirectTransport(copyClient.Transport)
 	copyClient.CheckRedirect = func(*http.Request, []*http.Request) error {
 		return http.ErrUseLastResponse
 	}
