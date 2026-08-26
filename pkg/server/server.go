@@ -79,6 +79,7 @@ type Server struct {
 	sqlOperations        *sqlOperationsState
 	excelPricing         *excelPricingState
 	excelPricingRemote   *excelPricingRemoteEventsBridge
+	excelPricingWrites   *excelPricingWritebackQueue
 	backgroundCtx        context.Context
 	backgroundCancel     context.CancelFunc
 	backgroundWG         sync.WaitGroup
@@ -222,6 +223,7 @@ func NewServerWithOptions(dbPath string, charMap converter.CharMapping, options 
 	s.excelPricing.canonical = s.canonicalRecordResultContext
 	s.excelPricingRemote = newExcelPricingRemoteEventsBridge(s)
 	s.excelPricing.snapshotRevisionCurrent = s.excelPricingRemote.revisionCurrent
+	s.excelPricingWrites = newExcelPricingWritebackQueue(s)
 
 	// Set up routes
 	s.setupRoutes()
@@ -242,6 +244,7 @@ func NewServerWithOptions(dbPath string, charMap converter.CharMapping, options 
 		}
 		s.configWatcher = w
 		s.excelPricingRemote.start(s.backgroundCtx, &s.backgroundWG)
+		s.excelPricingWrites.start(s.backgroundCtx, &s.backgroundWG)
 	}
 
 	return s, nil
@@ -265,6 +268,8 @@ func (s *Server) setupRoutes() {
 	s.router.HandleFunc("/api/pricing-sync/state", s.handlePostExcelPricingState).Methods("POST")
 	s.router.HandleFunc("/api/pricing-sync/preview", s.handlePostExcelPricingPreview).Methods("POST")
 	s.router.HandleFunc("/api/pricing-sync/apply", s.handlePostExcelPricingApply).Methods("POST")
+	s.router.HandleFunc("/api/pricing-sync/writebacks", s.handlePostExcelPricingWriteback).Methods("POST")
+	s.router.HandleFunc("/api/pricing-sync/writebacks/{job_id}", s.handleGetExcelPricingWriteback).Methods("GET")
 	s.router.HandleFunc("/api/pricing-sync/snapshots", s.handlePostExcelPricingSnapshot).Methods("POST")
 	s.router.HandleFunc("/api/pricing-sync/events", s.handleGetExcelPricingEvents).Methods("GET")
 	s.router.HandleFunc("/api/pricing-sync/snapshots/{job_id}", s.handleGetExcelPricingSnapshot).Methods("GET")

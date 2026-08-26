@@ -1176,6 +1176,7 @@ func TestDynamicCalculatorVBASourceGuardsLivePricingBeforeMutation(t *testing.T)
 	}
 	sseEventHandler := section("Private Sub HandlePricingSseEvent", "Private Function IsExpectedApplyMutationEvent")
 	for _, required := range []string{
+		`Case "snapshot_ready"`,
 		`Case "pricing_state_changed"`,
 		`Case "pricing_state_invalidated"`,
 		"eventStateRevision = SiteText(change, \"state_revision\")",
@@ -1185,6 +1186,18 @@ func TestDynamicCalculatorVBASourceGuardsLivePricingBeforeMutation(t *testing.T)
 		if !strings.Contains(sseEventHandler, required) {
 			t.Fatalf("SSE apply-race handling is missing %q", required)
 		}
+	}
+	snapshotReadyStart := strings.Index(sseEventHandler, `Case "snapshot_ready"`)
+	if snapshotReadyStart < 0 {
+		t.Fatal("SSE snapshot-ready handling is missing")
+	}
+	snapshotReadyEnd := strings.Index(sseEventHandler[snapshotReadyStart:], `Case "source_changed", "catalog_changed"`)
+	if snapshotReadyEnd < 0 {
+		t.Fatal("SSE snapshot-ready handling has no semantic-change boundary")
+	}
+	snapshotReadyHandler := sseEventHandler[snapshotReadyStart : snapshotReadyStart+snapshotReadyEnd]
+	if strings.Contains(snapshotReadyHandler, "MarkSseRefreshRequired") {
+		t.Fatal("snapshot readiness must not schedule another refresh without a semantic change event")
 	}
 	expectedApplyEvent := section("Private Function IsExpectedApplyMutationEvent", "Private Sub PreserveExpectedApplyMutationEvent")
 	for _, required := range []string{
@@ -1248,6 +1261,8 @@ func TestDynamicCalculatorVBASourceGuardsLivePricingBeforeMutation(t *testing.T)
 		`Private Const PRICING_SNAPSHOT_PAYLOAD_SCHEMA As String = "patris.pricing-snapshot/v1"`,
 		`Private Const PRICING_SNAPSHOT_EVENT_SCHEMA As String = "patris.pricing-state-event/v1"`,
 		`Private Const PRICING_SNAPSHOT_PROJECTION As String = "excel-v1"`,
+		"DigitalogicMessage.ConfigureUnicodeHex",
+		"DigitalogicMessage.ValidateUnicodeCaptions",
 		`Private Const DEFAULT_FANUM_FONT As String = "Yekan Bakh FaNum"`,
 		"Private mOperationRequest As AsyncWinHttpRequest",
 		"Private mSseRequest As AsyncWinHttpRequest",
@@ -1341,6 +1356,20 @@ func TestDynamicCalculatorVBASourceGuardsLivePricingBeforeMutation(t *testing.T)
 		"Public Sub ApplyPricingChanges()",
 		"Private Sub ApplyPricingChangesCore",
 		"Public Sub HandlePricingProposalChanged()",
+		"Public Sub QueuePricingInputWriteback(ByVal Target As Range)",
+		"Private mWritebackRequest As AsyncWinHttpRequest",
+		"Private Sub HandleWritebackTerminal",
+		"Private Function BuildPricingWritebackRequest",
+		`Private Const PRICING_WRITEBACK_REQUEST_SCHEMA As String = "patris.pricing-input-writeback-request/v1"`,
+		`Case "yuan_price": addressText = "B18"`,
+		`Case "dollar_price": addressText = "B19"`,
+		`Case "profit_margin_percent": addressText = "B21"`,
+		`Case "air_express_price_per_kg": addressText = "B22"`,
+		"Public Function ValidatePricingWritebackUIForValidation() As Boolean",
+		`Case "pending", "sending": fillColor = RGB(252, 228, 178)`,
+		`Case "confirmed": fillColor = RGB(226, 239, 218)`,
+		`Case "failed": fillColor = RGB(244, 204, 204)`,
+		`Case "warning": fillColor = RGB(255, 242, 204)`,
 		"mPricingPreviewQueued = True",
 		"Private Sub SchedulePricingPreview",
 		"Public Sub RunScheduledPricingPreview",
@@ -1607,7 +1636,7 @@ func TestDynamicCalculatorVBASourceGuardsLivePricingBeforeMutation(t *testing.T)
 		"ProductCatalogSync.ApplyPriceDisplayFontSetting",
 		`Union(Sh.Range("B18:B22"), _`,
 		`Sh.Range("B26"))`,
-		"ProductCatalogSync.HandlePricingProposalChanged",
+		"ProductCatalogSync.QueuePricingInputWriteback Target",
 		"previousEvents = Application.EnableEvents",
 		"Application.EnableEvents = previousEvents",
 		`Sh.Range("E20"), _`,
@@ -2024,6 +2053,13 @@ func TestDynamicCalculatorBuilderStylesPersianButtonsAndChartText(t *testing.T) 
 		`Name = 'PricingSseParser'`,
 		`[int]$component.Type -ne 2`,
 		"Public Function ValidateFonts",
+		"Private Const ARABIC_CHARSET As Long = 178",
+		"Public Sub ConfigureUnicodeHex",
+		"Private Function DecodeUtf16Hex",
+		"Public Function ValidateUnicodeCaptions",
+		"Private Sub ApplyPersianControlFont",
+		"ChrW$(codeUnit)",
+		"target.Font.Charset = ARABIC_CHARSET",
 		`Me.Caption = "DIGITALOGIC - Price Sync"`,
 		"function Replace-ByteSequence",
 		"$neutralProfile = 'C:\\ProgramData'",

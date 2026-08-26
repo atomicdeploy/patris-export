@@ -914,12 +914,21 @@ func newExcelPricingTestServer(t *testing.T, productSyncURL string) *Server {
 	}
 	state := newExcelPricingState()
 	state.canonical = canonicalProjectionSequence(excelPricingStateSourceForTest())
+	backgroundCtx, backgroundCancel := context.WithCancel(context.Background())
 	server := &Server{
-		router:       mux.NewRouter(),
-		config:       manager,
-		excelPricing: state,
-		dbPath:       "dataset",
+		router:           mux.NewRouter(),
+		config:           manager,
+		excelPricing:     state,
+		dbPath:           "dataset",
+		backgroundCtx:    backgroundCtx,
+		backgroundCancel: backgroundCancel,
 	}
+	server.excelPricingWrites = newExcelPricingWritebackQueue(server)
+	server.excelPricingWrites.start(backgroundCtx, &server.backgroundWG)
+	t.Cleanup(func() {
+		backgroundCancel()
+		server.backgroundWG.Wait()
+	})
 	state.snapshotCollector = server.collectExcelPricingSnapshotPages
 	state.snapshotRevisionCurrent = func(canonical.Source, string, string) bool { return true }
 	server.setupRoutes()

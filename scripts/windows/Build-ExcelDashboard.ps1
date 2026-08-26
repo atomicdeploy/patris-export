@@ -182,6 +182,48 @@ function Add-ActionButton($Sheet, [string]$Text, [string]$Macro, $Anchor, [doubl
     return $shape
 }
 
+function Add-OperationProgressSurface(
+    $Sheet,
+    $Anchor,
+    [double]$Width,
+    [double]$Height
+) {
+    $track = $Sheet.Shapes.AddShape(1, $Anchor.Left, $Anchor.Top, $Width, $Height)
+    $track.Name = 'OperationProgressTrack'
+    $track.Fill.ForeColor.RGB = ConvertTo-OleColor 'E8EEF4'
+    $track.Line.ForeColor.RGB = ConvertTo-OleColor 'B9CCF4'
+    $track.Line.Weight = 1
+    $track.AlternativeText = 'نوار وضعیت عملیات؛ زمینه ثابت.'
+
+    $fill = $Sheet.Shapes.AddShape(1, $Anchor.Left, $Anchor.Top, 1, $Height)
+    $fill.Name = 'OperationProgressFill'
+    $fill.Fill.ForeColor.RGB = ConvertTo-OleColor '0168CD'
+    $fill.Line.Visible = $false
+    $fill.Visible = $false
+    $fill.AlternativeText = 'پیشرفت عملیات؛ مقدار آماده.'
+
+    $text = $Sheet.Shapes.AddShape(1, $Anchor.Left, $Anchor.Top, $Width, $Height)
+    $text.Name = 'OperationProgressText'
+    $text.Fill.Visible = $false
+    $text.Line.Visible = $false
+    $text.TextFrame2.TextRange.Text = 'آماده'
+    Set-OfficeTextFont $text.TextFrame2.TextRange 10 $true '2F414B'
+    $text.TextFrame2.VerticalAnchor = 3
+    $text.TextFrame2.TextRange.ParagraphFormat.Alignment = 2
+    try {
+        $text.TextFrame.Characters().Font.Name = 'Yekan Bakh'
+        $text.TextFrame.Characters().Font.NameComplexScript = 'Yekan Bakh'
+        $text.TextFrame.Characters().Font.NameFarEast = 'Yekan Bakh'
+    } catch {}
+    $text.AlternativeText = 'پیام و درصد عملیات؛ آماده.'
+
+    return [pscustomobject]@{
+        Track = $track
+        Fill = $fill
+        Text = $text
+    }
+}
+
 function Add-DigitalogicMessageForm($Workbook) {
     $component = $Workbook.VBProject.VBComponents.Add(3)
     $component.Name = 'DigitalogicMessage'
@@ -274,10 +316,25 @@ function Add-DigitalogicMessageForm($Workbook) {
 Option Explicit
 
 Private mDialogResult As Long
+Private Const ARABIC_CHARSET As Long = 178
 
 Public Property Get DialogResult() As Long
     DialogResult = mDialogResult
 End Property
+
+Public Sub ConfigureUnicodeHex(ByVal messageHex As String, _
+                               ByVal titleHex As String, _
+                               ByVal messageType As Long, _
+                               ByVal okTextHex As String, _
+                               ByVal yesTextHex As String, _
+                               ByVal noTextHex As String, _
+                               ByVal persianFont As String, _
+                               ByVal latinFont As String)
+    Configure DecodeUtf16Hex(messageHex), DecodeUtf16Hex(titleHex), _
+              messageType, DecodeUtf16Hex(okTextHex), _
+              DecodeUtf16Hex(yesTextHex), DecodeUtf16Hex(noTextHex), _
+              persianFont, latinFont
+End Sub
 
 Public Sub Configure(ByVal message As String, ByVal title As String, _
                      ByVal messageType As Long, ByVal okText As String, _
@@ -287,6 +344,11 @@ Public Sub Configure(ByVal message As String, ByVal title As String, _
     ' Windows installations. Keep that chrome ASCII-only and show the Persian
     ' title in the Unicode-safe in-form header below.
     Me.Caption = "DIGITALOGIC - Price Sync"
+    AssertUnicodeText title, "title"
+    AssertUnicodeText message, "message"
+    AssertUnicodeText okText, "okText"
+    AssertUnicodeText yesText, "yesText"
+    AssertUnicodeText noText, "noText"
     lblTitle.Caption = title
     lblMessage.Caption = message
     lblBrand.Caption = "DIGITALOGIC"
@@ -319,14 +381,18 @@ End Sub
 Private Sub ApplyFonts(ByVal persianFont As String, _
                        ByVal latinFont As String)
     lblTitle.Font.Name = persianFont
+    ApplyPersianControlFont lblTitle, persianFont, latinFont
     lblTitle.Font.Size = 12
     lblTitle.Font.Bold = True
     lblMessage.Font.Name = persianFont
+    ApplyPersianControlFont lblMessage, persianFont, latinFont
     lblMessage.Font.Size = 10.5
     cmdPrimary.Font.Name = persianFont
+    ApplyPersianControlFont cmdPrimary, persianFont, latinFont
     cmdPrimary.Font.Size = 10
     cmdPrimary.Font.Bold = True
     cmdSecondary.Font.Name = persianFont
+    ApplyPersianControlFont cmdSecondary, persianFont, latinFont
     cmdSecondary.Font.Size = 10
     lblBrand.Font.Name = latinFont
     lblBrand.Font.Size = 8.5
@@ -335,13 +401,71 @@ Private Sub ApplyFonts(ByVal persianFont As String, _
     lblFooter.Font.Size = 8
 End Sub
 
+Private Sub ApplyPersianControlFont(ByVal target As Object, _
+                                    ByVal requestedFont As String, _
+                                    ByVal fallbackFont As String)
+    On Error GoTo UseFallback
+    If Len(Trim$(requestedFont)) = 0 Then GoTo UseFallback
+    target.Font.Charset = ARABIC_CHARSET
+    If StrComp(CStr(target.Font.Name), requestedFont, _
+               vbTextCompare) = 0 Then Exit Sub
+UseFallback:
+    Err.Clear
+    target.Font.Name = fallbackFont
+    target.Font.Charset = ARABIC_CHARSET
+End Sub
+
+Private Sub AssertUnicodeText(ByVal value As String, ByVal fieldName As String)
+    If InStr(1, value, "??", vbBinaryCompare) > 0 Then
+        Err.Raise vbObjectError + 241, "DigitalogicMessage.Configure", _
+                  "Damaged Unicode text: " & fieldName
+    End If
+End Sub
+
+Private Function DecodeUtf16Hex(ByVal hexCodeUnits As String) As String
+    Dim position As Long
+    Dim codeUnit As Long
+
+    If Len(hexCodeUnits) Mod 4 <> 0 Then
+        Err.Raise vbObjectError + 242, "DecodeUtf16Hex", _
+                  "Invalid UTF-16 hexadecimal text."
+    End If
+    For position = 1 To Len(hexCodeUnits) Step 4
+        codeUnit = CLng("&H" & Mid$(hexCodeUnits, position, 4))
+        If codeUnit > 32767 Then codeUnit = codeUnit - 65536
+        DecodeUtf16Hex = DecodeUtf16Hex & ChrW$(codeUnit)
+    Next position
+End Function
+
+Public Function ValidateUnicodeCaptions(ByVal messageHex As String, _
+                                        ByVal titleHex As String, _
+                                        ByVal primaryHex As String, _
+                                        ByVal secondaryHex As String) As Boolean
+    ValidateUnicodeCaptions = _
+        StrComp(CStr(lblMessage.Caption), DecodeUtf16Hex(messageHex), _
+                vbBinaryCompare) = 0 And _
+        StrComp(CStr(lblTitle.Caption), DecodeUtf16Hex(titleHex), _
+                vbBinaryCompare) = 0 And _
+        StrComp(CStr(cmdPrimary.Caption), DecodeUtf16Hex(primaryHex), _
+                vbBinaryCompare) = 0 And _
+        StrComp(CStr(cmdSecondary.Caption), DecodeUtf16Hex(secondaryHex), _
+                vbBinaryCompare) = 0 And _
+        InStr(1, CStr(lblMessage.Caption) & CStr(lblTitle.Caption) & _
+                CStr(cmdPrimary.Caption) & CStr(cmdSecondary.Caption), _
+                "??", vbBinaryCompare) = 0
+End Function
+
 Public Function ValidateFonts(ByVal persianFont As String, _
                               ByVal latinFont As String) As Boolean
     ValidateFonts = _
         StrComp(lblTitle.Font.Name, persianFont, vbTextCompare) = 0 And _
+        lblTitle.Font.Charset = ARABIC_CHARSET And _
         StrComp(lblMessage.Font.Name, persianFont, vbTextCompare) = 0 And _
+        lblMessage.Font.Charset = ARABIC_CHARSET And _
         StrComp(cmdPrimary.Font.Name, persianFont, vbTextCompare) = 0 And _
+        cmdPrimary.Font.Charset = ARABIC_CHARSET And _
         StrComp(cmdSecondary.Font.Name, persianFont, vbTextCompare) = 0 And _
+        cmdSecondary.Font.Charset = ARABIC_CHARSET And _
         StrComp(lblBrand.Font.Name, latinFont, vbTextCompare) = 0 And _
         StrComp(lblFooter.Font.Name, latinFont, vbTextCompare) = 0
 End Function
@@ -746,7 +870,10 @@ try {
     $searchButton.AlternativeText = 'جست‌وجوی کالا؛ تعداد نتیجه و جایگاه نتیجه جاری روی همین دکمه نمایش داده می‌شود.'
     [void]$searchButton
     [void](Add-ActionButton $priceList 'پاک کردن' 'ProductCatalogSync.ClearProductSearch' $priceList.Range('G3') $priceList.Range('G3').Width 27)
-    [void](Add-ActionButton $priceList 'همگام‌سازی اکنون' 'ProductCatalogSync.RefreshAllData' $priceList.Range('I3') $priceList.Range('I3:K3').Width 27)
+    [void](Add-ActionButton $priceList 'به‌روزرسانی' 'ProductCatalogSync.RefreshAllData' $priceList.Range('I3') $priceList.Range('I3:K3').Width 27)
+
+    $priceList.Rows.Item(4).RowHeight = 24
+    [void](Add-OperationProgressSurface $priceList $priceList.Range('B4') $priceList.Range('B4:K4').Width 20)
 
     $headers = @(
         'قیمت فروش (تومان)',
@@ -1134,6 +1261,9 @@ try {
     $settings.Range('B10:F15').Interior.Color = ConvertTo-OleColor 'F6F6F6'
     $settings.Range('B10:F15').HorizontalAlignment = -4108
 
+    $settings.Rows.Item(16).RowHeight = 24
+    [void](Add-OperationProgressSurface $settings $settings.Range('A16') $settings.Range('A16:F16').Width 20)
+
     $settings.Range('A17:F17').Merge()
     $settings.Range('A17').Value2 = 'مقادیر پیشنهادی این فایل'
     Set-SectionStyle $settings.Range('A17:F17') 'DDE8FC' '242424' 12
@@ -1329,6 +1459,20 @@ try {
                         $shape.TextFrame.Characters().Font.NameFarEast = 'Yekan Bakh'
                     } catch {}
                     Assert-ShapeFontSlots $shape 'Yekan Bakh' "action shape $($shape.Name)"
+                }
+            }
+            finally { Release-ComObject $shape }
+        }
+    }
+    foreach ($sheet in @($priceList, $settings)) {
+        foreach ($shapeName in @('OperationProgressTrack', 'OperationProgressFill', 'OperationProgressText')) {
+            $shape = $sheet.Shapes.Item($shapeName)
+            try {
+                if ($shape.Width -le 0 -or $shape.Height -le 0) {
+                    throw "$($sheet.Name) progress shape $shapeName has invalid dimensions."
+                }
+                if ($shapeName -eq 'OperationProgressText') {
+                    Assert-ShapeFontSlots $shape 'Yekan Bakh' "$($sheet.Name) progress label"
                 }
             }
             finally { Release-ComObject $shape }

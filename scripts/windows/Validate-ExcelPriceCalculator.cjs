@@ -318,6 +318,18 @@ function buildFailures(report, options) {
     `the fixed font policy or hard font audit failed: ${JSON.stringify(report.fontAudit)}`,
   );
   failUnless(
+    report.pricingWritebackUI === true,
+    'the native pricing-writeback cell color/comment and routing fixture failed',
+  );
+  failUnless(
+    report.pricingProgressUI === true,
+    'the visible Persian progress surface lifecycle fixture failed',
+  );
+  failUnless(
+    report.searchRegression.passed === true,
+    `the bounded non-reentrant search regression failed: ${JSON.stringify(report.searchRegression)}`,
+  );
+  failUnless(
     report.titleDirection.latinRows > 0
       && report.titleDirection.persianRows > 0
       && report.titleDirection.mismatches === 0,
@@ -1481,6 +1493,20 @@ function Test-FontAudit([object]$excel, [object]$book) {
     }
 }
 
+function Test-PricingWritebackUI([object]$excel, [object]$book) {
+    $bookName = ([string]$book.Name).Replace("'", "''")
+    return [bool]$excel.Run(
+        "'$bookName'!ProductCatalogSync.ValidatePricingWritebackUIForValidation"
+    )
+}
+
+function Test-PricingProgressUI([object]$excel, [object]$book) {
+    $bookName = ([string]$book.Name).Replace("'", "''")
+    return [bool]$excel.Run(
+        "'$bookName'!ProductCatalogSync.ValidateOperationProgressUIForValidation"
+    )
+}
+
 function Test-StatusSummaryFormatter([object]$excel, [object]$book) {
     $bookName = $book.Name.Replace("'", "''")
     $statusMacro = "'$bookName'!ProductCatalogSync.FormatStatusSummaryForValidation"
@@ -1942,6 +1968,68 @@ function Test-ProductSearch(
             try { $excel.Calculation = $calculationWas } catch {}
         }
         Release-ComObject $searchButton
+        Release-ComObject $queryRange
+        Release-ComObject $sheet
+        Release-ComObject $table
+    }
+}
+
+function Test-SearchCrashRegression([object]$excel, [object]$book) {
+    $table = Find-Table $book 'Products'
+    $queryRange = $null
+    $button = $null
+    $sheet = $null
+    $eventsWereEnabled = [bool]$excel.EnableEvents
+    try {
+        $sheet = $table.Parent
+        $queryRange = $book.Names.Item('ProductSearchQuery').RefersToRange
+        $button = $sheet.Shapes.Item('ProductSearchButton')
+        $macroBookName = ([string]$book.Name).Replace("'", "''")
+        $searchMacro = "'$macroBookName'!ProductCatalogSync.SearchProducts"
+        $clearMacro = "'$macroBookName'!ProductCatalogSync.ClearProductSearch"
+        $initialAddress = [string]$table.Range.Address($false, $false)
+        $initialRows = [int]$table.ListRows.Count
+        $checks = @()
+        foreach ($query in @('109032', '109032', '109032', '__DIGITALOGIC_NO_MATCH__', '*?~')) {
+            $excel.EnableEvents = $false
+            $queryRange.NumberFormat = '@'
+            $queryRange.Value2 = $query
+            $excel.EnableEvents = $eventsWereEnabled
+            [void]$excel.Run($searchMacro)
+            $caption = [Convert]::ToString(
+                $button.TextFrame2.TextRange.Text,
+                $invariant
+            )
+            $checks += [pscustomobject]@{
+                query = $query
+                caption = $caption
+                ready = [bool]$excel.Ready
+                rows = [int]$table.ListRows.Count
+                address = [string]$table.Range.Address($false, $false)
+            }
+            [void]$excel.Run($clearMacro)
+        }
+        $passed = (
+            @($checks).Count -eq 5 -and
+            @($checks | Where-Object {
+                -not $_.ready -or
+                $_.rows -ne $initialRows -or
+                $_.address -ne $initialAddress
+            }).Count -eq 0 -and
+            @($checks | Select-Object -First 3 | Where-Object {
+                $_.caption -notmatch '\(1/1\)$'
+            }).Count -eq 0 -and
+            $checks[3].caption -match '\(0\)$'
+        )
+        return [pscustomobject]@{
+            passed = $passed
+            initialRows = $initialRows
+            initialAddress = $initialAddress
+            checks = $checks
+        }
+    } finally {
+        $excel.EnableEvents = $eventsWereEnabled
+        Release-ComObject $button
         Release-ComObject $queryRange
         Release-ComObject $sheet
         Release-ComObject $table
@@ -2525,7 +2613,10 @@ try {
     $candidateProducts = Read-Products $candidateBook
     $titleDirection = Test-ProductTitleDirection $candidateBook
     $fontAudit = Test-FontAudit $excel $candidateBook
+    $pricingWritebackUI = Test-PricingWritebackUI $excel $candidateBook
+    $pricingProgressUI = Test-PricingProgressUI $excel $candidateBook
     $candidateSearch = Test-ProductSearch $excel $candidateBook $candidateProducts.Rows
+    $searchRegression = Test-SearchCrashRegression $excel $candidateBook
     Reset-SelectedProductRow $excel $candidateBook
     $candidateSyncData = Read-SyncData $candidateBook
     $candidateConfig = [pscustomobject]@{
@@ -2917,6 +3008,9 @@ try {
         statusSummary = $statusSummary
         titleDirection = $titleDirection
         fontAudit = $fontAudit
+        pricingWritebackUI = $pricingWritebackUI
+        pricingProgressUI = $pricingProgressUI
+        searchRegression = $searchRegression
         transientPricePreview = $transientPricePreview
         comparison = [pscustomobject]@{
             overlapRows = $overlapRows
@@ -3700,6 +3794,55 @@ function main() {
   if (process.platform !== 'win32') {
     console.error('This validator requires Windows, Microsoft Excel, and powershell.exe.');
     process.exitCode = 2;
+    return;
+  }
+  try {
+    const moduleSource = fs.readFileSync(
+      path.join(repoRoot, 'docs', 'examples', 'vba', 'ProductCatalogSync.bas'),
+      'utf8',
+    );
+    const workbookSource = fs.readFileSync(
+      path.join(repoRoot, 'docs', 'examples', 'vba', 'ThisWorkbook.cls'),
+      'utf8',
+    );
+    const procedure = (source, name) => {
+      const match = new RegExp(
+        `(?:Public|Private) Sub ${name}\\b[\\s\\S]*?\\r?\\nEnd Sub`,
+        'iu',
+      ).exec(source);
+      if (!match) throw new Error(`missing VBA procedure: ${name}`);
+      return match[0];
+    };
+    const searchSource = procedure(moduleSource, 'SearchProducts');
+    const enterSource = procedure(moduleSource, 'HandleProductSearchEnter');
+    const sheetChangeSource = procedure(workbookSource, 'Workbook_SheetChange');
+    const selectionSource = procedure(workbookSource, 'Workbook_SheetSelectionChange');
+    const forbiddenSearchTokens = [
+      'KickQueuedAsyncDispatch',
+      'Application.Goto',
+      'Application.OnKey',
+      'PumpExcelMessages',
+    ];
+    const foundSearchToken = forbiddenSearchTokens.find((token) => searchSource.includes(token));
+    if (foundSearchToken) {
+      throw new Error(`SearchProducts contains forbidden re-entrant token: ${foundSearchToken}`);
+    }
+    if (/Application\.OnKey\s+"~"\s*,/iu.test(moduleSource)) {
+      throw new Error('Enter must remain native; synchronous Application.OnKey binding is forbidden');
+    }
+    if (/\bSearchProducts\b/iu.test(enterSource)) {
+      throw new Error('HandleProductSearchEnter must queue, never call SearchProducts synchronously');
+    }
+    if (!/\bQueueProductSearch\b/iu.test(sheetChangeSource)
+        || /\bSearchProducts\b/iu.test(sheetChangeSource)) {
+      throw new Error('Workbook_SheetChange must queue search without synchronous execution');
+    }
+    if (/\bKickQueuedAsyncDispatch\b/iu.test(selectionSource)) {
+      throw new Error('Workbook_SheetSelectionChange must not dispatch network work');
+    }
+  } catch (error) {
+    console.error(`Search re-entrancy source gate failed: ${error.message}`);
+    process.exitCode = 1;
     return;
   }
   if (options.selfTestProcessSafety) {
