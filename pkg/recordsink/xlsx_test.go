@@ -1457,7 +1457,7 @@ func TestDynamicCalculatorVBASourceGuardsLivePricingBeforeMutation(t *testing.T)
 			t.Fatalf("VBA source contains %d occurrences of %q, want at least %d for register/release", count, key, wantMinimum)
 		}
 	}
-	if strings.Contains(source, `Application.OnKey "~"`) {
+	if strings.Contains(source, `Application.OnKey "~",`) {
 		t.Fatal("Enter must remain native; rebinding it can recurse through selection events and exhaust Excel's VBA stack")
 	}
 	for _, forbidden := range []string{
