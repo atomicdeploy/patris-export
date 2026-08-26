@@ -710,8 +710,7 @@ func (client *excelPricingRemoteSnapshotClient) fetchRevision(
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
-		if response.StatusCode == http.StatusConflict &&
-			excelPricingRemoteJSONContentType(response.Header.Get("Content-Type")) {
+		if response.StatusCode == http.StatusConflict {
 			body, readErr := readExcelPricingRemoteSnapshotBody(response.Body, excelPricingRemoteRevisionMaxBytes)
 			if readErr == nil {
 				var remoteError struct {

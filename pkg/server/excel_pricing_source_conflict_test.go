@@ -20,7 +20,6 @@ func TestExcelPricingRemoteSnapshotRevisionConflictIsActionable(t *testing.T) {
 		Revision: testExcelPricingRevision('a'),
 	}
 	remote := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
-		response.Header().Set("Content-Type", "application/json")
 		response.WriteHeader(http.StatusConflict)
 		_, _ = io.WriteString(response, `{"code":"digitalogic_pricing_snapshot_source_revision_conflict"}`)
 	}))
