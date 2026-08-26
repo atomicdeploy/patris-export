@@ -1366,6 +1366,8 @@ func TestDynamicCalculatorVBASourceGuardsLivePricingBeforeMutation(t *testing.T)
 		`Case "profit_margin_percent": addressText = "B21"`,
 		`Case "air_express_price_per_kg": addressText = "B22"`,
 		"Public Function ValidatePricingWritebackUIForValidation() As Boolean",
+		"Public Function ValidateOperationProgressUIForValidation() As Boolean",
+		"Private Function OperationProgressStageMatchesForValidation(",
 		`Case "pending", "sending": fillColor = RGB(252, 228, 178)`,
 		`Case "confirmed": fillColor = RGB(226, 239, 218)`,
 		`Case "failed": fillColor = RGB(244, 204, 204)`,
@@ -1459,6 +1461,33 @@ func TestDynamicCalculatorVBASourceGuardsLivePricingBeforeMutation(t *testing.T)
 	}
 	if strings.Contains(source, `Application.OnKey "~",`) {
 		t.Fatal("Enter must remain native; rebinding it can recurse through selection events and exhaust Excel's VBA stack")
+	}
+	progressSurface := section("Public Sub SetOperationProgressSurface", "Private Sub UpdateOperationProgressShapes")
+	if strings.Contains(progressSurface, `U("064606270645063906CC0646")`) {
+		t.Fatal("indeterminate progress must not expose the internal Persian label نامعین")
+	}
+	if strings.Count(progressSurface, "displayText = messageText") < 2 {
+		t.Fatal("neutral and indeterminate progress must display the useful stage message without an internal-state prefix")
+	}
+	progressValidation := section("Public Function ValidateOperationProgressUIForValidation", "Private Function WritebackCell")
+	for _, required := range []string{
+		`SetRefreshProgress "1/4"`,
+		`SetRefreshProgress "2/4"`,
+		`SetSnapshotProgress 0, 0, 0`,
+		`SetRefreshProgress "3/4"`,
+		`SetRefreshProgress "4/4"`,
+		`"refresh_request", 10`,
+		`"refresh_wait", -1`,
+		`"refresh_download", -1`,
+		`"refresh_validate", 70`,
+		`"refresh_apply", 90`,
+		`"completed", 100`,
+		"CStr(Application.StatusBar)",
+		"label.TextFrame2.TextRange.Text",
+	} {
+		if !strings.Contains(progressValidation, required) {
+			t.Fatalf("progress UI validator does not cover panel and StatusBar lifecycle: %s", required)
+		}
 	}
 	for _, forbidden := range []string{
 		`Worksheets("`,

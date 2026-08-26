@@ -946,7 +946,7 @@ Public Sub SetOperationProgressSurface(ByVal stageName As String, _
     If visualState = "neutral" Then
         displayText = messageText
     ElseIf percentValue < 0 Then
-        displayText = U("064606270645063906CC0646") & " - " & messageText
+        displayText = messageText
     Else
         displayText = CStr(percentValue) & "% - " & messageText
     End If
@@ -3893,22 +3893,38 @@ Public Function ValidateOperationProgressUIForValidation() As Boolean
         If StrComp(label.TextFrame2.TextRange.Font.NameComplexScript, _
                    "Yekan Bakh", vbTextCompare) <> 0 Then GoTo Failed
     Next sheetName
-    SetOperationProgressSurface "validate_wait", -1, _
-        U("062F0631002006270646062A0638062706310020062206450627062F0647200C06330627063206CC00200645064606280639"), _
-        "pending", False
-    For Each sheetName In Array(PriceSheet().Name, ConfigSheet().Name)
-        Set targetSheet = ThisWorkbook.Worksheets(CStr(sheetName))
-        Set track = targetSheet.Shapes(PROGRESS_TRACK_SHAPE)
-        Set fill = targetSheet.Shapes(PROGRESS_FILL_SHAPE)
-        Set label = targetSheet.Shapes(PROGRESS_TEXT_SHAPE)
-        If fill.Visible <> msoTrue Or fill.Width <= 1 Or _
-           fill.Width >= track.Width Or _
-           InStr(1, label.AlternativeText, "percent=-1", _
-                 vbBinaryCompare) = 0 Then GoTo Failed
-    Next sheetName
-    SetOperationProgressSurface "validate_done", 100, _
+    SetRefreshProgress "1/4"
+    If Not OperationProgressStageMatchesForValidation( _
+        "refresh_request", 10, _
+        U("062F0631062E064806270633062A002006280647200C063106480632063106330627064606CC0020062B0628062A00200634062F")) Then _
+        GoTo Failed
+    SetRefreshProgress "2/4"
+    If Not OperationProgressStageMatchesForValidation( _
+        "refresh_wait", -1, _
+        U("062F0631002006270646062A0638062706310020062206450627062F0647200C06330627063206CC00200645064606280639")) Then _
+        GoTo Failed
+    SetSnapshotProgress 0, 0, 0
+    If Not OperationProgressStageMatchesForValidation( _
+        "refresh_download", -1, _
+        U("062F06310020062D062706440020062F063106CC06270641062A0020062F0627062F0647200C06470627")) Then _
+        GoTo Failed
+    SetRefreshProgress "3/4"
+    If Not OperationProgressStageMatchesForValidation( _
+        "refresh_validate", 70, _
+        U("062F06310020062D06270644002006270639062A06280627063106330646062C06CC0020062F0627062F0647200C06470627")) Then _
+        GoTo Failed
+    SetRefreshProgress "4/4"
+    If Not OperationProgressStageMatchesForValidation( _
+        "refresh_apply", 90, _
+        U("062F06310020062D0627064400200627063906450627064400200631062F06CC0641200C0647062700200648002006410631064506480644200C06470627")) Then _
+        GoTo Failed
+    SetOperationProgressSurface "completed", 100, _
         U("06280647200C063106480632063106330627064606CC002006A906270645064400200634062F"), _
         "confirmed", False
+    If Not OperationProgressStageMatchesForValidation( _
+        "completed", 100, _
+        U("06280647200C063106480632063106330627064606CC002006A906270645064400200634062F")) Then _
+        GoTo Failed
     For Each sheetName In Array(PriceSheet().Name, ConfigSheet().Name)
         Set targetSheet = ThisWorkbook.Worksheets(CStr(sheetName))
         Set track = targetSheet.Shapes(PROGRESS_TRACK_SHAPE)
@@ -3924,6 +3940,48 @@ Failed:
     On Error Resume Next
     InitializeOperationProgress
     On Error GoTo 0
+End Function
+
+Private Function OperationProgressStageMatchesForValidation( _
+    ByVal stageName As String, _
+    ByVal percentValue As Long, _
+    ByVal messageText As String) As Boolean
+    Dim expectedText As String
+    Dim forbiddenText As String
+    Dim targetSheet As Worksheet
+    Dim track As Shape
+    Dim fill As Shape
+    Dim label As Shape
+    Dim sheetName As Variant
+
+    forbiddenText = U("064606270645063906CC0646")
+    If percentValue < 0 Then
+        expectedText = messageText
+    Else
+        expectedText = CStr(percentValue) & "% - " & messageText
+    End If
+    If StrComp(CStr(Application.StatusBar), expectedText, _
+               vbBinaryCompare) <> 0 Then Exit Function
+    If InStr(1, CStr(Application.StatusBar), forbiddenText, _
+             vbBinaryCompare) > 0 Then Exit Function
+    For Each sheetName In Array(PriceSheet().Name, ConfigSheet().Name)
+        Set targetSheet = ThisWorkbook.Worksheets(CStr(sheetName))
+        Set track = targetSheet.Shapes(PROGRESS_TRACK_SHAPE)
+        Set fill = targetSheet.Shapes(PROGRESS_FILL_SHAPE)
+        Set label = targetSheet.Shapes(PROGRESS_TEXT_SHAPE)
+        If StrComp(label.TextFrame2.TextRange.Text, expectedText, _
+                   vbBinaryCompare) <> 0 Then Exit Function
+        If InStr(1, label.TextFrame2.TextRange.Text, forbiddenText, _
+                 vbBinaryCompare) > 0 Then Exit Function
+        If InStr(1, label.AlternativeText, "stage=" & stageName, _
+                 vbBinaryCompare) = 0 Or _
+           InStr(1, label.AlternativeText, "percent=" & _
+                 CStr(percentValue), vbBinaryCompare) = 0 Then Exit Function
+        If percentValue < 0 And _
+           (fill.Visible <> msoTrue Or fill.Width <= 1 Or _
+            fill.Width >= track.Width) Then Exit Function
+    Next sheetName
+    OperationProgressStageMatchesForValidation = True
 End Function
 
 Private Function WritebackCell(ByVal settingKey As String) As Range
