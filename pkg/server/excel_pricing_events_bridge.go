@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log"
+	"strings"
 	"sync"
 	"sync/atomic"
 
@@ -25,6 +26,7 @@ type excelPricingRemoteBridgeConfig struct {
 type excelPricingRemoteBridgeDependencies struct {
 	config      func() appconfig.Config
 	resolve     func(appconfig.Config) excelPricingRemoteBridgeConfig
+	fenceConfig func()
 	materialize func(context.Context) (canonical.Source, error)
 	run         func(
 		context.Context,
@@ -33,10 +35,12 @@ type excelPricingRemoteBridgeDependencies struct {
 		uint64,
 		func(uint64),
 		func(excelPricingRemoteRevision) error,
+		func(excelPricingRemoteSourceLifecycle) error,
 		func(excelPricingRemoteSnapshotTerminalEvent) error,
 	) error
-	apply func(excelPricingRemoteRevision) error
-	logf  func(string, ...interface{})
+	apply     func(excelPricingRemoteRevision) error
+	lifecycle func(excelPricingRemoteSourceLifecycle) error
+	logf      func(string, ...interface{})
 }
 
 // excelPricingRemoteEventsBridge owns the production lifecycle around the
@@ -53,13 +57,19 @@ type excelPricingRemoteEventsBridge struct {
 	lifecycleWG  *sync.WaitGroup
 	managerLive  bool
 
-	mu                sync.Mutex
-	epoch             uint64
-	configInitialized bool
-	desired           excelPricingRemoteBridgeConfig
-	cursor            uint64
-	acknowledged      bool
-	verifiedRevision  atomic.Pointer[excelPricingRemoteRevision]
+	mu                  sync.Mutex
+	epoch               uint64
+	configInitialized   bool
+	desired             excelPricingRemoteBridgeConfig
+	cursor              uint64
+	acknowledged        bool
+	streamSource        canonical.Source
+	streamPresent       bool
+	acceptedSources     map[string]struct{}
+	acceptedSourceOrder []string
+	lifecycleSeen       map[string]string
+	lifecycleOrder      []string
+	verifiedRevision    atomic.Pointer[excelPricingRemoteRevision]
 }
 
 func newExcelPricingRemoteEventsBridge(server *Server) *excelPricingRemoteEventsBridge {
@@ -87,6 +97,7 @@ func newExcelPricingRemoteEventsBridge(server *Server) *excelPricingRemoteEvents
 			initialCursor uint64,
 			onCursor func(uint64),
 			onRevision func(excelPricingRemoteRevision) error,
+			onSourceLifecycle func(excelPricingRemoteSourceLifecycle) error,
 			onTerminal func(excelPricingRemoteSnapshotTerminalEvent) error,
 		) error {
 			return runExcelPricingRemoteEvents(
@@ -96,11 +107,14 @@ func newExcelPricingRemoteEventsBridge(server *Server) *excelPricingRemoteEvents
 				initialCursor,
 				onCursor,
 				onRevision,
+				onSourceLifecycle,
 				onTerminal,
 			)
 		},
-		apply: server.notifyExcelPricingRemoteRevisionChanged,
-		logf:  log.Printf,
+		fenceConfig: server.fenceExcelPricingRemoteConfiguration,
+		apply:       server.notifyExcelPricingRemoteRevisionChanged,
+		lifecycle:   server.notifyExcelPricingRemoteSourceLifecycle,
+		logf:        log.Printf,
 	})
 }
 
@@ -111,9 +125,11 @@ func newExcelPricingRemoteEventsBridgeWithDependencies(
 		dependencies.logf = func(string, ...interface{}) {}
 	}
 	return &excelPricingRemoteEventsBridge{
-		dependencies: dependencies,
-		wake:         make(chan struct{}, 1),
-		terminals:    newExcelPricingRemoteSnapshotTerminalHub(),
+		dependencies:    dependencies,
+		wake:            make(chan struct{}, 1),
+		terminals:       newExcelPricingRemoteSnapshotTerminalHub(),
+		acceptedSources: make(map[string]struct{}),
+		lifecycleSeen:   make(map[string]string),
 	}
 }
 
@@ -202,6 +218,7 @@ func (bridge *excelPricingRemoteEventsBridge) reconcile(
 	}
 	desired := bridge.dependencies.resolve(cfg)
 	bridge.mu.Lock()
+	initialized := bridge.configInitialized
 	configChanged := !bridge.configInitialized ||
 		bridge.desired.valid != desired.valid ||
 		bridge.desired.key != desired.key
@@ -210,13 +227,25 @@ func (bridge *excelPricingRemoteEventsBridge) reconcile(
 		bridge.mu.Unlock()
 		return epoch
 	}
+	if initialized && configChanged && !sourceChanged && bridge.dependencies.fenceConfig != nil {
+		bridge.dependencies.fenceConfig()
+	}
 	bridge.configInitialized = true
 	bridge.desired = desired
 	bridge.epoch++
 	epoch := bridge.epoch
 	bridge.cursor = 0
 	bridge.acknowledged = false
+	bridge.streamSource = canonical.Source{}
+	bridge.streamPresent = false
+	bridge.acceptedSources = make(map[string]struct{})
+	bridge.acceptedSourceOrder = nil
+	bridge.lifecycleSeen = make(map[string]string)
+	bridge.lifecycleOrder = nil
 	bridge.verifiedRevision.Store(nil)
+	if bridge.terminals != nil {
+		bridge.terminals.resetAuthenticatedEpoch()
+	}
 	bridge.mu.Unlock()
 	if wake {
 		bridge.signal()
@@ -324,7 +353,7 @@ func (bridge *excelPricingRemoteEventsBridge) runGeneration(
 ) {
 	defer bridge.clearVerifiedRevision(epoch)
 	if bridge.dependencies.materialize == nil || bridge.dependencies.run == nil ||
-		bridge.dependencies.apply == nil {
+		bridge.dependencies.apply == nil || bridge.dependencies.lifecycle == nil {
 		bridge.dependencies.logf("Pricing event subscriber is inactive: lifecycle dependencies are unavailable")
 		return
 	}
@@ -336,6 +365,9 @@ func (bridge *excelPricingRemoteEventsBridge) runGeneration(
 		}
 		return
 	}
+	if !bridge.initializeStreamSource(epoch, source) {
+		return
+	}
 	initialCursor := bridge.cursorForGeneration(epoch)
 	err = bridge.dependencies.run(
 		ctx,
@@ -345,6 +377,9 @@ func (bridge *excelPricingRemoteEventsBridge) runGeneration(
 		func(cursor uint64) { bridge.persistCursor(epoch, cursor) },
 		func(revision excelPricingRemoteRevision) error {
 			return bridge.acceptRevision(epoch, source, revision)
+		},
+		func(lifecycle excelPricingRemoteSourceLifecycle) error {
+			return bridge.acceptSourceLifecycle(epoch, source, lifecycle)
 		},
 		func(event excelPricingRemoteSnapshotTerminalEvent) error {
 			return bridge.acceptSnapshotTerminal(epoch, source, event)
@@ -372,6 +407,21 @@ func (bridge *excelPricingRemoteEventsBridge) cursorForGeneration(epoch uint64) 
 	return bridge.cursor
 }
 
+func (bridge *excelPricingRemoteEventsBridge) initializeStreamSource(
+	epoch uint64,
+	source canonical.Source,
+) bool {
+	bridge.mu.Lock()
+	defer bridge.mu.Unlock()
+	if epoch == 0 || bridge.epoch != epoch || !validExcelPricingRemoteSource(source) {
+		return false
+	}
+	bridge.streamSource = source
+	bridge.streamPresent = true
+	bridge.rememberAcceptedSourceLocked(source)
+	return true
+}
+
 func (bridge *excelPricingRemoteEventsBridge) acceptRevision(
 	epoch uint64,
 	source canonical.Source,
@@ -379,7 +429,9 @@ func (bridge *excelPricingRemoteEventsBridge) acceptRevision(
 ) error {
 	bridge.mu.Lock()
 	defer bridge.mu.Unlock()
-	if epoch == 0 || bridge.epoch != epoch || revision.Source != source {
+	if epoch == 0 || bridge.epoch != epoch ||
+		!sameExcelPricingRemoteSourceScope(revision.Source, source) ||
+		!bridge.streamPresent || revision.Source != bridge.streamSource {
 		return errExcelPricingRemoteBridgeStale
 	}
 	// A reconnect validates the authoritative composite before replaying queued
@@ -388,6 +440,7 @@ func (bridge *excelPricingRemoteEventsBridge) acceptRevision(
 	// cancel a snapshot that already fetched the same revision.
 	if sameExcelPricingRemoteCompositeRevision(bridge.verifiedRevision.Load(), revision) {
 		bridge.acknowledged = true
+		bridge.rememberAcceptedSourceLocked(revision.Source)
 		return nil
 	}
 	bridge.verifiedRevision.Store(nil)
@@ -395,9 +448,223 @@ func (bridge *excelPricingRemoteEventsBridge) acceptRevision(
 		return err
 	}
 	bridge.acknowledged = true
+	bridge.rememberAcceptedSourceLocked(revision.Source)
 	verified := revision
 	bridge.verifiedRevision.Store(&verified)
 	return nil
+}
+
+func (bridge *excelPricingRemoteEventsBridge) acceptSourceLifecycle(
+	epoch uint64,
+	fixedScope canonical.Source,
+	lifecycle excelPricingRemoteSourceLifecycle,
+) error {
+	bridge.mu.Lock()
+	defer bridge.mu.Unlock()
+	if epoch == 0 || bridge.epoch != epoch ||
+		!validExcelPricingRemoteSource(lifecycle.Source) ||
+		!sameExcelPricingRemoteSourceScope(lifecycle.Source, fixedScope) {
+		return errExcelPricingRemoteBridgeStale
+	}
+	key, fingerprint := excelPricingRemoteBridgeLifecycleIdentity(lifecycle)
+	if key != "" {
+		if stored, seen := bridge.lifecycleSeen[key]; seen {
+			if stored != fingerprint {
+				return errExcelPricingRemoteBridgeStale
+			}
+			bridge.acknowledged = true
+			return nil
+		}
+	}
+	if !bridge.validSourceLifecycleLocked(lifecycle) {
+		return errExcelPricingRemoteBridgeStale
+	}
+	if bridge.dependencies.lifecycle == nil {
+		return errExcelPricingRemoteConfiguration
+	}
+	// Fence the previously verified composite before any lifecycle side effect.
+	// A failing callback therefore leaves readers fail-closed and the durable
+	// cursor/state transition remains available for replay.
+	bridge.verifiedRevision.Store(nil)
+	if err := bridge.dependencies.lifecycle(lifecycle); err != nil {
+		return err
+	}
+
+	bridge.acknowledged = true
+	switch lifecycle.Mode {
+	case "ordered":
+		bridge.streamSource = lifecycle.Source
+		bridge.streamPresent = lifecycle.Change != "removed"
+		bridge.rememberAcceptedSourceLocked(lifecycle.Source)
+		bridge.rememberLifecycleLocked(key, fingerprint)
+	case "reconcile_present":
+		bridge.streamSource = lifecycle.Source
+		bridge.streamPresent = true
+		bridge.rememberAcceptedSourceLocked(lifecycle.Source)
+	case "reconcile_absent":
+		bridge.streamSource = lifecycle.Source
+		bridge.streamPresent = false
+	case "validation_gap":
+		bridge.verifiedRevision.Store(nil)
+		return nil
+	default:
+		return errExcelPricingRemoteBridgeStale
+	}
+	if lifecycle.Revision == nil || !bridge.streamPresent {
+		bridge.verifiedRevision.Store(nil)
+		return nil
+	}
+	verified := *lifecycle.Revision
+	bridge.verifiedRevision.Store(&verified)
+	return nil
+}
+
+func (bridge *excelPricingRemoteEventsBridge) validSourceLifecycleLocked(
+	lifecycle excelPricingRemoteSourceLifecycle,
+) bool {
+	if !validExcelPricingRemoteSource(lifecycle.Source) ||
+		!validExcelPricingRemoteLifecycleValidation(lifecycle) {
+		return false
+	}
+	if lifecycle.Revision != nil &&
+		(lifecycle.Revision.Source != lifecycle.Source ||
+			!validExcelPricingRemoteRevisionParts(
+				lifecycle.Revision.StateRevision,
+				lifecycle.Revision.CatalogRevision,
+				lifecycle.Revision.PricingStateRevision,
+				lifecycle.Revision.PricingPolicyRevision,
+			) || !isStrongExcelPricingRevisionETag(
+			lifecycle.Revision.ETag,
+			lifecycle.Revision.StateRevision,
+		)) {
+		return false
+	}
+	switch lifecycle.Mode {
+	case "ordered":
+		if lifecycle.EventID == 0 || !isSHA256Revision(lifecycle.IdempotencyKey) ||
+			lifecycle.ValidationOrigin != "source_event" ||
+			!validExcelPricingRemoteSourceTransition(
+				lifecycle.Name,
+				lifecycle.Change,
+				lifecycle.Source,
+				lifecycle.PreviousSourceRevision,
+				bridge.streamSource,
+				bridge.streamPresent,
+			) {
+			return false
+		}
+		if lifecycle.Change == "removed" {
+			return lifecycle.Revision == nil
+		}
+		return (lifecycle.ValidationOutcome == excelPricingRemoteSourceCurrent) ==
+			(lifecycle.Revision != nil)
+	case "validation_gap":
+		return lifecycle.Revision == nil && lifecycle.IdempotencyKey == "" &&
+			lifecycle.Source == bridge.streamSource &&
+			(lifecycle.ValidationOutcome == excelPricingRemoteSourceSuperseded ||
+				lifecycle.ValidationOutcome == excelPricingRemoteSourceAbsent ||
+				(lifecycle.ValidationOutcome == excelPricingRemoteSourceCurrent &&
+					!bridge.streamPresent))
+	case "reconcile_present":
+		return lifecycle.Name == "pricing.source.changed" && lifecycle.Change == "reconciled" &&
+			lifecycle.IdempotencyKey == "" && lifecycle.Revision != nil &&
+			lifecycle.ValidationOutcome == excelPricingRemoteSourceCurrent
+	case "reconcile_absent":
+		return lifecycle.Name == "pricing.source.removed" && lifecycle.Change == "removed" &&
+			lifecycle.IdempotencyKey == "" && lifecycle.Revision == nil &&
+			lifecycle.Source == bridge.streamSource && bridge.streamPresent &&
+			lifecycle.ValidationOutcome == excelPricingRemoteSourceAbsent
+	default:
+		return false
+	}
+}
+
+func validExcelPricingRemoteLifecycleValidation(lifecycle excelPricingRemoteSourceLifecycle) bool {
+	switch lifecycle.ValidationOutcome {
+	case excelPricingRemoteSourceCurrent:
+		return lifecycle.CurrentSourceRevision == ""
+	case excelPricingRemoteSourceSuperseded:
+		return lifecycle.Revision == nil &&
+			isSHA256Revision(lifecycle.CurrentSourceRevision) &&
+			lifecycle.CurrentSourceRevision != lifecycle.Source.Revision
+	case excelPricingRemoteSourceAbsent:
+		return lifecycle.Revision == nil && lifecycle.CurrentSourceRevision == ""
+	default:
+		return false
+	}
+}
+
+func excelPricingRemoteBridgeLifecycleIdentity(
+	lifecycle excelPricingRemoteSourceLifecycle,
+) (string, string) {
+	if lifecycle.Mode != "ordered" {
+		return "", ""
+	}
+	return excelPricingRemoteSourceEventDedupeKey(lifecycle.Name, lifecycle.IdempotencyKey),
+		strings.Join([]string{
+			lifecycle.Name,
+			lifecycle.Change,
+			lifecycle.Source.ID,
+			lifecycle.Source.Dataset,
+			lifecycle.Source.Revision,
+			lifecycle.PreviousSourceRevision,
+		}, "\x00")
+}
+
+func (bridge *excelPricingRemoteEventsBridge) rememberAcceptedSourceLocked(source canonical.Source) {
+	if bridge.acceptedSources == nil {
+		bridge.acceptedSources = make(map[string]struct{})
+	}
+	key := source.Revision
+	if _, exists := bridge.acceptedSources[key]; exists {
+		for index, accepted := range bridge.acceptedSourceOrder {
+			if accepted != key {
+				continue
+			}
+			copy(bridge.acceptedSourceOrder[index:], bridge.acceptedSourceOrder[index+1:])
+			bridge.acceptedSourceOrder = bridge.acceptedSourceOrder[:len(bridge.acceptedSourceOrder)-1]
+			break
+		}
+	} else {
+		bridge.acceptedSources[key] = struct{}{}
+	}
+	bridge.acceptedSourceOrder = append(bridge.acceptedSourceOrder, key)
+	if len(bridge.acceptedSourceOrder) > excelPricingSnapshotEventHistory {
+		delete(bridge.acceptedSources, bridge.acceptedSourceOrder[0])
+		bridge.acceptedSourceOrder = bridge.acceptedSourceOrder[1:]
+	}
+}
+
+func (bridge *excelPricingRemoteEventsBridge) rememberLifecycleLocked(key, fingerprint string) {
+	if key == "" {
+		return
+	}
+	if bridge.lifecycleSeen == nil {
+		bridge.lifecycleSeen = make(map[string]string)
+	}
+	if _, exists := bridge.lifecycleSeen[key]; exists {
+		return
+	}
+	bridge.lifecycleSeen[key] = fingerprint
+	bridge.lifecycleOrder = append(bridge.lifecycleOrder, key)
+	if len(bridge.lifecycleOrder) > excelPricingSnapshotEventHistory {
+		delete(bridge.lifecycleSeen, bridge.lifecycleOrder[0])
+		bridge.lifecycleOrder = bridge.lifecycleOrder[1:]
+	}
+}
+
+func (bridge *excelPricingRemoteEventsBridge) sourceAcceptedLocked(source canonical.Source) bool {
+	if !sameExcelPricingRemoteSourceScope(source, bridge.streamSource) {
+		return false
+	}
+	_, accepted := bridge.acceptedSources[source.Revision]
+	return accepted
+}
+
+func (bridge *excelPricingRemoteEventsBridge) sourceAbsent() bool {
+	bridge.mu.Lock()
+	defer bridge.mu.Unlock()
+	return !bridge.streamPresent
 }
 
 func sameExcelPricingRemoteCompositeRevision(
@@ -423,7 +690,9 @@ func (bridge *excelPricingRemoteEventsBridge) acceptSnapshotTerminal(
 	}
 	bridge.mu.Lock()
 	defer bridge.mu.Unlock()
-	if epoch == 0 || bridge.epoch != epoch || event.Source != source {
+	if epoch == 0 || bridge.epoch != epoch ||
+		!sameExcelPricingRemoteSourceScope(event.Source, source) ||
+		!bridge.sourceAcceptedLocked(event.Source) {
 		return errExcelPricingRemoteBridgeStale
 	}
 	return bridge.terminals.publishAuthenticated(event)
@@ -441,10 +710,10 @@ func (bridge *excelPricingRemoteEventsBridge) clearVerifiedRevision(epoch uint64
 }
 
 func (bridge *excelPricingRemoteEventsBridge) snapshotTerminals() excelPricingRemoteSnapshotTerminalSource {
-	if bridge == nil {
+	if bridge == nil || bridge.terminals == nil {
 		return nil
 	}
-	return bridge.terminals
+	return bridge.terminals.authenticatedLease()
 }
 
 func (bridge *excelPricingRemoteEventsBridge) revisionCurrent(

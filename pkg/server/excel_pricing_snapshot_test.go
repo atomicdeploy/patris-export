@@ -1922,6 +1922,73 @@ func TestExcelPricingSnapshotUpstreamCatalogInvalidationIsAtomic(t *testing.T) {
 	}
 }
 
+func TestExcelPricingSnapshotUpstreamSourceRemovalIsAtomic(t *testing.T) {
+	server := newExcelPricingTestServer(t, "http://127.0.0.1:1/wp-json/digitalogic/patris/product-sync")
+	store := server.excelPricing.snapshots
+	source := excelPricingStateSourceForTest()
+	previousCatalog := excelPricingRevisionForTest("removed-previous-catalog")
+	previousState := excelPricingRevisionForTest("removed-previous-state")
+	previousSnapshot := excelPricingRevisionForTest("removed-previous-snapshot")
+	previousETag := `"` + excelPricingRevisionForTest("removed-previous-payload") + `"`
+	owner := sha256.Sum256([]byte("removed-owner"))
+	cancelContext, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	store.mu.Lock()
+	store.publishChangeLocked(excelPricingStateChangeEvent{
+		Kind:             "snapshot_ready",
+		Source:           &source,
+		CatalogRevision:  previousCatalog,
+		StateRevision:    previousState,
+		SnapshotRevision: previousSnapshot,
+		ETag:             previousETag,
+		Verified:         true,
+	})
+	store.jobs["removed-leader"] = &excelPricingSnapshotJob{
+		id:              "removed-leader",
+		owner:           owner,
+		status:          "running",
+		startGeneration: store.generation,
+		cancel:          cancel,
+	}
+	store.activeJobID = "removed-leader"
+	initialGeneration := store.generation
+	store.mu.Unlock()
+
+	if err := server.notifyExcelPricingRemoteSourceLifecycle(excelPricingRemoteSourceLifecycle{
+		Mode:                   "ordered",
+		Name:                   "pricing.source.removed",
+		Change:                 "removed",
+		Source:                 source,
+		PreviousSourceRevision: source.Revision,
+		IdempotencyKey:         excelPricingRevisionForTest("removed-idempotency"),
+		EventID:                21,
+		ValidationOrigin:       "source_event",
+		ValidationOutcome:      excelPricingRemoteSourceAbsent,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-cancelContext.Done():
+	case <-time.After(time.Second):
+		t.Fatal("upstream source removal did not cancel active leader")
+	}
+
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if store.generation != initialGeneration+1 || store.jobs["removed-leader"].status != "cancelling" ||
+		len(store.cache) != 0 {
+		t.Fatalf("removal generation=%d leader=%+v cache=%d",
+			store.generation, store.jobs["removed-leader"], len(store.cache))
+	}
+	change := store.events[len(store.events)-1].Change
+	if change == nil || change.Kind != "source_changed" || change.Reason != "upstream_source_removed" ||
+		change.Source == nil || *change.Source != source || !change.Stale || !change.Verified ||
+		change.PreviousCatalogRevision != previousCatalog || change.PreviousStateRevision != previousState ||
+		change.PreviousSnapshotRevision != previousSnapshot || change.PreviousETag != previousETag {
+		t.Fatalf("source-removal event=%+v", change)
+	}
+}
+
 func TestExcelPricingSnapshotWaitDisconnectCancelsRemoteWork(t *testing.T) {
 	source := excelPricingStateSourceForTest()
 	started := make(chan struct{})

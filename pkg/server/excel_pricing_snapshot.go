@@ -1486,6 +1486,24 @@ func (s *Server) notifyExcelPricingSourceChanged(sourceChangeToken string) {
 	}
 }
 
+// fenceExcelPricingRemoteConfiguration synchronously makes every snapshot
+// started under the previous resolved remote configuration ineligible for
+// publication. The bridge invokes it before advancing its authenticated event
+// epoch, closing the window where a completed old-config response could become
+// ready while the replacement configuration is being installed.
+func (s *Server) fenceExcelPricingRemoteConfiguration() {
+	if s == nil || s.excelPricing == nil || s.excelPricing.snapshots == nil {
+		return
+	}
+	store := s.excelPricing.snapshots
+	store.mu.Lock()
+	cancel := store.invalidateGenerationLocked("snapshot_remote_configuration_changed")
+	store.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+}
+
 func (store *excelPricingSnapshotStore) publishPricingStateInvalidated(stateRevision string) {
 	store.mu.Lock()
 	previous := store.lastVerifiedChangeLocked()
@@ -1559,6 +1577,78 @@ func (s *Server) notifyExcelPricingRemoteRevisionChanged(
 		ETag:            revision.ETag,
 		Stale:           true,
 		Verified:        true,
+	}
+	bindExcelPricingPreviousState(&event, previous)
+	store.publishChangeLocked(event)
+	store.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	return nil
+}
+
+// notifyExcelPricingRemoteSourceLifecycle synchronously applies one accepted
+// source transition. It fences the old generation and publishes exactly one
+// source-change record before the subscriber may acknowledge its cursor.
+func (s *Server) notifyExcelPricingRemoteSourceLifecycle(
+	lifecycle excelPricingRemoteSourceLifecycle,
+) error {
+	if s == nil || !validExcelPricingRemoteSource(lifecycle.Source) ||
+		!validExcelPricingRemoteLifecycleValidation(lifecycle) {
+		return errExcelPricingRemoteRevision
+	}
+	if lifecycle.Revision != nil &&
+		(lifecycle.Revision.Source != lifecycle.Source ||
+			!validExcelPricingRemoteRevisionParts(
+				lifecycle.Revision.StateRevision,
+				lifecycle.Revision.CatalogRevision,
+				lifecycle.Revision.PricingStateRevision,
+				lifecycle.Revision.PricingPolicyRevision,
+			) || !isStrongExcelPricingRevisionETag(
+			lifecycle.Revision.ETag,
+			lifecycle.Revision.StateRevision,
+		)) {
+		return errExcelPricingRemoteRevision
+	}
+	reason := ""
+	switch lifecycle.Mode {
+	case "ordered":
+		switch lifecycle.Change {
+		case "added":
+			reason = "upstream_source_added"
+		case "changed":
+			reason = "upstream_source_changed"
+		case "removed":
+			reason = "upstream_source_removed"
+		}
+	case "validation_gap":
+		reason = "upstream_source_validation_gap"
+	case "reconcile_present":
+		reason = "upstream_source_reconciled"
+	case "reconcile_absent":
+		reason = "upstream_source_absence_reconciled"
+	}
+	if reason == "" {
+		return errExcelPricingRemoteRevision
+	}
+	s.invalidateCanonicalProjection(true)
+
+	store := s.excelPricing.snapshots
+	store.mu.Lock()
+	previous := store.lastVerifiedChangeLocked()
+	cancel := store.invalidateGenerationLocked("snapshot_source_changed")
+	source := lifecycle.Source
+	event := excelPricingStateChangeEvent{
+		Kind:     "source_changed",
+		Reason:   reason,
+		Source:   &source,
+		Stale:    true,
+		Verified: true,
+	}
+	if lifecycle.Revision != nil {
+		event.CatalogRevision = lifecycle.Revision.CatalogRevision
+		event.StateRevision = lifecycle.Revision.StateRevision
+		event.ETag = lifecycle.Revision.ETag
 	}
 	bindExcelPricingPreviousState(&event, previous)
 	store.publishChangeLocked(event)
