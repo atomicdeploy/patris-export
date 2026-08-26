@@ -1566,7 +1566,8 @@ func TestDynamicCalculatorVBASourceGuardsLivePricingBeforeMutation(t *testing.T)
 	} {
 		sectionSource := section(uiSection.start, uiSection.end)
 		if strings.Contains(sectionSource, "mRefreshInProgress") ||
-			!strings.Contains(sectionSource, "mCatalogCommitInProgress") {
+			(!strings.Contains(sectionSource, "mCatalogCommitInProgress") &&
+				!strings.Contains(sectionSource, "SearchOperationBusy()")) {
 			t.Fatalf("%s must remain usable throughout the network wait and pause only for atomic commit", uiSection.start)
 		}
 	}
