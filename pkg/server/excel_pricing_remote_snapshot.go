@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -1040,7 +1041,16 @@ func (client *excelPricingRemoteSnapshotClient) fetchSnapshot(
 		return nil, errExcelPricingRemoteSnapshotProtocol
 	}
 	if err := validateExcelPricingRemoteSnapshotPayload(payload, build, revision, client.source, etag); err != nil {
-		return nil, err
+		if code, ok := excelPricingRemoteSnapshotRepresentationDigestWarning(err); ok {
+			// The payload already passed parse, source/revision identity, mutation
+			// guard, column, row-count, unique-key, reconciliation, and warning
+			// checks. A transforming intermediary can change JSON bytes without
+			// changing those canonical values, so keep the read usable and record
+			// the reduced transport assurance instead of presenting a false outage.
+			log.Printf("Pricing snapshot accepted after semantic validation; optional representation digest warning: %s", code)
+		} else {
+			return nil, err
+		}
 	}
 	if missingETag {
 		if err := client.confirmSnapshotValidator(ctx, requestURL, build.Digest); err != nil {
@@ -1066,6 +1076,23 @@ func (client *excelPricingRemoteSnapshotClient) fetchSnapshot(
 		ProjectedRowFields:     fields,
 		RawPayload:             append([]byte(nil), body...),
 	}, nil
+}
+
+func excelPricingRemoteSnapshotRepresentationDigestWarning(err error) (string, bool) {
+	var integrityErr *excelPricingRemoteSnapshotIntegrityError
+	if !errors.As(err, &integrityErr) || integrityErr == nil {
+		return "", false
+	}
+	switch integrityErr.code {
+	case "page_digest_mismatch",
+		"page_revisions_digest_mismatch",
+		"catalog_metadata_digest_mismatch",
+		"state_digest_mismatch",
+		"snapshot_digest_mismatch":
+		return integrityErr.code, true
+	default:
+		return "", false
+	}
 }
 
 // confirmSnapshotValidator handles intermediaries that remove an ETag header

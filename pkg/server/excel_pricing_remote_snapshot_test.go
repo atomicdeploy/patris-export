@@ -826,6 +826,34 @@ func TestExcelPricingRemoteSnapshotStageCodeCoversConfigurationAndTransportClass
 	}
 }
 
+func TestExcelPricingRemoteSnapshotRepresentationDigestWarningsAreNarrow(t *testing.T) {
+	for _, code := range []string{
+		"page_digest_mismatch",
+		"page_revisions_digest_mismatch",
+		"catalog_metadata_digest_mismatch",
+		"state_digest_mismatch",
+		"snapshot_digest_mismatch",
+	} {
+		if got, ok := excelPricingRemoteSnapshotRepresentationDigestWarning(
+			excelPricingRemoteSnapshotIntegrityFailure(code),
+		); !ok || got != code {
+			t.Fatalf("digest warning (%q,%v), want (%q,true)", got, ok, code)
+		}
+	}
+	for _, code := range []string{
+		"page_digest_encoding_failed",
+		"page_digest_count_failed",
+		"shape_or_counts_failed",
+		"rows_or_reconciliation_failed",
+	} {
+		if _, ok := excelPricingRemoteSnapshotRepresentationDigestWarning(
+			excelPricingRemoteSnapshotIntegrityFailure(code),
+		); ok {
+			t.Fatalf("unsafe integrity failure accepted as representation warning: %q", code)
+		}
+	}
+}
+
 func TestExcelPricingRemoteSnapshotMissingETagConfirmationRejectsNonempty304(t *testing.T) {
 	digest := testExcelPricingRevision('a')
 	requestURL, err := url.Parse("https://example.test/wp-json/digitalogic/pricing/sync/snapshots/snap_00000000000000000000000000000000")
