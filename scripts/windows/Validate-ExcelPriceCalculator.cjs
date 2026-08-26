@@ -2536,6 +2536,7 @@ $syncRan = $false
 $syncSucceeded = $false
 $syncOperation = ''
 $syncError = ''
+$syncDiagnostic = ''
 try {
     Set-ValidatorStage 'creating_excel'
     $validatorJobHandle = New-ValidatorKillOnCloseJob
@@ -2612,12 +2613,18 @@ try {
             ),
             $invariant
         )
+        $syncDiagnostic = [Convert]::ToString(
+            $excel.Run(
+                "'$macroBookName'!ProductCatalogSync.LastPricingOperationDiagnosticForValidation"
+            ),
+            $invariant
+        )
         if (-not $syncSucceeded) {
             $syncFailureStatus = [Convert]::ToString(
                 (Sheet-Scalar $candidateBook 3 'B6'),
                 $invariant
             )
-            throw "Live synchronization '$syncOperation' failed before validation: $syncFailureStatus $syncError"
+            throw "Live synchronization '$syncOperation' failed before validation: $syncFailureStatus $syncError; diagnostic=$syncDiagnostic"
         }
         Set-ValidatorStage 'live_sync_completed' $syncOperation
     }
@@ -2977,6 +2984,7 @@ try {
             succeeded = $syncSucceeded
             operation = $syncOperation
             error = $syncError
+            diagnostic = $syncDiagnostic
         }
         candidate = [pscustomobject]@{
             path = $candidatePath

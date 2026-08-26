@@ -247,6 +247,7 @@ Private mCatalogCommitInProgress As Boolean
 Private mLastOperationName As String
 Private mLastOperationSucceeded As Boolean
 Private mLastOperationError As String
+Private mLastOperationDiagnostic As String
 
 #If VBA7 Then
 Private Declare PtrSafe Function MessageBoxW Lib "user32" ( _
@@ -2048,6 +2049,7 @@ Private Sub CompleteActiveOperation(ByVal success As Boolean)
     mLastOperationName = completedKind
     mLastOperationSucceeded = success
     mLastOperationError = vbNullString
+    mLastOperationDiagnostic = vbNullString
     Set mOperationRequest = Nothing
     mPricingCSRFToken = vbNullString
     mRefreshCancelRequested = False
@@ -2131,6 +2133,8 @@ Private Sub FailActiveOperation(ByVal errorNumber As Long, _
     mLastOperationName = failedKind
     mLastOperationSucceeded = False
     mLastOperationError = statusText
+    mLastOperationDiagnostic = errorSource & " (" & CStr(errorNumber) & "): " & _
+                               errorDescription
     mPricingCSRFToken = vbNullString
     mRequiredSnapshotStateRevision = vbNullString
     mRefreshInProgress = False
@@ -2192,6 +2196,10 @@ End Function
 
 Public Function LastPricingOperationErrorForValidation() As String
     LastPricingOperationErrorForValidation = mLastOperationError
+End Function
+
+Public Function LastPricingOperationDiagnosticForValidation() As String
+    LastPricingOperationDiagnosticForValidation = mLastOperationDiagnostic
 End Function
 
 Private Sub EnsureSseListener(ByVal eventsURL As String, _
