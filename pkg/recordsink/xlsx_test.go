@@ -1559,7 +1559,7 @@ func TestDynamicCalculatorVBASourceGuardsLivePricingBeforeMutation(t *testing.T)
 		start string
 		end   string
 	}{
-		{"Public Sub FocusProductSearch", "Public Sub SearchProducts"},
+		{"Public Sub FocusProductSearch", "Public Sub QueueProductSearch"},
 		{"Public Sub SearchProducts", "Public Sub ClearProductSearch"},
 		{"Public Sub ClearProductSearch", "Private Function ProductSearchMatchRows"},
 		{"Public Sub HighlightSelectedProductRow", "Public Sub HandlePricingProposalChanged"},
