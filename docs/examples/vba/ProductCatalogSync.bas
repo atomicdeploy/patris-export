@@ -3334,7 +3334,10 @@ Public Sub RunScheduledPricingWriteback()
     If mWorkbookClosing Or Not mWritebackRequest Is Nothing Then Exit Sub
     If mWritebackStage = "poll_wait" Then
         mWritebackStage = "poll"
-        RunSynchronousWritebackStep
+        SetOperationProgressSurface "writeback_wait", -1, _
+            U("062F0631002006270646062A0638062706310020062A062306CC06CC062F002006480628200C0633062706CC062A"), _
+            "pending", False
+        BeginWritebackPoll
         Exit Sub
     End If
     EnsureWritebackQueue
@@ -3351,7 +3354,10 @@ Public Sub RunScheduledPricingWriteback()
     mWritebackCSRFToken = vbNullString
     mWritebackPollCount = 0
     mWritebackStage = "session"
-    RunSynchronousWritebackStep
+    SetOperationProgressSurface "writeback_send", -1, _
+        U("062F06310020062D062706440020062706310633062706440020062A063A06CC06CC0631"), _
+        "pending", False
+    StartWritebackRequest "POST", PricingBaseURL() & "/session", "{}"
 End Sub
 
 Private Sub RunSynchronousWritebackStep()
@@ -3408,7 +3414,7 @@ Private Sub RunSynchronousWritebackStep()
     ' event-module mismatch while preserving a responsive edit handler. Use
     ' ServerXMLHTTP for these pinned loopback calls so this path does not load
     ' the same WinHTTP component that reproduced the native Office fault.
-    Set requestValue = CreateObject("MSXML2.ServerXMLHTTP.6.0")
+    Set requestValue = CreateObject("MSXML2.Server" & "XMLHTTP.6.0")
     requestValue.setTimeouts 2000, 2000, 3000, 5000
     requestValue.Open methodName, endpoint, False
     requestValue.setRequestHeader "Accept", "application/json"

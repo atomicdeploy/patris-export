@@ -1601,6 +1601,23 @@ func TestDynamicCalculatorVBASourceGuardsLivePricingBeforeMutation(t *testing.T)
 		}
 	}
 
+	writebackStart := strings.Index(source, "Public Sub RunScheduledPricingWriteback")
+	writebackEnd := strings.Index(source, "Private Sub RunSynchronousWritebackStep")
+	if writebackStart < 0 || writebackEnd <= writebackStart {
+		t.Fatal("scheduled pricing writeback section is missing")
+	}
+	writebackSource := source[writebackStart:writebackEnd]
+	for _, required := range []string{
+		"BeginWritebackPoll",
+		`StartWritebackRequest "POST", PricingBaseURL() & "/session", "{}"`,
+	} {
+		if !strings.Contains(writebackSource, required) {
+			t.Fatalf("scheduled pricing writeback must hand HTTP work to the asynchronous request path: %s", required)
+		}
+	}
+	if strings.Contains(writebackSource, "RunSynchronousWritebackStep") {
+		t.Fatal("scheduled pricing writeback must not execute synchronous HTTP on Excel's UI thread")
+	}
 	confirmStart := strings.Index(source, "Private Function ConfirmUnicodeMessage")
 	if confirmStart < 0 {
 		t.Fatal("native Unicode confirmation helper is missing")
