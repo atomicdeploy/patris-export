@@ -1795,8 +1795,7 @@ Private Sub HandleSnapshotStartResponse(ByVal statusCode As Long, _
     If statusCode < 200 Or statusCode >= 300 Then
         errorCode = LCase$(ResponseErrorCode(responseText))
         If errorCode = "canonical_source_mismatch" And _
-           Not mOperationRepairAttempted Then
-            BeginRepairRequest
+           RetrySnapshotAfterSourceDrift() Then
             Exit Sub
         End If
         RaiseSnapshotHTTPError statusCode, responseText
@@ -1836,8 +1835,7 @@ Private Sub HandleSnapshotWaitResponse(ByVal statusCode As Long, _
     If mSnapshotJobStatus <> "ready" Then
         If LCase$(Trim$(mSnapshotJobCode)) = _
            "snapshot_source_revision_conflict" And _
-           Not mOperationRepairAttempted Then
-            BeginRepairRequest
+           RetrySnapshotAfterSourceDrift() Then
             Exit Sub
         End If
         If IsSnapshotDriftCode(mSnapshotJobCode) And _
@@ -1854,6 +1852,20 @@ Private Sub HandleSnapshotWaitResponse(ByVal statusCode As Long, _
     End If
     BeginSnapshotPayloadRequest
 End Sub
+
+Private Function RetrySnapshotAfterSourceDrift() As Boolean
+    If mOperationSnapshotRetryCount >= 3 Then Exit Function
+
+    mOperationSnapshotRetryCount = mOperationSnapshotRetryCount + 1
+    mSourceID = vbNullString
+    mSourceDataset = vbNullString
+    mSourceRevision = vbNullString
+    mOperationContractStartedAt = PhaseTimestamp()
+    SetOperationProgressSurface "refresh_request", -1, _
+        T("source_changed"), "active", False
+    BeginContractRequest "contract"
+    RetrySnapshotAfterSourceDrift = True
+End Function
 
 Private Sub HandleSnapshotPayloadResponse(ByVal statusCode As Long, _
                                           ByVal responseHeaders As String, _
