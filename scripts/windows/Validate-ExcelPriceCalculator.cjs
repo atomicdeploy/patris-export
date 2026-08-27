@@ -3945,14 +3945,15 @@ function main() {
     if (/\bKickQueuedAsyncDispatch\b/iu.test(selectionSource)) {
       throw new Error('Workbook_SheetSelectionChange must not dispatch network work');
     }
-    if (!/Names\.Add\('PricingInputCNYRate',\s*\$settings\.Range\('B18'\)\)/u.test(buildSource)) {
-      throw new Error('PricingInputCNYRate must bind exactly to Settings B18');
+    if (!/Names\.Add\('ConfirmedCNYRate',\s*\$settings\.Range\('G18'\)\)/u.test(buildSource)) {
+      throw new Error('ConfirmedCNYRate must bind exactly to the hidden confirmed Settings G18 cell');
     }
     const priceFormulaSource = /Private Sub ApplyProductTableFormulas\b[\s\S]*?\r?\nEnd Sub/iu.exec(moduleSource)?.[0] || '';
     if (!/cnyRateFormula\s*=\s*_/iu.test(priceFormulaSource)
-        || !/ISNUMBER\(PricingInputCNYRate\)/iu.test(priceFormulaSource)
-        || !/PricingInputCNYRate>0/iu.test(priceFormulaSource)) {
-      throw new Error('Product formulas must use the validated B18 proposal rate with a safe fallback');
+        || !/ISNUMBER\(ConfirmedCNYRate\)/iu.test(priceFormulaSource)
+        || !/ConfirmedCNYRate>0/iu.test(priceFormulaSource)
+        || /PricingInputCNYRate/iu.test(priceFormulaSource)) {
+      throw new Error('Product formulas must use only the confirmed website rate, never the B18 proposal');
     }
   } catch (error) {
     console.error(`Search re-entrancy source gate failed: ${error.message}`);

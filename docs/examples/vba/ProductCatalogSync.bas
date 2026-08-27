@@ -33,6 +33,8 @@ Private Const PRICING_REQUEST_SCHEMA As String = "patris.excel-pricing-companion
 Private Const PRICING_SESSION_SCHEMA As String = "patris.excel-pricing-companion-session/v1"
 Private Const PRICING_WRITEBACK_REQUEST_SCHEMA As String = "patris.pricing-input-writeback-request/v1"
 Private Const PRICING_WRITEBACK_JOB_SCHEMA As String = "patris.pricing-input-writeback-job/v1"
+Private Const PRICING_CONFIRMATION_REQUEST_SCHEMA As String = "patris.pricing-confirmation-ack-request/v1"
+Private Const PRICING_CONFIRMATION_SCHEMA As String = "digitalogic.pricing-confirmation/v1"
 Private Const PRICING_STATE_SCHEMA As String = "digitalogic.pricing-sync-state/v1"
 Private Const PRICING_SNAPSHOT_REQUEST_SCHEMA As String = "patris.pricing-snapshot-request/v1"
 Private Const PRICING_SNAPSHOT_JOB_SCHEMA As String = "patris.pricing-snapshot-job/v1"
@@ -166,6 +168,10 @@ Private mWritebackRequestID As String
 Private mWritebackJobID As String
 Private mWritebackCSRFToken As String
 Private mWritebackPollCount As Long
+Private mPendingConfirmationTransactionID As String
+Private mPendingConfirmationRevision As String
+Private mPendingConfirmationDigest As String
+Private mPendingConfirmationDeadline As Double
 Private mForceFreshSnapshot As Boolean
 Private mImageRequest As AsyncWinHttpRequest
 Private mImageCache As Object
@@ -836,6 +842,15 @@ CommitExit:
     mCatalogCommitInProgress = False
     RefreshSearchEnterHotkey
     On Error GoTo 0
+    If savedErrorNumber = 0 And _
+       Len(mPendingConfirmationTransactionID) > 0 And _
+       Len(mWritebackStage) = 0 Then
+        EnsureWritebackQueue
+        mWritebackPending("site_confirmation") = "B18"
+        MarkWritebackState "site_confirmation", "sending", _
+            U("062A063A06CC06CC06310020064806280633062706CC062A0020062F06310020062706A9063306440020062A062706CC06CC062F00200634062F061B0020062F0631002006270646062A0638062706310020062B0628062A002006460647062706CC06CC002006480628200C0633062706CC062A002006270633062A002E")
+        SchedulePricingWriteback 1
+    End If
     If savedErrorNumber <> 0 Then
         Err.Raise savedErrorNumber, "CommitRefreshSnapshot", _
                   savedErrorDescription
@@ -3826,9 +3841,21 @@ Private Sub RunSynchronousWritebackStep()
             requestBody = "{}"
         Case "enqueue"
             methodName = "POST"
-            endpoint = PricingBaseURL() & "/writebacks"
-            requestBody = BuildPricingWritebackRequest( _
-                mWritebackSettingKey, mWritebackRequestID)
+            If mWritebackSettingKey = "site_confirmation" Then
+                endpoint = PricingBaseURL() & "/confirmations"
+                requestBody = BuildPricingConfirmationRequest( _
+                    mWritebackRequestID)
+            Else
+                endpoint = PricingBaseURL() & "/writebacks"
+                requestBody = BuildPricingWritebackRequest( _
+                    mWritebackSettingKey, mWritebackRequestID)
+            End If
+        Case "ack"
+            If Len(mWritebackJobID) <> 32 Then GoTo InvalidResponse
+            methodName = "POST"
+            endpoint = PricingBaseURL() & "/writebacks/" & _
+                mWritebackJobID & "/ack"
+            requestBody = "{}"
         Case "poll"
             If Len(mWritebackJobID) <> 32 Then GoTo InvalidResponse
             methodName = "GET"
@@ -3912,7 +3939,7 @@ Private Sub RunSynchronousWritebackStep()
             messageText = Trim$(CStr(BlankIfNull( _
                 JsonRuntime.JsonText(root, "message_fa"))))
             Select Case statusText
-                Case "pending", "sending"
+                Case "pending", "sending", "pending_ack", "sending_ack"
                     MarkWritebackState mWritebackSettingKey, _
                         "sending", messageText
                     SetOperationProgressSurface "writeback_wait", -1, _
@@ -3925,6 +3952,10 @@ Private Sub RunSynchronousWritebackStep()
                         mWritebackStage = "poll_wait"
                         SchedulePricingWriteback 1
                     End If
+                Case "awaiting_excel"
+                    ApplyWebsiteCommittedWriteback root, messageText
+                    mWritebackStage = "ack"
+                    RunSynchronousWritebackStep
                 Case "confirmed"
                     revisionText = Trim$(CStr(BlankIfNull( _
                         JsonRuntime.JsonText(root, "state_revision"))))
@@ -3937,6 +3968,7 @@ Private Sub RunSynchronousWritebackStep()
                 Case "superseded"
                     CompletePricingWriteback
                 Case "conflict", "failed"
+                    RestoreWritebackValueFromTerminal root
                     If Len(messageText) = 0 Then messageText = _
                         U("06280647200C063106480632063106330627064606CC002006480631062F067E063106330020064606270645064806410642003A") & _
                         " " & Trim$(CStr(BlankIfNull( _
@@ -3950,6 +3982,13 @@ Private Sub RunSynchronousWritebackStep()
                 Case Else
                     GoTo InvalidResponse
             End Select
+        Case "ack"
+            If CStr(JsonRuntime.JsonText(root, "schema")) <> _
+               PRICING_WRITEBACK_JOB_SCHEMA Or _
+               Trim$(CStr(JsonRuntime.JsonText(root, "job_id"))) <> _
+               mWritebackJobID Then GoTo InvalidResponse
+            mWritebackStage = "poll_wait"
+            SchedulePricingWriteback 1
     End Select
     Exit Sub
 
@@ -3975,9 +4014,15 @@ End Sub
 
 Private Sub BeginWritebackEnqueue()
     mWritebackStage = "enqueue"
-    StartWritebackRequest "POST", PricingBaseURL() & "/writebacks", _
-        BuildPricingWritebackRequest(mWritebackSettingKey, _
-                                     mWritebackRequestID)
+    If mWritebackSettingKey = "site_confirmation" Then
+        StartWritebackRequest "POST", PricingBaseURL() & _
+            "/confirmations", _
+            BuildPricingConfirmationRequest(mWritebackRequestID)
+    Else
+        StartWritebackRequest "POST", PricingBaseURL() & "/writebacks", _
+            BuildPricingWritebackRequest(mWritebackSettingKey, _
+                                         mWritebackRequestID)
+    End If
 End Sub
 
 Private Sub BeginWritebackPoll()
@@ -4093,7 +4138,7 @@ Private Sub HandleWritebackTerminal()
             messageText = Trim$(CStr(BlankIfNull( _
                 JsonRuntime.JsonText(root, "message_fa"))))
             Select Case statusText
-                Case "pending", "sending"
+                Case "pending", "sending", "pending_ack", "sending_ack"
                     If Len(messageText) = 0 Then
                         messageText = U("062F06310020062D062706440020062706310633062706440020062706450646002006280647002006480631062F067E06310633002006480020062E064806270646062F064600200646062A06CC062C0647002006270633062A002E")
                     End If
@@ -4106,6 +4151,11 @@ Private Sub HandleWritebackTerminal()
                         mWritebackStage = "poll_wait"
                         SchedulePricingWriteback 1
                     End If
+                Case "awaiting_excel"
+                    ApplyWebsiteCommittedWriteback root, messageText
+                    mWritebackStage = "ack"
+                    StartWritebackRequest "POST", PricingBaseURL() & _
+                        "/writebacks/" & mWritebackJobID & "/ack", "{}"
                 Case "confirmed"
                     revisionText = Trim$(CStr(BlankIfNull( _
                         JsonRuntime.JsonText(root, "state_revision"))))
@@ -4118,6 +4168,7 @@ Private Sub HandleWritebackTerminal()
                 Case "superseded"
                     CompletePricingWriteback
                 Case "conflict", "failed"
+                    RestoreWritebackValueFromTerminal root
                     If Len(messageText) = 0 Then messageText = _
                         U("06280647200C063106480632063106330627064606CC002006480631062F067E063106330020064606270645064806410642003A") & _
                         " " & Trim$(CStr(BlankIfNull( _
@@ -4128,6 +4179,13 @@ Private Sub HandleWritebackTerminal()
                 Case Else
                     GoTo InvalidResponse
             End Select
+        Case "ack"
+            If CStr(JsonRuntime.JsonText(root, "schema")) <> _
+               PRICING_WRITEBACK_JOB_SCHEMA Or _
+               Trim$(CStr(JsonRuntime.JsonText(root, "job_id"))) <> _
+               mWritebackJobID Then GoTo InvalidResponse
+            mWritebackStage = "poll_wait"
+            SchedulePricingWriteback 1
         Case Else
             GoTo InvalidResponse
     End Select
@@ -4141,6 +4199,12 @@ TerminalFailed:
 End Sub
 
 Private Sub CompletePricingWriteback()
+    If mWritebackSettingKey = "site_confirmation" Then
+        mPendingConfirmationTransactionID = vbNullString
+        mPendingConfirmationRevision = vbNullString
+        mPendingConfirmationDigest = vbNullString
+        mPendingConfirmationDeadline = 0
+    End If
     mWritebackStage = vbNullString
     mWritebackSettingKey = vbNullString
     mWritebackCellAddress = vbNullString
@@ -4150,6 +4214,144 @@ Private Sub CompletePricingWriteback()
     mWritebackPollCount = 0
     EnsureWritebackQueue
     If mWritebackPending.Count > 0 Then SchedulePricingWriteback 1
+End Sub
+
+Private Sub ApplyWebsiteCommittedWriteback(ByVal root As JsonValue, _
+                                           ByVal messageText As String)
+    Dim settings As Worksheet
+    Dim inputCell As Range
+    Dim confirmedValue As Variant
+    Dim revisionText As String
+    Dim transactionID As String
+    Dim digestText As String
+    Dim deadlineValue As Variant
+    Dim previousEvents As Boolean
+
+    Set settings = ConfigSheet()
+    Set inputCell = WritebackCell(mWritebackSettingKey)
+    If inputCell Is Nothing Then Err.Raise vbObjectError + 781, _
+        "ApplyWebsiteCommittedWriteback", T("bridge_missing")
+    transactionID = Trim$(CStr(BlankIfNull( _
+        JsonRuntime.JsonText(root, "transaction_id"))))
+    revisionText = Trim$(CStr(BlankIfNull( _
+        JsonRuntime.JsonText(root, "state_revision"))))
+    digestText = Trim$(CStr(BlankIfNull( _
+        JsonRuntime.JsonText(root, "confirmed_settings_digest"))))
+    deadlineValue = NumericOrBlank( _
+        JsonRuntime.JsonText(root, "ack_deadline"))
+    confirmedValue = BlankIfNull( _
+        JsonRuntime.JsonText(root, "confirmed_value"))
+    If Len(transactionID) <> 36 Or Left$(transactionID, 4) <> "ptx_" Or _
+       Not IsSHA256RevisionText(revisionText) Or _
+       Not IsSHA256RevisionText(digestText) Or _
+       IsEmpty(deadlineValue) Or Len(CanonicalCellText(confirmedValue)) = 0 Then
+        Err.Raise vbObjectError + 782, _
+            "ApplyWebsiteCommittedWriteback", T("bridge_missing")
+    End If
+
+    previousEvents = Application.EnableEvents
+    On Error GoTo ApplyFailed
+    mInternalPricingRefresh = True
+    Application.EnableEvents = False
+    settings.Range("G14").Value2 = revisionText
+    Select Case mWritebackSettingKey
+        Case "yuan_price"
+            settings.Range("B10").Value = CDbl(confirmedValue)
+            settings.Range("G18").Value = CDbl(confirmedValue)
+            inputCell.Value = CDbl(confirmedValue)
+        Case "dollar_price"
+            settings.Range("B11").Value = CDbl(confirmedValue)
+            settings.Range("G19").Value = CDbl(confirmedValue)
+            inputCell.Value = CDbl(confirmedValue)
+        Case "cny_effective_date"
+            settings.Range("H17").Value2 = CanonicalDateText(confirmedValue)
+            settings.Range("G20").Value2 = CanonicalDateText(confirmedValue)
+            inputCell.Value2 = CanonicalDateText(confirmedValue)
+        Case "usd_effective_date"
+            settings.Range("H16").Value2 = CanonicalDateText(confirmedValue)
+            inputCell.Value2 = CanonicalDateText(confirmedValue)
+        Case "profit_margin_percent"
+            settings.Range("B13").Value = CDbl(confirmedValue) / 100#
+            settings.Range("G21").Value = CDbl(confirmedValue) / 100#
+            inputCell.Value = CDbl(confirmedValue) / 100#
+        Case "air_express_price_per_kg"
+            settings.Range("B14").Value = CDbl(confirmedValue)
+            settings.Range("G22").Value = CDbl(confirmedValue)
+            inputCell.Value = CDbl(confirmedValue)
+        Case "price_rounding_digits"
+            settings.Range("B15").Value = CLng(confirmedValue)
+            settings.Range("H18").Value = CLng(confirmedValue)
+            inputCell.Value = CLng(confirmedValue)
+        Case Else
+            Err.Raise vbObjectError + 783, _
+                "ApplyWebsiteCommittedWriteback", T("bridge_missing")
+    End Select
+    CalculateRefreshedWorkbook
+    MarkWritebackState mWritebackSettingKey, "sending", _
+        IIf(Len(messageText) > 0, messageText, _
+            U("06460631062E0020062A062706CC06CC062F0634062F06470020062F06310020064806280633062706CC062A0020062B0628062A00200634062F061B0020062F0631002006270646062A063806270631002006460647062706CC06CC002006270633062A002E"))
+    SetOperationProgressSurface "writeback_wait", -1, _
+        U("062F0631002006270646062A0638062706310020062A062306CC06CC062F002006460647062706CC06CC002006480628200C0633062706CC062A"), _
+        "pending", False
+ApplyExit:
+    Application.EnableEvents = previousEvents
+    mInternalPricingRefresh = False
+    Exit Sub
+ApplyFailed:
+    Application.EnableEvents = previousEvents
+    mInternalPricingRefresh = False
+    Err.Raise Err.Number, "ApplyWebsiteCommittedWriteback", Err.Description
+End Sub
+
+Private Sub RestoreWritebackValueFromTerminal(ByVal root As JsonValue)
+    Dim confirmedValue As Variant
+    Dim settings As Worksheet
+    Dim inputCell As Range
+    Dim previousEvents As Boolean
+
+    confirmedValue = BlankIfNull( _
+        JsonRuntime.JsonText(root, "confirmed_value"))
+    If Len(CanonicalCellText(confirmedValue)) = 0 Then Exit Sub
+    Set settings = ConfigSheet()
+    Set inputCell = WritebackCell(mWritebackSettingKey)
+    If inputCell Is Nothing Then Exit Sub
+    previousEvents = Application.EnableEvents
+    On Error GoTo RestoreExit
+    mInternalPricingRefresh = True
+    Application.EnableEvents = False
+    Select Case mWritebackSettingKey
+        Case "yuan_price", "site_confirmation"
+            settings.Range("B10").Value = CDbl(confirmedValue)
+            settings.Range("G18").Value = CDbl(confirmedValue)
+            inputCell.Value = CDbl(confirmedValue)
+        Case "dollar_price"
+            settings.Range("B11").Value = CDbl(confirmedValue)
+            settings.Range("G19").Value = CDbl(confirmedValue)
+            inputCell.Value = CDbl(confirmedValue)
+        Case "cny_effective_date"
+            settings.Range("H17").Value2 = CanonicalDateText(confirmedValue)
+            settings.Range("G20").Value2 = CanonicalDateText(confirmedValue)
+            inputCell.Value2 = CanonicalDateText(confirmedValue)
+        Case "usd_effective_date"
+            settings.Range("H16").Value2 = CanonicalDateText(confirmedValue)
+            inputCell.Value2 = CanonicalDateText(confirmedValue)
+        Case "profit_margin_percent"
+            settings.Range("B13").Value = CDbl(confirmedValue) / 100#
+            settings.Range("G21").Value = CDbl(confirmedValue) / 100#
+            inputCell.Value = CDbl(confirmedValue) / 100#
+        Case "air_express_price_per_kg"
+            settings.Range("B14").Value = CDbl(confirmedValue)
+            settings.Range("G22").Value = CDbl(confirmedValue)
+            inputCell.Value = CDbl(confirmedValue)
+        Case "price_rounding_digits"
+            settings.Range("B15").Value = CLng(confirmedValue)
+            settings.Range("H18").Value = CLng(confirmedValue)
+            inputCell.Value = CLng(confirmedValue)
+    End Select
+    CalculateRefreshedWorkbook
+RestoreExit:
+    Application.EnableEvents = previousEvents
+    mInternalPricingRefresh = False
 End Sub
 
 Private Sub FailPricingWriteback(ByVal reasonText As String)
@@ -4285,6 +4487,48 @@ Failed:
     On Error GoTo 0
 End Function
 
+Private Function BuildPricingConfirmationRequest( _
+        ByVal requestID As String) As String
+    Dim settings As Worksheet
+    Dim profitPercent As Variant
+    Dim body As String
+
+    Set settings = ConfigSheet()
+    If Len(mPendingConfirmationTransactionID) <> 36 Or _
+       Left$(mPendingConfirmationTransactionID, 4) <> "ptx_" Or _
+       Not IsSHA256RevisionText(mPendingConfirmationRevision) Or _
+       Not IsSHA256RevisionText(mPendingConfirmationDigest) Then
+        Err.Raise vbObjectError + 784, _
+            "BuildPricingConfirmationRequest", T("bridge_missing")
+    End If
+    profitPercent = Empty
+    If IsNumeric(settings.Range("B13").Value2) Then
+        profitPercent = CDbl(settings.Range("B13").Value2) * 100#
+    End If
+    body = "{""schema"":" & _
+        JsonString(PRICING_CONFIRMATION_REQUEST_SCHEMA) & "," & _
+        """request_id"":" & JsonString(requestID) & "," & _
+        """transaction_id"":" & _
+        JsonString(mPendingConfirmationTransactionID) & "," & _
+        """committed_state_revision"":" & _
+        JsonString(mPendingConfirmationRevision) & "," & _
+        """confirmed_settings_digest"":" & _
+        JsonString(mPendingConfirmationDigest) & "," & _
+        """confirmed_settings"":{" & _
+        """dollar_price"":" & JsonNumberOrNull(settings.Range("B11").Value2) & "," & _
+        """yuan_price"":" & JsonNumberOrNull(settings.Range("B10").Value2) & "," & _
+        """effective_date"":" & JsonString(CanonicalDateText(settings.Range("B12").Value2)) & "," & _
+        """usd_effective_date"":" & JsonString(CanonicalDateText(settings.Range("H16").Value2)) & "," & _
+        """cny_effective_date"":" & JsonString(CanonicalDateText(settings.Range("H17").Value2)) & "," & _
+        """profit_margin_percent"":" & JsonNumberOrNull(profitPercent) & "," & _
+        """air_express_price_per_kg"":" & JsonNumberOrNull(settings.Range("B14").Value2) & "," & _
+        """air_express_currency"":" & JsonString(UCase$(Trim$(CStr(settings.Range("H14").Value2)))) & "," & _
+        """shipping_catalog_revision"":" & JsonString(Trim$(CStr(settings.Range("H15").Value2))) & "," & _
+        """price_rounding_digits"":" & JsonNumberOrNull(settings.Range("B15").Value2) & "," & _
+        """price_rounding_mode"":" & JsonString(Trim$(CStr(settings.Range("H19").Value2))) & "}}"
+    BuildPricingConfirmationRequest = body
+End Function
+
 Public Function ValidateOperationProgressUIForValidation() As Boolean
     Dim targetSheet As Worksheet
     Dim track As Shape
@@ -4397,7 +4641,7 @@ Private Function WritebackCell(ByVal settingKey As String) As Range
     Dim addressText As String
 
     Select Case settingKey
-        Case "yuan_price": addressText = "B18"
+        Case "yuan_price", "site_confirmation": addressText = "B18"
         Case "dollar_price": addressText = "B19"
         Case "cny_effective_date": addressText = "B20"
         Case "usd_effective_date": addressText = "E20"
@@ -5714,6 +5958,56 @@ Private Sub ApplyGlobalState(ByVal state As JsonValue)
         CLng(remoteRounding)
     UpdateProposalDriftFlags settings, remoteCNY, remoteUSD, remoteCNYDate, _
         remoteUSDDate, remoteProfit, remoteShipping, CLng(remoteRounding)
+    CapturePendingPricingConfirmation state
+End Sub
+
+Private Sub CapturePendingPricingConfirmation(ByVal state As JsonValue)
+    Dim confirmation As JsonValue
+    Dim statusText As String
+    Dim transactionID As String
+    Dim revisionText As String
+    Dim digestText As String
+    Dim ackPath As String
+    Dim consumerID As String
+    Dim channelText As String
+    Dim deadlineValue As Variant
+
+    mPendingConfirmationTransactionID = vbNullString
+    mPendingConfirmationRevision = vbNullString
+    mPendingConfirmationDigest = vbNullString
+    mPendingConfirmationDeadline = 0
+    Set confirmation = JsonRuntime.JsonMember(state, "confirmation")
+    If confirmation Is Nothing Then Exit Sub
+    statusText = LCase$(Trim$(CStr(BlankIfNull( _
+        JsonRuntime.JsonText(confirmation, "status")))))
+    If statusText <> "awaiting_ack" Then Exit Sub
+    If Trim$(CStr(JsonRuntime.JsonText(confirmation, "schema"))) <> _
+       PRICING_CONFIRMATION_SCHEMA Then Exit Sub
+    transactionID = Trim$(CStr(BlankIfNull( _
+        JsonRuntime.JsonText(confirmation, "transaction_id"))))
+    revisionText = Trim$(CStr(BlankIfNull( _
+        JsonRuntime.JsonText(confirmation, "committed_revision"))))
+    digestText = Trim$(CStr(BlankIfNull( _
+        JsonRuntime.JsonText(confirmation, "committed_settings_digest"))))
+    ackPath = Trim$(CStr(BlankIfNull( _
+        JsonRuntime.JsonText(confirmation, "ack_path"))))
+    consumerID = Trim$(CStr(BlankIfNull( _
+        JsonRuntime.JsonText(confirmation, "consumer_id"))))
+    channelText = Trim$(CStr(BlankIfNull( _
+        JsonRuntime.JsonText(confirmation, "channel"))))
+    deadlineValue = NumericOrBlank( _
+        JsonRuntime.JsonText(confirmation, "ack_deadline"))
+    If Len(transactionID) <> 36 Or Left$(transactionID, 4) <> "ptx_" Or _
+       Not IsSHA256RevisionText(revisionText) Or _
+       Not IsSHA256RevisionText(digestText) Or _
+       ackPath <> "/wp-json/digitalogic/pricing/sync/ack" Or _
+       consumerID <> PRICING_CONTRACT_CLIENT_ID Or _
+       channelText <> PRICING_CONTRACT_CHANNEL Or _
+       IsEmpty(deadlineValue) Then Exit Sub
+    mPendingConfirmationTransactionID = transactionID
+    mPendingConfirmationRevision = revisionText
+    mPendingConfirmationDigest = digestText
+    mPendingConfirmationDeadline = CDbl(deadlineValue)
 End Sub
 
 Private Sub UpdateProposalCell(ByVal proposal As Range, _
@@ -6230,8 +6524,8 @@ Private Sub ApplyProductTableFormulas(ByVal table As ListObject)
     lookupExpression = _
         "IF(RC[8]<>"""",""woo:""&RC[8],""patris:""&RC[6])"
     cnyRateFormula = _
-        "IF(AND(ISNUMBER(PricingInputCNYRate),PricingInputCNYRate>0)," & _
-        "PricingInputCNYRate,VLOOKUP(" & lookupExpression & _
+        "IF(AND(ISNUMBER(ConfirmedCNYRate),ConfirmedCNYRate>0)," & _
+        "ConfirmedCNYRate,VLOOKUP(" & lookupExpression & _
         ",SyncData,6,FALSE))"
     eligibleKindFormula = _
         "OR(VLOOKUP(" & lookupExpression & ",SyncData,20,FALSE)=""" & _

@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/atomicdeploy/patris-export/pkg/canonical"
 	"github.com/atomicdeploy/patris-export/pkg/updateout"
 )
 
@@ -93,10 +94,12 @@ func TestExcelPricingWritebackWorkerUsesPreviewApplyIdempotencyAndReadback(t *te
 	initialRevision := excelPricingRevisionForTest("writeback-initial")
 	confirmedRevision := excelPricingRevisionForTest("writeback-confirmed")
 	previewDigest := excelPricingRevisionForTest("writeback-preview")
+	settingsDigest := excelPricingRevisionForTest("writeback-settings")
 	settings := validExcelPricingWritebackRequest("excel-writeback-test-0005", "yuan_price", 29500).Settings
 	var previewCalls atomic.Int32
 	var applyCalls atomic.Int32
 	var stateCalls atomic.Int32
+	var ackReceived atomic.Bool
 	remote := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch {
@@ -118,6 +121,23 @@ func TestExcelPricingWritebackWorkerUsesPreviewApplyIdempotencyAndReadback(t *te
 			}
 			_ = json.NewEncoder(w).Encode(map[string]interface{}{
 				"schema": excelPricingApplySchema, "state_revision": confirmedRevision,
+				"settings": settings,
+				"confirmation": map[string]interface{}{
+					"schema": excelPricingConfirmationSchema, "status": "awaiting_ack",
+					"transaction_id":            "ptx_0123456789abcdef0123456789abcdef",
+					"committed_revision":        confirmedRevision,
+					"committed_settings_digest": settingsDigest,
+					"ack_deadline":              time.Now().Add(time.Minute).Unix(),
+					"ack_path":                  "/wp-json/digitalogic/pricing/sync/ack",
+					"consumer_id":               excelPricingContractClientID,
+					"channel":                   excelPricingContractChannel,
+				},
+			})
+		case strings.HasSuffix(r.URL.Path, "/ack"):
+			ackReceived.Store(true)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"schema": excelPricingConfirmationSchema, "status": "acknowledged",
+				"transaction_id": "ptx_0123456789abcdef0123456789abcdef",
 			})
 		case strings.HasSuffix(r.URL.Path, "/state"):
 			call := stateCalls.Add(1)
@@ -125,9 +145,15 @@ func TestExcelPricingWritebackWorkerUsesPreviewApplyIdempotencyAndReadback(t *te
 			if call == 1 {
 				stateSettings.YuanPrice = 29400
 			}
+			confirmationStatus := "awaiting_ack"
+			if ackReceived.Load() {
+				confirmationStatus = "clear"
+			}
 			_ = json.NewEncoder(w).Encode(map[string]interface{}{
 				"schema": excelPricingStateSchema, "state_revision": confirmedRevision,
-				"settings": stateSettings,
+				"settings": stateSettings, "confirmation": map[string]interface{}{
+					"schema": excelPricingConfirmationSchema, "status": confirmationStatus,
+				},
 			})
 		default:
 			t.Fatalf("unexpected remote path %q", r.URL.Path)
@@ -156,17 +182,28 @@ func TestExcelPricingWritebackWorkerUsesPreviewApplyIdempotencyAndReadback(t *te
 		t.Fatal(err)
 	}
 	deadline := time.Now().Add(4 * time.Second)
+	ackSent := false
 	for time.Now().Before(deadline) {
 		poll := httptest.NewRecorder()
 		server.router.ServeHTTP(poll, authenticatedExcelPricingRequest(
 			http.MethodGet, "/api/pricing-sync/writebacks/"+accepted.JobID, "", token,
 		))
 		var job excelPricingWritebackJob
+		if poll.Code == http.StatusOK && json.Unmarshal(poll.Body.Bytes(), &job) == nil && job.Status == "awaiting_excel" && !ackSent {
+			ack := httptest.NewRecorder()
+			server.router.ServeHTTP(ack, authenticatedExcelPricingRequest(
+				http.MethodPost, "/api/pricing-sync/writebacks/"+accepted.JobID+"/ack", "{}", token,
+			))
+			if ack.Code != http.StatusAccepted {
+				t.Fatalf("ack status=%d: %s", ack.Code, ack.Body.String())
+			}
+			ackSent = true
+		}
 		if poll.Code == http.StatusOK && json.Unmarshal(poll.Body.Bytes(), &job) == nil && job.Status == "confirmed" {
 			if job.ConfirmedValue != "29500" || job.StateRevision != confirmedRevision {
 				t.Fatalf("confirmed job=%#v", job)
 			}
-			if previewCalls.Load() != 1 || applyCalls.Load() != 1 || stateCalls.Load() < 2 {
+			if !ackSent || previewCalls.Load() != 1 || applyCalls.Load() != 1 || stateCalls.Load() < 3 {
 				t.Fatalf("remote calls preview=%d apply=%d state=%d", previewCalls.Load(), applyCalls.Load(), stateCalls.Load())
 			}
 			return
@@ -224,6 +261,50 @@ func TestExcelPricingWritebackNoopConfirmsFromReadbackWithoutApply(t *testing.T)
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatalf("no-op writeback did not confirm: %#v", server.excelPricingWrites.get(accepted.JobID))
+}
+
+func TestExcelPricingWritebackACKIsBoundedAndCannotConfirmLateOrWrongJobs(t *testing.T) {
+	now := time.Date(2026, 8, 27, 12, 0, 0, 0, time.UTC)
+	queue := newExcelPricingWritebackQueue(nil)
+	queue.now = func() time.Time { return now }
+	queue.jobs["0123456789abcdef0123456789abcdef"] = &excelPricingWritebackJob{
+		JobID: "0123456789abcdef0123456789abcdef", Status: "awaiting_excel",
+		TransactionID: "ptx_0123456789abcdef0123456789abcdef", ACKDeadline: now.Add(-time.Second).Unix(),
+		createdAt: now,
+	}
+	if _, err := queue.acknowledge("ffffffffffffffffffffffffffffffff"); err == nil || err.Error() != "writeback_not_found" {
+		t.Fatalf("wrong job acknowledgement error=%v", err)
+	}
+	if _, err := queue.acknowledge("0123456789abcdef0123456789abcdef"); err == nil || err.Error() != "ack_deadline_expired" {
+		t.Fatalf("late acknowledgement error=%v", err)
+	}
+	if got := queue.get("0123456789abcdef0123456789abcdef"); got == nil || got.Status != "awaiting_excel" {
+		t.Fatalf("late acknowledgement mutated job: %#v", got)
+	}
+}
+
+func TestExcelPricingDirectWebsiteConfirmationEnqueuesOnlyExactCommittedContract(t *testing.T) {
+	queue := newExcelPricingWritebackQueue(nil)
+	request := excelPricingConfirmationRequest{
+		Schema:                  excelPricingConfirmationRequestSchema,
+		RequestID:               "excel-direct-confirmation-0001",
+		TransactionID:           "ptx_0123456789abcdef0123456789abcdef",
+		CommittedStateRevision:  excelPricingRevisionForTest("direct-confirmation-state"),
+		ConfirmedSettingsDigest: excelPricingRevisionForTest("direct-confirmation-settings"),
+		ConfirmedSettings:       validExcelPricingWritebackRequest("excel-direct-confirmation-settings", "yuan_price", 29501).Settings,
+	}
+	source := canonical.Source{ID: "patris", Dataset: "product-catalog", Revision: excelPricingRevisionForTest("direct-confirmation-source")}
+	job, err := queue.enqueueConfirmation(request, source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if job.Status != "pending_ack" || job.SettingKey != "site_confirmation" || job.DesiredValue != "29501" || !job.ackOnly {
+		t.Fatalf("direct confirmation job=%#v", job)
+	}
+	request.TransactionID = "ptx_not_hex"
+	if _, err := queue.enqueueConfirmation(request, source); err == nil || err.Error() != "invalid_confirmation" {
+		t.Fatalf("invalid transaction error=%v", err)
+	}
 }
 
 func validExcelPricingWritebackRequest(requestID, key string, yuan int64) excelPricingWritebackRequest {

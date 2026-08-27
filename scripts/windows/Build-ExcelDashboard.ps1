@@ -949,7 +949,7 @@ try {
     $profitValue = $priceList.Range("${configSecondColumn}10")
 
     $yuanHeader.Value2 = 'بهای یوآن'
-    $yuanValue.Formula = "=IF('تنظیمات'!B18="""","""",'تنظیمات'!B18)"
+    $yuanValue.Formula = "=IF('تنظیمات'!G18="""","""",'تنظیمات'!G18)"
     $yuanTable = $priceList.ListObjects.Add(1, $priceList.Range("${configFirstColumn}6:${configFirstColumn}7"), $null, 1)
     $yuanTable.Name = 'Yuan_Price'
     $yuanTable.TableStyle = 'TableStyleMedium2'
@@ -1312,7 +1312,7 @@ try {
     $settings.Range('A18:F23').Borders.Color = ConvertTo-OleColor 'B9CCF4'
     $settings.Range('B18:F23').Interior.Color = ConvertTo-OleColor 'FFF8E7'
     $settings.Range('B18:F23').HorizontalAlignment = -4108
-    [void]$workbook.Names.Add('PricingInputCNYRate', $settings.Range('B18'))
+    [void]$workbook.Names.Add('ConfirmedCNYRate', $settings.Range('G18'))
     $settings.Range('B22').Validation.Delete()
     $settings.Range('B22').Validation.Add(2, 1, 5, '0')
     $settings.Range('B22').Validation.ErrorTitle = 'نرخ حمل نامعتبر'
