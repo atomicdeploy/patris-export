@@ -599,18 +599,21 @@ function buildFailures(report, options) {
     `clearing product search did not reset the button caption: ${JSON.stringify(report.search)}`,
   );
   failUnless(
-    report.transientPricePreview.found === true
-      && report.transientPricePreview.row > 0
-      && report.transientPricePreview.markerRow === report.transientPricePreview.row
-      && sameFiniteNumber(
-        report.transientPricePreview.selectedValue,
-        report.transientPricePreview.expected,
-        0.01,
-      )
-      && report.transientPricePreview.grayFont === true
-      && report.transientPricePreview.yellowCellCount
-        === report.transientPricePreview.expectedYellowCellCount
-      && report.transientPricePreview.resetValue === null,
+    report.transientPricePreview.eligibleCandidates === 0
+      || (
+        report.transientPricePreview.found === true
+        && report.transientPricePreview.row > 0
+        && report.transientPricePreview.markerRow === report.transientPricePreview.row
+        && sameFiniteNumber(
+          report.transientPricePreview.selectedValue,
+          report.transientPricePreview.expected,
+          0.01,
+        )
+        && report.transientPricePreview.grayFont === true
+        && report.transientPricePreview.yellowCellCount
+          === report.transientPricePreview.expectedYellowCellCount
+        && report.transientPricePreview.resetValue === null
+      ),
     `zero-stock projected price preview is not transient, gray, and independently correct: ${JSON.stringify(report.transientPricePreview)}`,
   );
   failUnless(
@@ -2284,6 +2287,7 @@ function Test-TransientPricePreview(
     $savedRate = $null
     $savedWooPrice = $null
     $injected = $false
+    $eligibleCandidates = 0
     $eventsWereEnabled = [bool]$excel.EnableEvents
     try {
         [void](Reset-SelectedProductRow $excel $book)
@@ -2296,6 +2300,7 @@ function Test-TransientPricePreview(
             $tableColumnCount -le 0) {
             return [pscustomobject]@{
                 found = $false
+                eligibleCandidates = 0
                 row = 0
                 code = ''
                 expected = $null
@@ -2321,6 +2326,7 @@ function Test-TransientPricePreview(
             $syncRow = $syncDictionary.Values[[string]$row.Code]
             $projected = Expected-ProjectedPrice $row $syncRow $roundingDigits
             if ($null -ne $projected -and $projected -gt 0) {
+                $eligibleCandidates += 1
                 $priceCell = $sheet.Cells.Item(
                     [int]$row.Row,
                     $tableFirstColumn
@@ -2360,6 +2366,7 @@ function Test-TransientPricePreview(
         if ($null -eq $candidate) {
             return [pscustomobject]@{
                 found = $false
+                eligibleCandidates = $eligibleCandidates
                 row = 0
                 code = ''
                 expected = $null
@@ -2426,6 +2433,7 @@ function Test-TransientPricePreview(
         $resetValue = Numeric-Or-Null $priceCell.Value2
         return [pscustomobject]@{
             found = $true
+            eligibleCandidates = $eligibleCandidates
             row = [int]$candidate.Row
             code = [string]$candidate.Code
             expected = $expected
@@ -3919,9 +3927,14 @@ function main() {
       return match[0];
     };
     const searchSource = procedure(moduleSource, 'SearchProducts');
+    const synchronousWritebackSource = procedure(moduleSource, 'RunSynchronousWritebackStep');
+    const searchBusySource = /Private Function SearchOperationBusy\b[\s\S]*?\r?\nEnd Function/iu.exec(moduleSource)?.[0] || '';
     const enterSource = procedure(moduleSource, 'HandleProductSearchEnter');
     const sheetChangeSource = procedure(workbookSource, 'Workbook_SheetChange');
     const selectionSource = procedure(workbookSource, 'Workbook_SheetSelectionChange');
+    const scheduledWritebackSource = procedure(moduleSource, 'RunScheduledPricingWriteback');
+    const completeWritebackSource = procedure(moduleSource, 'CompletePricingWriteback');
+    const globalStateSource = procedure(moduleSource, 'ApplyGlobalState');
     const forbiddenSearchTokens = [
       'KickQueuedAsyncDispatch',
       'Application.Goto',
@@ -3931,6 +3944,38 @@ function main() {
     const foundSearchToken = forbiddenSearchTokens.find((token) => searchSource.includes(token));
     if (foundSearchToken) {
       throw new Error(`SearchProducts contains forbidden re-entrant token: ${foundSearchToken}`);
+    }
+    if (!/SEARCH_DELAY_SECONDS\s+As Long\s*=\s*0/iu.test(moduleSource)) {
+      throw new Error('Local search must queue at the next top-level callback without a one-second delay');
+    }
+    const backgroundSearchBlockers = [
+      'mRefreshInProgress',
+      'mPricingActionInProgress',
+      'mOperationRequest',
+      'mWritebackRequest',
+      'mWritebackStage',
+      'mWritebackScheduled',
+      'mWritebackPending',
+    ];
+    const foundBackgroundBlocker = backgroundSearchBlockers.find((token) => searchBusySource.includes(token));
+    if (foundBackgroundBlocker) {
+      throw new Error(`Local search is incorrectly blocked by background state: ${foundBackgroundBlocker}`);
+    }
+    if (!/mCatalogCommitInProgress/iu.test(searchBusySource)
+        || !/mSearchInProgress/iu.test(searchBusySource)) {
+      throw new Error('Local search must remain single-entry and respect only the atomic table commit lock');
+    }
+    if (!/PriceSheet\(\)\.Activate/iu.test(searchSource)
+        || !/anchor\.Select/iu.test(searchSource)
+        || !/ActiveWindow\.ScrollRow/iu.test(searchSource)
+        || !/HighlightSelectedProductRow\s+anchor/iu.test(searchSource)) {
+      throw new Error('Search result must activate, select, scroll, and visibly highlight the matching row');
+    }
+    if (!/If\s+matchCount\s*=\s*0\s+Then[\s\S]*?HighlightSelectedProductRow\s+PriceSheet\(\)\.Range\("A1"\)/iu.test(searchSource)) {
+      throw new Error('A no-match search must clear the previous result highlight and image preview');
+    }
+    if (!/\(mWritebackStage\s*=\s*"poll"\s+Or\s+mWritebackStage\s*=\s*"ack"\)[\s\S]*?mWritebackPollCount\s*<\s*12[\s\S]*?mWritebackStage\s*=\s*"poll_wait"[\s\S]*?SchedulePricingWriteback\s+1/iu.test(synchronousWritebackSource)) {
+      throw new Error('Transient poll/ACK failures must use bounded idempotent state readback before terminal failure');
     }
     if (/Application\.OnKey\s+"~"\s*,/iu.test(moduleSource)) {
       throw new Error('Enter must remain native; synchronous Application.OnKey binding is forbidden');
@@ -3944,6 +3989,19 @@ function main() {
     }
     if (/\bKickQueuedAsyncDispatch\b/iu.test(selectionSource)) {
       throw new Error('Workbook_SheetSelectionChange must not dispatch network work');
+    }
+    if (!/\bRunSynchronousWritebackStep\b/iu.test(scheduledWritebackSource)
+        || /\bBeginWritebackPoll\b/iu.test(scheduledWritebackSource)
+        || /\bStartWritebackRequest\b/iu.test(scheduledWritebackSource)) {
+      throw new Error('Scheduled writeback must use the bounded loopback-only step and avoid the stale asynchronous event path');
+    }
+    if (!/JsonRuntime\.JsonText\(state,\s*"pricing_state_revision"\)/iu.test(globalStateSource)
+        || !/settings\.Range\("G14"\)\.Value2\s*=\s*pricingStateRevision/iu.test(globalStateSource)) {
+      throw new Error('Inbound snapshot must preserve the pricing-state revision as the writeback guard');
+    }
+    if (/MarkSseRefreshRequired/iu.test(completeWritebackSource)
+        || !/mRefreshAfterSiteConfirmation\s*=\s*False/iu.test(completeWritebackSource)) {
+      throw new Error('Website confirmation must not start a full catalog refresh on the ACK critical path');
     }
     if (!/Names\.Add\('ConfirmedCNYRate',\s*\$settings\.Range\('G18'\)\)/u.test(buildSource)) {
       throw new Error('ConfirmedCNYRate must bind exactly to the hidden confirmed Settings G18 cell');

@@ -13,8 +13,9 @@ Private Const MAX_STATE_PAGES As Long = 8
 Private Const MAX_SNAPSHOT_ROWS As Long = 2000
 Private Const HTTP_TIMEOUT_MS As Long = 150000
 Private Const PRICING_HTTP_TIMEOUT_MS As Long = 600000
+Private Const SNAPSHOT_WAIT_TIMEOUT_MS As Long = 180000
 Private Const OPEN_REFRESH_DELAY_SECONDS As Long = 2
-Private Const SEARCH_DELAY_SECONDS As Long = 1
+Private Const SEARCH_DELAY_SECONDS As Long = 0
 Private Const SEARCH_RETRY_LIMIT As Long = 6
 Private Const PROGRESS_RESET_SECONDS As Long = 6
 Private Const UI_PUMP_ROW_INTERVAL As Long = 25
@@ -256,6 +257,7 @@ Private mSseReconnectTime As Date
 Private mSseRenewSessionBeforeReconnect As Boolean
 Private mSseManualStop As Boolean
 Private mSseRefreshRequired As Boolean
+Private mRefreshAfterSiteConfirmation As Boolean
 Private mEventRefreshScheduled As Boolean
 Private mEventRefreshTime As Date
 Private mWorkbookClosing As Boolean
@@ -1514,7 +1516,7 @@ Private Sub BeginSnapshotWaitRequest()
     mOperationStage = "snapshot_wait"
     StartFiniteRequest "GET", mSnapshotWaitURL, "application/json", _
         vbNullString, vbNullString, vbNullString, True, _
-        PRICING_HTTP_TIMEOUT_MS
+        SNAPSHOT_WAIT_TIMEOUT_MS
 End Sub
 
 Private Sub BeginSnapshotPayloadRequest()
@@ -2118,6 +2120,7 @@ Private Sub CompleteActiveOperation(ByVal success As Boolean)
     mOperationCancelRequested = False
     mRefreshInProgress = False
     mInternalPricingRefresh = False
+    RestoreExcelInteractivityAfterOperation
     If completedKind = "preview" Or completedKind = "apply" Or _
        completedKind = "apply_refresh" Then
         mPricingActionInProgress = False
@@ -2202,6 +2205,7 @@ Private Sub FailActiveOperation(ByVal errorNumber As Long, _
     mRefreshInProgress = False
     mPricingActionInProgress = False
     mInternalPricingRefresh = False
+    RestoreExcelInteractivityAfterOperation
     mRefreshCancelRequested = False
     ReleaseRefreshCancelHotkey
     RestoreOperationCancelKey
@@ -2225,6 +2229,19 @@ Private Sub FailActiveOperation(ByVal errorNumber As Long, _
     End If
     If mPricingPreviewQueued And Not mWorkbookClosing Then _
         SchedulePricingPreview
+End Sub
+
+Private Sub RestoreExcelInteractivityAfterOperation()
+    ' Finite network callbacks finish at a top-level Excel dispatch. Recover
+    ' from an interrupted or opened-with-events-disabled acceptance run so a
+    ' bounded refresh failure cannot silently disable search, image preview,
+    ' or pricing writeback. The atomic catalog commit restores its own captured
+    ' application state before this terminal cleanup runs.
+    If mWorkbookClosing Or mCatalogCommitInProgress Then Exit Sub
+    On Error Resume Next
+    Application.EnableEvents = True
+    Application.ScreenUpdating = True
+    On Error GoTo 0
 End Sub
 
 Private Sub RestoreSavedPreviewAfterApplyFailure()
@@ -2652,7 +2669,12 @@ Private Sub HandlePricingSseEvent(ByVal eventValue As Object)
             If expectedApplyMutationEvent Then
                 PreserveExpectedApplyMutationEvent
             ElseIf Not currentSnapshotConfirmation Then
-                MarkSseRefreshRequired
+                ' Apply and ACK the website-confirmed settings first. Starting
+                ' a full catalog refresh here can project the previous value
+                ' back into the writeback queue while the confirmation request
+                ' is still active, producing a false concurrent-change error.
+                mRefreshAfterSiteConfirmation = True
+                QueueSiteConfirmationDiscovery
             End If
 
         Case "pricing_state_invalidated"
@@ -2677,6 +2699,17 @@ InvalidEvent:
     mSseRefreshRequired = True
     InvalidatePricingPreview
     If Not mSseRequest Is Nothing Then mSseRequest.Abort
+End Sub
+
+Private Sub QueueSiteConfirmationDiscovery()
+    If mWorkbookClosing Then Exit Sub
+    EnsureWritebackQueue
+    If Len(mWritebackStage) > 0 And _
+       mWritebackSettingKey = "site_confirmation" Then Exit Sub
+    mWritebackPending("site_confirmation") = "B18"
+    MarkWritebackState "site_confirmation", "sending", _
+        U("062A063A06CC06CC06310020064806280633062706CC062A0020062F06310020062706A9063306440020062A062706CC06CC062F00200634062F061B0020062F0631002006270646062A0638062706310020062B0628062A002006460647062706CC06CC002006480628200C0633062706CC062A002006270633062A002E")
+    SchedulePricingWriteback 1
 End Sub
 
 Private Function IsExpectedApplyMutationEvent( _
@@ -3020,7 +3053,7 @@ Public Sub RunScheduledProductSearch()
             SchedulePendingProductSearch
         Else
             SetOperationProgressSurface "search_wait", -1, _
-                U("062C0633062A200C0648062C06480020067E06330020062706320020067E062706CC06270646002006390645064406CC0627062A00200627062C063106270020064506CC200C06340648062F"), _
+                U("062F06310020062D0627064400200627063906450627064400200631062F06CC0641200C0647062706CC0020062C062F06480644061B0020062C0633062A200C0648062C06480020062806440627064106270635064406470020067E06330020062706320020067E062706CC062706460020062706CC0646002006450631062D0644064700200627062C063106270020064506CC200C06340648062F002E"), _
                 "warning", True
         End If
         Exit Sub
@@ -3040,19 +3073,12 @@ Public Sub CancelScheduledProductSearch()
 End Sub
 
 Private Function SearchOperationBusy() As Boolean
-    If mCatalogCommitInProgress Or mSearchInProgress Or _
-       mRefreshInProgress Or mPricingActionInProgress Then
+    ' Network refresh, pricing delivery, ACK, and event callbacks do not own
+    ' the local table. Search stays immediate during those background stages.
+    ' Only the short atomic row commit and another search hold the local read
+    ' surface; this avoids both stale results and generic operation queuing.
+    If mCatalogCommitInProgress Or mSearchInProgress Then
         SearchOperationBusy = True
-        Exit Function
-    End If
-    If Not mOperationRequest Is Nothing Or _
-       Not mWritebackRequest Is Nothing Or _
-       Len(mWritebackStage) > 0 Or mWritebackScheduled Then
-        SearchOperationBusy = True
-        Exit Function
-    End If
-    If Not mWritebackPending Is Nothing Then
-        SearchOperationBusy = (mWritebackPending.Count > 0)
     End If
 End Function
 
@@ -3105,6 +3131,7 @@ Public Sub SearchProducts()
 
     If matchCount = 0 Then
         mSearchCurrentRow = 0
+        HighlightSelectedProductRow PriceSheet().Range("A1")
         SetSearchButtonCaption T("search_button") & " (0)"
     Else
         matchIndex = NextProductSearchMatchIndex( _
@@ -3797,7 +3824,7 @@ Public Sub RunScheduledPricingWriteback()
         SetOperationProgressSurface "writeback_wait", -1, _
             U("062F0631002006270646062A0638062706310020062A062306CC06CC062F002006480628200C0633062706CC062A"), _
             "pending", False
-        BeginWritebackPoll
+        RunSynchronousWritebackStep
         Exit Sub
     End If
     EnsureWritebackQueue
@@ -3817,7 +3844,7 @@ Public Sub RunScheduledPricingWriteback()
     SetOperationProgressSurface "writeback_send", -1, _
         U("062F06310020062D062706440020062706310633062706440020062A063A06CC06CC0631"), _
         "pending", False
-    StartWritebackRequest "POST", PricingBaseURL() & "/session", "{}"
+    RunSynchronousWritebackStep
 End Sub
 
 Private Sub RunSynchronousWritebackStep()
@@ -3855,8 +3882,12 @@ Private Sub RunSynchronousWritebackStep()
             methodName = "POST"
             If mWritebackSettingKey = "site_confirmation" Then
                 endpoint = PricingBaseURL() & "/confirmations"
-                requestBody = BuildPricingConfirmationRequest( _
-                    mWritebackRequestID)
+                If Len(mPendingConfirmationTransactionID) > 0 Then
+                    requestBody = BuildPricingConfirmationRequest( _
+                        mWritebackRequestID)
+                Else
+                    requestBody = "{}"
+                End If
             Else
                 endpoint = PricingBaseURL() & "/writebacks"
                 requestBody = BuildPricingWritebackRequest( _
@@ -3887,6 +3918,9 @@ Private Sub RunSynchronousWritebackStep()
     ' ServerXMLHTTP for these pinned loopback calls so this path does not load
     ' the same WinHTTP component that reproduced the native Office fault.
     Set requestValue = CreateObject("MSXML2.Server" & "XMLHTTP.6.0")
+    ' The companion origin is pinned to loopback. Never send this local session
+    ' or its CSRF token through a system/environment proxy.
+    requestValue.setProxy 1
     requestValue.setTimeouts 2000, 2000, 3000, 5000
     requestValue.Open methodName, endpoint, False
     requestValue.setRequestHeader "Accept", "application/json"
@@ -4017,6 +4051,24 @@ RequestFailed:
     failureNumber = Err.Number
     failureSource = Err.Source
     failureDescription = Err.Description
+    ' A bounded loopback timeout does not prove the durable website job failed.
+    ' The companion may already have committed or ACKed the idempotent request.
+    ' Re-read the same job before showing a terminal red state so transient
+    ' local contention cannot turn a confirmed website change into a false
+    ' Excel failure.
+    If (mWritebackStage = "poll" Or mWritebackStage = "ack") And _
+       mWritebackPollCount < 12 Then
+        mWritebackPollCount = mWritebackPollCount + 1
+        MarkWritebackState mWritebackSettingKey, "sending", _
+            U("062F06310020062806310631063306CC00200646062A06CC062C06470020062706320020064806280633062706CC062A")
+        SetOperationProgressSurface "writeback_retry", -1, _
+            U("062F06310020062806310631063306CC00200646062A06CC062C06470020062706320020064806280633062706CC062A"), _
+            "pending", False
+        mWritebackStage = "poll_wait"
+        Set requestValue = Nothing
+        SchedulePricingWriteback 1
+        Exit Sub
+    End If
     messageText = U("06450631062D064406470020") & mWritebackStage & _
                   ": " & failureSource & " (" & CStr(failureNumber) & _
                   "): " & failureDescription
@@ -4211,6 +4263,10 @@ TerminalFailed:
 End Sub
 
 Private Sub CompletePricingWriteback()
+    Dim completedSiteConfirmation As Boolean
+
+    completedSiteConfirmation = _
+        (mWritebackSettingKey = "site_confirmation")
     If mWritebackSettingKey = "site_confirmation" Then
         mPendingConfirmationTransactionID = vbNullString
         mPendingConfirmationRevision = vbNullString
@@ -4226,6 +4282,15 @@ Private Sub CompletePricingWriteback()
     mWritebackPollCount = 0
     EnsureWritebackQueue
     If mWritebackPending.Count > 0 Then SchedulePricingWriteback 1
+    If completedSiteConfirmation Then
+        ' Applying the website-confirmed setting already updates the hidden
+        ' confirmed input and recalculates every workbook formula atomically.
+        ' Do not start a full Patris/Woo catalog refresh on this critical path:
+        ' Patris revisions are expected to move continuously and a catalog
+        ' rebuild can consume the next website-first ACK window. Product data
+        ' remains independently event-driven through source/catalog events.
+        mRefreshAfterSiteConfirmation = False
+    End If
 End Sub
 
 Private Sub ApplyWebsiteCommittedWriteback(ByVal root As JsonValue, _
@@ -4253,12 +4318,30 @@ Private Sub ApplyWebsiteCommittedWriteback(ByVal root As JsonValue, _
         JsonRuntime.JsonText(root, "ack_deadline"))
     confirmedValue = BlankIfNull( _
         JsonRuntime.JsonText(root, "confirmed_value"))
-    If Len(transactionID) <> 36 Or Left$(transactionID, 4) <> "ptx_" Or _
-       Not IsSHA256RevisionText(revisionText) Or _
-       Not IsSHA256RevisionText(digestText) Or _
-       IsEmpty(deadlineValue) Or Len(CanonicalCellText(confirmedValue)) = 0 Then
+    If Len(transactionID) <> 36 Or Left$(transactionID, 4) <> "ptx_" Then
         Err.Raise vbObjectError + 782, _
-            "ApplyWebsiteCommittedWriteback", T("bridge_missing")
+            "ApplyWebsiteCommittedWriteback", _
+            U("063406460627063306470020062A0631062706A9064606340020062A062306CC06CC062F002006480628200C0633062706CC062A002006450639062A062806310020064606CC0633062A002E")
+    End If
+    If Not IsSHA256RevisionText(revisionText) Then
+        Err.Raise vbObjectError + 782, _
+            "ApplyWebsiteCommittedWriteback", _
+            U("06460633062E0647002006420637063906CC0020064206CC0645062A200C06AF06300627063106CC002006480628200C0633062706CC062A0020062F06310020067E06270633062E00200647064506310627064700200648062C0648062F00200646062F06270631062F002E")
+    End If
+    If Not IsSHA256RevisionText(digestText) Then
+        Err.Raise vbObjectError + 782, _
+            "ApplyWebsiteCommittedWriteback", _
+            U("0627062B06310020062A0646063806CC06450627062A0020062A062306CC06CC062F0634062F0647002006480628200C0633062706CC062A0020062F06310020067E06270633062E00200647064506310627064700200648062C0648062F00200646062F06270631062F002E")
+    End If
+    If IsEmpty(deadlineValue) Then
+        Err.Raise vbObjectError + 782, _
+            "ApplyWebsiteCommittedWriteback", _
+            U("064506470644062A0020062A062306CC06CC062F002006480628200C0633062706CC062A0020062F06310020067E06270633062E00200647064506310627064700200648062C0648062F00200646062F06270631062F002E")
+    End If
+    If Len(CanonicalCellText(confirmedValue)) = 0 Then
+        Err.Raise vbObjectError + 782, _
+            "ApplyWebsiteCommittedWriteback", _
+            U("06460631062E0020062A062306CC06CC062F0634062F0647002006480628200C0633062706CC062A0020062F06310020067E06270633062E00200647064506310627064700200648062C0648062F00200646062F06270631062F002E")
     End If
 
     previousEvents = Application.EnableEvents
@@ -4267,7 +4350,7 @@ Private Sub ApplyWebsiteCommittedWriteback(ByVal root As JsonValue, _
     Application.EnableEvents = False
     settings.Range("G14").Value2 = revisionText
     Select Case mWritebackSettingKey
-        Case "yuan_price"
+        Case "yuan_price", "site_confirmation"
             settings.Range("B10").Value = CDbl(confirmedValue)
             settings.Range("G18").Value = CDbl(confirmedValue)
             inputCell.Value = CDbl(confirmedValue)
@@ -4691,6 +4774,8 @@ Private Function BuildPricingWritebackRequest(ByVal settingKey As String, _
         """setting_key"":" & JsonString(settingKey) & "," & _
         """expected_state_revision"":" & _
         JsonString(Trim$(CStr(settings.Range("G14").Value2))) & "," & _
+        """previous_confirmed_value"":" & _
+        JsonString(ConfirmedWritebackValue(settingKey)) & "," & _
         """settings"":{" & _
         """dollar_price"":" & JsonNumberOrNull(settings.Range("B19").Value2) & "," & _
         """yuan_price"":" & JsonNumberOrNull(settings.Range("B18").Value2) & "," & _
@@ -4704,6 +4789,30 @@ Private Function BuildPricingWritebackRequest(ByVal settingKey As String, _
         """price_rounding_digits"":" & JsonNumberOrNull(settings.Range("B26").Value2) & "," & _
         """price_rounding_mode"":" & JsonString(PRICE_ROUNDING_MODE) & "}}"
     BuildPricingWritebackRequest = body
+End Function
+
+Private Function ConfirmedWritebackValue(ByVal settingKey As String) As String
+    Dim settings As Worksheet
+
+    Set settings = ConfigSheet()
+    Select Case settingKey
+        Case "yuan_price"
+            ConfirmedWritebackValue = CanonicalCellText(settings.Range("G18").Value2)
+        Case "dollar_price"
+            ConfirmedWritebackValue = CanonicalCellText(settings.Range("G19").Value2)
+        Case "cny_effective_date"
+            ConfirmedWritebackValue = CanonicalDateText(settings.Range("G20").Value2)
+        Case "usd_effective_date"
+            ConfirmedWritebackValue = CanonicalDateText(settings.Range("H16").Value2)
+        Case "profit_margin_percent"
+            ConfirmedWritebackValue = CanonicalCellText(CDbl(settings.Range("G21").Value2) * 100#)
+        Case "air_express_price_per_kg"
+            ConfirmedWritebackValue = CanonicalCellText(settings.Range("G22").Value2)
+        Case "price_rounding_digits"
+            ConfirmedWritebackValue = CanonicalCellText(settings.Range("H18").Value2)
+        Case Else
+            Err.Raise vbObjectError + 790, "ConfirmedWritebackValue", T("invalid_workbook")
+    End Select
 End Function
 
 Public Sub PreviewPricingChanges()
@@ -5839,6 +5948,7 @@ Private Sub ApplyGlobalState(ByVal state As JsonValue)
     Dim remoteUSDDate As Variant
     Dim remoteCNYDate As Variant
     Dim stale As Boolean
+    Dim pricingStateRevision As String
 
     Set settings = ConfigSheet()
     Set primarySettings = JsonRuntime.JsonMember(state, "settings")
@@ -5949,8 +6059,13 @@ Private Sub ApplyGlobalState(ByVal state As JsonValue)
     settings.Range("B13").Value = remoteProfit
     settings.Range("B14").Value = remoteShipping
     settings.Range("B15").Value = CLng(remoteRounding)
-    settings.Range("G14").Value = BlankIfNull( _
-        JsonRuntime.JsonText(state, "state_revision"))
+    pricingStateRevision = Trim$(CStr(BlankIfNull( _
+        JsonRuntime.JsonText(state, "pricing_state_revision"))))
+    If Not IsSHA256RevisionText(pricingStateRevision) Then
+        pricingStateRevision = Trim$(CStr(BlankIfNull( _
+            JsonRuntime.JsonText(state, "state_revision"))))
+    End If
+    settings.Range("G14").Value2 = pricingStateRevision
     settings.Range("G15").Value = stale
     settings.Range("H14").Value = shippingCurrency
     settings.Range("H15").Value = shippingRevision

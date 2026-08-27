@@ -5,6 +5,8 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -16,6 +18,30 @@ import (
 )
 
 const excelPricingRemoteBridgeTestTimeout = 2 * time.Second
+
+func TestExcelPricingEventBridgeSourceDoesNotMaterializeCatalogOnColdStart(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "kala.db")
+	if err := os.WriteFile(path, []byte("live-provider-routing-identity"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	server := &Server{dbPath: path}
+	cfg := appconfig.Default()
+	cfg.Canonical.SourceID = "patris-office"
+	started := time.Now()
+	source, err := server.excelPricingEventBridgeSource(context.Background(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if elapsed := time.Since(started); elapsed > 100*time.Millisecond {
+		t.Fatalf("cold event source took %s; catalog projection must not run", elapsed)
+	}
+	if source.ID != "patris-office" || source.Dataset != "kala.db" || !isSHA256Revision(source.Revision) {
+		t.Fatalf("cold event source=%+v", source)
+	}
+	if server.lastRecordsReady || server.lastContractRevision != "" {
+		t.Fatal("event source lookup mutated the catalog projection baseline")
+	}
+}
 
 type excelPricingRemoteBridgeTestRun struct {
 	config        updateout.Config
@@ -655,6 +681,74 @@ func TestExcelPricingRemoteEventsBridgeCursorRequiresSuccessfulApplyAndAllowsRes
 	_, cursor, acknowledged = excelPricingRemoteBridgeState(bridge)
 	if cursor != 0 || !acknowledged {
 		t.Fatalf("validated replay reset was not persisted: cursor=%d acknowledged=%v", cursor, acknowledged)
+	}
+}
+
+func TestExcelPricingRemoteEventsBridgeAcceptsRevisionAdvanceForStableSourceIdentity(t *testing.T) {
+	source := excelPricingRemoteTestSource()
+	newerSource := source
+	newerSource.Revision = excelPricingRemoteTestRevision("b")
+	var applied excelPricingRemoteRevision
+	bridge := newExcelPricingRemoteEventsBridgeWithDependencies(excelPricingRemoteBridgeDependencies{
+		apply: func(revision excelPricingRemoteRevision) error {
+			applied = revision
+			return nil
+		},
+	})
+	bridge.mu.Lock()
+	bridge.epoch = 1
+	bridge.mu.Unlock()
+
+	revision := excelPricingRemoteRevision{
+		Source:        newerSource,
+		StateRevision: excelPricingRemoteTestRevision("1"),
+	}
+	if err := bridge.acceptRevision(1, source, revision); err != nil {
+		t.Fatalf("same-identity revision advance was rejected: %v", err)
+	}
+	if applied.Source != newerSource {
+		t.Fatalf("applied source=%+v, want %+v", applied.Source, newerSource)
+	}
+
+	wrongIdentity := revision
+	wrongIdentity.Source.Dataset = "other.db"
+	if err := bridge.acceptRevision(1, source, wrongIdentity); !errors.Is(err, errExcelPricingRemoteBridgeStale) {
+		t.Fatalf("unsafe identity change error=%v", err)
+	}
+}
+
+func TestExcelPricingRemoteEventsBridgeAcceptsSnapshotTerminalForRequestedRevision(t *testing.T) {
+	source := excelPricingRemoteTestSource()
+	requestedSource := source
+	requestedSource.Revision = excelPricingRemoteTestRevision("b")
+	bridge := newExcelPricingRemoteEventsBridgeWithDependencies(excelPricingRemoteBridgeDependencies{})
+	bridge.mu.Lock()
+	bridge.epoch = 1
+	bridge.mu.Unlock()
+	snapshotRevision := excelPricingRemoteTestRevision("f")
+	event := excelPricingRemoteSnapshotTerminalEvent{
+		Schema:               excelPricingRemoteSnapshotEventSchema,
+		SchemaVersion:        1,
+		BuildID:              "snapshot-terminal-build-0003",
+		RequestID:            "snapshot-terminal-request-0003",
+		Status:               "ready",
+		Source:               requestedSource,
+		StateRevision:        excelPricingRemoteTestRevision("1"),
+		PricingStateRevision: excelPricingRemoteTestRevision("2"),
+		CatalogRevision:      excelPricingRemoteTestRevision("3"),
+		SnapshotToken:        "snapshot-terminal-token-0003",
+		SnapshotRevision:     snapshotRevision,
+		Digest:               snapshotRevision,
+		SnapshotPath:         "/wp-json/digitalogic/pricing/sync/snapshots/snapshot-terminal-token-0003",
+		IdempotencyKey:       excelPricingRemoteTestRevision("4"),
+		EventID:              21,
+	}
+	if err := bridge.acceptSnapshotTerminal(1, source, event); err != nil {
+		t.Fatalf("same-identity snapshot terminal was rejected: %v", err)
+	}
+	event.Source.ID = "other-source"
+	if err := bridge.acceptSnapshotTerminal(1, source, event); !errors.Is(err, errExcelPricingRemoteBridgeStale) {
+		t.Fatalf("unsafe terminal identity change error=%v", err)
 	}
 }
 

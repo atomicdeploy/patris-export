@@ -539,6 +539,85 @@ func TestExcelPricingRemoteEventCursorAdvancesOnlyAfterAtomicAcceptance(t *testi
 	}
 }
 
+func TestExcelPricingRemoteStateEventAcceptsNewerRevisionForSameSourceIdentity(t *testing.T) {
+	source := excelPricingRemoteTestSource()
+	newerSource := source
+	newerSource.Revision = excelPricingRemoteTestRevision("b")
+	var accepted excelPricingRemoteRevision
+	client, err := newExcelPricingRemoteEventsClient(
+		excelPricingRemoteTestConfig(t, "http://127.0.0.1:18080"), source,
+		excelPricingRemoteEventsOptions{OnRevision: func(revision excelPricingRemoteRevision) error {
+			accepted = revision
+			return nil
+		}},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := json.Marshal(excelPricingRemoteTestStateFrame(
+		newerSource, 9, excelPricingRemoteTestRevision("6"),
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.handleExcelPricingRemoteFrame(t.Context(), body, true); err != nil {
+		t.Fatalf("same-identity revision advance was rejected: %v", err)
+	}
+	if accepted.Source != newerSource || client.currentCursor() != 9 {
+		t.Fatalf("accepted=%+v cursor=%d, want newer source and cursor 9", accepted, client.currentCursor())
+	}
+}
+
+func TestExcelPricingRemoteSnapshotTerminalAcceptsRequestedRevisionForSameSourceIdentity(t *testing.T) {
+	source := excelPricingRemoteTestSource()
+	requestedSource := source
+	requestedSource.Revision = excelPricingRemoteTestRevision("b")
+	var accepted excelPricingRemoteSnapshotTerminalEvent
+	client, err := newExcelPricingRemoteEventsClient(
+		excelPricingRemoteTestConfig(t, "http://127.0.0.1:18080"), source,
+		excelPricingRemoteEventsOptions{
+			OnRevision: func(excelPricingRemoteRevision) error { return nil },
+			OnSnapshotTerminal: func(event excelPricingRemoteSnapshotTerminalEvent) error {
+				accepted = event
+				return nil
+			},
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshotRevision := excelPricingRemoteTestRevision("f")
+	event := excelPricingRemoteSnapshotTerminalEvent{
+		Schema:               excelPricingRemoteSnapshotEventSchema,
+		SchemaVersion:        1,
+		BuildID:              "snapshot-terminal-build-0002",
+		RequestID:            "snapshot-terminal-request-0002",
+		Status:               "ready",
+		Source:               requestedSource,
+		StateRevision:        excelPricingRemoteTestRevision("1"),
+		PricingStateRevision: excelPricingRemoteTestRevision("2"),
+		CatalogRevision:      excelPricingRemoteTestRevision("3"),
+		SnapshotToken:        "snapshot-terminal-token-0002",
+		SnapshotRevision:     snapshotRevision,
+		Digest:               snapshotRevision,
+		SnapshotPath:         "/wp-json/digitalogic/pricing/sync/snapshots/snapshot-terminal-token-0002",
+		IdempotencyKey:       excelPricingRemoteTestRevision("4"),
+	}
+	body, err := json.Marshal(map[string]interface{}{
+		"event": "pricing.snapshot.build.terminal", "name": "pricing.snapshot.build.terminal",
+		"success": true, "id": uint64(12), "data": event,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.handleExcelPricingRemoteFrame(t.Context(), body, true); err != nil {
+		t.Fatalf("same-identity snapshot terminal was rejected: %v", err)
+	}
+	if accepted.Source != requestedSource || accepted.EventID != 12 || client.currentCursor() != 12 {
+		t.Fatalf("accepted=%+v cursor=%d", accepted, client.currentCursor())
+	}
+}
+
 func TestExcelPricingRemoteEventsRejectWrongSourceWeakETagAndUnmappedAlias(t *testing.T) {
 	source := excelPricingRemoteTestSource()
 	client, err := newExcelPricingRemoteEventsClient(
@@ -593,6 +672,55 @@ func TestExcelPricingRemoteRevisionRejectsWeakValidator(t *testing.T) {
 	}
 	if err := client.validateExcelPricingRemoteRevision(t.Context(), "connection_validation", 0); !errors.Is(err, errExcelPricingRemoteRevision) {
 		t.Fatalf("revision error = %v", err)
+	}
+}
+
+func TestExcelPricingRemoteRevisionAcceptsAdvanceForSameSourceIdentity(t *testing.T) {
+	source := excelPricingRemoteTestSource()
+	newerSource := source
+	newerSource.Revision = excelPricingRemoteTestRevision("b")
+	state := excelPricingRemoteTestRevision("8")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("ETag", `"`+state+`"`)
+		_ = json.NewEncoder(w).Encode(excelPricingRemoteTestRevisionPayload(newerSource, state))
+	}))
+	defer server.Close()
+	var accepted excelPricingRemoteRevision
+	client, err := newExcelPricingRemoteEventsClient(excelPricingRemoteTestConfig(t, server.URL), source,
+		excelPricingRemoteEventsOptions{OnRevision: func(revision excelPricingRemoteRevision) error {
+			accepted = revision
+			return nil
+		}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.validateExcelPricingRemoteRevision(t.Context(), "connection_validation", 27); err != nil {
+		t.Fatalf("same-identity revision advance was rejected: %v", err)
+	}
+	if accepted.Source != newerSource || accepted.StateRevision != state || accepted.EventID != 27 {
+		t.Fatalf("accepted = %+v", accepted)
+	}
+}
+
+func TestExcelPricingRemoteRevisionRejectsDifferentSourceIdentity(t *testing.T) {
+	source := excelPricingRemoteTestSource()
+	wrongSource := source
+	wrongSource.Dataset = "other.db"
+	state := excelPricingRemoteTestRevision("9")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("ETag", `"`+state+`"`)
+		_ = json.NewEncoder(w).Encode(excelPricingRemoteTestRevisionPayload(wrongSource, state))
+	}))
+	defer server.Close()
+	client, err := newExcelPricingRemoteEventsClient(excelPricingRemoteTestConfig(t, server.URL), source,
+		excelPricingRemoteEventsOptions{OnRevision: func(excelPricingRemoteRevision) error { return nil }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.validateExcelPricingRemoteRevision(t.Context(), "connection_validation", 0); !errors.Is(err, errExcelPricingRemoteRevision) {
+		t.Fatalf("different source identity error = %v", err)
 	}
 }
 

@@ -258,6 +258,18 @@ func validExcelPricingRemoteSource(source canonical.Source) bool {
 		isSHA256Revision(source.Revision)
 }
 
+// sameExcelPricingRemoteSourceIdentity keeps the stable provider identity
+// strict while allowing the revision to advance during a live subscription.
+// Patris is expected to change continuously; an authenticated pricing event
+// must not be discarded merely because it was emitted from a newer coherent
+// source revision than the one used for the initial handshake.
+func sameExcelPricingRemoteSourceIdentity(expected, candidate canonical.Source) bool {
+	return validExcelPricingRemoteSource(expected) &&
+		validExcelPricingRemoteSource(candidate) &&
+		expected.ID == candidate.ID &&
+		expected.Dataset == candidate.Dataset
+}
+
 func validExcelPricingRemoteHeaderValue(value string) bool {
 	return value != "" && len(value) <= 256 && strings.TrimSpace(value) == value &&
 		!strings.ContainsAny(value, "\r\n")
@@ -488,7 +500,8 @@ func (client *excelPricingRemoteEventsClient) handleExcelPricingRemoteFrame(
 		var data excelPricingRemoteStateEventData
 		if json.Unmarshal(frame.Data, &data) != nil ||
 			data.Schema != excelPricingRemoteStateEventSchema || data.SchemaVersion != 1 ||
-			data.Projection != excelPricingRemoteProjection || data.Source != client.source ||
+			data.Projection != excelPricingRemoteProjection ||
+			!sameExcelPricingRemoteSourceIdentity(client.source, data.Source) ||
 			!validExcelPricingRemoteRevisionParts(data.StateRevision, data.CatalogRevision,
 				data.PricingStateRevision, data.PricingPolicyRevision) ||
 			!isStrongExcelPricingRevisionETag(data.ETag, data.StateRevision) ||
@@ -529,7 +542,8 @@ func (client *excelPricingRemoteEventsClient) handleExcelPricingRemoteFrame(
 			return false, errExcelPricingRemoteProtocol
 		}
 		event.EventID = frame.ID
-		if event.Source != client.source || validateExcelPricingRemoteSnapshotTerminalEvent(event) != nil {
+		if !sameExcelPricingRemoteSourceIdentity(client.source, event.Source) ||
+			validateExcelPricingRemoteSnapshotTerminalEvent(event) != nil {
 			return false, errExcelPricingRemoteProtocol
 		}
 		if err := client.onTerminal(event); err != nil {
@@ -628,7 +642,7 @@ func (client *excelPricingRemoteEventsClient) validateExcelPricingRemoteRevision
 		payload.Schema != excelPricingRemoteRevisionSchema || payload.SchemaVersion != 1 ||
 		payload.Projection != excelPricingRemoteProjection ||
 		payload.ProjectionSchema != excelPricingRemoteProjectionSchema ||
-		payload.Source != client.source || payload.Locale != "fa" ||
+		!sameExcelPricingRemoteSourceIdentity(client.source, payload.Source) || payload.Locale != "fa" ||
 		payload.PageSize != excelPricingSnapshotPageSize ||
 		!validExcelPricingRemoteRevisionParts(payload.StateRevision, payload.CatalogRevision,
 			payload.PricingStateRevision, payload.PricingPolicyRevision) ||

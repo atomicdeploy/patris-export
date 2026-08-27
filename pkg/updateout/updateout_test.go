@@ -394,6 +394,24 @@ func TestDispatchDoesNotForwardProductSyncSecretAcrossRedirect(t *testing.T) {
 	}
 }
 
+func TestPinnedProductSyncClientBypassesAmbientProxy(t *testing.T) {
+	client := pinnedProductSyncHTTPClient()
+	transport, ok := client.Transport.(*http.Transport)
+	if !ok || transport.Proxy != nil {
+		t.Fatalf("authenticated product-sync transport = %#v", client.Transport)
+	}
+	if client.CheckRedirect == nil {
+		t.Fatal("authenticated product-sync client must reject redirects")
+	}
+	request, err := http.NewRequest(http.MethodGet, "https://example.invalid", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.CheckRedirect(request, []*http.Request{request}); !errors.Is(err, http.ErrUseLastResponse) {
+		t.Fatalf("redirect policy = %v", err)
+	}
+}
+
 func TestDispatchRequiresReceiverEventIdentityInStrictProductSyncResponse(t *testing.T) {
 	t.Setenv("PATRIS_PRODUCT_SYNC_TEST_SECRET", "strict-response")
 	contract := canonical.NewEnvelope(nil, "kala.db", "patris-office", time.Unix(1, 0))

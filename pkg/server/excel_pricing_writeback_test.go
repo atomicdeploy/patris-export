@@ -5,12 +5,14 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/atomicdeploy/patris-export/pkg/appconfig"
 	"github.com/atomicdeploy/patris-export/pkg/canonical"
 	"github.com/atomicdeploy/patris-export/pkg/updateout"
 )
@@ -54,6 +56,9 @@ func TestExcelPricingWritebackQueueCoalescesNewestSettingAndRetriesBoundedly(t *
 		if job != nil && job.Status == "confirmed" {
 			if job.Attempts != 2 || job.ConfirmedValue != "29600" {
 				t.Fatalf("confirmed job=%#v", job)
+			}
+			if job.RetryCount != 1 || job.LastRetryCode != "remote_unavailable" || job.LastRetryAt == "" {
+				t.Fatalf("retry diagnostics=%#v", job)
 			}
 			return
 		}
@@ -140,17 +145,23 @@ func TestExcelPricingWritebackWorkerUsesPreviewApplyIdempotencyAndReadback(t *te
 				"transaction_id": "ptx_0123456789abcdef0123456789abcdef",
 			})
 		case strings.HasSuffix(r.URL.Path, "/state"):
+			var stateRequest excelPricingRemoteRequest
+			if err := json.NewDecoder(r.Body).Decode(&stateRequest); err != nil || stateRequest.Projection != "settings" {
+				t.Errorf("writeback state projection=%q error=%v, want settings", stateRequest.Projection, err)
+			}
 			call := stateCalls.Add(1)
 			stateSettings := settings
+			stateRevision := confirmedRevision
 			if call == 1 {
 				stateSettings.YuanPrice = 29400
+				stateRevision = initialRevision
 			}
 			confirmationStatus := "awaiting_ack"
 			if ackReceived.Load() {
 				confirmationStatus = "clear"
 			}
 			_ = json.NewEncoder(w).Encode(map[string]interface{}{
-				"schema": excelPricingStateSchema, "state_revision": confirmedRevision,
+				"schema": excelPricingStateSchema, "state_revision": stateRevision,
 				"settings": stateSettings, "confirmation": map[string]interface{}{
 					"schema": excelPricingConfirmationSchema, "status": confirmationStatus,
 				},
@@ -169,6 +180,7 @@ func TestExcelPricingWritebackWorkerUsesPreviewApplyIdempotencyAndReadback(t *te
 	token := openExcelPricingSession(t, server)
 	request := validExcelPricingWritebackRequest("excel-writeback-test-0005", "yuan_price", 29500)
 	request.ExpectedStateRevision = initialRevision
+	request.PreviousConfirmedValue = "29400"
 	body, _ := json.Marshal(request)
 	response := httptest.NewRecorder()
 	server.router.ServeHTTP(response, authenticatedExcelPricingRequest(
@@ -203,7 +215,7 @@ func TestExcelPricingWritebackWorkerUsesPreviewApplyIdempotencyAndReadback(t *te
 			if job.ConfirmedValue != "29500" || job.StateRevision != confirmedRevision {
 				t.Fatalf("confirmed job=%#v", job)
 			}
-			if !ackSent || previewCalls.Load() != 1 || applyCalls.Load() != 1 || stateCalls.Load() < 3 {
+			if !ackSent || previewCalls.Load() != 1 || applyCalls.Load() != 1 || stateCalls.Load() < 2 {
 				t.Fatalf("remote calls preview=%d apply=%d state=%d", previewCalls.Load(), applyCalls.Load(), stateCalls.Load())
 			}
 			return
@@ -224,6 +236,10 @@ func TestExcelPricingWritebackNoopConfirmsFromReadbackWithoutApply(t *testing.T)
 			mutationCalls.Add(1)
 			t.Fatalf("no-op writeback reached mutation path %q", r.URL.Path)
 		}
+		var stateRequest excelPricingRemoteRequest
+		if err := json.NewDecoder(r.Body).Decode(&stateRequest); err != nil || stateRequest.Projection != "settings" {
+			t.Errorf("no-op state projection=%q error=%v, want settings", stateRequest.Projection, err)
+		}
 		stateCalls.Add(1)
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{
 			"schema": excelPricingStateSchema, "state_revision": confirmedRevision,
@@ -232,6 +248,10 @@ func TestExcelPricingWritebackNoopConfirmsFromReadbackWithoutApply(t *testing.T)
 	}))
 	defer remote.Close()
 	server := newExcelPricingTestServer(t, remote.URL+"/wp-json/digitalogic/patris/product-sync")
+	// Simulate an unrelated inbound catalog refresh. Pricing writeback has its
+	// own serial queue and must not wait for this projection permit.
+	server.excelPricing.permit <- struct{}{}
+	t.Cleanup(func() { <-server.excelPricing.permit })
 	token := openExcelPricingSession(t, server)
 	request := validExcelPricingWritebackRequest("excel-writeback-test-0006", "yuan_price", 29500)
 	body, _ := json.Marshal(request)
@@ -283,6 +303,122 @@ func TestExcelPricingWritebackACKIsBoundedAndCannotConfirmLateOrWrongJobs(t *tes
 	}
 }
 
+func TestExcelPricingWritebackRebaseAllowsLivePatrisRevisionButNotConcurrentInputs(t *testing.T) {
+	proposed := validExcelPricingWritebackRequest("excel-writeback-rebase-0001", "yuan_price", 29500).Settings
+	current := proposed
+	current.YuanPrice = 29501
+	current.ShippingCatalogRevision = excelPricingRevisionForTest("new-live-patris-revision")
+	if !excelPricingSettingsEqualExcept(current, proposed, "yuan_price") {
+		t.Fatal("live Patris shipping revision should be rebased while the target rate uses its prior confirmed value")
+	}
+	current.DollarPrice++
+	if excelPricingSettingsEqualExcept(current, proposed, "yuan_price") {
+		t.Fatal("a concurrent user pricing-input change must remain blocking")
+	}
+	for _, code := range []string{
+		"digitalogic_pricing_state_revision_conflict",
+		"digitalogic_pricing_snapshot_source_revision_conflict",
+		"digitalogic_pricing_source_revision_conflict",
+		"digitalogic_product_sync_busy",
+	} {
+		if !excelPricingWritebackRebaseCode(code) {
+			t.Fatalf("%s should trigger bounded automatic rebase", code)
+		}
+	}
+	websiteState := current
+	websiteState.ShippingCatalogRevision = excelPricingRevisionForTest("fresh-website-shipping-catalog")
+	rebased := excelPricingSettingsWithCurrentWebsiteState(proposed, websiteState)
+	if rebased.ShippingCatalogRevision != websiteState.ShippingCatalogRevision {
+		t.Fatalf("derived shipping revision=%q, want current website state %q", rebased.ShippingCatalogRevision, websiteState.ShippingCatalogRevision)
+	}
+	if rebased.YuanPrice != proposed.YuanPrice || rebased.DollarPrice != proposed.DollarPrice ||
+		rebased.ProfitMarginPercent != proposed.ProfitMarginPercent {
+		t.Fatal("live-source rebase changed a user-controlled pricing input")
+	}
+	if rebased.ShippingCatalogRevision == excelPricingRevisionForTest("new-live-patris-revision") {
+		t.Fatal("WordPress shipping revision was incorrectly coupled to the Patris product-source revision")
+	}
+}
+
+func TestExcelPricingWritebackConflictKeepsExactRemoteReason(t *testing.T) {
+	result := excelPricingWritebackErrorResult(&excelPricingRemoteError{
+		status: http.StatusConflict,
+		code:   "digitalogic_pricing_source_revision_conflict",
+	})
+	if !strings.Contains(result.messageFA, "digitalogic_pricing_source_revision_conflict") {
+		t.Fatalf("conflict reason was hidden: %q", result.messageFA)
+	}
+}
+
+func TestExcelPricingWritebackSourceUsesLiveEventIdentityWithoutCatalogProjection(t *testing.T) {
+	source := canonical.Source{
+		ID: "patris-office", Dataset: "kala.db",
+		Revision: excelPricingRevisionForTest("event-source"),
+	}
+	bridge := newExcelPricingRemoteEventsBridgeWithDependencies(excelPricingRemoteBridgeDependencies{})
+	bridge.verifiedRevision.Store(&excelPricingRemoteRevision{
+		Source: source, StateRevision: excelPricingRevisionForTest("event-state"),
+		CatalogRevision: excelPricingRevisionForTest("event-catalog"),
+	})
+	server := &Server{excelPricingRemote: bridge}
+	started := time.Now()
+	got, err := server.excelPricingWritebackSource(context.Background(), appconfig.Config{})
+	if err != nil || got != source {
+		t.Fatalf("writeback source=%#v error=%v", got, err)
+	}
+	if elapsed := time.Since(started); elapsed > 100*time.Millisecond {
+		t.Fatalf("event-backed source lookup took %s; writeback must not build a catalog projection", elapsed)
+	}
+}
+
+func TestExcelPricingWritebackSourceRetainsMinimalAuthenticatedIdentityAcrossTransientDisconnect(t *testing.T) {
+	source := canonical.Source{
+		ID: "patris-office", Dataset: "kala.db",
+		Revision: excelPricingRevisionForTest("event-source-before-disconnect"),
+	}
+	bridge := newExcelPricingRemoteEventsBridgeWithDependencies(excelPricingRemoteBridgeDependencies{
+		apply: func(excelPricingRemoteRevision) error { return nil },
+	})
+	bridge.mu.Lock()
+	bridge.epoch = 1
+	bridge.mu.Unlock()
+	if err := bridge.acceptRevision(1, source, excelPricingRemoteRevision{
+		Source: source, StateRevision: excelPricingRevisionForTest("event-state-before-disconnect"),
+		CatalogRevision: excelPricingRevisionForTest("event-catalog-before-disconnect"),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	bridge.clearVerifiedRevision(1)
+
+	server := &Server{excelPricingRemote: bridge}
+	started := time.Now()
+	got, err := server.excelPricingWritebackSource(context.Background(), appconfig.Config{})
+	if err != nil || got != source {
+		t.Fatalf("retained writeback source=%#v error=%v", got, err)
+	}
+	if elapsed := time.Since(started); elapsed > 100*time.Millisecond {
+		t.Fatalf("retained source lookup took %s; transient disconnect must not rebuild a catalog projection", elapsed)
+	}
+}
+
+func TestExcelPricingWritebackSourceUsesWatchBaselineWithoutCatalogProjection(t *testing.T) {
+	revision := excelPricingRevisionForTest("watch-baseline")
+	server := &Server{
+		dbPath: "C:/Patris/data4/kala.db", lastRecordsReady: true,
+		lastContractRevision: revision,
+	}
+	cfg := appconfig.Config{}
+	cfg.Canonical.SourceID = "patris-office"
+	started := time.Now()
+	got, err := server.excelPricingWritebackSource(context.Background(), cfg)
+	if err != nil || got.ID != "patris-office" || got.Dataset != "kala.db" || got.Revision != revision {
+		t.Fatalf("writeback source=%#v error=%v", got, err)
+	}
+	if elapsed := time.Since(started); elapsed > 100*time.Millisecond {
+		t.Fatalf("watch-baseline source lookup took %s; writeback must not build a catalog projection", elapsed)
+	}
+}
+
 func TestExcelPricingDirectWebsiteConfirmationEnqueuesOnlyExactCommittedContract(t *testing.T) {
 	queue := newExcelPricingWritebackQueue(nil)
 	request := excelPricingConfirmationRequest{
@@ -301,6 +437,20 @@ func TestExcelPricingDirectWebsiteConfirmationEnqueuesOnlyExactCommittedContract
 	if job.Status != "pending_ack" || job.SettingKey != "site_confirmation" || job.DesiredValue != "29501" || !job.ackOnly {
 		t.Fatalf("direct confirmation job=%#v", job)
 	}
+	discovered, err := queue.enqueueDiscoveredConfirmation(request, source, time.Now().Add(time.Minute).Unix())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if discovered.Status != "awaiting_excel" || discovered.Code != "website_committed" ||
+		discovered.SettingKey != "site_confirmation" || discovered.DesiredValue != "29501" ||
+		discovered.ConfirmedValue != "29501" ||
+		!discovered.ackOnly {
+		t.Fatalf("discovered confirmation job=%#v", discovered)
+	}
+	acknowledged, err := queue.acknowledge(discovered.JobID)
+	if err != nil || acknowledged.Status != "pending_ack" {
+		t.Fatalf("discovered confirmation acknowledgement=%#v error=%v", acknowledged, err)
+	}
 	request.TransactionID = "ptx_not_hex"
 	if _, err := queue.enqueueConfirmation(request, source); err == nil || err.Error() != "invalid_confirmation" {
 		t.Fatalf("invalid transaction error=%v", err)
@@ -311,6 +461,7 @@ func validExcelPricingWritebackRequest(requestID, key string, yuan int64) excelP
 	return excelPricingWritebackRequest{
 		Schema: excelPricingWritebackRequestSchema, RequestID: requestID,
 		SettingKey: key, ExpectedStateRevision: excelPricingRevisionForTest("writeback-state"),
+		PreviousConfirmedValue: strconv.FormatInt(yuan, 10),
 		Settings: excelPricingSettings{
 			DollarPrice: 187891, YuanPrice: yuan,
 			EffectiveDate: "2026-07-27", USDEffectiveDate: "2026-07-26", CNYEffectiveDate: "2026-07-27",

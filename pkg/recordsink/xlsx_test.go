@@ -1204,6 +1204,35 @@ func TestDynamicCalculatorVBASourceGuardsLivePricingBeforeMutation(t *testing.T)
 	if strings.Contains(snapshotReadyHandler, "MarkSseRefreshRequired") {
 		t.Fatal("snapshot readiness must not schedule another refresh without a semantic change event")
 	}
+	pricingChangedStart := strings.Index(sseEventHandler, `Case "pricing_state_changed"`)
+	pricingInvalidatedStart := strings.Index(sseEventHandler, `Case "pricing_state_invalidated"`)
+	if pricingChangedStart < 0 || pricingInvalidatedStart <= pricingChangedStart {
+		t.Fatal("pricing-state event handling boundaries are missing")
+	}
+	pricingChangedHandler := sseEventHandler[pricingChangedStart:pricingInvalidatedStart]
+	for _, required := range []string{
+		"mRefreshAfterSiteConfirmation = True",
+		"QueueSiteConfirmationDiscovery",
+	} {
+		if !strings.Contains(pricingChangedHandler, required) {
+			t.Fatalf("website confirmation must precede catalog refresh: %s", required)
+		}
+	}
+	if strings.Contains(pricingChangedHandler, "MarkSseRefreshRequired") {
+		t.Fatal("website pricing events must not start a catalog refresh before Excel applies and ACKs the committed setting")
+	}
+	completeWriteback := section("Private Sub CompletePricingWriteback", "Private Sub ApplyWebsiteCommittedWriteback")
+	for _, required := range []string{
+		`completedSiteConfirmation = _`,
+		"mRefreshAfterSiteConfirmation = False",
+	} {
+		if !strings.Contains(completeWriteback, required) {
+			t.Fatalf("post-ACK pricing completion is missing %q", required)
+		}
+	}
+	if strings.Contains(completeWriteback, "MarkSseRefreshRequired") {
+		t.Fatal("post-ACK pricing completion must not rebuild the independently event-driven catalog")
+	}
 	expectedApplyEvent := section("Private Function IsExpectedApplyMutationEvent", "Private Sub PreserveExpectedApplyMutationEvent")
 	for _, required := range []string{
 		`Case "apply"`,
@@ -1494,6 +1523,18 @@ func TestDynamicCalculatorVBASourceGuardsLivePricingBeforeMutation(t *testing.T)
 	if strings.Contains(source, `Application.OnKey "~",`) {
 		t.Fatal("Enter must remain native; rebinding it can recurse through selection events and exhaust Excel's VBA stack")
 	}
+	for _, required := range []string{
+		"Private Const SNAPSHOT_WAIT_TIMEOUT_MS As Long = 180000",
+		"Private Sub RestoreExcelInteractivityAfterOperation()",
+		"Application.EnableEvents = True",
+	} {
+		if !strings.Contains(source, required) {
+			t.Fatalf("Excel refresh cleanup is missing %q", required)
+		}
+	}
+	if strings.Count(source, "RestoreExcelInteractivityAfterOperation") < 3 {
+		t.Fatal("both successful and failed finite operations must restore Excel interactivity")
+	}
 	progressSurface := section("Public Sub SetOperationProgressSurface", "Private Sub UpdateOperationProgressShapes")
 	if strings.Contains(progressSurface, `U("064606270645063906CC0646")`) {
 		t.Fatal("indeterminate progress must not expose the internal Persian label نامعین")
@@ -1669,16 +1710,23 @@ func TestDynamicCalculatorVBASourceGuardsLivePricingBeforeMutation(t *testing.T)
 		t.Fatal("scheduled pricing writeback section is missing")
 	}
 	writebackSource := source[writebackStart:writebackEnd]
-	for _, required := range []string{
-		"BeginWritebackPoll",
-		`StartWritebackRequest "POST", PricingBaseURL() & "/session", "{}"`,
-	} {
-		if !strings.Contains(writebackSource, required) {
-			t.Fatalf("scheduled pricing writeback must hand HTTP work to the asynchronous request path: %s", required)
+	if !strings.Contains(writebackSource, "RunSynchronousWritebackStep") {
+		t.Fatal("scheduled pricing writeback must use the bounded loopback-only synchronous step")
+	}
+	for _, forbidden := range []string{"BeginWritebackPoll", "StartWritebackRequest"} {
+		if strings.Contains(writebackSource, forbidden) {
+			t.Fatalf("scheduled pricing writeback must not re-enter the stale asynchronous event path: %s", forbidden)
 		}
 	}
-	if strings.Contains(writebackSource, "RunSynchronousWritebackStep") {
-		t.Fatal("scheduled pricing writeback must not execute synchronous HTTP on Excel's UI thread")
+	for _, required := range []string{
+		"QueueSiteConfirmationDiscovery",
+		`mWritebackPending("site_confirmation") = "B18"`,
+		`requestBody = "{}"`,
+		`Case "yuan_price", "site_confirmation"`,
+	} {
+		if !strings.Contains(source, required) {
+			t.Fatalf("website-originated pricing confirmation is missing its fast Excel apply/ACK path: %s", required)
+		}
 	}
 	confirmStart := strings.Index(source, "Private Function ConfirmUnicodeMessage")
 	if confirmStart < 0 {

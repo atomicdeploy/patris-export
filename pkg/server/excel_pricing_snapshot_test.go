@@ -18,6 +18,26 @@ import (
 	"github.com/atomicdeploy/patris-export/pkg/recordpipe"
 )
 
+func TestWriteExcelPricingSnapshotSSEPadsFrameForWinHTTPDelivery(t *testing.T) {
+	response := httptest.NewRecorder()
+	payload := map[string]interface{}{
+		"schema":   excelPricingSnapshotEventSchema,
+		"sequence": 7,
+		"kind":     "pricing_state_changed",
+	}
+	if err := writeExcelPricingSnapshotSSE(response, 7, "pricing_state_changed", payload); err != nil {
+		t.Fatal(err)
+	}
+	body := response.Body.String()
+	if len(body) < excelPricingSnapshotSSEFlushPadding || !strings.HasPrefix(body, ": ") {
+		t.Fatalf("SSE frame was not padded for WinHTTP delivery: bytes=%d", len(body))
+	}
+	if !strings.Contains(body, "\nid: 7\nevent: pricing_state_changed\ndata: ") ||
+		!strings.HasSuffix(body, "\n\n") {
+		t.Fatalf("padded SSE frame lost its semantic event: %q", body[len(body)-200:])
+	}
+}
+
 func TestExcelPricingSnapshotStartValidatesFreshCanonicalSourceRevision(t *testing.T) {
 	current := excelPricingStateSourceForTest()
 	stale := current
@@ -1920,6 +1940,126 @@ func TestExcelPricingSnapshotUpstreamCatalogInvalidationIsAtomic(t *testing.T) {
 		change.PreviousStateRevision != previousState ||
 		change.PreviousSnapshotRevision != previousSnapshot || change.PreviousETag != previousETag {
 		t.Fatalf("upstream semantic event=%+v", change)
+	}
+}
+
+func TestExcelPricingRemoteRevisionAdvanceIsNotSourceChange(t *testing.T) {
+	server := newExcelPricingTestServer(t, "http://127.0.0.1:1/wp-json/digitalogic/patris/product-sync")
+	store := server.excelPricing.snapshots
+	previousSource := excelPricingStateSourceForTest()
+	currentSource := previousSource
+	currentSource.Revision = excelPricingRevisionForTest("live-patris-revision-advance")
+	catalogRevision := excelPricingRevisionForTest("unchanged-catalog")
+	previousState := excelPricingRevisionForTest("previous-pricing-state")
+	currentState := excelPricingRevisionForTest("current-pricing-state")
+	currentETag := `"` + currentState + `"`
+
+	store.mu.Lock()
+	store.publishChangeLocked(excelPricingStateChangeEvent{
+		Kind:            "snapshot_ready",
+		Source:          &previousSource,
+		CatalogRevision: catalogRevision,
+		StateRevision:   previousState,
+		ETag:            `"` + previousState + `"`,
+		Verified:        true,
+	})
+	store.mu.Unlock()
+
+	if err := server.notifyExcelPricingRemoteRevisionChanged(excelPricingRemoteRevision{
+		Source:          currentSource,
+		CatalogRevision: catalogRevision,
+		StateRevision:   currentState,
+		ETag:            currentETag,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	change := store.events[len(store.events)-1].Change
+	if change == nil || change.Kind != "pricing_state_changed" || change.Source == nil ||
+		*change.Source != currentSource || change.StateRevision != currentState {
+		t.Fatalf("live revision advance event=%+v", change)
+	}
+}
+
+func TestExcelPricingRemoteWebsiteCommitPrefersFastConfirmationOverDerivedCatalogChange(t *testing.T) {
+	server := newExcelPricingTestServer(t, "http://127.0.0.1:1/wp-json/digitalogic/patris/product-sync")
+	store := server.excelPricing.snapshots
+	source := excelPricingStateSourceForTest()
+	previousState := excelPricingRevisionForTest("website-previous-state")
+	currentState := excelPricingRevisionForTest("website-current-state")
+	previousPricing := excelPricingRevisionForTest("website-previous-pricing")
+	currentPricing := excelPricingRevisionForTest("website-current-pricing")
+
+	store.mu.Lock()
+	store.publishChangeLocked(excelPricingStateChangeEvent{
+		Kind:                 "snapshot_ready",
+		Source:               &source,
+		CatalogRevision:      excelPricingRevisionForTest("website-previous-catalog"),
+		StateRevision:        previousState,
+		PricingStateRevision: previousPricing,
+		ETag:                 `"` + previousState + `"`,
+		Verified:             true,
+	})
+	store.mu.Unlock()
+
+	if err := server.notifyExcelPricingRemoteRevisionChanged(excelPricingRemoteRevision{
+		Source:                source,
+		CatalogRevision:       excelPricingRevisionForTest("website-current-catalog"),
+		StateRevision:         currentState,
+		PricingStateRevision:  currentPricing,
+		PricingPolicyRevision: excelPricingRevisionForTest("website-current-policy"),
+		ETag:                  `"` + currentState + `"`,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	change := store.events[len(store.events)-1].Change
+	if change == nil || change.Kind != "pricing_state_changed" ||
+		change.PricingStateRevision != currentPricing {
+		t.Fatalf("website commit event=%+v", change)
+	}
+}
+
+func TestExcelPricingRemoteCatalogChangeRemainsCatalogChangeWhenPricingStateIsStable(t *testing.T) {
+	server := newExcelPricingTestServer(t, "http://127.0.0.1:1/wp-json/digitalogic/patris/product-sync")
+	store := server.excelPricing.snapshots
+	source := excelPricingStateSourceForTest()
+	previousState := excelPricingRevisionForTest("catalog-previous-state")
+	currentState := excelPricingRevisionForTest("catalog-current-state")
+	pricingState := excelPricingRevisionForTest("catalog-stable-pricing")
+
+	store.mu.Lock()
+	store.publishChangeLocked(excelPricingStateChangeEvent{
+		Kind:                 "snapshot_ready",
+		Source:               &source,
+		CatalogRevision:      excelPricingRevisionForTest("catalog-previous-catalog"),
+		StateRevision:        previousState,
+		PricingStateRevision: pricingState,
+		ETag:                 `"` + previousState + `"`,
+		Verified:             true,
+	})
+	store.mu.Unlock()
+
+	if err := server.notifyExcelPricingRemoteRevisionChanged(excelPricingRemoteRevision{
+		Source:                source,
+		CatalogRevision:       excelPricingRevisionForTest("catalog-current-catalog"),
+		StateRevision:         currentState,
+		PricingStateRevision:  pricingState,
+		PricingPolicyRevision: excelPricingRevisionForTest("catalog-current-policy"),
+		ETag:                  `"` + currentState + `"`,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	change := store.events[len(store.events)-1].Change
+	if change == nil || change.Kind != "catalog_changed" {
+		t.Fatalf("catalog event=%+v", change)
 	}
 }
 

@@ -1018,7 +1018,19 @@ func sendConvertUpdate(cfg appconfig.Config, source string, result recordpipe.Re
 		Contract:         result.SyncEnvelope(changes),
 		SnapshotContract: result.SyncEnvelope(nil),
 	}
-	delivery, err := updateout.DispatchWithResult(context.Background(), cfg.SendUpdates, event)
+	deliveryConfig := cfg.SendUpdates
+	if strings.TrimSpace(deliveryConfig.ProductSyncSecretEnv) != "" {
+		// Product-sync applies large catalogs in bounded batches. A one-shot
+		// runtime setting can otherwise leave the receiver on a partial event
+		// forever and block every fresher Patris revision behind it.
+		if deliveryConfig.RetryAttempts < 10 {
+			deliveryConfig.RetryAttempts = 10
+		}
+		if backoff, parseErr := time.ParseDuration(deliveryConfig.RetryBackoff); parseErr != nil || backoff < 2*time.Second {
+			deliveryConfig.RetryBackoff = "2s"
+		}
+	}
+	delivery, err := updateout.DispatchWithResult(context.Background(), deliveryConfig, event)
 	if err != nil {
 		warningColor.Printf("Send update failed: %v\n", err)
 		return

@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -11,6 +12,69 @@ import (
 	"github.com/atomicdeploy/patris-export/pkg/canonical"
 	"github.com/atomicdeploy/patris-export/pkg/updateout"
 )
+
+func TestExcelPricingRemoteSnapshotConflictCodesAreRecoverableAtEveryStage(t *testing.T) {
+	for _, code := range []string{
+		"digitalogic_pricing_snapshot_source_revision_conflict",
+		"digitalogic_pricing_snapshot_state_revision_conflict",
+	} {
+		err := readExcelPricingRemoteSnapshotResponseError(
+			bytes.NewBufferString(`{"code":"`+code+`"}`),
+			errExcelPricingRemoteSnapshotUnavailable,
+		)
+		if !errors.Is(err, errExcelPricingRemoteSnapshotSourceConflict) {
+			t.Fatalf("code %q mapped to %v", code, err)
+		}
+		for _, stage := range []string{
+			excelPricingRemoteSnapshotStageRevisionFetch,
+			excelPricingRemoteSnapshotStageSnapshotStart,
+			excelPricingRemoteSnapshotStageStatusFallback,
+			excelPricingRemoteSnapshotStageSnapshotPayload,
+		} {
+			wrapped := wrapExcelPricingRemoteSnapshotStage(stage, err)
+			gotStage, gotCode, ok := excelPricingRemoteSnapshotFailureDetails(wrapped)
+			if !ok || gotStage != stage || gotCode != "snapshot_source_revision_conflict" {
+				t.Fatalf("stage %q details=(%q,%q,%v)", stage, gotStage, gotCode, ok)
+			}
+			if got := excelPricingRemoteSnapshotFailureCode(context.Background(), wrapped); got != "snapshot_source_revision_conflict" {
+				t.Fatalf("stage %q public code=%q", stage, got)
+			}
+		}
+	}
+}
+
+func TestExcelPricingRemoteSnapshotUnknownErrorDoesNotBecomeConflict(t *testing.T) {
+	want := errExcelPricingRemoteSnapshotUnavailable
+	got := readExcelPricingRemoteSnapshotResponseError(
+		bytes.NewBufferString(`{"code":"unrelated_failure"}`),
+		want,
+	)
+	if !errors.Is(got, want) || errors.Is(got, errExcelPricingRemoteSnapshotSourceConflict) {
+		t.Fatalf("unknown remote error mapped to %v", got)
+	}
+}
+
+func TestExcelPricingSnapshotLiveDeliveryMayBePendingButNeverAmbiguous(t *testing.T) {
+	eventID := testExcelPricingRevision('e')
+	result := updateout.DeliveryResult{
+		HTTPStatus:      http.StatusAccepted,
+		Status:          "accepted",
+		EventID:         eventID,
+		Attempts:        1,
+		PendingProducts: 976,
+	}
+	if !excelPricingSnapshotDeliveryAccepted(result, eventID) {
+		t.Fatal("current stored source was rejected only because product actuation remains pending")
+	}
+	result.DeferredAmbiguous = 1
+	if excelPricingSnapshotDeliveryAccepted(result, eventID) {
+		t.Fatal("ambiguous product identity must remain blocking")
+	}
+	result.DeferredAmbiguous = 0
+	if excelPricingSnapshotDeliveryAccepted(result, testExcelPricingRevision('f')) {
+		t.Fatal("a different event/source envelope must not be selected as current")
+	}
+}
 
 func TestExcelPricingRemoteSnapshotRevisionConflictIsActionable(t *testing.T) {
 	t.Setenv(excelPricingRemoteSnapshotTestSecretEnv, "test-only-secret")

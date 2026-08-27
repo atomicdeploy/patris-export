@@ -258,9 +258,7 @@ func sendHTTP(ctx context.Context, cfg Config, event Event) (DeliveryResult, err
 	endpoint := safeEndpoint(cfg.URL)
 	client := http.DefaultClient
 	if secret != "" {
-		client = &http.Client{CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
-			return http.ErrUseLastResponse
-		}}
+		client = pinnedProductSyncHTTPClient()
 	}
 	var result DeliveryResult
 	for attempt := 1; attempt <= cfg.RetryAttempts; attempt++ {
@@ -279,6 +277,22 @@ func sendHTTP(ctx context.Context, cfg Config, event Event) (DeliveryResult, err
 		return result, deliveryError(endpoint, result, result.Retryable, reason)
 	}
 	return result, deliveryError(endpoint, result, result.Retryable, "delivery failed")
+}
+
+// pinnedProductSyncHTTPClient is the narrow release-time bypass for the one
+// authenticated product-sync origin. Transforming ambient proxies previously
+// changed or stranded large canonical deliveries. Credentials remain
+// header-only and redirects remain forbidden. First-class explicit proxy
+// configuration and diagnostics are tracked separately.
+func pinnedProductSyncHTTPClient() *http.Client {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.Proxy = nil
+	return &http.Client{
+		Transport: transport,
+		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
 }
 
 func sendHTTPAttempt(

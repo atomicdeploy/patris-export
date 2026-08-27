@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/atomicdeploy/patris-export/pkg/appconfig"
 	"github.com/atomicdeploy/patris-export/pkg/canonical"
 	"github.com/atomicdeploy/patris-export/pkg/updateout"
 	"github.com/gorilla/mux"
@@ -40,11 +41,12 @@ var excelPricingWritebackKeys = map[string]struct{}{
 }
 
 type excelPricingWritebackRequest struct {
-	Schema                string               `json:"schema"`
-	RequestID             string               `json:"request_id"`
-	SettingKey            string               `json:"setting_key"`
-	ExpectedStateRevision string               `json:"expected_state_revision"`
-	Settings              excelPricingSettings `json:"settings"`
+	Schema                 string               `json:"schema"`
+	RequestID              string               `json:"request_id"`
+	SettingKey             string               `json:"setting_key"`
+	ExpectedStateRevision  string               `json:"expected_state_revision"`
+	PreviousConfirmedValue string               `json:"previous_confirmed_value"`
+	Settings               excelPricingSettings `json:"settings"`
 }
 
 type excelPricingWritebackJob struct {
@@ -64,15 +66,21 @@ type excelPricingWritebackJob struct {
 	SettingsDigest string `json:"confirmed_settings_digest,omitempty"`
 	ACKDeadline    int64  `json:"ack_deadline,omitempty"`
 	UpdatedAt      string `json:"updated_at"`
+	RetryCount     int    `json:"retry_count,omitempty"`
+	LastRetryCode  string `json:"last_retry_code,omitempty"`
+	LastRetryAt    string `json:"last_retry_at,omitempty"`
+	LastAttemptMS  int64  `json:"last_attempt_ms,omitempty"`
+	TotalElapsedMS int64  `json:"total_elapsed_ms,omitempty"`
 
-	settings              excelPricingSettings
-	expectedStateRevision string
-	sequence              uint64
-	confirmedSettings     excelPricingSettings
-	confirmationSource    canonical.Source
-	ackOnly               bool
-	createdAt             time.Time
-	nextAttemptAt         time.Time
+	settings               excelPricingSettings
+	expectedStateRevision  string
+	previousConfirmedValue string
+	sequence               uint64
+	confirmedSettings      excelPricingSettings
+	confirmationSource     canonical.Source
+	ackOnly                bool
+	createdAt              time.Time
+	nextAttemptAt          time.Time
 }
 
 type excelPricingWritebackQueue struct {
@@ -99,6 +107,7 @@ type excelPricingWritebackResult struct {
 	ackDeadline    int64
 	settings       excelPricingSettings
 	source         canonical.Source
+	attemptMS      int64
 }
 
 type excelPricingConfirmationRequest struct {
@@ -223,6 +232,8 @@ func (queue *excelPricingWritebackQueue) finish(job *excelPricingWritebackJob, r
 		return
 	}
 	now := queue.now().UTC()
+	stored.LastAttemptMS = result.attemptMS
+	stored.TotalElapsedMS = now.Sub(stored.createdAt).Milliseconds()
 	if !stored.ackOnly && queue.latestByKey[stored.SettingKey] != stored.JobID {
 		queue.supersedeLocked(stored, now)
 		return
@@ -236,6 +247,9 @@ func (queue *excelPricingWritebackQueue) finish(job *excelPricingWritebackJob, r
 		stored.Code = result.code
 		stored.MessageFA = result.messageFA
 		stored.Blocking = false
+		stored.RetryCount++
+		stored.LastRetryCode = result.code
+		stored.LastRetryAt = now.Format(time.RFC3339)
 		stored.nextAttemptAt = now.Add(queue.retryDelay(stored.Attempts))
 		stored.UpdatedAt = now.Format(time.RFC3339)
 		queue.signal()
@@ -289,6 +303,9 @@ func (queue *excelPricingWritebackQueue) enqueue(request excelPricingWritebackRe
 			return nil, errors.New("invalid_pricing_settings")
 		}
 	}
+	if strings.TrimSpace(request.PreviousConfirmedValue) == "" {
+		return nil, errors.New("invalid_previous_confirmed_value")
+	}
 	if _, ok := excelPricingWritebackKeys[request.SettingKey]; !ok {
 		return nil, errors.New("unsupported_setting")
 	}
@@ -311,21 +328,22 @@ func (queue *excelPricingWritebackQueue) enqueue(request excelPricingWritebackRe
 	}
 	queue.sequence++
 	job := &excelPricingWritebackJob{
-		Schema:                excelPricingWritebackJobSchema,
-		JobID:                 jobID,
-		RequestID:             request.RequestID,
-		SettingKey:            request.SettingKey,
-		DesiredValue:          desired,
-		Status:                "pending",
-		Code:                  "queued",
-		MessageFA:             "تغییر در صف ارسال امن به وردپرس قرار گرفت.",
-		Blocking:              false,
-		UpdatedAt:             now.Format(time.RFC3339),
-		settings:              request.Settings,
-		expectedStateRevision: request.ExpectedStateRevision,
-		sequence:              queue.sequence,
-		createdAt:             now,
-		nextAttemptAt:         now,
+		Schema:                 excelPricingWritebackJobSchema,
+		JobID:                  jobID,
+		RequestID:              request.RequestID,
+		SettingKey:             request.SettingKey,
+		DesiredValue:           desired,
+		Status:                 "pending",
+		Code:                   "queued",
+		MessageFA:              "تغییر در صف ارسال امن به وردپرس قرار گرفت.",
+		Blocking:               false,
+		UpdatedAt:              now.Format(time.RFC3339),
+		settings:               request.Settings,
+		expectedStateRevision:  request.ExpectedStateRevision,
+		previousConfirmedValue: strings.TrimSpace(request.PreviousConfirmedValue),
+		sequence:               queue.sequence,
+		createdAt:              now,
+		nextAttemptAt:          now,
 	}
 	queue.jobs[jobID] = job
 	queue.latestByKey[request.SettingKey] = jobID
@@ -336,6 +354,23 @@ func (queue *excelPricingWritebackQueue) enqueue(request excelPricingWritebackRe
 func (queue *excelPricingWritebackQueue) enqueueConfirmation(
 	request excelPricingConfirmationRequest,
 	source canonical.Source,
+) (*excelPricingWritebackJob, error) {
+	return queue.enqueueConfirmationState(request, source, false, 0)
+}
+
+func (queue *excelPricingWritebackQueue) enqueueDiscoveredConfirmation(
+	request excelPricingConfirmationRequest,
+	source canonical.Source,
+	ackDeadline int64,
+) (*excelPricingWritebackJob, error) {
+	return queue.enqueueConfirmationState(request, source, true, ackDeadline)
+}
+
+func (queue *excelPricingWritebackQueue) enqueueConfirmationState(
+	request excelPricingConfirmationRequest,
+	source canonical.Source,
+	awaitingExcel bool,
+	ackDeadline int64,
 ) (*excelPricingWritebackJob, error) {
 	if request.Schema != excelPricingConfirmationRequestSchema ||
 		!excelPricingIdempotencyPattern.MatchString(request.RequestID) ||
@@ -358,11 +393,18 @@ func (queue *excelPricingWritebackQueue) enqueueConfirmation(
 	job := &excelPricingWritebackJob{
 		Schema: excelPricingWritebackJobSchema, JobID: jobID, RequestID: request.RequestID,
 		SettingKey: "site_confirmation", DesiredValue: strconv.FormatInt(request.ConfirmedSettings.YuanPrice, 10),
-		Status: "pending_ack", Code: "excel_applied", MessageFA: "تغییر وب‌سایت در اکسل اعمال شد؛ تأیید نهایی در صف است.",
+		ConfirmedValue: strconv.FormatInt(request.ConfirmedSettings.YuanPrice, 10),
+		Status:         "pending_ack", Code: "excel_applied", MessageFA: "تغییر وب‌سایت در اکسل اعمال شد؛ تأیید نهایی در صف است.",
 		StateRevision: request.CommittedStateRevision, TransactionID: request.TransactionID,
 		SettingsDigest: request.ConfirmedSettingsDigest, UpdatedAt: now.Format(time.RFC3339),
+		ACKDeadline:       ackDeadline,
 		confirmedSettings: request.ConfirmedSettings, confirmationSource: source, ackOnly: true,
 		sequence: queue.sequence, createdAt: now, nextAttemptAt: now,
+	}
+	if awaitingExcel {
+		job.Status = "awaiting_excel"
+		job.Code = "website_committed"
+		job.MessageFA = "وب‌سایت نرخ را ثبت و قیمت‌ها را بازتولید کرد؛ در انتظار اعمال در اکسل و تأیید نهایی است."
 	}
 	queue.jobs[jobID] = job
 	queue.signal()
@@ -455,33 +497,59 @@ func (queue *excelPricingWritebackQueue) signal() {
 	}
 }
 
-func (queue *excelPricingWritebackQueue) processRemote(ctx context.Context, job *excelPricingWritebackJob) excelPricingWritebackResult {
+func (queue *excelPricingWritebackQueue) processRemote(ctx context.Context, job *excelPricingWritebackJob) (result excelPricingWritebackResult) {
+	started := time.Now()
+	defer func() {
+		result.attemptMS = time.Since(started).Milliseconds()
+	}()
 	server := queue.server
 	if server == nil || server.excelPricing == nil || server.config == nil {
 		return excelPricingWritebackFailure("remote_not_configured", true)
 	}
 	bounded, cancel := context.WithTimeout(ctx, excelPricingWritebackTimeout)
 	defer cancel()
-	select {
-	case server.excelPricing.permit <- struct{}{}:
-		defer func() { <-server.excelPricing.permit }()
-	case <-bounded.Done():
-		return excelPricingWritebackFailure("pricing_busy", true)
-	}
+	// The queue is already single-worker and coalesces newer edits per setting.
+	// Do not share the catalog snapshot permit here: an inbound product refresh
+	// may legitimately run for tens of seconds while a pricing proposal must
+	// still reach WordPress immediately. WordPress owns the cross-consumer
+	// mutation lock, revision fence, atomic repricing, and ACK transaction.
 	cfg := server.Config()
 	if job.TransactionID != "" {
 		return queue.ackRemote(bounded, cfg.SendUpdates, job)
 	}
-	contract, err := server.excelPricingCanonical(bounded, cfg)
+	source, err := server.excelPricingWritebackSource(bounded, cfg)
 	if err != nil {
 		return excelPricingWritebackFailure("canonical_source_unavailable", true)
 	}
-	// A same-value edit is the safest live acceptance strategy. Confirm it from
-	// WordPress state before preview/apply so an idempotent no-op never waits on
-	// a mutation pipeline that has nothing to change.
-	if current := queue.readback(bounded, job); current.status == "confirmed" {
-		current.messageFA = "مقدار از قبل در وردپرس همین بود و با خواندن مجدد تأیید شد."
-		return current
+	// Read the live website state before mutating. Patris may legitimately move
+	// the aggregate revision while the user is editing. Rebase only when the
+	// edited setting still equals Excel's last confirmed value and every other
+	// pricing setting is unchanged. A concurrent edit to the same setting stays
+	// a blocking conflict and is never overwritten.
+	currentDocument, readErr := queue.readbackDocument(bounded, job)
+	if readErr == nil {
+		// This revision belongs to WordPress's shipping-method catalog; it is not
+		// the Patris product-source revision. Always rebase the derived marker from
+		// the fresh website state while separately conflict-checking every editable
+		// shipping/pricing value. This permits live Patris movement without coupling
+		// two unrelated revision domains.
+		job.settings = excelPricingSettingsWithCurrentWebsiteState(job.settings, currentDocument.Settings)
+		currentValue, valueErr := excelPricingSettingValue(currentDocument.Settings, job.SettingKey)
+		if valueErr == nil && currentValue == job.DesiredValue {
+			return queue.resultFromCurrentDocument(job, source, currentDocument)
+		}
+		if currentDocument.StateRevision != job.expectedStateRevision {
+			if valueErr != nil || currentValue != job.previousConfirmedValue ||
+				!excelPricingSettingsEqualExcept(currentDocument.Settings, job.settings, job.SettingKey) {
+				return excelPricingWritebackResult{
+					status: "conflict", code: "unsafe_concurrent_setting_change",
+					messageFA:      "همان تنظیم یا یکی از تنظیمات قیمت‌گذاری هم‌زمان تغییر کرده است؛ مقدار جدیدتر بازنویسی نشد.",
+					confirmedValue: currentValue, stateRevision: currentDocument.StateRevision,
+				}
+			}
+			job.expectedStateRevision = currentDocument.StateRevision
+			job.settings.ShippingCatalogRevision = currentDocument.Settings.ShippingCatalogRevision
+		}
 	}
 	previewID := "excel-writeback-" + job.JobID + "-preview"
 	previewLocal := excelPricingLocalRequest{
@@ -491,7 +559,7 @@ func (queue *excelPricingWritebackQueue) processRemote(ctx context.Context, job 
 		IdempotencyKey: previewID, ExpectedStateRevision: job.expectedStateRevision,
 		Settings: &job.settings, ProductChanges: json.RawMessage(`[]`),
 	}
-	previewRemote := buildExcelPricingRemoteRequest("preview", previewLocal, contract.Source)
+	previewRemote := buildExcelPricingRemoteRequest("preview", previewLocal, source)
 	preview, err := server.forwardExcelPricing(bounded, cfg.SendUpdates, "preview", previewRemote, previewLocal)
 	if err != nil {
 		return excelPricingWritebackErrorResult(err)
@@ -510,7 +578,7 @@ func (queue *excelPricingWritebackQueue) processRemote(ctx context.Context, job 
 	applyLocal.IdempotencyKey = applyID
 	applyLocal.PreviewDigest = digest
 	applyLocal.Confirmation = "APPLY"
-	applyRemote := buildExcelPricingRemoteRequest("apply", applyLocal, contract.Source)
+	applyRemote := buildExcelPricingRemoteRequest("apply", applyLocal, source)
 	applied, err := server.forwardExcelPricing(bounded, cfg.SendUpdates, "apply", applyRemote, applyLocal)
 	if err != nil {
 		if readback := queue.readback(bounded, job); readback.status == "confirmed" {
@@ -535,10 +603,11 @@ func (queue *excelPricingWritebackQueue) processRemote(ctx context.Context, job 
 	if err != nil || confirmed != job.DesiredValue {
 		return excelPricingWritebackFailure("confirmation_value_conflict", false)
 	}
-	readback := queue.readback(bounded, job)
-	if readback.status != "confirmed" || readback.stateRevision != applied.stateRevision {
-		return excelPricingWritebackFailure("post_apply_verification_failed", true)
-	}
+	// The authenticated apply response is the website's terminal commit and
+	// repricing receipt. Do not block the short ACK window on another full state
+	// projection before Excel can apply the committed value. The ACK worker below
+	// still performs an independent website readback before it marks the cell
+	// green, so success is never inferred from the mutation response alone.
 	server.excelPricing.snapshots.publishPricingStateVerified(applied.stateRevision)
 	return excelPricingWritebackResult{
 		status: "awaiting_excel", code: "website_committed",
@@ -547,7 +616,7 @@ func (queue *excelPricingWritebackQueue) processRemote(ctx context.Context, job 
 		transactionID:  document.Confirmation.TransactionID,
 		settingsDigest: document.Confirmation.CommittedSettingsDigest,
 		ackDeadline:    document.Confirmation.ACKDeadline,
-		settings:       document.Settings, source: contract.Source,
+		settings:       document.Settings, source: source,
 	}
 }
 
@@ -634,18 +703,22 @@ func (queue *excelPricingWritebackQueue) readback(ctx context.Context, job *exce
 func (queue *excelPricingWritebackQueue) readbackDocument(ctx context.Context, job *excelPricingWritebackJob) (excelPricingStateDocument, error) {
 	server := queue.server
 	cfg := server.Config()
-	contract, err := server.excelPricingCanonical(ctx, cfg)
-	if err != nil {
-		return excelPricingStateDocument{}, err
+	source := job.confirmationSource
+	if !validExcelPricingRemoteSource(source) {
+		var err error
+		source, err = server.excelPricingWritebackSource(ctx, cfg)
+		if err != nil {
+			return excelPricingStateDocument{}, err
+		}
 	}
 	requestID := "excel-writeback-" + job.JobID + "-readback"
 	local := excelPricingLocalRequest{
 		Schema: excelPricingLocalRequestSchema, SchemaVersion: 1,
 		Operation: "state", ClientID: excelPricingContractClientID,
 		Channel: excelPricingContractChannel, RequestID: requestID,
-		Source: &contract.Source, Page: 1, Limit: 1, Locale: "fa",
+		Source: &source, Page: 1, Limit: 1, Locale: "fa", Projection: "settings",
 	}
-	remoteRequest := buildExcelPricingRemoteRequest("state", local, contract.Source)
+	remoteRequest := buildExcelPricingRemoteRequest("state", local, source)
 	state, err := server.forwardExcelPricing(ctx, cfg.SendUpdates, "state", remoteRequest, local)
 	if err != nil {
 		return excelPricingStateDocument{}, err
@@ -811,17 +884,95 @@ func (s *Server) handlePostExcelPricingConfirmation(w http.ResponseWriter, r *ht
 		writeExcelPricingError(w, http.StatusBadRequest, "invalid_request")
 		return
 	}
-	contract, err := s.excelPricingCanonical(r.Context(), s.Config())
+	if request == (excelPricingConfirmationRequest{}) {
+		job, err := s.discoverExcelPricingConfirmation(r.Context())
+		if err != nil {
+			status := http.StatusConflict
+			if err.Error() == "remote_unavailable" || err.Error() == "canonical_source_unavailable" {
+				status = http.StatusServiceUnavailable
+			}
+			writeExcelPricingError(w, status, err.Error())
+			return
+		}
+		writeExcelPricingJSON(w, http.StatusAccepted, job)
+		return
+	}
+	source, err := s.excelPricingWritebackSource(r.Context(), s.Config())
 	if err != nil {
 		writeExcelPricingError(w, http.StatusServiceUnavailable, "canonical_source_unavailable")
 		return
 	}
-	job, err := s.excelPricingWrites.enqueueConfirmation(request, contract.Source)
+	job, err := s.excelPricingWrites.enqueueConfirmation(request, source)
 	if err != nil {
 		writeExcelPricingError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	writeExcelPricingJSON(w, http.StatusAccepted, job)
+}
+
+func (s *Server) discoverExcelPricingConfirmation(ctx context.Context) (*excelPricingWritebackJob, error) {
+	if s == nil || s.excelPricingWrites == nil {
+		return nil, errors.New("remote_unavailable")
+	}
+	bounded, cancel := context.WithTimeout(ctx, 8*time.Second)
+	defer cancel()
+	source, err := s.excelPricingWritebackSource(bounded, s.Config())
+	if err != nil {
+		return nil, errors.New("canonical_source_unavailable")
+	}
+	probe := &excelPricingWritebackJob{SettingKey: "site_confirmation", confirmationSource: source}
+	document, err := s.excelPricingWrites.readbackDocument(bounded, probe)
+	if err != nil {
+		return nil, errors.New("remote_unavailable")
+	}
+	confirmation := document.Confirmation
+	if confirmation.Status != "awaiting_ack" ||
+		!validExcelPricingTransactionID(confirmation.TransactionID) ||
+		confirmation.CommittedRevision != document.StateRevision ||
+		!isSHA256Revision(confirmation.CommittedSettingsDigest) ||
+		confirmation.ACKDeadline <= time.Now().Unix() ||
+		confirmation.ACKPath != "/wp-json/digitalogic/pricing/sync/ack" ||
+		confirmation.ConsumerID != excelPricingContractClientID ||
+		confirmation.Channel != excelPricingContractChannel {
+		return nil, errors.New("confirmation_not_pending")
+	}
+	request := excelPricingConfirmationRequest{
+		Schema:                  excelPricingConfirmationRequestSchema,
+		RequestID:               "excel-confirmation-" + strings.TrimPrefix(confirmation.TransactionID, "ptx_"),
+		TransactionID:           confirmation.TransactionID,
+		CommittedStateRevision:  document.StateRevision,
+		ConfirmedSettingsDigest: confirmation.CommittedSettingsDigest,
+		ConfirmedSettings:       document.Settings,
+	}
+	return s.excelPricingWrites.enqueueDiscoveredConfirmation(request, source, confirmation.ACKDeadline)
+}
+
+func (s *Server) excelPricingWritebackSource(ctx context.Context, cfg appconfig.Config) (canonical.Source, error) {
+	if s != nil && s.excelPricingRemote != nil {
+		if source, ok := s.excelPricingRemote.currentVerifiedSource(); ok {
+			return source, nil
+		}
+	}
+	if s != nil {
+		s.lastRecordsMu.RLock()
+		ready := s.lastRecordsReady
+		revision := s.lastContractRevision
+		s.lastRecordsMu.RUnlock()
+		if ready && isSHA256Revision(revision) {
+			source := canonical.SourceIdentity(s.currentDBPath(), cfg.Canonical.SourceID, revision)
+			if validExcelPricingRemoteSource(source) {
+				return source, nil
+			}
+		}
+	}
+	// Bounded cold-start fallback only. Once the authenticated event subscriber
+	// or the in-memory watch baseline is live, all subsequent writebacks stay
+	// independent of catalog projection.
+	contract, err := s.excelPricingCanonical(ctx, cfg)
+	if err != nil || contract == nil || !validExcelPricingRemoteSource(contract.Source) {
+		return canonical.Source{}, errors.New("pricing source is unavailable")
+	}
+	return contract.Source, nil
 }
 
 func (s *Server) authorizeExcelPricingWriteback(r *http.Request) bool {
@@ -882,10 +1033,11 @@ func canonicalExcelPricingNumber(value string) (string, error) {
 func excelPricingWritebackErrorResult(err error) excelPricingWritebackResult {
 	var remote *excelPricingRemoteError
 	if errors.As(err, &remote) {
-		retryable := remote.status == http.StatusTooManyRequests || remote.status >= 500
+		retryable := remote.status == http.StatusTooManyRequests || remote.status >= 500 ||
+			excelPricingWritebackRebaseCode(remote.code)
 		message := "وردپرس تغییر را نپذیرفت: " + remote.code
 		if remote.status == http.StatusConflict || remote.status == http.StatusPreconditionFailed {
-			message = "مقدار یا نسخهٔ وردپرس تغییر کرده است؛ ابتدا به‌روزرسانی کنید و دوباره تلاش کنید."
+			message = "مقدار یا نسخهٔ وردپرس تغییر کرده است؛ بازبینی خودکار انجام شد اما تعارض ایمن باقی ماند (" + remote.code + ")."
 		}
 		status := "failed"
 		if !retryable && (remote.status == http.StatusConflict || remote.status == http.StatusPreconditionFailed) {
@@ -894,6 +1046,82 @@ func excelPricingWritebackErrorResult(err error) excelPricingWritebackResult {
 		return excelPricingWritebackResult{status: status, code: remote.code, messageFA: message, retryable: retryable}
 	}
 	return excelPricingWritebackFailure("remote_unavailable", true)
+}
+
+func excelPricingWritebackRebaseCode(code string) bool {
+	switch strings.TrimSpace(code) {
+	case "digitalogic_pricing_state_revision_conflict",
+		"digitalogic_pricing_snapshot_source_revision_conflict",
+		"digitalogic_pricing_source_revision_conflict",
+		"digitalogic_product_sync_busy":
+		return true
+	default:
+		return false
+	}
+}
+
+func excelPricingSettingsEqualExcept(current, proposed excelPricingSettings, key string) bool {
+	// The shipping catalog revision is a derived WordPress coherence marker,
+	// not a user pricing input. Compare semantic pricing values while rebasing
+	// this marker from the live website state.
+	proposed.ShippingCatalogRevision = current.ShippingCatalogRevision
+	switch key {
+	case "yuan_price":
+		proposed.YuanPrice = current.YuanPrice
+	case "dollar_price":
+		proposed.DollarPrice = current.DollarPrice
+	case "cny_effective_date":
+		proposed.CNYEffectiveDate = current.CNYEffectiveDate
+		proposed.EffectiveDate = current.EffectiveDate
+	case "usd_effective_date":
+		proposed.USDEffectiveDate = current.USDEffectiveDate
+	case "profit_margin_percent":
+		proposed.ProfitMarginPercent = current.ProfitMarginPercent
+	case "air_express_price_per_kg":
+		proposed.AirExpressPricePerKG = current.AirExpressPricePerKG
+	case "price_rounding_digits":
+		proposed.PriceRoundingDigits = current.PriceRoundingDigits
+	default:
+		return false
+	}
+	return current == proposed
+}
+
+func excelPricingSettingsWithCurrentWebsiteState(settings, current excelPricingSettings) excelPricingSettings {
+	settings.ShippingCatalogRevision = current.ShippingCatalogRevision
+	return settings
+}
+
+func (queue *excelPricingWritebackQueue) resultFromCurrentDocument(
+	job *excelPricingWritebackJob,
+	source canonical.Source,
+	document excelPricingStateDocument,
+) excelPricingWritebackResult {
+	confirmed, err := excelPricingSettingValue(document.Settings, job.SettingKey)
+	if err != nil {
+		return excelPricingWritebackFailure("readback_contract_invalid", false)
+	}
+	confirmation := document.Confirmation
+	if confirmation.Status == "awaiting_ack" && confirmation.TransactionID != "" &&
+		confirmation.CommittedRevision == document.StateRevision &&
+		confirmation.CommittedSettingsDigest != "" &&
+		confirmation.ACKDeadline > time.Now().Unix() &&
+		confirmation.ACKPath == "/wp-json/digitalogic/pricing/sync/ack" &&
+		confirmation.ConsumerID == excelPricingContractClientID &&
+		confirmation.Channel == excelPricingContractChannel {
+		return excelPricingWritebackResult{
+			status: "awaiting_excel", code: "website_committed",
+			messageFA:      "وب‌سایت نرخ را ثبت و قیمت‌ها را بازتولید کرد؛ در انتظار اعمال در اکسل و تأیید نهایی است.",
+			confirmedValue: confirmed, stateRevision: document.StateRevision,
+			transactionID: confirmation.TransactionID, settingsDigest: confirmation.CommittedSettingsDigest,
+			ackDeadline: confirmation.ACKDeadline, settings: document.Settings, source: source,
+		}
+	}
+	return excelPricingWritebackResult{
+		status: "confirmed", code: "confirmed",
+		messageFA:      "مقدار از قبل در وردپرس همین بود و با خواندن مجدد تأیید شد.",
+		confirmedValue: confirmed, stateRevision: document.StateRevision,
+	}
 }
 
 func excelPricingWritebackFailure(code string, retryable bool) excelPricingWritebackResult {

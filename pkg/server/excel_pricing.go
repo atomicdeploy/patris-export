@@ -79,6 +79,7 @@ type excelPricingLocalRequest struct {
 	Page                  int                   `json:"page,omitempty"`
 	Limit                 int                   `json:"limit,omitempty"`
 	Locale                string                `json:"locale,omitempty"`
+	Projection            string                `json:"projection,omitempty"`
 	IdempotencyKey        string                `json:"idempotency_key,omitempty"`
 	ExpectedStateRevision string                `json:"expected_state_revision,omitempty"`
 	Settings              *excelPricingSettings `json:"settings,omitempty"`
@@ -98,6 +99,7 @@ type excelPricingRemoteRequest struct {
 	Page                  int                   `json:"page,omitempty"`
 	Limit                 int                   `json:"limit,omitempty"`
 	Locale                string                `json:"locale,omitempty"`
+	Projection            string                `json:"projection,omitempty"`
 	IdempotencyKey        string                `json:"idempotency_key,omitempty"`
 	ExpectedStateRevision string                `json:"expected_state_revision,omitempty"`
 	Settings              *excelPricingSettings `json:"settings,omitempty"`
@@ -459,6 +461,7 @@ func buildExcelPricingRemoteRequest(operation string, local excelPricingLocalReq
 		Page:                  local.Page,
 		Limit:                 local.Limit,
 		Locale:                local.Locale,
+		Projection:            local.Projection,
 		IdempotencyKey:        local.IdempotencyKey,
 		ExpectedStateRevision: local.ExpectedStateRevision,
 		Settings:              local.Settings,

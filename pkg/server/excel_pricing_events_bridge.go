@@ -5,7 +5,10 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
+	"os"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 
@@ -60,6 +63,12 @@ type excelPricingRemoteEventsBridge struct {
 	cursor            uint64
 	acknowledged      bool
 	verifiedRevision  atomic.Pointer[excelPricingRemoteRevision]
+	// lastAuthenticatedSource retains only the smallest authenticated routing
+	// identity needed by pricing-state reads and ACKs. A transient event-stream
+	// disconnect must not force a full Patris projection rebuild before a
+	// website-first confirmation can finish. WordPress revalidates id/dataset
+	// and treats a moved source revision as non-blocking metadata.
+	lastAuthenticatedSource atomic.Pointer[canonical.Source]
 }
 
 func newExcelPricingRemoteEventsBridge(server *Server) *excelPricingRemoteEventsBridge {
@@ -70,15 +79,7 @@ func newExcelPricingRemoteEventsBridge(server *Server) *excelPricingRemoteEvents
 		config:  server.Config,
 		resolve: resolveExcelPricingRemoteBridgeConfig,
 		materialize: func(ctx context.Context) (canonical.Source, error) {
-			cfg := server.Config()
-			materializeCtx, cancel := context.WithTimeout(ctx, canonicalRequestTimeout(cfg))
-			defer cancel()
-			result, err := server.canonicalRecordResultContext(materializeCtx)
-			if err != nil || result.Contract == nil ||
-				!validExcelPricingRemoteSource(result.Contract.Source) {
-				return canonical.Source{}, errExcelPricingRemoteConfiguration
-			}
-			return result.Contract.Source, nil
+			return server.excelPricingEventBridgeSource(ctx, server.Config())
 		},
 		run: func(
 			ctx context.Context,
@@ -102,6 +103,42 @@ func newExcelPricingRemoteEventsBridge(server *Server) *excelPricingRemoteEvents
 		apply: server.notifyExcelPricingRemoteRevisionChanged,
 		logf:  log.Printf,
 	})
+}
+
+// excelPricingEventBridgeSource derives only the authenticated provider identity
+// needed to subscribe. Starting the live event lane must never wait for a full
+// 1,000-row catalog projection: Patris is expected to keep changing while Excel
+// is open, and the first remote revision frame immediately supplies the current
+// semantic revision. The metadata digest is therefore an ephemeral handshake
+// envelope, not a persisted or authoritative catalog snapshot.
+func (s *Server) excelPricingEventBridgeSource(ctx context.Context, cfg appconfig.Config) (canonical.Source, error) {
+	if s == nil || ctx == nil {
+		return canonical.Source{}, errExcelPricingRemoteConfiguration
+	}
+	select {
+	case <-ctx.Done():
+		return canonical.Source{}, ctx.Err()
+	default:
+	}
+	s.lastRecordsMu.RLock()
+	ready := s.lastRecordsReady
+	revision := s.lastContractRevision
+	s.lastRecordsMu.RUnlock()
+	path := s.currentDBPath()
+	if !ready || !isSHA256Revision(revision) {
+		info, err := os.Stat(path)
+		if err != nil || !info.Mode().IsRegular() {
+			return canonical.Source{}, errExcelPricingRemoteConfiguration
+		}
+		material := fmt.Sprintf("%s\x00%d\x00%d", filepath.Clean(path), info.Size(), info.ModTime().UnixNano())
+		digest := sha256.Sum256([]byte(material))
+		revision = fmt.Sprintf("sha256:%x", digest[:])
+	}
+	source := canonical.SourceIdentity(path, cfg.Canonical.SourceID, revision)
+	if !validExcelPricingRemoteSource(source) {
+		return canonical.Source{}, errExcelPricingRemoteConfiguration
+	}
+	return source, nil
 }
 
 func newExcelPricingRemoteEventsBridgeWithDependencies(
@@ -217,6 +254,9 @@ func (bridge *excelPricingRemoteEventsBridge) reconcile(
 	bridge.cursor = 0
 	bridge.acknowledged = false
 	bridge.verifiedRevision.Store(nil)
+	if configChanged {
+		bridge.lastAuthenticatedSource.Store(nil)
+	}
 	bridge.mu.Unlock()
 	if wake {
 		bridge.signal()
@@ -379,7 +419,8 @@ func (bridge *excelPricingRemoteEventsBridge) acceptRevision(
 ) error {
 	bridge.mu.Lock()
 	defer bridge.mu.Unlock()
-	if epoch == 0 || bridge.epoch != epoch || revision.Source != source {
+	if epoch == 0 || bridge.epoch != epoch ||
+		!sameExcelPricingRemoteSourceIdentity(source, revision.Source) {
 		return errExcelPricingRemoteBridgeStale
 	}
 	// A reconnect validates the authoritative composite before replaying queued
@@ -397,6 +438,8 @@ func (bridge *excelPricingRemoteEventsBridge) acceptRevision(
 	bridge.acknowledged = true
 	verified := revision
 	bridge.verifiedRevision.Store(&verified)
+	authenticatedSource := revision.Source
+	bridge.lastAuthenticatedSource.Store(&authenticatedSource)
 	return nil
 }
 
@@ -423,7 +466,8 @@ func (bridge *excelPricingRemoteEventsBridge) acceptSnapshotTerminal(
 	}
 	bridge.mu.Lock()
 	defer bridge.mu.Unlock()
-	if epoch == 0 || bridge.epoch != epoch || event.Source != source {
+	if epoch == 0 || bridge.epoch != epoch ||
+		!sameExcelPricingRemoteSourceIdentity(source, event.Source) {
 		return errExcelPricingRemoteBridgeStale
 	}
 	return bridge.terminals.publishAuthenticated(event)
@@ -445,6 +489,25 @@ func (bridge *excelPricingRemoteEventsBridge) snapshotTerminals() excelPricingRe
 		return nil
 	}
 	return bridge.terminals
+}
+
+// currentVerifiedSource returns only the small, authenticated source identity
+// already maintained by the live event stream. Pricing-setting writebacks use
+// it so they never rebuild a full Patris product projection merely to address
+// the WordPress pricing endpoint.
+func (bridge *excelPricingRemoteEventsBridge) currentVerifiedSource() (canonical.Source, bool) {
+	if bridge == nil {
+		return canonical.Source{}, false
+	}
+	verified := bridge.verifiedRevision.Load()
+	if verified != nil && validExcelPricingRemoteSource(verified.Source) {
+		return verified.Source, true
+	}
+	authenticated := bridge.lastAuthenticatedSource.Load()
+	if authenticated == nil || !validExcelPricingRemoteSource(*authenticated) {
+		return canonical.Source{}, false
+	}
+	return *authenticated, true
 }
 
 func (bridge *excelPricingRemoteEventsBridge) revisionCurrent(
