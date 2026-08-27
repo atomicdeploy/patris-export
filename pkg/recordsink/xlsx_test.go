@@ -1527,6 +1527,10 @@ func TestDynamicCalculatorVBASourceGuardsLivePricingBeforeMutation(t *testing.T)
 		"Private Const SNAPSHOT_WAIT_TIMEOUT_MS As Long = 180000",
 		"Private Sub RestoreExcelInteractivityAfterOperation()",
 		"Application.EnableEvents = True",
+		"Public Sub StartPricingEventListenerOnOpen()",
+		"Public Function PricingEventListenerActiveForValidation() As Boolean",
+		`If mWritebackSettingKey = "site_confirmation" Then`,
+		`confirmedValue = CanonicalCellText(settings.Range("G18").Value2)`,
 	} {
 		if !strings.Contains(source, required) {
 			t.Fatalf("Excel refresh cleanup is missing %q", required)
@@ -1776,6 +1780,7 @@ func TestDynamicCalculatorVBASourceGuardsLivePricingBeforeMutation(t *testing.T)
 		"ProductCatalogSync.HighlightSelectedProductRow Target",
 		"Call ProductCatalogSync.AuditFontsOnOpen",
 		"ProductCatalogSync.PreserveSearchLiteral",
+		"ProductCatalogSync.StartPricingEventListenerOnOpen",
 		"ProductCatalogSync.ScheduleRefreshOnOpen",
 		"ProductCatalogSync.CancelActivePricingOperations True",
 		"ProductCatalogSync.CancelScheduledRefresh",

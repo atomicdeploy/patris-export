@@ -7,6 +7,7 @@ Private Sub Workbook_Open()
     ProductCatalogSync.RegisterSearchHotkey
     ThisWorkbook.Worksheets(1).Activate
     ProductCatalogSync.HandleProductImageSettingChanged
+    ProductCatalogSync.StartPricingEventListenerOnOpen
     ProductCatalogSync.ScheduleRefreshOnOpen
     Call ProductCatalogSync.AuditFontsOnOpen
     On Error GoTo 0

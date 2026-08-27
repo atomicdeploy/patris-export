@@ -2281,6 +2281,26 @@ Public Function LastPricingOperationDiagnosticForValidation() As String
     LastPricingOperationDiagnosticForValidation = mLastOperationDiagnostic
 End Function
 
+Public Sub StartPricingEventListenerOnOpen()
+    ' Pricing events are a lightweight, independent channel. Restore them on
+    ' every cold open without waiting for a full Patris/Woo catalog snapshot;
+    ' the latter may be slow while the live source is changing continuously.
+    If mWorkbookClosing Then Exit Sub
+    If Len(mSseEventsURL) = 0 Then
+        mSseEventsURL = PricingBaseURL() & "/events"
+        mSseJobID = vbNullString
+        mSseLastEventID = vbNullString
+    End If
+    mSseManualStop = False
+    If mSseRequest Is Nothing And mSseSessionRequest Is Nothing Then _
+        BeginSseSessionRenewal
+End Sub
+
+Public Function PricingEventListenerActiveForValidation() As Boolean
+    PricingEventListenerActiveForValidation = _
+        (Not mSseRequest Is Nothing) And Not mSseManualStop
+End Function
+
 Private Sub EnsureSseListener(ByVal eventsURL As String, _
                               ByVal jobID As String, _
                               ByVal csrfToken As String)
@@ -4410,6 +4430,13 @@ Private Sub RestoreWritebackValueFromTerminal(ByVal root As JsonValue)
     Set settings = ConfigSheet()
     Set inputCell = WritebackCell(mWritebackSettingKey)
     If inputCell Is Nothing Then Exit Sub
+    If mWritebackSettingKey = "site_confirmation" Then
+        ' A cold listener may replay a terminal event for another setting (for
+        ' example rounding digits = 2). Site-confirmation discovery is bound to
+        ' the confirmed CNY cell, so never show that unrelated event value in
+        ' the B18 progress message or tooltip.
+        confirmedValue = CanonicalCellText(settings.Range("G18").Value2)
+    End If
     previousEvents = Application.EnableEvents
     On Error GoTo RestoreExit
     mInternalPricingRefresh = True
