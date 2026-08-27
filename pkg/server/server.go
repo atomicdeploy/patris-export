@@ -83,6 +83,7 @@ type Server struct {
 	backgroundCtx        context.Context
 	backgroundCancel     context.CancelFunc
 	backgroundWG         sync.WaitGroup
+	serviceWG            sync.WaitGroup
 }
 
 type Options struct {
@@ -244,7 +245,9 @@ func NewServerWithOptions(dbPath string, charMap converter.CharMapping, options 
 		}
 		s.configWatcher = w
 		s.excelPricingRemote.start(s.backgroundCtx, &s.backgroundWG)
-		s.excelPricingWrites.start(s.backgroundCtx, &s.backgroundWG)
+		// The writeback queue is a process-lifetime worker. Keep it separate
+		// from backgroundWG, which is also used to await bounded startup work.
+		s.excelPricingWrites.start(s.backgroundCtx, &s.serviceWG)
 	}
 
 	return s, nil
@@ -2878,6 +2881,7 @@ func (s *Server) Close() error {
 		s.backgroundCancel()
 	}
 	s.backgroundWG.Wait()
+	s.serviceWG.Wait()
 	if s.configWatcher != nil {
 		if err := s.configWatcher.Close(); err != nil && firstErr == nil {
 			firstErr = err
