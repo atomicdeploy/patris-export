@@ -182,6 +182,48 @@ function Add-ActionButton($Sheet, [string]$Text, [string]$Macro, $Anchor, [doubl
     return $shape
 }
 
+function Add-OperationProgressSurface(
+    $Sheet,
+    $Anchor,
+    [double]$Width,
+    [double]$Height
+) {
+    $track = $Sheet.Shapes.AddShape(1, $Anchor.Left, $Anchor.Top, $Width, $Height)
+    $track.Name = 'OperationProgressTrack'
+    $track.Fill.ForeColor.RGB = ConvertTo-OleColor 'E8EEF4'
+    $track.Line.ForeColor.RGB = ConvertTo-OleColor 'B9CCF4'
+    $track.Line.Weight = 1
+    $track.AlternativeText = 'نوار وضعیت عملیات؛ زمینه ثابت.'
+
+    $fill = $Sheet.Shapes.AddShape(1, $Anchor.Left, $Anchor.Top, 1, $Height)
+    $fill.Name = 'OperationProgressFill'
+    $fill.Fill.ForeColor.RGB = ConvertTo-OleColor '0168CD'
+    $fill.Line.Visible = $false
+    $fill.Visible = $false
+    $fill.AlternativeText = 'پیشرفت عملیات؛ مقدار آماده.'
+
+    $text = $Sheet.Shapes.AddShape(1, $Anchor.Left, $Anchor.Top, $Width, $Height)
+    $text.Name = 'OperationProgressText'
+    $text.Fill.Visible = $false
+    $text.Line.Visible = $false
+    $text.TextFrame2.TextRange.Text = 'آماده'
+    Set-OfficeTextFont $text.TextFrame2.TextRange 10 $true '2F414B'
+    $text.TextFrame2.VerticalAnchor = 3
+    $text.TextFrame2.TextRange.ParagraphFormat.Alignment = 2
+    try {
+        $text.TextFrame.Characters().Font.Name = 'Yekan Bakh'
+        $text.TextFrame.Characters().Font.NameComplexScript = 'Yekan Bakh'
+        $text.TextFrame.Characters().Font.NameFarEast = 'Yekan Bakh'
+    } catch {}
+    $text.AlternativeText = 'پیام و درصد عملیات؛ آماده.'
+
+    return [pscustomobject]@{
+        Track = $track
+        Fill = $fill
+        Text = $text
+    }
+}
+
 function Add-DigitalogicMessageForm($Workbook) {
     $component = $Workbook.VBProject.VBComponents.Add(3)
     $component.Name = 'DigitalogicMessage'
@@ -274,10 +316,25 @@ function Add-DigitalogicMessageForm($Workbook) {
 Option Explicit
 
 Private mDialogResult As Long
+Private Const ARABIC_CHARSET As Long = 178
 
 Public Property Get DialogResult() As Long
     DialogResult = mDialogResult
 End Property
+
+Public Sub ConfigureUnicodeHex(ByVal messageHex As String, _
+                               ByVal titleHex As String, _
+                               ByVal messageType As Long, _
+                               ByVal okTextHex As String, _
+                               ByVal yesTextHex As String, _
+                               ByVal noTextHex As String, _
+                               ByVal persianFont As String, _
+                               ByVal latinFont As String)
+    Configure DecodeUtf16Hex(messageHex), DecodeUtf16Hex(titleHex), _
+              messageType, DecodeUtf16Hex(okTextHex), _
+              DecodeUtf16Hex(yesTextHex), DecodeUtf16Hex(noTextHex), _
+              persianFont, latinFont
+End Sub
 
 Public Sub Configure(ByVal message As String, ByVal title As String, _
                      ByVal messageType As Long, ByVal okText As String, _
@@ -287,6 +344,11 @@ Public Sub Configure(ByVal message As String, ByVal title As String, _
     ' Windows installations. Keep that chrome ASCII-only and show the Persian
     ' title in the Unicode-safe in-form header below.
     Me.Caption = "DIGITALOGIC - Price Sync"
+    AssertUnicodeText title, "title"
+    AssertUnicodeText message, "message"
+    AssertUnicodeText okText, "okText"
+    AssertUnicodeText yesText, "yesText"
+    AssertUnicodeText noText, "noText"
     lblTitle.Caption = title
     lblMessage.Caption = message
     lblBrand.Caption = "DIGITALOGIC"
@@ -319,14 +381,18 @@ End Sub
 Private Sub ApplyFonts(ByVal persianFont As String, _
                        ByVal latinFont As String)
     lblTitle.Font.Name = persianFont
+    ApplyPersianControlFont lblTitle, persianFont, latinFont
     lblTitle.Font.Size = 12
     lblTitle.Font.Bold = True
     lblMessage.Font.Name = persianFont
+    ApplyPersianControlFont lblMessage, persianFont, latinFont
     lblMessage.Font.Size = 10.5
     cmdPrimary.Font.Name = persianFont
+    ApplyPersianControlFont cmdPrimary, persianFont, latinFont
     cmdPrimary.Font.Size = 10
     cmdPrimary.Font.Bold = True
     cmdSecondary.Font.Name = persianFont
+    ApplyPersianControlFont cmdSecondary, persianFont, latinFont
     cmdSecondary.Font.Size = 10
     lblBrand.Font.Name = latinFont
     lblBrand.Font.Size = 8.5
@@ -335,13 +401,71 @@ Private Sub ApplyFonts(ByVal persianFont As String, _
     lblFooter.Font.Size = 8
 End Sub
 
+Private Sub ApplyPersianControlFont(ByVal target As Object, _
+                                    ByVal requestedFont As String, _
+                                    ByVal fallbackFont As String)
+    On Error GoTo UseFallback
+    If Len(Trim$(requestedFont)) = 0 Then GoTo UseFallback
+    target.Font.Charset = ARABIC_CHARSET
+    If StrComp(CStr(target.Font.Name), requestedFont, _
+               vbTextCompare) = 0 Then Exit Sub
+UseFallback:
+    Err.Clear
+    target.Font.Name = fallbackFont
+    target.Font.Charset = ARABIC_CHARSET
+End Sub
+
+Private Sub AssertUnicodeText(ByVal value As String, ByVal fieldName As String)
+    If InStr(1, value, "??", vbBinaryCompare) > 0 Then
+        Err.Raise vbObjectError + 241, "DigitalogicMessage.Configure", _
+                  "Damaged Unicode text: " & fieldName
+    End If
+End Sub
+
+Private Function DecodeUtf16Hex(ByVal hexCodeUnits As String) As String
+    Dim position As Long
+    Dim codeUnit As Long
+
+    If Len(hexCodeUnits) Mod 4 <> 0 Then
+        Err.Raise vbObjectError + 242, "DecodeUtf16Hex", _
+                  "Invalid UTF-16 hexadecimal text."
+    End If
+    For position = 1 To Len(hexCodeUnits) Step 4
+        codeUnit = CLng("&H" & Mid$(hexCodeUnits, position, 4))
+        If codeUnit > 32767 Then codeUnit = codeUnit - 65536
+        DecodeUtf16Hex = DecodeUtf16Hex & ChrW$(codeUnit)
+    Next position
+End Function
+
+Public Function ValidateUnicodeCaptions(ByVal messageHex As String, _
+                                        ByVal titleHex As String, _
+                                        ByVal primaryHex As String, _
+                                        ByVal secondaryHex As String) As Boolean
+    ValidateUnicodeCaptions = _
+        StrComp(CStr(lblMessage.Caption), DecodeUtf16Hex(messageHex), _
+                vbBinaryCompare) = 0 And _
+        StrComp(CStr(lblTitle.Caption), DecodeUtf16Hex(titleHex), _
+                vbBinaryCompare) = 0 And _
+        StrComp(CStr(cmdPrimary.Caption), DecodeUtf16Hex(primaryHex), _
+                vbBinaryCompare) = 0 And _
+        StrComp(CStr(cmdSecondary.Caption), DecodeUtf16Hex(secondaryHex), _
+                vbBinaryCompare) = 0 And _
+        InStr(1, CStr(lblMessage.Caption) & CStr(lblTitle.Caption) & _
+                CStr(cmdPrimary.Caption) & CStr(cmdSecondary.Caption), _
+                "??", vbBinaryCompare) = 0
+End Function
+
 Public Function ValidateFonts(ByVal persianFont As String, _
                               ByVal latinFont As String) As Boolean
     ValidateFonts = _
         StrComp(lblTitle.Font.Name, persianFont, vbTextCompare) = 0 And _
+        lblTitle.Font.Charset = ARABIC_CHARSET And _
         StrComp(lblMessage.Font.Name, persianFont, vbTextCompare) = 0 And _
+        lblMessage.Font.Charset = ARABIC_CHARSET And _
         StrComp(cmdPrimary.Font.Name, persianFont, vbTextCompare) = 0 And _
+        cmdPrimary.Font.Charset = ARABIC_CHARSET And _
         StrComp(cmdSecondary.Font.Name, persianFont, vbTextCompare) = 0 And _
+        cmdSecondary.Font.Charset = ARABIC_CHARSET And _
         StrComp(lblBrand.Font.Name, latinFont, vbTextCompare) = 0 And _
         StrComp(lblFooter.Font.Name, latinFont, vbTextCompare) = 0
 End Function
@@ -746,7 +870,10 @@ try {
     $searchButton.AlternativeText = 'جست‌وجوی کالا؛ تعداد نتیجه و جایگاه نتیجه جاری روی همین دکمه نمایش داده می‌شود.'
     [void]$searchButton
     [void](Add-ActionButton $priceList 'پاک کردن' 'ProductCatalogSync.ClearProductSearch' $priceList.Range('G3') $priceList.Range('G3').Width 27)
-    [void](Add-ActionButton $priceList 'همگام‌سازی اکنون' 'ProductCatalogSync.RefreshAllData' $priceList.Range('I3') $priceList.Range('I3:K3').Width 27)
+    [void](Add-ActionButton $priceList 'به‌روزرسانی' 'ProductCatalogSync.RefreshAllData' $priceList.Range('I3') $priceList.Range('I3:K3').Width 27)
+
+    $priceList.Rows.Item(4).RowHeight = 24
+    [void](Add-OperationProgressSurface $priceList $priceList.Range('B4') $priceList.Range('B4:K4').Width 20)
 
     $headers = @(
         'قیمت فروش (تومان)',
@@ -822,7 +949,7 @@ try {
     $profitValue = $priceList.Range("${configSecondColumn}10")
 
     $yuanHeader.Value2 = 'بهای یوآن'
-    $yuanValue.Formula = "=IF('تنظیمات'!B10="""","""",'تنظیمات'!B10)"
+    $yuanValue.Formula = "=IF('تنظیمات'!G18="""","""",'تنظیمات'!G18)"
     $yuanTable = $priceList.ListObjects.Add(1, $priceList.Range("${configFirstColumn}6:${configFirstColumn}7"), $null, 1)
     $yuanTable.Name = 'Yuan_Price'
     $yuanTable.TableStyle = 'TableStyleMedium2'
@@ -886,6 +1013,30 @@ try {
     $updatedBodyRange.HorizontalAlignment = -4108
     $updatedBodyRange.Interior.Color = ConvertTo-OleColor 'DDE8FC'
     $updatedBodyRange.Borders.Color = ConvertTo-OleColor 'B9CCF4'
+
+    # A single deferred image preview lives beside, never over, the product
+    # table. The workbook starts with previews disabled so normal 1,103-row
+    # refresh and search remain just as fast as before.
+    $imageHeaderRange = $priceList.Range('M21:O21')
+    $imageStatusRange = $priceList.Range('M22:O22')
+    $imageAreaRange = $priceList.Range('M23:O32')
+    $imageHeaderRange.Merge()
+    $imageHeaderRange.Cells.Item(1, 1).Value2 = 'تصویر محصول'
+    Set-SectionStyle $imageHeaderRange 'F6F6F6' '242424' 10
+    $imageStatusRange.Merge()
+    $imageStatusRange.Cells.Item(1, 1).Value2 = 'نمایش تصاویر غیرفعال است.'
+    $imageStatusRange.WrapText = $true
+    $imageStatusRange.HorizontalAlignment = -4108
+    $imageStatusRange.VerticalAlignment = -4108
+    $imageStatusRange.Interior.Color = ConvertTo-OleColor 'DDE8FC'
+    $imageStatusRange.Borders.Color = ConvertTo-OleColor 'B9CCF4'
+    $imageAreaRange.Merge()
+    $imageAreaRange.Interior.Color = ConvertTo-OleColor 'FFFFFF'
+    $imageAreaRange.Borders.Color = ConvertTo-OleColor 'B9CCF4'
+    $priceList.Rows.Item(22).RowHeight = 34
+    $priceList.Rows('23:32').RowHeight = 21
+    [void]$workbook.Names.Add('ProductImagePreviewStatus', $priceList.Range('M22'))
+    [void]$workbook.Names.Add('ProductImagePreviewArea', $imageAreaRange)
     $priceList.Range("B5:${productLastColumn}1000").Borders.Color = ConvertTo-OleColor 'D9E5EC'
 
     $excel.ActiveWindow.SplitRow = 5
@@ -917,12 +1068,13 @@ try {
         'نوع ردیف',
         'مبلغ منبع قیمت',
         'ارز منبع قیمت',
-        'نوع منبع قیمت'
+        'نوع منبع قیمت',
+        'نشانی تصویر'
     )
     for ($column = 0; $column -lt $syncHeaders.Count; $column++) {
         $syncData.Cells.Item(1, $column + 1).Value2 = $syncHeaders[$column]
     }
-    $syncTable = $syncData.ListObjects.Add(1, $syncData.Range('A1:W2'), $null, 1)
+    $syncTable = $syncData.ListObjects.Add(1, $syncData.Range('A1:X2'), $null, 1)
     $syncTable.Name = 'SyncData'
     $syncTable.TableStyle = 'TableStyleMedium2'
     [void]$syncTable.DataBodyRange.Delete()
@@ -1134,6 +1286,9 @@ try {
     $settings.Range('B10:F15').Interior.Color = ConvertTo-OleColor 'F6F6F6'
     $settings.Range('B10:F15').HorizontalAlignment = -4108
 
+    $settings.Rows.Item(16).RowHeight = 24
+    [void](Add-OperationProgressSurface $settings $settings.Range('A16') $settings.Range('A16:F16').Width 20)
+
     $settings.Range('A17:F17').Merge()
     $settings.Range('A17').Value2 = 'مقادیر پیشنهادی این فایل'
     Set-SectionStyle $settings.Range('A17:F17') 'DDE8FC' '242424' 12
@@ -1157,6 +1312,7 @@ try {
     $settings.Range('A18:F23').Borders.Color = ConvertTo-OleColor 'B9CCF4'
     $settings.Range('B18:F23').Interior.Color = ConvertTo-OleColor 'FFF8E7'
     $settings.Range('B18:F23').HorizontalAlignment = -4108
+    [void]$workbook.Names.Add('ConfirmedCNYRate', $settings.Range('G18'))
     $settings.Range('B22').Validation.Delete()
     $settings.Range('B22').Validation.Add(2, 1, 5, '0')
     $settings.Range('B22').Validation.ErrorTitle = 'نرخ حمل نامعتبر'
@@ -1192,14 +1348,30 @@ try {
     $settings.Range('B26').Validation.ErrorMessage = 'تعداد رقم گردکردن باید عددی صحیح از صفر تا ۹ باشد.'
     $settings.Range('B26').Validation.ShowError = $true
     $settings.Range('A27:F27').ClearContents()
-    $settings.Range('A3:A26').WrapText = $true
+    $settings.Range('A3:A32').WrapText = $true
     $settings.Rows.Item(14).RowHeight = 30
     $settings.Rows.Item(22).RowHeight = 30
 
     [void](Add-ActionButton $settings 'پیش‌نمایش تغییرات' 'ProductCatalogSync.PreviewPricingChanges' $settings.Range('A28') $settings.Range('A28:C29').Width $settings.Range('A28:C29').Height)
     [void](Add-ActionButton $settings 'اعمال تغییرات تأییدشده' 'ProductCatalogSync.ApplyPricingChanges' $settings.Range('D28') $settings.Range('D28:F29').Width $settings.Range('D28:F29').Height)
 
-    $settings.Range('A31:F36').ClearContents()
+    $settings.Range('A31:F37').ClearContents()
+    $settings.Range('A31').Value2 = 'نمایش تصاویر محصولات'
+    $settings.Range('B31:F31').Merge()
+    $settings.Range('B31').Value2 = 'خیر'
+    $settings.Range('B31:F31').NumberFormat = '@'
+    $settings.Range('B31:F31').Interior.Color = ConvertTo-OleColor 'FFF8E7'
+    $settings.Range('A31:F31').Borders.Color = ConvertTo-OleColor 'B9CCF4'
+    $settings.Range('A31').Font.Bold = $true
+    $settings.Range('B31').Validation.Delete()
+    $settings.Range('B31').Validation.Add(3, 1, 1, 'خیر,بله')
+    [void]$workbook.Names.Add('ShowProductImages', $settings.Range('B31'))
+    $settings.Range('A37:F37').Merge()
+    $settings.Range('A37').Value2 = 'برای حفظ سرعت، فقط تصویر کالای انتخاب‌شده دریافت می‌شود.'
+    $settings.Range('A37:F37').WrapText = $true
+    $settings.Range('A37:F37').Interior.Color = ConvertTo-OleColor 'F6F6F6'
+    $settings.Range('A37:F37').Borders.Color = ConvertTo-OleColor 'D9D9D9'
+    $settings.Rows.Item(32).RowHeight = 32
 
     $settings.Range('A38:F38').Merge()
     $settings.Range('A38').Value2 = 'سیاست قلم'
@@ -1271,7 +1443,7 @@ try {
     # Never format only the first column of several adjacent merged rows.
     # Excel silently coalesces those rows into one large MergeArea, which
     # makes every setting except the first one inaccessible to VBA.
-    foreach ($row in @((10..15) + 18 + 19 + (21..23) + 26 + (39..44) + (46..55))) {
+    foreach ($row in @((10..15) + 18 + 19 + (21..23) + 26 + 31 + (39..44) + (46..55))) {
         $mergeCell = $settings.Range("B${row}")
         $mergeArea = $mergeCell.MergeArea
         try {
@@ -1285,6 +1457,10 @@ try {
             Release-ComObject $mergeArea
             Release-ComObject $mergeCell
         }
+    }
+    $noteMerge = $settings.Range('A37').MergeArea.Address($false, $false)
+    if ($noteMerge -cne 'A37:F37') {
+        throw "Settings image-preview note has MergeArea $noteMerge; expected A37:F37."
     }
     foreach ($dateMergeAddress in @('B20:C20', 'E20:F20')) {
         $mergeCell = $settings.Range($dateMergeAddress.Split(':')[0])
@@ -1312,8 +1488,8 @@ try {
     Set-RangeFontSlots $dashboard.Range('B5:C6,D5:E6,F5:G6,H5:I6,B9:C10,D9:E10,F9:G10,H9:I10,B13:E14,F13:G14,H13:I14,C22:C24,C27:C29,C32:C34') 'Segoe UI'
     Set-RangeFontSlots $settings.Range('A1:F55') 'Yekan Bakh'
     Set-RangeFontSlots $settings.Range('B3:F4,B7:F7,B10:F15,B18:F22,B24:F26,B39:F40,B46:F55') 'Segoe UI'
-    Set-RangeFontSlots $syncData.Range('A1:W1') 'Yekan Bakh'
-    Set-RangeFontSlots $syncData.Range('A2:P2,U2:W2') 'Segoe UI'
+    Set-RangeFontSlots $syncData.Range('A1:X1') 'Yekan Bakh'
+    Set-RangeFontSlots $syncData.Range('A2:P2,U2:X2') 'Segoe UI'
     Set-RangeFontSlots $syncData.Range('Q2:T2') 'Yekan Bakh'
     foreach ($sheet in @($priceList, $dashboard, $settings)) {
         for ($shapeIndex = 1; $shapeIndex -le $sheet.Shapes.Count; $shapeIndex++) {
@@ -1329,6 +1505,20 @@ try {
                         $shape.TextFrame.Characters().Font.NameFarEast = 'Yekan Bakh'
                     } catch {}
                     Assert-ShapeFontSlots $shape 'Yekan Bakh' "action shape $($shape.Name)"
+                }
+            }
+            finally { Release-ComObject $shape }
+        }
+    }
+    foreach ($sheet in @($priceList, $settings)) {
+        foreach ($shapeName in @('OperationProgressTrack', 'OperationProgressFill', 'OperationProgressText')) {
+            $shape = $sheet.Shapes.Item($shapeName)
+            try {
+                if ($shape.Width -le 0 -or $shape.Height -le 0) {
+                    throw "$($sheet.Name) progress shape $shapeName has invalid dimensions."
+                }
+                if ($shapeName -eq 'OperationProgressText') {
+                    Assert-ShapeFontSlots $shape 'Yekan Bakh' "$($sheet.Name) progress label"
                 }
             }
             finally { Release-ComObject $shape }
@@ -1352,7 +1542,7 @@ try {
     Assert-RangeFontSlots $settings.Range('A1:F2') 'Yekan Bakh' 'settings text'
     Assert-RangeFontSlots $settings.Range('B39:F40') 'Segoe UI' 'font family values'
     Assert-RangeFontSlots $settings.Range('B41:F44') 'Yekan Bakh' 'localized font policy values'
-    Assert-RangeFontSlots $syncData.Range('A1:W1') 'Yekan Bakh' 'SyncData headers'
+    Assert-RangeFontSlots $syncData.Range('A1:X1') 'Yekan Bakh' 'SyncData headers'
 
     $priceList.PageSetup.PrintArea = '$B$1:$O$30'
     $priceList.PageSetup.Orientation = 2

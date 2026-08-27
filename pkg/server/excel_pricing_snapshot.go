@@ -43,6 +43,10 @@ const (
 	excelPricingSnapshotHeartbeatStale   = 5 * time.Second
 	excelPricingSnapshotSSEHeartbeat     = 15 * time.Second
 	excelPricingSnapshotEventHistory     = 256
+	// WinHTTP COM can buffer small chunks on an open response instead of
+	// raising OnResponseDataAvailable. Prefix each semantic SSE frame with an
+	// ignored comment large enough to cross that client-side delivery boundary.
+	excelPricingSnapshotSSEFlushPadding = 4096
 )
 
 type excelPricingSnapshotStartRequest struct {
@@ -154,6 +158,8 @@ type excelPricingStateChangeEvent struct {
 	SourceChangeToken        string                        `json:"source_change_token,omitempty"`
 	CatalogRevision          string                        `json:"catalog_revision,omitempty"`
 	StateRevision            string                        `json:"state_revision,omitempty"`
+	PricingStateRevision     string                        `json:"pricing_state_revision,omitempty"`
+	PricingPolicyRevision    string                        `json:"pricing_policy_revision,omitempty"`
 	SnapshotRevision         string                        `json:"snapshot_revision,omitempty"`
 	ETag                     string                        `json:"etag,omitempty"`
 	PreviousSource           *canonical.Source             `json:"previous_source,omitempty"`
@@ -230,6 +236,7 @@ var excelPricingSnapshotExcelV1RowFields = []string{
 	"patris_final_price",
 	"sale_price",
 	"publication_status",
+	"image_url",
 }
 
 type excelPricingSnapshotStore struct {
@@ -1123,7 +1130,14 @@ func writeExcelPricingSnapshotSSE(
 	if err != nil {
 		return err
 	}
-	_, err = fmt.Fprintf(w, "id: %d\nevent: %s\ndata: %s\n\n", sequence, kind, body)
+	_, err = fmt.Fprintf(
+		w,
+		": %s\nid: %d\nevent: %s\ndata: %s\n\n",
+		strings.Repeat(" ", excelPricingSnapshotSSEFlushPadding),
+		sequence,
+		kind,
+		body,
+	)
 	return err
 }
 
@@ -1540,9 +1554,24 @@ func (s *Server) notifyExcelPricingRemoteRevisionChanged(
 	previous := store.lastVerifiedChangeLocked()
 	kind := "pricing_state_changed"
 	code := "snapshot_pricing_state_changed"
-	if previous != nil && previous.Source != nil && *previous.Source != revision.Source {
+	// Patris revisions are expected to advance while the workbook is open.
+	// Revision is snapshot coherence, not provider identity: classifying every
+	// advance as source_changed sends Excel down the full catalog-refresh path
+	// and can consume the website-first ACK window. Only an ID/dataset change is
+	// a source change; a pricing-only revision can then use the fast confirmation
+	// discovery path while catalog refresh remains independently event-driven.
+	if previous != nil && previous.Source != nil &&
+		!sameExcelPricingRemoteSourceIdentity(*previous.Source, revision.Source) {
 		kind = "source_changed"
 		code = "snapshot_source_changed"
+	} else if previous != nil && previous.PricingStateRevision != "" &&
+		previous.PricingStateRevision != revision.PricingStateRevision {
+		// A website pricing commit can legitimately change the derived catalog
+		// revision as every Woo price is rebuilt. Route that event to the fast
+		// confirmation/ACK path before considering catalog drift; otherwise Excel
+		// starts a full snapshot and can miss the bounded ACK deadline.
+		kind = "pricing_state_changed"
+		code = "snapshot_pricing_state_changed"
 	} else if previous != nil && previous.CatalogRevision != "" &&
 		previous.CatalogRevision != revision.CatalogRevision {
 		kind = "catalog_changed"
@@ -1551,14 +1580,16 @@ func (s *Server) notifyExcelPricingRemoteRevisionChanged(
 	cancel := store.invalidateGenerationLocked(code)
 	source := revision.Source
 	event := excelPricingStateChangeEvent{
-		Kind:            kind,
-		Reason:          "upstream_composite_revision_changed",
-		Source:          &source,
-		CatalogRevision: revision.CatalogRevision,
-		StateRevision:   revision.StateRevision,
-		ETag:            revision.ETag,
-		Stale:           true,
-		Verified:        true,
+		Kind:                  kind,
+		Reason:                "upstream_composite_revision_changed",
+		Source:                &source,
+		CatalogRevision:       revision.CatalogRevision,
+		StateRevision:         revision.StateRevision,
+		PricingStateRevision:  revision.PricingStateRevision,
+		PricingPolicyRevision: revision.PricingPolicyRevision,
+		ETag:                  revision.ETag,
+		Stale:                 true,
+		Verified:              true,
 	}
 	bindExcelPricingPreviousState(&event, previous)
 	store.publishChangeLocked(event)
@@ -1649,16 +1680,17 @@ func (store *excelPricingSnapshotStore) publishSnapshotReadyLocked(
 		ETag:             excelPricingSnapshotETag(snapshot.etagRevision),
 	}
 	return store.publishChangeLocked(excelPricingStateChangeEvent{
-		Kind:             "snapshot_ready",
-		Reason:           reason,
-		JobID:            job.id,
-		Source:           &source,
-		CatalogRevision:  identity.CatalogRevision,
-		StateRevision:    identity.StateRevision,
-		SnapshotRevision: identity.SnapshotRevision,
-		ETag:             identity.ETag,
-		Verified:         true,
-		Identity:         identity,
+		Kind:                 "snapshot_ready",
+		Reason:               reason,
+		JobID:                job.id,
+		Source:               &source,
+		CatalogRevision:      identity.CatalogRevision,
+		StateRevision:        identity.StateRevision,
+		PricingStateRevision: snapshot.pricingStateRevision,
+		SnapshotRevision:     identity.SnapshotRevision,
+		ETag:                 identity.ETag,
+		Verified:             true,
+		Identity:             identity,
 	})
 }
 
@@ -1862,15 +1894,16 @@ func (s *Server) runExcelPricingSnapshotJob(
 		}
 		source := job.source
 		store.publishChangeLocked(excelPricingStateChangeEvent{
-			Kind:             "snapshot_ready",
-			Reason:           "snapshot_verified",
-			JobID:            jobID,
-			Source:           &source,
-			CatalogRevision:  snapshot.integrity.DatasetRevision,
-			StateRevision:    snapshot.stateRevision,
-			SnapshotRevision: snapshot.revision,
-			ETag:             excelPricingSnapshotETag(snapshot.etagRevision),
-			Verified:         true,
+			Kind:                 "snapshot_ready",
+			Reason:               "snapshot_verified",
+			JobID:                jobID,
+			Source:               &source,
+			CatalogRevision:      snapshot.integrity.DatasetRevision,
+			StateRevision:        snapshot.stateRevision,
+			PricingStateRevision: snapshot.pricingStateRevision,
+			SnapshotRevision:     snapshot.revision,
+			ETag:                 excelPricingSnapshotETag(snapshot.etagRevision),
+			Verified:             true,
 		})
 		return
 	}
@@ -1955,6 +1988,21 @@ func (s *Server) collectExcelPricingSnapshot(
 		excelPricingRemoteSnapshotRequestID(jobID),
 		request.MaxAgeSeconds,
 	)
+	if errors.Is(err, errExcelPricingRemoteSnapshotSourceConflict) {
+		// Patris is expected to change while Excel is open. Align WordPress to
+		// this exact live source once, then rebuild the ephemeral snapshot. If
+		// Patris advances again during delivery, retain the actionable conflict
+		// so the workbook's bounded retry reacquires the newer source instead of
+		// mixing revisions or falling back to a persisted snapshot.
+		s.updateExcelPricingSnapshotProgress(jobID, "waiting_remote", 0, 1, 0)
+		if s.deliverExcelPricingSnapshotSource(ctx, cfg, request.Source) == nil {
+			result, err = client.Collect(
+				ctx,
+				excelPricingRemoteSnapshotRequestID(jobID),
+				request.MaxAgeSeconds,
+			)
+		}
+	}
 	if err != nil {
 		if stage, detail, ok := excelPricingRemoteSnapshotFailureDetails(err); ok {
 			s.setExcelPricingSnapshotFailure(jobID, stage, detail)
@@ -1984,6 +2032,67 @@ func (s *Server) collectExcelPricingSnapshot(
 		snapshot.integrity.RowCount,
 	)
 	return snapshot, ""
+}
+
+func (s *Server) deliverExcelPricingSnapshotSource(
+	ctx context.Context,
+	cfg updateout.Config,
+	expected canonical.Source,
+) error {
+	if s == nil || s.excelPricing == nil || !validExcelPricingRemoteSource(expected) {
+		return errExcelPricingRemoteSnapshotSourceConflict
+	}
+	contract, err := s.excelPricingCanonical(ctx, s.Config())
+	if err != nil || contract == nil || contract.Source != expected {
+		return errExcelPricingRemoteSnapshotSourceConflict
+	}
+	deliveryConfig := updateout.Normalize(cfg)
+	if !deliveryConfig.Enabled || deliveryConfig.Format != "json" ||
+		deliveryConfig.Method != http.MethodPost {
+		return errExcelPricingRemoteSnapshotConfiguration
+	}
+	if deliveryConfig.RetryAttempts < 10 {
+		deliveryConfig.RetryAttempts = 10
+	}
+	if backoff, parseErr := time.ParseDuration(deliveryConfig.RetryBackoff); parseErr != nil || backoff < 2*time.Second {
+		deliveryConfig.RetryBackoff = "2s"
+	}
+	event := updateout.Event{
+		Type:             "update",
+		Timestamp:        time.Now().UTC().Format(time.RFC3339),
+		Source:           s.currentDBPath(),
+		Raw:              false,
+		Contract:         contract,
+		SnapshotContract: contract,
+	}
+	dispatch := s.excelPricing.dispatch
+	if dispatch == nil {
+		dispatch = updateout.DispatchWithResult
+	}
+	delivery, err := dispatch(ctx, deliveryConfig, event)
+	if err != nil || !excelPricingSnapshotDeliveryAccepted(delivery, contract.EventID) {
+		return errExcelPricingRemoteSnapshotUnavailable
+	}
+	// A newer source supersedes the just-delivered coherence envelope. Never
+	// reuse it as current; let the caller reacquire and retry the new revision.
+	current, err := s.excelPricingCanonical(ctx, s.Config())
+	if err != nil || current == nil || current.Source != expected {
+		return errExcelPricingRemoteSnapshotSourceConflict
+	}
+	return nil
+}
+
+func excelPricingSnapshotDeliveryAccepted(result updateout.DeliveryResult, eventID string) bool {
+	if result.HTTPStatus < 200 || result.HTTPStatus >= 300 || result.Retryable ||
+		result.EventID != eventID || result.Attempts < 1 || result.DeferredAmbiguous != 0 {
+		return false
+	}
+	switch result.Status {
+	case "accepted", "already_current", "replayed", "recovered":
+		return true
+	default:
+		return false
+	}
 }
 
 func (s *Server) finalizeExcelPricingRemoteSnapshot(
@@ -2024,6 +2133,8 @@ func excelPricingRemoteSnapshotFailureCode(ctx context.Context, err error) strin
 			return excelPricingSnapshotContextCode(ctx)
 		}
 		return "remote_unavailable"
+	case errors.Is(err, errExcelPricingRemoteSnapshotSourceConflict):
+		return "snapshot_source_revision_conflict"
 	case errors.Is(err, errExcelPricingRemoteSnapshotProtocol),
 		errors.Is(err, errExcelPricingRemoteSnapshotIntegrity):
 		return "snapshot_integrity_failed"
@@ -2877,6 +2988,17 @@ func validExcelPricingSnapshotFailure(stage, code string) bool {
 		return code == "snapshot_remote_terminal_failed"
 	case excelPricingRemoteSnapshotStageSnapshotPayload:
 		return code == "snapshot_payload_integrity_failed" ||
+			code == "snapshot_payload_shape_or_counts_failed" ||
+			code == "snapshot_payload_mutation_guard_failed" ||
+			code == "snapshot_payload_columns_failed" ||
+			code == "snapshot_payload_rows_or_reconciliation_failed" ||
+			code == "snapshot_payload_integrity_metadata_failed" ||
+			code == "snapshot_payload_digest_failed" ||
+			strings.HasPrefix(code, "snapshot_payload_page_digest_") ||
+			code == "snapshot_payload_page_revisions_digest_mismatch" ||
+			code == "snapshot_payload_catalog_metadata_digest_mismatch" ||
+			code == "snapshot_payload_state_digest_mismatch" ||
+			code == "snapshot_payload_snapshot_digest_mismatch" ||
 			code == "snapshot_payload_protocol_failed" ||
 			code == "snapshot_payload_configuration_failed" ||
 			code == "snapshot_payload_unavailable"

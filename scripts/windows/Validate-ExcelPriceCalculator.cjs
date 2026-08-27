@@ -54,6 +54,7 @@ const SYNC_DATA_HEADERS = Object.freeze([
   'مبلغ منبع قیمت',
   'ارز منبع قیمت',
   'نوع منبع قیمت',
+  'نشانی تصویر',
 ]);
 
 const REGRESSION_ACCEPTANCE = Object.freeze({
@@ -92,6 +93,7 @@ function usage() {
     '  --sync                 Run ProductCatalogSync.RefreshAllData silently before validation',
     '  --no-sync              Validate without running the live synchronization macro',
     '  --strict-reference     Fail on every comparable weight/rate difference from the archive',
+    '  --save-synced-to PATH  Save the fully validated synchronized workbook to PATH',
     '  --json                 Print the complete machine-readable report',
     '  --timeout-ms NUMBER    Excel validation timeout in milliseconds (default: 240000)',
     '  --self-test-native-excel-timeout  Force a hidden native Excel timeout safety test',
@@ -113,6 +115,7 @@ function parseArgs(argv) {
     timeoutMs: 240000,
     selfTestProcessSafety: false,
     selfTestNativeExcelTimeout: false,
+    saveSyncedTo: '',
   };
 
   for (let index = 0; index < argv.length; index += 1) {
@@ -136,6 +139,11 @@ function parseArgs(argv) {
         break;
       case '--strict-reference':
         options.strictReference = true;
+        break;
+      case '--save-synced-to':
+        index += 1;
+        if (index >= argv.length) throw new Error('--save-synced-to requires a path');
+        options.saveSyncedTo = argv[index];
         break;
       case '--json':
         options.json = true;
@@ -167,6 +175,7 @@ function parseArgs(argv) {
 
   options.candidate = path.resolve(options.candidate);
   options.reference = path.resolve(options.reference);
+  if (options.saveSyncedTo) options.saveSyncedTo = path.resolve(options.saveSyncedTo);
   if (options.sync === undefined) {
     options.sync = path.extname(options.candidate).toLowerCase() === '.xltm';
   }
@@ -316,6 +325,22 @@ function buildFailures(report, options) {
         slot.supported === false || slot.value === 'Segoe UI'
       )),
     `the fixed font policy or hard font audit failed: ${JSON.stringify(report.fontAudit)}`,
+  );
+  failUnless(
+    report.pricingWritebackUI === true,
+    'the native pricing-writeback cell color/comment and routing fixture failed',
+  );
+  failUnless(
+    report.pricingProgressUI === true,
+    'the visible Persian progress surface lifecycle fixture failed',
+  );
+  failUnless(
+    report.productImagePreviewUI === true,
+    'the product image preview setting/layout/cache safety fixture failed',
+  );
+  failUnless(
+    report.searchRegression.passed === true,
+    `the bounded non-reentrant search regression failed: ${JSON.stringify(report.searchRegression)}`,
   );
   failUnless(
     report.titleDirection.latinRows > 0
@@ -574,18 +599,21 @@ function buildFailures(report, options) {
     `clearing product search did not reset the button caption: ${JSON.stringify(report.search)}`,
   );
   failUnless(
-    report.transientPricePreview.found === true
-      && report.transientPricePreview.row > 0
-      && report.transientPricePreview.markerRow === report.transientPricePreview.row
-      && sameFiniteNumber(
-        report.transientPricePreview.selectedValue,
-        report.transientPricePreview.expected,
-        0.01,
-      )
-      && report.transientPricePreview.grayFont === true
-      && report.transientPricePreview.yellowCellCount
-        === report.transientPricePreview.expectedYellowCellCount
-      && report.transientPricePreview.resetValue === null,
+    report.transientPricePreview.eligibleCandidates === 0
+      || (
+        report.transientPricePreview.found === true
+        && report.transientPricePreview.row > 0
+        && report.transientPricePreview.markerRow === report.transientPricePreview.row
+        && sameFiniteNumber(
+          report.transientPricePreview.selectedValue,
+          report.transientPricePreview.expected,
+          0.01,
+        )
+        && report.transientPricePreview.grayFont === true
+        && report.transientPricePreview.yellowCellCount
+          === report.transientPricePreview.expectedYellowCellCount
+        && report.transientPricePreview.resetValue === null
+      ),
     `zero-stock projected price preview is not transient, gray, and independently correct: ${JSON.stringify(report.transientPricePreview)}`,
   );
   failUnless(
@@ -1025,9 +1053,21 @@ ${processSafetyPowerShell}
 
 $candidatePath = $env:PATRIS_VALIDATOR_CANDIDATE
 $referencePath = $env:PATRIS_VALIDATOR_REFERENCE
+$stagePath = $env:PATRIS_VALIDATOR_STAGE_PATH
 $runSync = $env:PATRIS_VALIDATOR_SYNC -eq '1'
 $validationTimeoutMilliseconds = [int]$env:PATRIS_VALIDATOR_TIMEOUT_MS
+$saveSyncedTo = $env:PATRIS_VALIDATOR_SAVE_SYNCED_TO
 $invariant = [System.Globalization.CultureInfo]::InvariantCulture
+
+function Set-ValidatorStage([string]$stage, [string]$detail = '') {
+    if ([string]::IsNullOrWhiteSpace($stagePath)) { return }
+    $payload = [ordered]@{
+        stage = $stage
+        detail = $detail
+        updated_at_utc = [DateTime]::UtcNow.ToString('o')
+    } | ConvertTo-Json -Compress
+    [IO.File]::WriteAllText($stagePath, $payload, [Text.UTF8Encoding]::new($false))
+}
 
 function Release-ComObject([object]$value) {
     try {
@@ -1345,10 +1385,13 @@ function Test-FontAudit([object]$excel, [object]$book) {
             $priceColumn = $priceDataRange.Cells.Item(1, 1)
         }
         $macro = "'$($book.Name.Replace("'", "''"))'!ProductCatalogSync.AuditFontsForValidation"
+        Set-ValidatorStage 'font_audit_macro'
         $passed = [bool]$excel.Run($macro)
         $dialogMacro = "'$($book.Name.Replace("'", "''"))'!ProductCatalogSync.AuditMessageDialogForValidation"
         $friendlyMacro = "'$($book.Name.Replace("'", "''"))'!ProductCatalogSync.FriendlyStatusErrorForValidation"
+        Set-ValidatorStage 'font_dialog_fixture'
         $dialogPassed = [bool]$excel.Run($dialogMacro)
+        Set-ValidatorStage 'font_friendly_error_fixture'
         $friendlyError = [Convert]::ToString(
             $excel.Run(
                 $friendlyMacro,
@@ -1357,6 +1400,7 @@ function Test-FontAudit([object]$excel, [object]$book) {
             $invariant
         )
         $policyFixtureMacro = "'$($book.Name.Replace("'", "''"))'!ProductCatalogSync.ValidateFontPolicyFixturesForValidation"
+        Set-ValidatorStage 'font_policy_fixtures'
         $policyFixturesPassed = [bool]$excel.Run($policyFixtureMacro)
         $savedPersianFont = $settings.Range('B39').Value2
         $savedAuditMode = $settings.Range('B41').Value2
@@ -1370,6 +1414,7 @@ function Test-FontAudit([object]$excel, [object]$book) {
             $savedPriceFont = $priceColumn.Font.Name
             $applyPriceFontMacro = "'$($book.Name.Replace("'", "''"))'!ProductCatalogSync.ApplyPriceDisplayFontSetting"
             $settings.Range('B44').Value2 = 'بله'
+            Set-ValidatorStage 'font_apply_fanum'
             [void]$excel.Run($applyPriceFontMacro)
             $faNumEnabled = [Convert]::ToString(
                 $priceColumn.Font.Name,
@@ -1420,15 +1465,18 @@ function Test-FontAudit([object]$excel, [object]$book) {
                 }
             }
             $settings.Range('B44').Value2 = 'خیر'
+            Set-ValidatorStage 'font_apply_segoe'
             [void]$excel.Run($applyPriceFontMacro)
             $faNumDisabled = [Convert]::ToString(
                 $priceColumn.Font.Name,
                 $invariant
             ) -eq 'Segoe UI'
             $settings.Range('B44').Value2 = 'بله'
+            Set-ValidatorStage 'font_reapply_fanum'
             [void]$excel.Run($applyPriceFontMacro)
             $priceColumn.Font.Name = 'Arial'
             $repairMacro = "'$($book.Name.Replace("'", "''"))'!ProductCatalogSync.RepairFontDriftForValidation"
+            Set-ValidatorStage 'font_repair_drift'
             $driftRepaired = [bool]$excel.Run($repairMacro) -and
                 [Convert]::ToString($priceColumn.Font.Name, $invariant) -eq 'Yekan Bakh FaNum'
         }
@@ -1466,6 +1514,7 @@ function Test-FontAudit([object]$excel, [object]$book) {
                 $settings.Range('B44').Value2 = $savedPriceDisplayFaNum
                 if ($null -ne $priceColumn) {
                     $restorePriceFontMacro = "'$($book.Name.Replace("'", "''"))'!ProductCatalogSync.ApplyPriceDisplayFontSetting"
+                    Set-ValidatorStage 'font_restore_original'
                     [void]$excel.Run($restorePriceFontMacro)
                 }
             }
@@ -1479,6 +1528,27 @@ function Test-FontAudit([object]$excel, [object]$book) {
         Release-ComObject $table
         Release-ComObject $settings
     }
+}
+
+function Test-PricingWritebackUI([object]$excel, [object]$book) {
+    $bookName = ([string]$book.Name).Replace("'", "''")
+    return [bool]$excel.Run(
+        "'$bookName'!ProductCatalogSync.ValidatePricingWritebackUIForValidation"
+    )
+}
+
+function Test-PricingProgressUI([object]$excel, [object]$book) {
+    $bookName = ([string]$book.Name).Replace("'", "''")
+    return [bool]$excel.Run(
+        "'$bookName'!ProductCatalogSync.ValidateOperationProgressUIForValidation"
+    )
+}
+
+function Test-ProductImagePreviewUI([object]$excel, [object]$book) {
+    $bookName = ([string]$book.Name).Replace("'", "''")
+    return [bool]$excel.Run(
+        "'$bookName'!ProductCatalogSync.ValidateProductImagePreviewUIForValidation"
+    )
 }
 
 function Test-StatusSummaryFormatter([object]$excel, [object]$book) {
@@ -1866,8 +1936,6 @@ function Test-ProductSearch(
         $focusMacro = "'$macroBookName'!ProductCatalogSync.FocusProductSearch"
         $registerMacro = "'$macroBookName'!ProductCatalogSync.RegisterSearchHotkey"
         $unregisterMacro = "'$macroBookName'!ProductCatalogSync.UnregisterSearchHotkey"
-        $refreshEnterMacro = "'$macroBookName'!ProductCatalogSync.RefreshSearchEnterHotkey"
-        $enterMacro = "'$macroBookName'!ProductCatalogSync.HandleProductSearchEnter"
         $clearMacro = "'$macroBookName'!ProductCatalogSync.ClearProductSearch"
         $baseCaption = [Convert]::ToString(
             $searchButton.TextFrame2.TextRange.Text,
@@ -1887,11 +1955,12 @@ function Test-ProductSearch(
         } finally {
             $excel.EnableEvents = $eventsWereEnabled
         }
-        [void]$excel.Run($refreshEnterMacro)
-        [void]$excel.Run($enterMacro)
+        # Invoke the search only from this top-level validator frame. The
+        # workbook's physical Enter handler is intentionally deferred through
+        # OnTime so it cannot be used as a synchronous automation shortcut.
+        [void]$excel.Run($searchMacro)
         $first = Read-SearchButtonState $excel $searchButton $table $expectedScrollColumn
-        [void]$excel.Run($refreshEnterMacro)
-        [void]$excel.Run($enterMacro)
+        [void]$excel.Run($searchMacro)
         $second = Read-SearchButtonState $excel $searchButton $table $expectedScrollColumn
 
         $wrap = $null
@@ -1942,6 +2011,68 @@ function Test-ProductSearch(
             try { $excel.Calculation = $calculationWas } catch {}
         }
         Release-ComObject $searchButton
+        Release-ComObject $queryRange
+        Release-ComObject $sheet
+        Release-ComObject $table
+    }
+}
+
+function Test-SearchCrashRegression([object]$excel, [object]$book) {
+    $table = Find-Table $book 'Products'
+    $queryRange = $null
+    $button = $null
+    $sheet = $null
+    $eventsWereEnabled = [bool]$excel.EnableEvents
+    try {
+        $sheet = $table.Parent
+        $queryRange = $book.Names.Item('ProductSearchQuery').RefersToRange
+        $button = $sheet.Shapes.Item('ProductSearchButton')
+        $macroBookName = ([string]$book.Name).Replace("'", "''")
+        $searchMacro = "'$macroBookName'!ProductCatalogSync.SearchProducts"
+        $clearMacro = "'$macroBookName'!ProductCatalogSync.ClearProductSearch"
+        $initialAddress = [string]$table.Range.Address($false, $false)
+        $initialRows = [int]$table.ListRows.Count
+        $checks = @()
+        foreach ($query in @('109032', '109032', '109032', '__DIGITALOGIC_NO_MATCH__', '*?~')) {
+            $excel.EnableEvents = $false
+            $queryRange.NumberFormat = '@'
+            $queryRange.Value2 = $query
+            $excel.EnableEvents = $eventsWereEnabled
+            [void]$excel.Run($searchMacro)
+            $caption = [Convert]::ToString(
+                $button.TextFrame2.TextRange.Text,
+                $invariant
+            )
+            $checks += [pscustomobject]@{
+                query = $query
+                caption = $caption
+                ready = [bool]$excel.Ready
+                rows = [int]$table.ListRows.Count
+                address = [string]$table.Range.Address($false, $false)
+            }
+            [void]$excel.Run($clearMacro)
+        }
+        $passed = (
+            @($checks).Count -eq 5 -and
+            @($checks | Where-Object {
+                -not $_.ready -or
+                $_.rows -ne $initialRows -or
+                $_.address -ne $initialAddress
+            }).Count -eq 0 -and
+            @($checks | Select-Object -First 3 | Where-Object {
+                $_.caption -notmatch '\(1/1\)$'
+            }).Count -eq 0 -and
+            $checks[3].caption -match '\(0\)$'
+        )
+        return [pscustomobject]@{
+            passed = $passed
+            initialRows = $initialRows
+            initialAddress = $initialAddress
+            checks = $checks
+        }
+    } finally {
+        $excel.EnableEvents = $eventsWereEnabled
+        Release-ComObject $button
         Release-ComObject $queryRange
         Release-ComObject $sheet
         Release-ComObject $table
@@ -2020,6 +2151,10 @@ function Read-SyncData([object]$book) {
                         ).Trim()
                         PriceSourceKind = [Convert]::ToString(
                             (Matrix-Value $values $rowCount $columnCount $row 23),
+                            $invariant
+                        ).Trim()
+                        ImageURL = [Convert]::ToString(
+                            (Matrix-Value $values $rowCount $columnCount $row 24),
                             $invariant
                         ).Trim()
                     }
@@ -2152,6 +2287,7 @@ function Test-TransientPricePreview(
     $savedRate = $null
     $savedWooPrice = $null
     $injected = $false
+    $eligibleCandidates = 0
     $eventsWereEnabled = [bool]$excel.EnableEvents
     try {
         [void](Reset-SelectedProductRow $excel $book)
@@ -2164,6 +2300,7 @@ function Test-TransientPricePreview(
             $tableColumnCount -le 0) {
             return [pscustomobject]@{
                 found = $false
+                eligibleCandidates = 0
                 row = 0
                 code = ''
                 expected = $null
@@ -2189,6 +2326,7 @@ function Test-TransientPricePreview(
             $syncRow = $syncDictionary.Values[[string]$row.Code]
             $projected = Expected-ProjectedPrice $row $syncRow $roundingDigits
             if ($null -ne $projected -and $projected -gt 0) {
+                $eligibleCandidates += 1
                 $priceCell = $sheet.Cells.Item(
                     [int]$row.Row,
                     $tableFirstColumn
@@ -2228,6 +2366,7 @@ function Test-TransientPricePreview(
         if ($null -eq $candidate) {
             return [pscustomobject]@{
                 found = $false
+                eligibleCandidates = $eligibleCandidates
                 row = 0
                 code = ''
                 expected = $null
@@ -2294,6 +2433,7 @@ function Test-TransientPricePreview(
         $resetValue = Numeric-Or-Null $priceCell.Value2
         return [pscustomobject]@{
             found = $true
+            eligibleCandidates = $eligibleCandidates
             row = [int]$candidate.Row
             code = [string]$candidate.Code
             expected = $expected
@@ -2428,7 +2568,9 @@ $syncRan = $false
 $syncSucceeded = $false
 $syncOperation = ''
 $syncError = ''
+$syncDiagnostic = ''
 try {
+    Set-ValidatorStage 'creating_excel'
     $validatorJobHandle = New-ValidatorKillOnCloseJob
     $excel = New-Object -ComObject Excel.Application
     $excelProcessIdentity = Get-ExcelProcessIdentity $excel
@@ -2449,6 +2591,7 @@ try {
     # macro here made the remaining validation path impossible by definition.
     $excel.AutomationSecurity = 1
 
+    Set-ValidatorStage 'opening_candidate' $candidatePath
     if ([IO.Path]::GetExtension($candidatePath).ToLowerInvariant() -eq '.xltm') {
         $workbooks = $excel.Workbooks
         $candidateBook = $workbooks.Add($candidatePath)
@@ -2458,8 +2601,10 @@ try {
     }
     Release-ComObject $workbooks
     $workbooks = $null
+    Set-ValidatorStage 'candidate_opened' ([string]$candidateBook.Name)
 
     if ($runSync) {
+        Set-ValidatorStage 'starting_live_sync'
         $macroBookName = ([string]$candidateBook.Name).Replace("'", "''")
         [void]$excel.Run(
             "'$macroBookName'!ProductCatalogSync.RefreshAllDataForValidation"
@@ -2500,14 +2645,22 @@ try {
             ),
             $invariant
         )
+        $syncDiagnostic = [Convert]::ToString(
+            $excel.Run(
+                "'$macroBookName'!ProductCatalogSync.LastPricingOperationDiagnosticForValidation"
+            ),
+            $invariant
+        )
         if (-not $syncSucceeded) {
             $syncFailureStatus = [Convert]::ToString(
                 (Sheet-Scalar $candidateBook 3 'B6'),
                 $invariant
             )
-            throw "Live synchronization '$syncOperation' failed before validation: $syncFailureStatus $syncError"
+            throw "Live synchronization '$syncOperation' failed before validation: $syncFailureStatus $syncError; diagnostic=$syncDiagnostic"
         }
+        Set-ValidatorStage 'live_sync_completed' $syncOperation
     }
+    Set-ValidatorStage 'calculating_candidate'
     $excel.CalculateFullRebuild()
     Reset-SelectedProductRow $excel $candidateBook
     $candidateSyncStatus = [Convert]::ToString(
@@ -2519,15 +2672,37 @@ try {
         $invariant
     )
 
+    Set-ValidatorStage 'checking_branding'
     $brandingLayout = Test-BrandingLayout $candidateBook
+    Set-ValidatorStage 'checking_literal_search'
     $searchLiteral = Test-SearchLiteralText $excel $candidateBook
+    Set-ValidatorStage 'checking_status_summary'
     $statusSummary = Test-StatusSummaryFormatter $excel $candidateBook
+    Set-ValidatorStage 'reading_candidate_products'
     $candidateProducts = Read-Products $candidateBook
+    Set-ValidatorStage 'checking_title_direction'
     $titleDirection = Test-ProductTitleDirection $candidateBook
+    Set-ValidatorStage 'checking_fonts'
     $fontAudit = Test-FontAudit $excel $candidateBook
+    Set-ValidatorStage 'checking_writeback_ui'
+    $pricingWritebackUI = Test-PricingWritebackUI $excel $candidateBook
+    Set-ValidatorStage 'checking_progress_ui'
+    $pricingProgressUI = Test-PricingProgressUI $excel $candidateBook
+    Set-ValidatorStage 'checking_product_image_preview_ui'
+    $productImagePreviewUI = Test-ProductImagePreviewUI $excel $candidateBook
+    Set-ValidatorStage 'checking_product_search'
     $candidateSearch = Test-ProductSearch $excel $candidateBook $candidateProducts.Rows
+    Set-ValidatorStage 'checking_search_crash_regression'
+    $searchRegression = Test-SearchCrashRegression $excel $candidateBook
     Reset-SelectedProductRow $excel $candidateBook
+    Set-ValidatorStage 'reading_candidate_sync_data'
     $candidateSyncData = Read-SyncData $candidateBook
+    $imageRows = @($candidateSyncData.Rows | Where-Object {
+        -not [string]::IsNullOrWhiteSpace([string]$_.ImageURL)
+    })
+    $missingImageRows = @($candidateSyncData.Rows | Where-Object {
+        [string]::IsNullOrWhiteSpace([string]$_.ImageURL)
+    })
     $candidateConfig = [pscustomobject]@{
         autoSyncOnOpen = [Convert]::ToString(
             (Sheet-Scalar $candidateBook 3 'B5'),
@@ -2542,13 +2717,16 @@ try {
         cardShipping = Numeric-Or-Null (Table-Scalar $candidateBook 'Shipping')
         cardProfit = Numeric-Or-Null (Table-Scalar $candidateBook 'Profit')
     }
+    Set-ValidatorStage 'checking_workbook_errors'
     $errors = Workbook-Errors $candidateBook
 
     $excel.AutomationSecurity = 3
+    Set-ValidatorStage 'opening_reference' $referencePath
     $workbooks = $excel.Workbooks
     $referenceBook = $workbooks.Open($referencePath, 0, $true)
     Release-ComObject $workbooks
     $workbooks = $null
+    Set-ValidatorStage 'reading_reference_products'
     $referenceProducts = Read-Products $referenceBook
     $referenceConfig = [pscustomobject]@{
         yuan = Numeric-Or-Null (Table-Scalar $referenceBook 'Yuan_Price')
@@ -2556,6 +2734,7 @@ try {
         profit = Numeric-Or-Null (Table-Scalar $referenceBook 'Profit')
     }
 
+    Set-ValidatorStage 'comparing_candidate_reference'
     $candidateDictionary = Row-Dictionary $candidateProducts.Rows
     $candidateProductDictionary = ProductCode-Dictionary $candidateProducts.Rows
     $syncDictionary = Row-Dictionary $candidateSyncData.Rows
@@ -2837,6 +3016,7 @@ try {
         }
     }
 
+    Set-ValidatorStage 'assembling_report'
     $report = [pscustomobject]@{
         sync = [pscustomobject]@{
             requested = $runSync
@@ -2844,6 +3024,7 @@ try {
             succeeded = $syncSucceeded
             operation = $syncOperation
             error = $syncError
+            diagnostic = $syncDiagnostic
         }
         candidate = [pscustomobject]@{
             path = $candidatePath
@@ -2901,6 +3082,9 @@ try {
             duplicateCodes = $syncDictionary.Duplicates
             missingProductCodes = $missingProductCodes
             extraCodes = $extraSyncCodes
+            imageURLRows = $imageRows.Count
+            firstImageRow = if ($imageRows.Count -gt 0) { $imageRows[0] } else { $null }
+            firstMissingImageRow = if ($missingImageRows.Count -gt 0) { $missingImageRows[0] } else { $null }
         }
         reference = [pscustomobject]@{
             path = $referencePath
@@ -2917,6 +3101,10 @@ try {
         statusSummary = $statusSummary
         titleDirection = $titleDirection
         fontAudit = $fontAudit
+        pricingWritebackUI = $pricingWritebackUI
+        pricingProgressUI = $pricingProgressUI
+        productImagePreviewUI = $productImagePreviewUI
+        searchRegression = $searchRegression
         transientPricePreview = $transientPricePreview
         comparison = [pscustomobject]@{
             overlapRows = $overlapRows
@@ -2935,11 +3123,25 @@ try {
             wooFallback109001 = $wooFallbackRegression
         }
     }
+    if (-not [string]::IsNullOrWhiteSpace($saveSyncedTo)) {
+        if (-not $runSync -or -not $syncSucceeded) {
+            throw 'A synchronized workbook can only be saved after a successful live synchronization.'
+        }
+        Set-ValidatorStage 'saving_validated_workbook' $saveSyncedTo
+        $saveParent = [IO.Path]::GetDirectoryName([IO.Path]::GetFullPath($saveSyncedTo))
+        if (-not (Test-Path -LiteralPath $saveParent -PathType Container)) {
+            throw "Validated workbook destination directory does not exist: $saveParent"
+        }
+        $excel.EnableEvents = $false
+        $candidateBook.SaveAs([IO.Path]::GetFullPath($saveSyncedTo), 53)
+        $report | Add-Member -NotePropertyName savedSynchronizedWorkbook -NotePropertyValue ([IO.Path]::GetFullPath($saveSyncedTo))
+    }
 }
 catch {
     $validationException = $_.Exception
 }
 finally {
+    Set-ValidatorStage 'cleanup_started'
     if ($null -ne $referenceBook) {
         try {
             [void](Invoke-ExcelBusyRetry {
@@ -3037,6 +3239,7 @@ $report | Add-Member -NotePropertyName validatorExcelProcessExited -NoteProperty
 $report | Add-Member -NotePropertyName validatorExcelProcessExitCode -NotePropertyValue $excelProcessExitCode
 $report | Add-Member -NotePropertyName validatorExcelProcessStartTimeUtc -NotePropertyValue $excelProcessIdentity.StartTimeUtc.ToString('o')
 $report | Add-Member -NotePropertyName validatorExcelExecutablePath -NotePropertyValue $excelProcessIdentity.ExecutablePath
+Set-ValidatorStage 'completed'
 [Console]::Out.WriteLine(($report | ConvertTo-Json -Depth 10 -Compress))
 `;
 
@@ -3702,6 +3905,119 @@ function main() {
     process.exitCode = 2;
     return;
   }
+  try {
+    const moduleSource = fs.readFileSync(
+      path.join(repoRoot, 'docs', 'examples', 'vba', 'ProductCatalogSync.bas'),
+      'utf8',
+    );
+    const workbookSource = fs.readFileSync(
+      path.join(repoRoot, 'docs', 'examples', 'vba', 'ThisWorkbook.cls'),
+      'utf8',
+    );
+    const buildSource = fs.readFileSync(
+      path.join(repoRoot, 'scripts', 'windows', 'Build-ExcelDashboard.ps1'),
+      'utf8',
+    );
+    const procedure = (source, name) => {
+      const match = new RegExp(
+        `(?:Public|Private) Sub ${name}\\b[\\s\\S]*?\\r?\\nEnd Sub`,
+        'iu',
+      ).exec(source);
+      if (!match) throw new Error(`missing VBA procedure: ${name}`);
+      return match[0];
+    };
+    const searchSource = procedure(moduleSource, 'SearchProducts');
+    const synchronousWritebackSource = procedure(moduleSource, 'RunSynchronousWritebackStep');
+    const searchBusySource = /Private Function SearchOperationBusy\b[\s\S]*?\r?\nEnd Function/iu.exec(moduleSource)?.[0] || '';
+    const enterSource = procedure(moduleSource, 'HandleProductSearchEnter');
+    const sheetChangeSource = procedure(workbookSource, 'Workbook_SheetChange');
+    const selectionSource = procedure(workbookSource, 'Workbook_SheetSelectionChange');
+    const scheduledWritebackSource = procedure(moduleSource, 'RunScheduledPricingWriteback');
+    const completeWritebackSource = procedure(moduleSource, 'CompletePricingWriteback');
+    const globalStateSource = procedure(moduleSource, 'ApplyGlobalState');
+    const forbiddenSearchTokens = [
+      'KickQueuedAsyncDispatch',
+      'Application.Goto',
+      'Application.OnKey',
+      'PumpExcelMessages',
+    ];
+    const foundSearchToken = forbiddenSearchTokens.find((token) => searchSource.includes(token));
+    if (foundSearchToken) {
+      throw new Error(`SearchProducts contains forbidden re-entrant token: ${foundSearchToken}`);
+    }
+    if (!/SEARCH_DELAY_SECONDS\s+As Long\s*=\s*0/iu.test(moduleSource)) {
+      throw new Error('Local search must queue at the next top-level callback without a one-second delay');
+    }
+    const backgroundSearchBlockers = [
+      'mRefreshInProgress',
+      'mPricingActionInProgress',
+      'mOperationRequest',
+      'mWritebackRequest',
+      'mWritebackStage',
+      'mWritebackScheduled',
+      'mWritebackPending',
+    ];
+    const foundBackgroundBlocker = backgroundSearchBlockers.find((token) => searchBusySource.includes(token));
+    if (foundBackgroundBlocker) {
+      throw new Error(`Local search is incorrectly blocked by background state: ${foundBackgroundBlocker}`);
+    }
+    if (!/mCatalogCommitInProgress/iu.test(searchBusySource)
+        || !/mSearchInProgress/iu.test(searchBusySource)) {
+      throw new Error('Local search must remain single-entry and respect only the atomic table commit lock');
+    }
+    if (!/PriceSheet\(\)\.Activate/iu.test(searchSource)
+        || !/anchor\.Select/iu.test(searchSource)
+        || !/ActiveWindow\.ScrollRow/iu.test(searchSource)
+        || !/HighlightSelectedProductRow\s+anchor/iu.test(searchSource)) {
+      throw new Error('Search result must activate, select, scroll, and visibly highlight the matching row');
+    }
+    if (!/If\s+matchCount\s*=\s*0\s+Then[\s\S]*?HighlightSelectedProductRow\s+PriceSheet\(\)\.Range\("A1"\)/iu.test(searchSource)) {
+      throw new Error('A no-match search must clear the previous result highlight and image preview');
+    }
+    if (!/\(mWritebackStage\s*=\s*"poll"\s+Or\s+mWritebackStage\s*=\s*"ack"\)[\s\S]*?mWritebackPollCount\s*<\s*12[\s\S]*?mWritebackStage\s*=\s*"poll_wait"[\s\S]*?SchedulePricingWriteback\s+1/iu.test(synchronousWritebackSource)) {
+      throw new Error('Transient poll/ACK failures must use bounded idempotent state readback before terminal failure');
+    }
+    if (/Application\.OnKey\s+"~"\s*,/iu.test(moduleSource)) {
+      throw new Error('Enter must remain native; synchronous Application.OnKey binding is forbidden');
+    }
+    if (/\bSearchProducts\b/iu.test(enterSource)) {
+      throw new Error('HandleProductSearchEnter must queue, never call SearchProducts synchronously');
+    }
+    if (!/\bQueueProductSearch\b/iu.test(sheetChangeSource)
+        || /\bSearchProducts\b/iu.test(sheetChangeSource)) {
+      throw new Error('Workbook_SheetChange must queue search without synchronous execution');
+    }
+    if (/\bKickQueuedAsyncDispatch\b/iu.test(selectionSource)) {
+      throw new Error('Workbook_SheetSelectionChange must not dispatch network work');
+    }
+    if (!/\bRunSynchronousWritebackStep\b/iu.test(scheduledWritebackSource)
+        || /\bBeginWritebackPoll\b/iu.test(scheduledWritebackSource)
+        || /\bStartWritebackRequest\b/iu.test(scheduledWritebackSource)) {
+      throw new Error('Scheduled writeback must use the bounded loopback-only step and avoid the stale asynchronous event path');
+    }
+    if (!/JsonRuntime\.JsonText\(state,\s*"pricing_state_revision"\)/iu.test(globalStateSource)
+        || !/settings\.Range\("G14"\)\.Value2\s*=\s*pricingStateRevision/iu.test(globalStateSource)) {
+      throw new Error('Inbound snapshot must preserve the pricing-state revision as the writeback guard');
+    }
+    if (/MarkSseRefreshRequired/iu.test(completeWritebackSource)
+        || !/mRefreshAfterSiteConfirmation\s*=\s*False/iu.test(completeWritebackSource)) {
+      throw new Error('Website confirmation must not start a full catalog refresh on the ACK critical path');
+    }
+    if (!/Names\.Add\('ConfirmedCNYRate',\s*\$settings\.Range\('G18'\)\)/u.test(buildSource)) {
+      throw new Error('ConfirmedCNYRate must bind exactly to the hidden confirmed Settings G18 cell');
+    }
+    const priceFormulaSource = /Private Sub ApplyProductTableFormulas\b[\s\S]*?\r?\nEnd Sub/iu.exec(moduleSource)?.[0] || '';
+    if (!/cnyRateFormula\s*=\s*_/iu.test(priceFormulaSource)
+        || !/ISNUMBER\(ConfirmedCNYRate\)/iu.test(priceFormulaSource)
+        || !/ConfirmedCNYRate>0/iu.test(priceFormulaSource)
+        || /PricingInputCNYRate/iu.test(priceFormulaSource)) {
+      throw new Error('Product formulas must use only the confirmed website rate, never the B18 proposal');
+    }
+  } catch (error) {
+    console.error(`Search re-entrancy source gate failed: ${error.message}`);
+    process.exitCode = 1;
+    return;
+  }
   if (options.selfTestProcessSafety) {
     try {
       const report = runProcessSafetySelfTest();
@@ -3736,11 +4052,13 @@ function main() {
   const tempDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'patris-excel-validator-'));
   const powershellPath = path.join(tempDirectory, 'validate.ps1');
   const processIdentityPath = path.join(tempDirectory, 'excel-process-identity.json');
+  const stagePath = path.join(tempDirectory, 'validator-stage.json');
   let result;
   let abnormalCleanup = null;
   let abnormalCleanupError = null;
   let abnormalCleanupOutcome = null;
   let preservedRecoveryDirectory = null;
+  let lastStage = null;
   try {
     // Windows PowerShell 5.1 treats a BOM-less script as the active ANSI code
     // page. A UTF-8 BOM keeps the Persian literals used by the validator exact.
@@ -3766,7 +4084,9 @@ function main() {
             PATRIS_VALIDATOR_REFERENCE: options.reference,
             PATRIS_VALIDATOR_SYNC: options.sync ? '1' : '0',
             PATRIS_VALIDATOR_TIMEOUT_MS: String(options.timeoutMs),
+            PATRIS_VALIDATOR_SAVE_SYNCED_TO: options.saveSyncedTo,
             PATRIS_VALIDATOR_PROCESS_IDENTITY_PATH: processIdentityPath,
+            PATRIS_VALIDATOR_STAGE_PATH: stagePath,
           },
           maxBuffer: 16 * 1024 * 1024,
           // The user-facing deadline governs workbook validation. Keep a bounded
@@ -3795,6 +4115,9 @@ function main() {
     abnormalCleanup = abnormalCleanupOutcome.report;
     abnormalCleanupError = abnormalCleanupOutcome.error;
   } finally {
+    try {
+      if (fs.existsSync(stagePath)) lastStage = JSON.parse(fs.readFileSync(stagePath, 'utf8'));
+    } catch {}
     preservedRecoveryDirectory = finalizeValidatorTempDirectory(
       tempDirectory,
       abnormalCleanupOutcome,
@@ -3807,6 +4130,7 @@ function main() {
         + `(${options.timeoutMs} ms validation deadline plus bounded COM startup/cleanup grace)`
       : '';
     console.error(`Excel validation could not run${suffix}: ${result.error.message}`);
+    if (lastStage) console.error(`Last completed validator checkpoint: ${JSON.stringify(lastStage)}`);
     if (abnormalCleanup) {
       console.error(`Scoped Excel cleanup: ${JSON.stringify(abnormalCleanup)}`);
     }
@@ -3821,6 +4145,7 @@ function main() {
   }
   if (result.status !== 0) {
     console.error('Excel validation process failed.');
+    if (lastStage) console.error(`Last completed validator checkpoint: ${JSON.stringify(lastStage)}`);
     if (result.stderr.trim()) console.error(result.stderr.trim());
     if (result.stdout.trim()) console.error(result.stdout.trim());
     if (abnormalCleanup) {

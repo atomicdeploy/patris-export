@@ -767,7 +767,7 @@ func TestExcelPricingRemoteSnapshotCollectAnnotatesEveryRemoteStage(t *testing.T
 		fixture.finalizePayload()
 		_, err := fixture.Client(t).Collect(context.Background(), fixture.requestID, 60)
 		assertStage(t, err, excelPricingRemoteSnapshotStageSnapshotPayload,
-			"snapshot_payload_integrity_failed")
+			"snapshot_payload_columns_failed")
 	})
 }
 
@@ -792,6 +792,8 @@ func TestExcelPricingRemoteSnapshotStageCodeCoversConfigurationAndTransportClass
 			errExcelPricingRemoteSnapshotConfiguration, "snapshot_payload_configuration_failed"},
 		{"payload transport", excelPricingRemoteSnapshotStageSnapshotPayload,
 			errExcelPricingRemoteSnapshotUnavailable, "snapshot_payload_unavailable"},
+		{"payload exact integrity boundary", excelPricingRemoteSnapshotStageSnapshotPayload,
+			excelPricingRemoteSnapshotIntegrityFailure("digest_failed"), "snapshot_payload_digest_failed"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			err := wrapExcelPricingRemoteSnapshotStage(test.stage, test.cause)
@@ -821,6 +823,34 @@ func TestExcelPricingRemoteSnapshotStageCodeCoversConfigurationAndTransportClass
 				t.Fatalf("body error=%v, want protocol", err)
 			}
 		})
+	}
+}
+
+func TestExcelPricingRemoteSnapshotRepresentationDigestWarningsAreNarrow(t *testing.T) {
+	for _, code := range []string{
+		"page_digest_mismatch",
+		"page_revisions_digest_mismatch",
+		"catalog_metadata_digest_mismatch",
+		"state_digest_mismatch",
+		"snapshot_digest_mismatch",
+	} {
+		if got, ok := excelPricingRemoteSnapshotRepresentationDigestWarning(
+			excelPricingRemoteSnapshotIntegrityFailure(code),
+		); !ok || got != code {
+			t.Fatalf("digest warning (%q,%v), want (%q,true)", got, ok, code)
+		}
+	}
+	for _, code := range []string{
+		"page_digest_encoding_failed",
+		"page_digest_count_failed",
+		"shape_or_counts_failed",
+		"rows_or_reconciliation_failed",
+	} {
+		if _, ok := excelPricingRemoteSnapshotRepresentationDigestWarning(
+			excelPricingRemoteSnapshotIntegrityFailure(code),
+		); ok {
+			t.Fatalf("unsafe integrity failure accepted as representation warning: %q", code)
+		}
 	}
 }
 
@@ -942,6 +972,7 @@ func TestExcelPricingSnapshotFailureEvidenceRejectsUnreviewedValues(t *testing.T
 		{excelPricingRemoteSnapshotStageTerminalMatch, "snapshot_terminal_match_failed"},
 		{excelPricingRemoteSnapshotStageRemoteTerminal, "snapshot_remote_terminal_failed"},
 		{excelPricingRemoteSnapshotStageSnapshotPayload, "snapshot_payload_integrity_failed"},
+		{excelPricingRemoteSnapshotStageSnapshotPayload, "snapshot_payload_digest_failed"},
 		{excelPricingSnapshotStageRemoteConfiguration, "snapshot_remote_configuration_failed"},
 		{excelPricingSnapshotStageLocalProjection, "snapshot_local_projection_integrity_failed"},
 	} {
@@ -1331,16 +1362,6 @@ func TestExcelPricingRemoteSnapshotFailsClosedOnIntegrityViolations(t *testing.T
 				fixture.finalizePayload()
 			},
 		},
-		{
-			name: "payload digest mismatch",
-			mutate: func(fixture *excelPricingRemoteSnapshotFixture) {
-				fixture.payload.Digest = testExcelPricingRevision('9')
-				fixture.payload.Revision = fixture.payload.Digest
-				fixture.payload.SnapshotRevision = fixture.payload.Digest
-				fixture.payload.Integrity.PayloadDigest = fixture.payload.Digest
-				fixture.payloadBody = mustMarshalExcelPricingRemoteSnapshotTestJSON(fixture.t, fixture.payload)
-			},
-		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -1355,6 +1376,24 @@ func TestExcelPricingRemoteSnapshotFailsClosedOnIntegrityViolations(t *testing.T
 			}
 			fixture.assertNoStatusCalls(t)
 		})
+	}
+}
+
+func TestExcelPricingRemoteSnapshotAcceptsOptionalRepresentationDigestMismatch(t *testing.T) {
+	fixture := newExcelPricingRemoteSnapshotFixture(t, "ready")
+	defer fixture.Close()
+	fixture.payload.Digest = testExcelPricingRevision('9')
+	fixture.payload.Revision = fixture.payload.Digest
+	fixture.payload.SnapshotRevision = fixture.payload.Digest
+	fixture.payload.Integrity.PayloadDigest = fixture.payload.Digest
+	fixture.payloadBody = mustMarshalExcelPricingRemoteSnapshotTestJSON(t, fixture.payload)
+
+	result, err := fixture.Client(t).Collect(context.Background(), fixture.requestID, 60)
+	if err != nil {
+		t.Fatalf("semantically valid representation mismatch: %v", err)
+	}
+	if result == nil || len(result.Rows) != fixture.payload.RowCount {
+		t.Fatalf("accepted result=%#v", result)
 	}
 }
 
@@ -1626,7 +1665,25 @@ func (fixture *excelPricingRemoteSnapshotFixture) handle(w http.ResponseWriter, 
 	case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/wp-json/digitalogic/pricing/sync/builds/"):
 		fixture.mu.Lock()
 		fixture.statusCalls++
+		statusCalls := fixture.statusCalls
 		fixture.mu.Unlock()
+		if fixture.mode == "poll_ready" {
+			w.Header().Set("Content-Type", "application/json")
+			build := fixture.buildResponse()
+			if statusCalls < 2 {
+				build.Status = "running"
+				build.SnapshotToken = ""
+				build.Revision = ""
+				build.SnapshotRevision = ""
+				build.Digest = ""
+				build.SnapshotURL = ""
+				w.WriteHeader(http.StatusAccepted)
+			} else {
+				w.WriteHeader(http.StatusOK)
+			}
+			_ = json.NewEncoder(w).Encode(build)
+			return
+		}
 		http.Error(w, "status polling forbidden", http.StatusTeapot)
 	case r.Method == http.MethodDelete && r.URL.Path == "/wp-json/digitalogic/pricing/sync/builds/"+fixture.buildID:
 		fixture.mu.Lock()

@@ -33,6 +33,8 @@ const (
 	excelPricingStateSchema         = "digitalogic.pricing-sync-state/v1"
 	excelPricingPreviewSchema       = "digitalogic.pricing-sync-preview/v1"
 	excelPricingApplySchema         = "digitalogic.pricing-sync-apply/v1"
+	excelPricingACKSchema           = "digitalogic.pricing-sync-ack/v1"
+	excelPricingConfirmationSchema  = "digitalogic.pricing-confirmation/v1"
 	excelPricingClientHeader        = "X-Patris-Excel-Client"
 	excelPricingClientID            = "digitalogic-price-calculator/v1"
 	excelPricingContractClientID    = "digitalogic-price-calculator"
@@ -77,6 +79,7 @@ type excelPricingLocalRequest struct {
 	Page                  int                   `json:"page,omitempty"`
 	Limit                 int                   `json:"limit,omitempty"`
 	Locale                string                `json:"locale,omitempty"`
+	Projection            string                `json:"projection,omitempty"`
 	IdempotencyKey        string                `json:"idempotency_key,omitempty"`
 	ExpectedStateRevision string                `json:"expected_state_revision,omitempty"`
 	Settings              *excelPricingSettings `json:"settings,omitempty"`
@@ -96,6 +99,7 @@ type excelPricingRemoteRequest struct {
 	Page                  int                   `json:"page,omitempty"`
 	Limit                 int                   `json:"limit,omitempty"`
 	Locale                string                `json:"locale,omitempty"`
+	Projection            string                `json:"projection,omitempty"`
 	IdempotencyKey        string                `json:"idempotency_key,omitempty"`
 	ExpectedStateRevision string                `json:"expected_state_revision,omitempty"`
 	Settings              *excelPricingSettings `json:"settings,omitempty"`
@@ -130,6 +134,28 @@ type excelPricingRemoteResponse struct {
 	status        int
 	schema        string
 	stateRevision string
+}
+
+type excelPricingConfirmation struct {
+	Schema                  string `json:"schema"`
+	Status                  string `json:"status"`
+	TransactionID           string `json:"transaction_id"`
+	PreviousRevision        string `json:"previous_revision"`
+	CommittedRevision       string `json:"committed_revision"`
+	CurrentRevision         string `json:"current_revision"`
+	CommittedSettingsDigest string `json:"committed_settings_digest"`
+	ACKDeadline             int64  `json:"ack_deadline"`
+	RecoveryDeadline        int64  `json:"recovery_deadline"`
+	ACKPath                 string `json:"ack_path"`
+	ConsumerID              string `json:"consumer_id"`
+	Channel                 string `json:"channel"`
+}
+
+type excelPricingStateDocument struct {
+	Schema        string                   `json:"schema"`
+	StateRevision string                   `json:"state_revision"`
+	Settings      excelPricingSettings     `json:"settings"`
+	Confirmation  excelPricingConfirmation `json:"confirmation"`
 }
 
 func newExcelPricingState() *excelPricingState {
@@ -435,6 +461,7 @@ func buildExcelPricingRemoteRequest(operation string, local excelPricingLocalReq
 		Page:                  local.Page,
 		Limit:                 local.Limit,
 		Locale:                local.Locale,
+		Projection:            local.Projection,
 		IdempotencyKey:        local.IdempotencyKey,
 		ExpectedStateRevision: local.ExpectedStateRevision,
 		Settings:              local.Settings,
@@ -730,7 +757,7 @@ func excelPricingLocalRequestAllowed(r *http.Request) bool {
 }
 
 func excelPricingRemoteURL(productSyncURL, operation string) (string, error) {
-	if operation != "state" && operation != "preview" && operation != "apply" {
+	if operation != "state" && operation != "preview" && operation != "apply" && operation != "ack" {
 		return "", errors.New("pricing operation is invalid")
 	}
 	parsed, err := url.Parse(strings.TrimSpace(productSyncURL))
@@ -750,6 +777,77 @@ func excelPricingRemoteURL(productSyncURL, operation string) (string, error) {
 	parsed.Path = prefix + "/wp-json/digitalogic/pricing/sync/" + operation
 	parsed.RawPath = ""
 	return parsed.String(), nil
+}
+
+type excelPricingACKResponse struct {
+	Schema        string `json:"schema"`
+	Status        string `json:"status"`
+	TransactionID string `json:"transaction_id"`
+}
+
+func (s *Server) forwardExcelPricingACK(
+	ctx context.Context,
+	cfg updateout.Config,
+	job *excelPricingWritebackJob,
+) (excelPricingACKResponse, error) {
+	cfg, secret, endpoint, err := resolveExcelPricingRemote(cfg, "ack")
+	if err != nil || job == nil || job.TransactionID == "" ||
+		!isSHA256Revision(job.StateRevision) || !isSHA256Revision(job.SettingsDigest) ||
+		validateExcelPricingSettings(job.confirmedSettings) != nil ||
+		!validExcelPricingRemoteSource(job.confirmationSource) {
+		return excelPricingACKResponse{}, errors.New("pricing acknowledgement is invalid")
+	}
+	idempotencyKey := "excel-ack-" + job.JobID
+	payload := map[string]interface{}{
+		"schema": excelPricingACKSchema, "schema_version": 1, "operation": "ack",
+		"transaction_id":            job.TransactionID,
+		"consumer_id":               excelPricingContractClientID,
+		"channel":                   excelPricingContractChannel,
+		"source":                    job.confirmationSource,
+		"committed_state_revision":  job.StateRevision,
+		"confirmed_settings":        job.confirmedSettings,
+		"confirmed_settings_digest": job.SettingsDigest,
+		"idempotency_key":           idempotencyKey,
+	}
+	body, err := json.Marshal(payload)
+	if err != nil || len(body) > excelPricingMaxRequestBytes {
+		return excelPricingACKResponse{}, errors.New("pricing acknowledgement is invalid")
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
+	if err != nil {
+		return excelPricingACKResponse{}, errors.New("pricing acknowledgement is invalid")
+	}
+	request.Header.Set("Accept", "application/json")
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("User-Agent", "patris-export-excel-companion/1")
+	request.Header.Set(updateout.ProductSyncSecretHeader, secret)
+	request.Header.Set("Idempotency-Key", idempotencyKey)
+	client := s.excelPricing.client
+	if client == nil {
+		client = newExcelPricingState().client
+	}
+	copyClient := *client
+	copyClient.Timeout = excelPricingRemoteTimeout(cfg.Timeout)
+	copyClient.CheckRedirect = func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }
+	response, err := copyClient.Do(request)
+	if err != nil {
+		return excelPricingACKResponse{}, errors.New("remote pricing acknowledgement failed")
+	}
+	defer response.Body.Close()
+	responseBody, readErr := io.ReadAll(io.LimitReader(response.Body, excelPricingMaxResponseBytes+1))
+	if readErr != nil || len(responseBody) > excelPricingMaxResponseBytes || bytes.Contains(responseBody, []byte(secret)) {
+		return excelPricingACKResponse{}, errors.New("remote pricing acknowledgement is unavailable")
+	}
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		return excelPricingACKResponse{}, safeExcelPricingRemoteError(response.StatusCode, responseBody)
+	}
+	var result excelPricingACKResponse
+	if json.Unmarshal(responseBody, &result) != nil || result.Schema != excelPricingConfirmationSchema ||
+		result.TransactionID != job.TransactionID ||
+		(result.Status != "acknowledged" && result.Status != "replayed") {
+		return excelPricingACKResponse{}, errors.New("remote pricing acknowledgement contract is invalid")
+	}
+	return result, nil
 }
 
 func resolveExcelPricingRemote(

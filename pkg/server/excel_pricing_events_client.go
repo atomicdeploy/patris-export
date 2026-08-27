@@ -158,6 +158,27 @@ type excelPricingRemoteRevisionResponse struct {
 	PageSize              int              `json:"page_size"`
 }
 
+// excelPricingRemoteDirectTransport keeps validator-bearing pricing traffic
+// off ambient machine proxies. Some HTTP intermediaries rewrite strong ETags
+// for a gzip representation even when the request explicitly asks for
+// identity bytes, which breaks If-Match and immutable payload verification.
+// The configured destination is already restricted to HTTPS (or loopback),
+// and custom test transports remain untouched.
+func excelPricingRemoteDirectTransport(base http.RoundTripper) http.RoundTripper {
+	if base == nil {
+		transport := http.DefaultTransport.(*http.Transport).Clone()
+		transport.Proxy = nil
+		return transport
+	}
+	transport, ok := base.(*http.Transport)
+	if !ok {
+		return base
+	}
+	clone := transport.Clone()
+	clone.Proxy = nil
+	return clone
+}
+
 func newExcelPricingRemoteEventsClient(
 	cfg updateout.Config,
 	source canonical.Source,
@@ -186,6 +207,7 @@ func newExcelPricingRemoteEventsClient(
 		}
 		dialer = &copyDialer
 	}
+	dialer.Proxy = nil
 
 	httpClient := options.HTTPClient
 	if httpClient == nil {
@@ -195,6 +217,7 @@ func newExcelPricingRemoteEventsClient(
 		}
 	}
 	copyHTTPClient := *httpClient
+	copyHTTPClient.Transport = excelPricingRemoteDirectTransport(copyHTTPClient.Transport)
 	// Never forward the machine credential to a redirected host or path.
 	copyHTTPClient.CheckRedirect = func(*http.Request, []*http.Request) error {
 		return http.ErrUseLastResponse
@@ -233,6 +256,18 @@ func validExcelPricingRemoteSource(source canonical.Source) bool {
 	return validExcelPricingRemoteHeaderValue(source.ID) &&
 		validExcelPricingRemoteHeaderValue(source.Dataset) &&
 		isSHA256Revision(source.Revision)
+}
+
+// sameExcelPricingRemoteSourceIdentity keeps the stable provider identity
+// strict while allowing the revision to advance during a live subscription.
+// Patris is expected to change continuously; an authenticated pricing event
+// must not be discarded merely because it was emitted from a newer coherent
+// source revision than the one used for the initial handshake.
+func sameExcelPricingRemoteSourceIdentity(expected, candidate canonical.Source) bool {
+	return validExcelPricingRemoteSource(expected) &&
+		validExcelPricingRemoteSource(candidate) &&
+		expected.ID == candidate.ID &&
+		expected.Dataset == candidate.Dataset
 }
 
 func validExcelPricingRemoteHeaderValue(value string) bool {
@@ -465,7 +500,8 @@ func (client *excelPricingRemoteEventsClient) handleExcelPricingRemoteFrame(
 		var data excelPricingRemoteStateEventData
 		if json.Unmarshal(frame.Data, &data) != nil ||
 			data.Schema != excelPricingRemoteStateEventSchema || data.SchemaVersion != 1 ||
-			data.Projection != excelPricingRemoteProjection || data.Source != client.source ||
+			data.Projection != excelPricingRemoteProjection ||
+			!sameExcelPricingRemoteSourceIdentity(client.source, data.Source) ||
 			!validExcelPricingRemoteRevisionParts(data.StateRevision, data.CatalogRevision,
 				data.PricingStateRevision, data.PricingPolicyRevision) ||
 			!isStrongExcelPricingRevisionETag(data.ETag, data.StateRevision) ||
@@ -506,7 +542,8 @@ func (client *excelPricingRemoteEventsClient) handleExcelPricingRemoteFrame(
 			return false, errExcelPricingRemoteProtocol
 		}
 		event.EventID = frame.ID
-		if event.Source != client.source || validateExcelPricingRemoteSnapshotTerminalEvent(event) != nil {
+		if !sameExcelPricingRemoteSourceIdentity(client.source, event.Source) ||
+			validateExcelPricingRemoteSnapshotTerminalEvent(event) != nil {
 			return false, errExcelPricingRemoteProtocol
 		}
 		if err := client.onTerminal(event); err != nil {
@@ -605,7 +642,7 @@ func (client *excelPricingRemoteEventsClient) validateExcelPricingRemoteRevision
 		payload.Schema != excelPricingRemoteRevisionSchema || payload.SchemaVersion != 1 ||
 		payload.Projection != excelPricingRemoteProjection ||
 		payload.ProjectionSchema != excelPricingRemoteProjectionSchema ||
-		payload.Source != client.source || payload.Locale != "fa" ||
+		!sameExcelPricingRemoteSourceIdentity(client.source, payload.Source) || payload.Locale != "fa" ||
 		payload.PageSize != excelPricingSnapshotPageSize ||
 		!validExcelPricingRemoteRevisionParts(payload.StateRevision, payload.CatalogRevision,
 			payload.PricingStateRevision, payload.PricingPolicyRevision) ||
