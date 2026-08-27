@@ -3906,6 +3906,10 @@ function main() {
       path.join(repoRoot, 'docs', 'examples', 'vba', 'ThisWorkbook.cls'),
       'utf8',
     );
+    const buildSource = fs.readFileSync(
+      path.join(repoRoot, 'scripts', 'windows', 'Build-ExcelDashboard.ps1'),
+      'utf8',
+    );
     const procedure = (source, name) => {
       const match = new RegExp(
         `(?:Public|Private) Sub ${name}\\b[\\s\\S]*?\\r?\\nEnd Sub`,
@@ -3940,6 +3944,15 @@ function main() {
     }
     if (/\bKickQueuedAsyncDispatch\b/iu.test(selectionSource)) {
       throw new Error('Workbook_SheetSelectionChange must not dispatch network work');
+    }
+    if (!/Names\.Add\('PricingInputCNYRate',\s*\$settings\.Range\('B18'\)\)/u.test(buildSource)) {
+      throw new Error('PricingInputCNYRate must bind exactly to Settings B18');
+    }
+    const priceFormulaSource = /Private Sub ApplyProductTableFormulas\b[\s\S]*?\r?\nEnd Sub/iu.exec(moduleSource)?.[0] || '';
+    if (!/cnyRateFormula\s*=\s*_/iu.test(priceFormulaSource)
+        || !/ISNUMBER\(PricingInputCNYRate\)/iu.test(priceFormulaSource)
+        || !/PricingInputCNYRate>0/iu.test(priceFormulaSource)) {
+      throw new Error('Product formulas must use the validated B18 proposal rate with a safe fallback');
     }
   } catch (error) {
     console.error(`Search re-entrancy source gate failed: ${error.message}`);

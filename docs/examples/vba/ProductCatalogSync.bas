@@ -6223,11 +6223,16 @@ Private Sub ApplyProductTableFormulas(ByVal table As ListObject)
     Dim sourceCurrencyFormula As String
     Dim sourceKindFormula As String
     Dim settingsReference As String
+    Dim cnyRateFormula As String
 
     If table.DataBodyRange Is Nothing Then Exit Sub
     settingsReference = "'" & U("062A0646063806CC06450627062A") & "'!"
     lookupExpression = _
         "IF(RC[8]<>"""",""woo:""&RC[8],""patris:""&RC[6])"
+    cnyRateFormula = _
+        "IF(AND(ISNUMBER(PricingInputCNYRate),PricingInputCNYRate>0)," & _
+        "PricingInputCNYRate,VLOOKUP(" & lookupExpression & _
+        ",SyncData,6,FALSE))"
     eligibleKindFormula = _
         "OR(VLOOKUP(" & lookupExpression & ",SyncData,20,FALSE)=""" & _
         T("row_kind_matched") & """,VLOOKUP(" & lookupExpression & _
@@ -6244,15 +6249,15 @@ Private Sub ApplyProductTableFormulas(ByVal table As ListObject)
         "VLOOKUP(" & lookupExpression & ",SyncData,5,FALSE)<>""""," & _
         "VLOOKUP(" & lookupExpression & ",SyncData,5,FALSE)>=0," & _
         "OR(AND(VLOOKUP(" & lookupExpression & _
-        ",SyncData,2,FALSE)=""CNY"",VLOOKUP(" & lookupExpression & _
-        ",SyncData,6,FALSE)>0),AND(VLOOKUP(" & lookupExpression & _
+        ",SyncData,2,FALSE)=""CNY""," & cnyRateFormula & _
+        ">0),AND(VLOOKUP(" & lookupExpression & _
         ",SyncData,2,FALSE)=""USD"",VLOOKUP(" & lookupExpression & _
         ",SyncData,7,FALSE)>0),VLOOKUP(" & lookupExpression & _
         ",SyncData,2,FALSE)=""IRR"",VLOOKUP(" & lookupExpression & _
         ",SyncData,2,FALSE)=""IRT"")," & _
         "OR(AND(VLOOKUP(" & lookupExpression & _
-        ",SyncData,4,FALSE)=""CNY"",VLOOKUP(" & lookupExpression & _
-        ",SyncData,6,FALSE)>0),AND(VLOOKUP(" & lookupExpression & _
+        ",SyncData,4,FALSE)=""CNY""," & cnyRateFormula & _
+        ">0),AND(VLOOKUP(" & lookupExpression & _
         ",SyncData,4,FALSE)=""USD"",VLOOKUP(" & lookupExpression & _
         ",SyncData,7,FALSE)>0),VLOOKUP(" & lookupExpression & _
         ",SyncData,4,FALSE)=""IRR"",VLOOKUP(" & lookupExpression & _
@@ -6260,8 +6265,8 @@ Private Sub ApplyProductTableFormulas(ByVal table As ListObject)
     basePriceFormula = _
         "IFERROR(IF(" & readyFormula & ",ROUND((" & _
         "(RC[4]*IF(VLOOKUP(" & lookupExpression & _
-        ",SyncData,2,FALSE)=""CNY"",VLOOKUP(" & lookupExpression & _
-        ",SyncData,6,FALSE),IF(VLOOKUP(" & lookupExpression & _
+        ",SyncData,2,FALSE)=""CNY""," & cnyRateFormula & _
+        ",IF(VLOOKUP(" & lookupExpression & _
         ",SyncData,2,FALSE)=""USD"",VLOOKUP(" & lookupExpression & _
         ",SyncData,7,FALSE),IF(VLOOKUP(" & lookupExpression & _
         ",SyncData,2,FALSE)=""IRR"",0.1,IF(VLOOKUP(" & lookupExpression & _
@@ -6269,8 +6274,8 @@ Private Sub ApplyProductTableFormulas(ByVal table As ListObject)
         "IF(OR(RC[1]="""",VLOOKUP(" & lookupExpression & _
         ",SyncData,3,FALSE)=""""),0,(RC[1]/1000)*VLOOKUP(" & _
         lookupExpression & ",SyncData,3,FALSE)*IF(VLOOKUP(" & _
-        lookupExpression & ",SyncData,4,FALSE)=""CNY"",VLOOKUP(" & _
-        lookupExpression & ",SyncData,6,FALSE),IF(VLOOKUP(" & _
+        lookupExpression & ",SyncData,4,FALSE)=""CNY""," & _
+        cnyRateFormula & ",IF(VLOOKUP(" & _
         lookupExpression & ",SyncData,4,FALSE)=""USD"",VLOOKUP(" & _
         lookupExpression & ",SyncData,7,FALSE),IF(VLOOKUP(" & _
         lookupExpression & ",SyncData,4,FALSE)=""IRR"",0.1,IF(VLOOKUP(" & _
@@ -6292,15 +6297,15 @@ Private Sub ApplyProductTableFormulas(ByVal table As ListObject)
         ",SyncData,3,FALSE)<>"""",VLOOKUP(" & lookupExpression & _
         ",SyncData,3,FALSE)>=0,VLOOKUP(" & lookupExpression & _
         ",SyncData,5,FALSE)<>"""",VLOOKUP(" & lookupExpression & _
-        ",SyncData,5,FALSE)>=0,VLOOKUP(" & lookupExpression & _
-        ",SyncData,6,FALSE)>0,OR(VLOOKUP(" & lookupExpression & _
+        ",SyncData,5,FALSE)>=0," & cnyRateFormula & _
+        ">0,OR(VLOOKUP(" & lookupExpression & _
         ",SyncData,4,FALSE)=""CNY"",VLOOKUP(" & lookupExpression & _
         ",SyncData,4,FALSE)=""IRR"")),ROUND((" & sourceAmountFormula & _
-        "*VLOOKUP(" & lookupExpression & ",SyncData,6,FALSE)+" & _
+        "*" & cnyRateFormula & "+" & _
         "(RC[1]/1000)*IF(VLOOKUP(" & lookupExpression & _
         ",SyncData,4,FALSE)=""CNY"",VLOOKUP(" & lookupExpression & _
-        ",SyncData,3,FALSE)*VLOOKUP(" & lookupExpression & _
-        ",SyncData,6,FALSE),VLOOKUP(" & lookupExpression & _
+        ",SyncData,3,FALSE)*" & cnyRateFormula & _
+        ",VLOOKUP(" & lookupExpression & _
         ",SyncData,3,FALSE)/10))*(1+VLOOKUP(" & lookupExpression & _
         ",SyncData,5,FALSE)/100),-" & settingsReference & "R15C2),"
     projectedFormula = projectedFormula & _
