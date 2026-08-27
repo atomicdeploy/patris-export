@@ -664,6 +664,7 @@ func TestDynamicCalculatorTemplatesPreservePersianPriceListContracts(t *testing.
 		"مبلغ منبع قیمت",
 		"ارز منبع قیمت",
 		"نوع منبع قیمت",
+		"نشانی تصویر",
 	}
 
 	for _, contract := range dynamicCalculatorContracts() {
@@ -786,9 +787,10 @@ func TestDynamicCalculatorTemplatesPreservePersianPriceListContracts(t *testing.
 			}
 
 			for cell, want := range map[string]string{
-				"B3": "http://127.0.0.1:18080/api/product-sync",
-				"B4": "http://127.0.0.1:18080/api/pricing-sync/state",
-				"G8": "canonical",
+				"B3":  "http://127.0.0.1:18080/api/product-sync",
+				"B4":  "http://127.0.0.1:18080/api/pricing-sync/state",
+				"B31": "خیر",
+				"G8":  "canonical",
 			} {
 				got, valueErr := book.GetCellValue(settingsSheet, cell, excelize.Options{RawCellValue: true})
 				if valueErr != nil || got != want {
@@ -817,7 +819,7 @@ func TestDynamicCalculatorTemplatesPreservePersianPriceListContracts(t *testing.
 			}
 			for _, row := range []int{
 				10, 11, 12, 13, 14, 15,
-				18, 19, 21, 22, 23, 26,
+				18, 19, 21, 22, 23, 26, 31,
 				39, 40, 41, 42, 43,
 				46, 47, 48, 49, 50, 51, 52, 53, 54, 55,
 			} {
@@ -828,6 +830,9 @@ func TestDynamicCalculatorTemplatesPreservePersianPriceListContracts(t *testing.
 						settingsSheet, row, wantMerge, settingsMerges,
 					)
 				}
+			}
+			if !settingsMerges["A37:F37"] {
+				t.Fatalf("%s image-preview note is missing independent merge A37:F37; merges=%v", settingsSheet, settingsMerges)
 			}
 			for _, wantMerge := range []string{"B20:C20", "E20:F20"} {
 				if !settingsMerges[wantMerge] {
@@ -858,8 +863,8 @@ func TestDynamicCalculatorTemplatesPreservePersianPriceListContracts(t *testing.
 				t.Fatal(syncTableErr)
 			}
 			if len(syncTables) != 1 || syncTables[0].Name != "SyncData" ||
-				strings.ReplaceAll(syncTables[0].Range, "$", "") != "A1:W2" {
-				t.Fatalf("SyncData table = %+v, want empty A1:W2 table", syncTables)
+				strings.ReplaceAll(syncTables[0].Range, "$", "") != "A1:X2" {
+				t.Fatalf("SyncData table = %+v, want empty A1:X2 table", syncTables)
 			}
 			gotSyncHeaders := make([]string, 0, len(wantSyncHeaders))
 			for column := 1; column <= len(wantSyncHeaders); column++ {
@@ -1252,7 +1257,7 @@ func TestDynamicCalculatorVBASourceGuardsLivePricingBeforeMutation(t *testing.T)
 	for _, required := range []string{
 		`Attribute VB_Name = "ProductCatalogSync"`,
 		`Private Const SYNC_TABLE As String = "SyncData"`,
-		`Private Const SYNC_COLUMN_COUNT As Long = 23`,
+		`Private Const SYNC_COLUMN_COUNT As Long = 24`,
 		`Private Const PRICING_CLIENT_HEADER As String = "X-Patris-Excel-Client"`,
 		`Private Const PRICING_CSRF_HEADER As String = "X-Patris-Excel-CSRF-Token"`,
 		`Private Const PRICING_SESSION_SCHEMA As String = "patris.excel-pricing-companion-session/v1"`,
@@ -1367,6 +1372,21 @@ func TestDynamicCalculatorVBASourceGuardsLivePricingBeforeMutation(t *testing.T)
 		`Case "air_express_price_per_kg": addressText = "B22"`,
 		"Public Function ValidatePricingWritebackUIForValidation() As Boolean",
 		"Public Function ValidateOperationProgressUIForValidation() As Boolean",
+		"Public Function ValidateProductImagePreviewUIForValidation() As Boolean",
+		"Public Sub HandleProductImageSettingChanged()",
+		"Private Sub RefreshProductImagePreview(ByVal relativeRow As Long)",
+		"Private Sub HandleProductImageTerminal()",
+		"Private Sub CancelProductImagePreview(ByVal clearPreview As Boolean)",
+		"Private Function CachedProductImagePath(ByVal imageURL As String) As String",
+		"Private Const PRODUCT_IMAGE_CACHE_LIMIT As Long = 16",
+		"Private Const PRODUCT_IMAGE_MAX_BYTES As Long = 2097152",
+		`requestValue.OpenAsync "GET", imageURL`,
+		`requestValue.SetRequestHeader "Accept", _`,
+		`If requestGeneration <> mImageGeneration Or _`,
+		`requestRow <> SelectedProductRelativeRow() Or _`,
+		`LCase$(Left$(imageURL, 8)) <> "https://"`,
+		`InStr(1, authority, "@", vbBinaryCompare) > 0`,
+		`Shapes.AddPicture(`,
 		"Private Function OperationProgressStageMatchesForValidation(",
 		`Case "pending", "sending": fillColor = RGB(252, 228, 178)`,
 		`Case "confirmed": fillColor = RGB(226, 239, 218)`,
@@ -1681,6 +1701,8 @@ func TestDynamicCalculatorVBASourceGuardsLivePricingBeforeMutation(t *testing.T)
 		"ProductCatalogSync.KickQueuedAsyncDispatch",
 		"If Success Then ProductCatalogSync.RegisterSearchHotkey",
 		"Private Sub Workbook_SheetChange",
+		`If Not Intersect(Target, Sh.Range("B31")) Is Nothing Then`,
+		"ProductCatalogSync.HandleProductImageSettingChanged",
 		`If Not Intersect(Target, Sh.Range("B44")) Is Nothing Then`,
 		"ProductCatalogSync.ApplyPriceDisplayFontSetting",
 		`Union(Sh.Range("B18:B22"), _`,
@@ -2150,7 +2172,13 @@ func TestDynamicCalculatorBuilderStylesPersianButtonsAndChartText(t *testing.T) 
 		"'مبلغ منبع قیمت'",
 		"'ارز منبع قیمت'",
 		"'نوع منبع قیمت'",
-		"$syncData.Range('A1:W2')",
+		"$syncData.Range('A1:X2')",
+		"'نمایش تصاویر محصولات'",
+		"$settings.Range('B31').Value2 = 'خیر'",
+		"$settings.Range('B31').Validation.Add(3, 1, 1, 'خیر,بله')",
+		"[void]$workbook.Names.Add('ShowProductImages', $settings.Range('B31'))",
+		"[void]$workbook.Names.Add('ProductImagePreviewStatus', $priceList.Range('M22'))",
+		"[void]$workbook.Names.Add('ProductImagePreviewArea', $imageAreaRange)",
 		"Set-OfficeTextFont $chart.ChartTitle.Format.TextFrame2.TextRange",
 		"Set-OfficeTextFont $chart.Legend.Format.TextFrame2.TextRange",
 		"'تعداد رقم گردکردن قیمت'",

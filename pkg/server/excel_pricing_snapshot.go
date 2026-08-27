@@ -230,6 +230,7 @@ var excelPricingSnapshotExcelV1RowFields = []string{
 	"patris_final_price",
 	"sale_price",
 	"publication_status",
+	"image_url",
 }
 
 type excelPricingSnapshotStore struct {

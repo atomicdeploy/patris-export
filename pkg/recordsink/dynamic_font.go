@@ -174,7 +174,7 @@ func ValidateDynamicWorkbookFontPolicy(path string, policy DynamicWorkbookFontPo
 	if err := addTableColumnFontRole(book, expected, "محصولات", "Products", 1, report.PriceDisplayFont); err != nil {
 		return report, err
 	}
-	if err := addTableFontRoles(book, expected, "داده‌های همگام‌سازی", "SyncData", report.PersianFont, report.LatinFont, []int{17, 18, 19, 20}, []int{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 21, 22, 23}); err != nil {
+	if err := addTableFontRoles(book, expected, "داده‌های همگام‌سازی", "SyncData", report.PersianFont, report.LatinFont, []int{17, 18, 19, 20}, []int{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 21, 22, 23, 24}); err != nil {
 		return report, err
 	}
 	for key, fontName := range expected {

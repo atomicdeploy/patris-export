@@ -7,7 +7,7 @@ Private Const YUAN_TABLE As String = "Yuan_Price"
 Private Const SHIPPING_TABLE As String = "Shipping"
 Private Const PROFIT_TABLE As String = "Profit"
 Private Const PRODUCT_COLUMN_COUNT As Long = 10
-Private Const SYNC_COLUMN_COUNT As Long = 23
+Private Const SYNC_COLUMN_COUNT As Long = 24
 Private Const SNAPSHOT_PAGE_SIZE As Long = 250
 Private Const MAX_STATE_PAGES As Long = 8
 Private Const MAX_SNAPSHOT_ROWS As Long = 2000
@@ -39,7 +39,7 @@ Private Const PRICING_SNAPSHOT_JOB_SCHEMA As String = "patris.pricing-snapshot-j
 Private Const PRICING_SNAPSHOT_PAYLOAD_SCHEMA As String = "patris.pricing-snapshot/v1"
 Private Const PRICING_SNAPSHOT_EVENT_SCHEMA As String = "patris.pricing-state-event/v1"
 Private Const PRICING_SNAPSHOT_PROJECTION As String = "excel-v1"
-Private Const PRICING_SNAPSHOT_ROW_FIELD_COUNT As Long = 26
+Private Const PRICING_SNAPSHOT_ROW_FIELD_COUNT As Long = 27
 Private Const PRICING_SNAPSHOT_ROW_FIELDS As String = _
     "sync_key,reconciliation_status,patris_code,woocommerce_id,sku," & _
     "weight_grams,foreign_price,patris_location,categories," & _
@@ -48,7 +48,7 @@ Private Const PRICING_SNAPSHOT_ROW_FIELDS As String = _
     "price_source_amount,price_source_currency,price_source_kind," & _
     "effective_price,patris_total_stock,stock_quantity,name,updated_at," & _
     "record_revision,permalink,patris_final_price,sale_price," & _
-    "publication_status"
+    "publication_status,image_url"
 Private Const SNAPSHOT_FIELD_SYNC_KEY As Long = 1
 Private Const SNAPSHOT_FIELD_RECONCILIATION_STATUS As Long = 2
 Private Const SNAPSHOT_FIELD_PATRIS_CODE As Long = 3
@@ -75,6 +75,7 @@ Private Const SNAPSHOT_FIELD_PERMALINK As Long = 23
 Private Const SNAPSHOT_FIELD_PATRIS_FINAL_PRICE As Long = 24
 Private Const SNAPSHOT_FIELD_SALE_PRICE As Long = 25
 Private Const SNAPSHOT_FIELD_PUBLICATION_STATUS As Long = 26
+Private Const SNAPSHOT_FIELD_IMAGE_URL As Long = 27
 Private Const PRICING_SNAPSHOT_CACHE_SECONDS As Long = 30
 Private Const PRICE_ROUNDING_MODE As String = "nearest_half_up"
 Private Const LOOPBACK_PREFIX As String = "http://127.0.0.1:18080/"
@@ -82,6 +83,10 @@ Private Const SEARCH_BUTTON_SHAPE As String = "ProductSearchButton"
 Private Const PROGRESS_TRACK_SHAPE As String = "OperationProgressTrack"
 Private Const PROGRESS_FILL_SHAPE As String = "OperationProgressFill"
 Private Const PROGRESS_TEXT_SHAPE As String = "OperationProgressText"
+Private Const PRODUCT_IMAGE_SHAPE As String = "ProductImagePreview"
+Private Const PRODUCT_IMAGE_CACHE_LIMIT As Long = 16
+Private Const PRODUCT_IMAGE_MAX_BYTES As Long = 2097152
+Private Const PRODUCT_IMAGE_TIMEOUT_MS As Long = 15000
 Private Const DEFAULT_PERSIAN_FONT As String = "Yekan Bakh"
 Private Const DEFAULT_LATIN_FONT As String = "Segoe UI"
 Private Const DEFAULT_FANUM_FONT As String = "Yekan Bakh FaNum"
@@ -162,6 +167,12 @@ Private mWritebackJobID As String
 Private mWritebackCSRFToken As String
 Private mWritebackPollCount As Long
 Private mForceFreshSnapshot As Boolean
+Private mImageRequest As AsyncWinHttpRequest
+Private mImageCache As Object
+Private mImageRequestURL As String
+Private mImageRequestRow As Long
+Private mImageGeneration As Long
+Private mImageRequestGeneration As Long
 
 ' Finite HTTP work is serialized through one callback-driven request lane.
 ' The SSE request is deliberately separate so it can remain connected after
@@ -660,6 +671,7 @@ Private Sub BeginRefreshPipeline(ByVal silent As Boolean, _
     Dim settings As Worksheet
 
     On Error GoTo BeginFailed
+    CancelProductImagePreview True
     CancelScheduledRefresh
     If Not afterApply Then
         ResetFiniteOperationContext
@@ -1090,6 +1102,7 @@ Public Sub CancelActivePricingOperations( _
              Not mSseSessionRequest Is Nothing)
         mWorkbookClosing = True
         CancelQueuedAsyncDispatch
+        CancelProductImagePreview True
     End If
     CancelScheduledRefresh
     CancelScheduledPricingPreview True
@@ -1400,6 +1413,12 @@ Private Sub CancelQueuedAsyncDispatch()
 End Sub
 
 Private Sub DispatchAsyncRequest(ByVal requestToken As Long)
+    If Not mImageRequest Is Nothing Then
+        If mImageRequest.Token = requestToken Then
+            If mImageRequest.Terminal Then HandleProductImageTerminal
+            Exit Sub
+        End If
+    End If
     If Not mWritebackRequest Is Nothing Then
         If mWritebackRequest.Token = requestToken Then
             If mWritebackRequest.Terminal Then HandleWritebackTerminal
@@ -3228,7 +3247,10 @@ Public Sub HighlightSelectedProductRow(ByVal target As Range)
             previousPriceCell.Calculate
         End If
     End If
-    If relativeRow <= 0 Then GoTo CleanExit
+    If relativeRow <= 0 Then
+        RefreshProductImagePreview 0
+        GoTo CleanExit
+    End If
 
     Set priceCell = table.DataBodyRange.Cells(relativeRow, 1)
     priceCell.Calculate
@@ -3244,10 +3266,397 @@ Public Sub HighlightSelectedProductRow(ByVal target As Range)
             End If
         End If
     End If
+    RefreshProductImagePreview relativeRow
     PumpExcelMessages
 CleanExit:
     Application.EnableEvents = previousEvents
 End Sub
+
+Public Sub HandleProductImageSettingChanged()
+    RefreshProductImagePreview SelectedProductRelativeRow()
+End Sub
+
+Private Sub RefreshProductImagePreview(ByVal relativeRow As Long)
+    Dim syncTable As ListObject
+    Dim imageURL As String
+    Dim cachedPath As String
+    Dim requestValue As AsyncWinHttpRequest
+
+    CancelProductImagePreview True
+    If Not ProductImagesEnabled() Then
+        ShowProductImageState _
+            U("06460645062706CC06340020062A06350627064806CC06310020063A06CC06310641063906270644002006270633062A002E")
+        Exit Sub
+    End If
+    If relativeRow < 1 Then
+        ShowProductImageState _
+            U("06280631062706CC002006460645062706CC06340020062A0635064806CC0631060C002006CC06A9002006A9062706440627002006310627002006270646062A062E06270628002006A9064606CC062F002E")
+        Exit Sub
+    End If
+
+    On Error GoTo PreviewFailed
+    Set syncTable = SyncSheet().ListObjects(SYNC_TABLE)
+    If syncTable.DataBodyRange Is Nothing Or _
+       relativeRow > syncTable.DataBodyRange.Rows.Count Then GoTo NoImage
+    imageURL = Trim$(CStr(syncTable.DataBodyRange.Cells( _
+        relativeRow, SYNC_COLUMN_COUNT).Value2))
+    If Len(imageURL) = 0 Then GoTo NoImage
+    If Not IsSafeProductImageURL(imageURL) Then GoTo InvalidImageURL
+
+    cachedPath = CachedProductImagePath(imageURL)
+    If Len(cachedPath) > 0 Then
+        DisplayProductImageFile cachedPath, imageURL
+        Exit Sub
+    End If
+
+    ShowProductImageState _
+        U("062F06310020062D062706440020062F063106CC06270641062A0020062A0635064806CC06312026")
+    mImageRequestURL = imageURL
+    mImageRequestRow = relativeRow
+    mImageRequestGeneration = mImageGeneration
+    Set requestValue = New AsyncWinHttpRequest
+    Set mImageRequest = requestValue
+    requestValue.OpenAsync "GET", imageURL, NextAsyncToken(), _
+        "product_image", False, PRODUCT_IMAGE_MAX_BYTES, _
+        5000, 5000, 5000, PRODUCT_IMAGE_TIMEOUT_MS
+    requestValue.SetRequestHeader "Accept", _
+        "image/avif,image/webp,image/png,image/jpeg,image/gif"
+    requestValue.Send
+    Exit Sub
+
+NoImage:
+    ShowProductImageState _
+        U("06280631062706CC0020062706CC0646002006A90627064406270020062A0635064806CC063106CC0020062B0628062A002006460634062F0647002006270633062A002E")
+    Exit Sub
+
+InvalidImageURL:
+    ShowProductImageState _
+        U("064606340627064606CC0020062A0635064806CC0631002006450639062A062806310020064606CC0633062A002E")
+    Exit Sub
+
+PreviewFailed:
+    Set mImageRequest = Nothing
+    ShowProductImageState _
+        U("062A0635064806CC063100200642062706280644002006460645062706CC06340020064606CC0633062A002E")
+End Sub
+
+Private Sub CancelProductImagePreview(ByVal clearPreview As Boolean)
+    mImageGeneration = mImageGeneration + 1
+    On Error Resume Next
+    If Not mImageRequest Is Nothing Then mImageRequest.Abort
+    Set mImageRequest = Nothing
+    mImageRequestURL = vbNullString
+    mImageRequestRow = 0
+    mImageRequestGeneration = 0
+    If clearPreview Then ClearProductImageShape
+    On Error GoTo 0
+End Sub
+
+Private Sub HandleProductImageTerminal()
+    Dim requestValue As AsyncWinHttpRequest
+    Dim requestURL As String
+    Dim requestRow As Long
+    Dim requestGeneration As Long
+    Dim contentType As String
+    Dim imageBytes As Variant
+    Dim cachePath As String
+
+    On Error GoTo ImageFailed
+    Set requestValue = mImageRequest
+    If requestValue Is Nothing Then Exit Sub
+    requestURL = mImageRequestURL
+    requestRow = mImageRequestRow
+    requestGeneration = mImageRequestGeneration
+    Set mImageRequest = Nothing
+    mImageRequestURL = vbNullString
+    mImageRequestRow = 0
+    mImageRequestGeneration = 0
+
+    If requestGeneration <> mImageGeneration Or _
+       requestRow <> SelectedProductRelativeRow() Or _
+       Not ProductImagesEnabled() Then Exit Sub
+    If requestValue.HasError Or requestValue.Aborted Or _
+       requestValue.StatusCode < 200 Or requestValue.StatusCode >= 300 Then _
+        GoTo ImageFailed
+    contentType = LCase$(Trim$(Split( _
+        requestValue.ContentType & ";", ";")(0)))
+    If Len(ProductImageExtension(contentType)) = 0 Then GoTo ImageFailed
+    imageBytes = requestValue.TakeResponseBody()
+    If Not IsByteArrayVariant(imageBytes) Or _
+       ByteArrayVariantLength(imageBytes) < 1 Or _
+       ByteArrayVariantLength(imageBytes) > PRODUCT_IMAGE_MAX_BYTES Then _
+        GoTo ImageFailed
+
+    cachePath = ProductImageCachePath(requestURL, contentType)
+    SaveProductImageBytes imageBytes, cachePath
+    CacheProductImagePath requestURL, cachePath
+    If requestGeneration <> mImageGeneration Or _
+       requestRow <> SelectedProductRelativeRow() Or _
+       Not ProductImagesEnabled() Then Exit Sub
+    DisplayProductImageFile cachePath, requestURL
+    Exit Sub
+
+ImageFailed:
+    On Error Resume Next
+    Set mImageRequest = Nothing
+    mImageRequestURL = vbNullString
+    mImageRequestRow = 0
+    mImageRequestGeneration = 0
+    If requestGeneration = mImageGeneration And _
+       ProductImagesEnabled() Then
+        ShowProductImageState _
+            U("062A0635064806CC063100200642062706280644002006460645062706CC06340020064606CC0633062A002E")
+    End If
+    On Error GoTo 0
+End Sub
+
+Private Function ProductImagesEnabled() As Boolean
+    Dim valid As Boolean
+
+    ProductImagesEnabled = NamedYesNo("ShowProductImages", valid)
+    If Not valid Then ProductImagesEnabled = False
+End Function
+
+Private Function SelectedProductRelativeRow() As Long
+    Dim table As ListObject
+    Dim selectedRow As Long
+    Dim relativeRow As Long
+
+    On Error GoTo CleanExit
+    Set table = PriceSheet().ListObjects(PRODUCTS_TABLE)
+    If table.DataBodyRange Is Nothing Then Exit Function
+    selectedRow = CLng(Val(CStr(ConfigSheet().Range("G30").Value2)))
+    relativeRow = selectedRow - table.DataBodyRange.Row + 1
+    If relativeRow >= 1 And relativeRow <= table.DataBodyRange.Rows.Count Then _
+        SelectedProductRelativeRow = relativeRow
+CleanExit:
+End Function
+
+Private Function IsSafeProductImageURL(ByVal imageURL As String) As Boolean
+    Dim authorityEnd As Long
+    Dim authority As String
+
+    imageURL = Trim$(imageURL)
+    If Len(imageURL) < 12 Or Len(imageURL) > 2048 Then Exit Function
+    If LCase$(Left$(imageURL, 8)) <> "https://" Then Exit Function
+    authorityEnd = InStr(9, imageURL, "/", vbBinaryCompare)
+    If authorityEnd = 0 Then
+        authority = Mid$(imageURL, 9)
+    Else
+        authority = Mid$(imageURL, 9, authorityEnd - 9)
+    End If
+    If Len(authority) = 0 Or _
+       InStr(1, authority, "@", vbBinaryCompare) > 0 Then Exit Function
+    IsSafeProductImageURL = True
+End Function
+
+Private Sub EnsureProductImageCache()
+    If mImageCache Is Nothing Then
+        Set mImageCache = CreateObject("Scripting.Dictionary")
+        mImageCache.CompareMode = vbBinaryCompare
+    End If
+End Sub
+
+Private Function CachedProductImagePath(ByVal imageURL As String) As String
+    Dim fileSystem As Object
+    Dim cachePath As String
+
+    EnsureProductImageCache
+    If Not mImageCache.Exists(imageURL) Then Exit Function
+    cachePath = CStr(mImageCache(imageURL))
+    Set fileSystem = CreateObject("Scripting.FileSystemObject")
+    If fileSystem.FileExists(cachePath) Then
+        CachedProductImagePath = cachePath
+    Else
+        mImageCache.Remove imageURL
+    End If
+End Function
+
+Private Sub CacheProductImagePath(ByVal imageURL As String, _
+                                  ByVal cachePath As String)
+    Dim cacheKey As Variant
+    Dim evictedPath As String
+    Dim fileSystem As Object
+
+    EnsureProductImageCache
+    If Not mImageCache.Exists(imageURL) And _
+       mImageCache.Count >= PRODUCT_IMAGE_CACHE_LIMIT Then
+        For Each cacheKey In mImageCache.Keys
+            evictedPath = CStr(mImageCache(CStr(cacheKey)))
+            mImageCache.Remove CStr(cacheKey)
+            Exit For
+        Next cacheKey
+        If Len(evictedPath) > 0 Then
+            Set fileSystem = CreateObject("Scripting.FileSystemObject")
+            On Error Resume Next
+            If fileSystem.FileExists(evictedPath) And _
+               InStr(1, fileSystem.GetFileName(evictedPath), _
+                     "digitalogic-product-image-", vbTextCompare) = 1 Then _
+                fileSystem.DeleteFile evictedPath, True
+            On Error GoTo 0
+        End If
+    End If
+    mImageCache(imageURL) = cachePath
+End Sub
+
+Private Function ProductImageCachePath(ByVal imageURL As String, _
+                                       ByVal contentType As String) As String
+    Dim fileSystem As Object
+    Dim digestText As String
+
+    Set fileSystem = CreateObject("Scripting.FileSystemObject")
+    digestText = Mid$(SHA256Revision(imageURL), 8)
+    ProductImageCachePath = fileSystem.GetSpecialFolder(2).Path & _
+        Application.PathSeparator & "digitalogic-product-image-" & _
+        digestText & ProductImageExtension(contentType)
+End Function
+
+Private Function ProductImageExtension(ByVal contentType As String) As String
+    Select Case LCase$(Trim$(contentType))
+        Case "image/jpeg", "image/jpg"
+            ProductImageExtension = ".jpg"
+        Case "image/png"
+            ProductImageExtension = ".png"
+        Case "image/gif"
+            ProductImageExtension = ".gif"
+        Case "image/webp"
+            ProductImageExtension = ".webp"
+        Case "image/avif"
+            ProductImageExtension = ".avif"
+    End Select
+End Function
+
+Private Sub SaveProductImageBytes(ByVal imageBytes As Variant, _
+                                  ByVal cachePath As String)
+    Dim stream As Object
+
+    Set stream = CreateObject("ADODB.Stream")
+    stream.Type = 1
+    stream.Open
+    stream.Write imageBytes
+    stream.SaveToFile cachePath, 2
+    stream.Close
+End Sub
+
+Private Sub DisplayProductImageFile(ByVal cachePath As String, _
+                                    ByVal imageURL As String)
+    Dim previewArea As Range
+    Dim pictureValue As Shape
+    Dim maxWidth As Double
+    Dim maxHeight As Double
+
+    On Error GoTo DisplayFailed
+    ClearProductImageShape
+    Set previewArea = ThisWorkbook.Names( _
+        "ProductImagePreviewArea").RefersToRange
+    Set pictureValue = PriceSheet().Shapes.AddPicture( _
+        cachePath, 0, -1, previewArea.Left + 4, previewArea.Top + 4, _
+        -1, -1)
+    pictureValue.Name = PRODUCT_IMAGE_SHAPE
+    pictureValue.LockAspectRatio = -1
+    maxWidth = previewArea.Width - 8
+    maxHeight = previewArea.Height - 8
+    If pictureValue.Width > maxWidth Then pictureValue.Width = maxWidth
+    If pictureValue.Height > maxHeight Then pictureValue.Height = maxHeight
+    pictureValue.Left = previewArea.Left + _
+        (previewArea.Width - pictureValue.Width) / 2
+    pictureValue.Top = previewArea.Top + _
+        (previewArea.Height - pictureValue.Height) / 2
+    pictureValue.Placement = 1
+    pictureValue.AlternativeText = U( _
+        "062A0635064806CC063100200645062D063506480644")
+    ShowProductImageState _
+        U("062A0635064806CC063100200645062D063506480644002006460645062706CC06340020062F0627062F064700200634062F002E"), _
+        False
+    Exit Sub
+
+DisplayFailed:
+    ClearProductImageShape
+    ShowProductImageState _
+        U("062A0635064806CC063100200642062706280644002006460645062706CC06340020064606CC0633062A002E")
+End Sub
+
+Private Sub ClearProductImageShape()
+    On Error Resume Next
+    PriceSheet().Shapes(PRODUCT_IMAGE_SHAPE).Delete
+    On Error GoTo 0
+End Sub
+
+Private Sub ShowProductImageState(ByVal messageText As String, _
+                                  Optional ByVal clearImage As Boolean = True)
+    Dim statusCell As Range
+
+    If clearImage Then ClearProductImageShape
+    On Error GoTo CleanExit
+    Set statusCell = ThisWorkbook.Names( _
+        "ProductImagePreviewStatus").RefersToRange
+    statusCell.Value2 = messageText
+    statusCell.Font.Name = NamedText("PersianFont", DEFAULT_PERSIAN_FONT)
+    statusCell.Font.Bold = False
+    statusCell.WrapText = True
+CleanExit:
+End Sub
+
+Public Function ValidateProductImagePreviewUIForValidation() As Boolean
+    Dim settingCell As Range
+    Dim previewArea As Range
+    Dim previewShape As Shape
+    Dim previousValue As Variant
+    Dim previousEvents As Boolean
+    Dim sampleURL As String
+    Dim fileSystem As Object
+
+    On Error GoTo ValidationFailed
+    previousEvents = Application.EnableEvents
+    Set settingCell = ThisWorkbook.Names( _
+        "ShowProductImages").RefersToRange
+    Set previewArea = ThisWorkbook.Names( _
+        "ProductImagePreviewArea").RefersToRange
+    previousValue = settingCell.Value2
+    If settingCell.Address(False, False) <> "B31" Or _
+       settingCell.Validation.Type <> 3 Then GoTo ValidationFailed
+    If Not Intersect(previewArea, _
+        PriceSheet().ListObjects(PRODUCTS_TABLE).Range) Is Nothing Then _
+        GoTo ValidationFailed
+    If Not Intersect(previewArea, PriceSheet().Range("B3:K4")) _
+        Is Nothing Then GoTo ValidationFailed
+    If Not IsSafeProductImageURL( _
+        "https://digitalogic.ir/product-image.webp") Or _
+       IsSafeProductImageURL("http://digitalogic.ir/image.jpg") Or _
+       IsSafeProductImageURL("https://user:secret@digitalogic.ir/a.jpg") Then _
+        GoTo ValidationFailed
+    Application.EnableEvents = False
+    settingCell.Value2 = U("062E06CC0631")
+    HandleProductImageSettingChanged
+    If Not mImageRequest Is Nothing Then GoTo ValidationFailed
+    On Error Resume Next
+    Err.Clear
+    Set previewShape = PriceSheet().Shapes(PRODUCT_IMAGE_SHAPE)
+    If Err.Number = 0 Then GoTo ValidationFailed
+    Err.Clear
+    On Error GoTo ValidationFailed
+    EnsureProductImageCache
+    sampleURL = "https://digitalogic.ir/missing-cache-entry.webp"
+    Set fileSystem = CreateObject("Scripting.FileSystemObject")
+    mImageCache(sampleURL) = fileSystem.BuildPath( _
+        fileSystem.GetSpecialFolder(2).Path, _
+        "digitalogic-product-image-missing.webp")
+    If Len(CachedProductImagePath(sampleURL)) <> 0 Or _
+       mImageCache.Exists(sampleURL) Then GoTo ValidationFailed
+    ValidateProductImagePreviewUIForValidation = True
+
+ValidationExit:
+    On Error Resume Next
+    settingCell.Value2 = previousValue
+    Application.EnableEvents = previousEvents
+    HandleProductImageSettingChanged
+    On Error GoTo 0
+    Exit Function
+
+ValidationFailed:
+    ValidateProductImagePreviewUIForValidation = False
+    Resume ValidationExit
+End Function
 
 Public Sub HandlePricingProposalChanged()
     If mProposalSyncActive Then Exit Sub
@@ -5671,6 +6080,8 @@ Private Function ImportReconciledCatalog(ByVal reconciledRows As Object) As Long
         syncOutput(outputRow, 21) = priceSourceAmount
         syncOutput(outputRow, 22) = priceSourceCurrency
         syncOutput(outputRow, 23) = priceSourceKind
+        syncOutput(outputRow, 24) = ReconciledRowText( _
+            reconciledRow, "image_url", SNAPSHOT_FIELD_IMAGE_URL)
         If outputRow Mod UI_PUMP_ROW_INTERVAL = 0 Then PumpExcelMessages
     Next rowKey
     mReconcileSeconds = PhaseElapsed(phaseStartedAt)
@@ -7639,7 +8050,7 @@ Private Function AuditFixedFontMap(ByVal persianFont As String, _
     If Not syncTable.DataBodyRange Is Nothing Then
         For Each columnIndex In Array(1, 2, 3, 4, 5, 6, 7, 8, _
                                       9, 10, 11, 12, 13, 14, 15, 16, _
-                                      21, 22, 23)
+                                      21, 22, 23, 24)
             AuditFixedFontMap = AuditFixedFontMap + AuditRangeFont( _
                 syncTable.ListColumns(CLng(columnIndex)).DataBodyRange, _
                 latinFont, repair)

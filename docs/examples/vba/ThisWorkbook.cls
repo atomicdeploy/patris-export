@@ -6,6 +6,7 @@ Private Sub Workbook_Open()
     ProductCatalogSync.PreserveSearchLiteral
     ProductCatalogSync.RegisterSearchHotkey
     ThisWorkbook.Worksheets(1).Activate
+    ProductCatalogSync.HandleProductImageSettingChanged
     ProductCatalogSync.ScheduleRefreshOnOpen
     Call ProductCatalogSync.AuditFontsOnOpen
     On Error GoTo 0
@@ -76,6 +77,11 @@ Private Sub Workbook_SheetChange(ByVal Sh As Object, ByVal Target As Range)
         GoTo CleanExit
     End If
     If Not Sh Is ThisWorkbook.Worksheets(3) Then GoTo CleanExit
+    If Not Intersect(Target, Sh.Range("B31")) Is Nothing Then
+        Application.EnableEvents = False
+        ProductCatalogSync.HandleProductImageSettingChanged
+        GoTo CleanExit
+    End If
     If Not Intersect(Target, Sh.Range("B44")) Is Nothing Then
         Application.EnableEvents = False
         ProductCatalogSync.ApplyPriceDisplayFontSetting

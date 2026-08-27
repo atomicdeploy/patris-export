@@ -1013,6 +1013,30 @@ try {
     $updatedBodyRange.HorizontalAlignment = -4108
     $updatedBodyRange.Interior.Color = ConvertTo-OleColor 'DDE8FC'
     $updatedBodyRange.Borders.Color = ConvertTo-OleColor 'B9CCF4'
+
+    # A single deferred image preview lives beside, never over, the product
+    # table. The workbook starts with previews disabled so normal 1,103-row
+    # refresh and search remain just as fast as before.
+    $imageHeaderRange = $priceList.Range('M21:O21')
+    $imageStatusRange = $priceList.Range('M22:O22')
+    $imageAreaRange = $priceList.Range('M23:O32')
+    $imageHeaderRange.Merge()
+    $imageHeaderRange.Cells.Item(1, 1).Value2 = 'تصویر محصول'
+    Set-SectionStyle $imageHeaderRange 'F6F6F6' '242424' 10
+    $imageStatusRange.Merge()
+    $imageStatusRange.Cells.Item(1, 1).Value2 = 'نمایش تصاویر غیرفعال است.'
+    $imageStatusRange.WrapText = $true
+    $imageStatusRange.HorizontalAlignment = -4108
+    $imageStatusRange.VerticalAlignment = -4108
+    $imageStatusRange.Interior.Color = ConvertTo-OleColor 'DDE8FC'
+    $imageStatusRange.Borders.Color = ConvertTo-OleColor 'B9CCF4'
+    $imageAreaRange.Merge()
+    $imageAreaRange.Interior.Color = ConvertTo-OleColor 'FFFFFF'
+    $imageAreaRange.Borders.Color = ConvertTo-OleColor 'B9CCF4'
+    $priceList.Rows.Item(22).RowHeight = 34
+    $priceList.Rows('23:32').RowHeight = 21
+    [void]$workbook.Names.Add('ProductImagePreviewStatus', $priceList.Range('M22'))
+    [void]$workbook.Names.Add('ProductImagePreviewArea', $imageAreaRange)
     $priceList.Range("B5:${productLastColumn}1000").Borders.Color = ConvertTo-OleColor 'D9E5EC'
 
     $excel.ActiveWindow.SplitRow = 5
@@ -1044,12 +1068,13 @@ try {
         'نوع ردیف',
         'مبلغ منبع قیمت',
         'ارز منبع قیمت',
-        'نوع منبع قیمت'
+        'نوع منبع قیمت',
+        'نشانی تصویر'
     )
     for ($column = 0; $column -lt $syncHeaders.Count; $column++) {
         $syncData.Cells.Item(1, $column + 1).Value2 = $syncHeaders[$column]
     }
-    $syncTable = $syncData.ListObjects.Add(1, $syncData.Range('A1:W2'), $null, 1)
+    $syncTable = $syncData.ListObjects.Add(1, $syncData.Range('A1:X2'), $null, 1)
     $syncTable.Name = 'SyncData'
     $syncTable.TableStyle = 'TableStyleMedium2'
     [void]$syncTable.DataBodyRange.Delete()
@@ -1322,14 +1347,30 @@ try {
     $settings.Range('B26').Validation.ErrorMessage = 'تعداد رقم گردکردن باید عددی صحیح از صفر تا ۹ باشد.'
     $settings.Range('B26').Validation.ShowError = $true
     $settings.Range('A27:F27').ClearContents()
-    $settings.Range('A3:A26').WrapText = $true
+    $settings.Range('A3:A32').WrapText = $true
     $settings.Rows.Item(14).RowHeight = 30
     $settings.Rows.Item(22).RowHeight = 30
 
     [void](Add-ActionButton $settings 'پیش‌نمایش تغییرات' 'ProductCatalogSync.PreviewPricingChanges' $settings.Range('A28') $settings.Range('A28:C29').Width $settings.Range('A28:C29').Height)
     [void](Add-ActionButton $settings 'اعمال تغییرات تأییدشده' 'ProductCatalogSync.ApplyPricingChanges' $settings.Range('D28') $settings.Range('D28:F29').Width $settings.Range('D28:F29').Height)
 
-    $settings.Range('A31:F36').ClearContents()
+    $settings.Range('A31:F37').ClearContents()
+    $settings.Range('A31').Value2 = 'نمایش تصاویر محصولات'
+    $settings.Range('B31:F31').Merge()
+    $settings.Range('B31').Value2 = 'خیر'
+    $settings.Range('B31:F31').NumberFormat = '@'
+    $settings.Range('B31:F31').Interior.Color = ConvertTo-OleColor 'FFF8E7'
+    $settings.Range('A31:F31').Borders.Color = ConvertTo-OleColor 'B9CCF4'
+    $settings.Range('A31').Font.Bold = $true
+    $settings.Range('B31').Validation.Delete()
+    $settings.Range('B31').Validation.Add(3, 1, 1, 'خیر,بله')
+    [void]$workbook.Names.Add('ShowProductImages', $settings.Range('B31'))
+    $settings.Range('A37:F37').Merge()
+    $settings.Range('A37').Value2 = 'برای حفظ سرعت، فقط تصویر کالای انتخاب‌شده دریافت می‌شود.'
+    $settings.Range('A37:F37').WrapText = $true
+    $settings.Range('A37:F37').Interior.Color = ConvertTo-OleColor 'F6F6F6'
+    $settings.Range('A37:F37').Borders.Color = ConvertTo-OleColor 'D9D9D9'
+    $settings.Rows.Item(32).RowHeight = 32
 
     $settings.Range('A38:F38').Merge()
     $settings.Range('A38').Value2 = 'سیاست قلم'
@@ -1401,7 +1442,7 @@ try {
     # Never format only the first column of several adjacent merged rows.
     # Excel silently coalesces those rows into one large MergeArea, which
     # makes every setting except the first one inaccessible to VBA.
-    foreach ($row in @((10..15) + 18 + 19 + (21..23) + 26 + (39..44) + (46..55))) {
+    foreach ($row in @((10..15) + 18 + 19 + (21..23) + 26 + 31 + (39..44) + (46..55))) {
         $mergeCell = $settings.Range("B${row}")
         $mergeArea = $mergeCell.MergeArea
         try {
@@ -1415,6 +1456,10 @@ try {
             Release-ComObject $mergeArea
             Release-ComObject $mergeCell
         }
+    }
+    $noteMerge = $settings.Range('A37').MergeArea.Address($false, $false)
+    if ($noteMerge -cne 'A37:F37') {
+        throw "Settings image-preview note has MergeArea $noteMerge; expected A37:F37."
     }
     foreach ($dateMergeAddress in @('B20:C20', 'E20:F20')) {
         $mergeCell = $settings.Range($dateMergeAddress.Split(':')[0])
@@ -1442,8 +1487,8 @@ try {
     Set-RangeFontSlots $dashboard.Range('B5:C6,D5:E6,F5:G6,H5:I6,B9:C10,D9:E10,F9:G10,H9:I10,B13:E14,F13:G14,H13:I14,C22:C24,C27:C29,C32:C34') 'Segoe UI'
     Set-RangeFontSlots $settings.Range('A1:F55') 'Yekan Bakh'
     Set-RangeFontSlots $settings.Range('B3:F4,B7:F7,B10:F15,B18:F22,B24:F26,B39:F40,B46:F55') 'Segoe UI'
-    Set-RangeFontSlots $syncData.Range('A1:W1') 'Yekan Bakh'
-    Set-RangeFontSlots $syncData.Range('A2:P2,U2:W2') 'Segoe UI'
+    Set-RangeFontSlots $syncData.Range('A1:X1') 'Yekan Bakh'
+    Set-RangeFontSlots $syncData.Range('A2:P2,U2:X2') 'Segoe UI'
     Set-RangeFontSlots $syncData.Range('Q2:T2') 'Yekan Bakh'
     foreach ($sheet in @($priceList, $dashboard, $settings)) {
         for ($shapeIndex = 1; $shapeIndex -le $sheet.Shapes.Count; $shapeIndex++) {
@@ -1496,7 +1541,7 @@ try {
     Assert-RangeFontSlots $settings.Range('A1:F2') 'Yekan Bakh' 'settings text'
     Assert-RangeFontSlots $settings.Range('B39:F40') 'Segoe UI' 'font family values'
     Assert-RangeFontSlots $settings.Range('B41:F44') 'Yekan Bakh' 'localized font policy values'
-    Assert-RangeFontSlots $syncData.Range('A1:W1') 'Yekan Bakh' 'SyncData headers'
+    Assert-RangeFontSlots $syncData.Range('A1:X1') 'Yekan Bakh' 'SyncData headers'
 
     $priceList.PageSetup.PrintArea = '$B$1:$O$30'
     $priceList.PageSetup.Orientation = 2

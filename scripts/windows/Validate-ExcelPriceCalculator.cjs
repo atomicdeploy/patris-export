@@ -54,6 +54,7 @@ const SYNC_DATA_HEADERS = Object.freeze([
   'مبلغ منبع قیمت',
   'ارز منبع قیمت',
   'نوع منبع قیمت',
+  'نشانی تصویر',
 ]);
 
 const REGRESSION_ACCEPTANCE = Object.freeze({
@@ -92,6 +93,7 @@ function usage() {
     '  --sync                 Run ProductCatalogSync.RefreshAllData silently before validation',
     '  --no-sync              Validate without running the live synchronization macro',
     '  --strict-reference     Fail on every comparable weight/rate difference from the archive',
+    '  --save-synced-to PATH  Save the fully validated synchronized workbook to PATH',
     '  --json                 Print the complete machine-readable report',
     '  --timeout-ms NUMBER    Excel validation timeout in milliseconds (default: 240000)',
     '  --self-test-native-excel-timeout  Force a hidden native Excel timeout safety test',
@@ -113,6 +115,7 @@ function parseArgs(argv) {
     timeoutMs: 240000,
     selfTestProcessSafety: false,
     selfTestNativeExcelTimeout: false,
+    saveSyncedTo: '',
   };
 
   for (let index = 0; index < argv.length; index += 1) {
@@ -136,6 +139,11 @@ function parseArgs(argv) {
         break;
       case '--strict-reference':
         options.strictReference = true;
+        break;
+      case '--save-synced-to':
+        index += 1;
+        if (index >= argv.length) throw new Error('--save-synced-to requires a path');
+        options.saveSyncedTo = argv[index];
         break;
       case '--json':
         options.json = true;
@@ -167,6 +175,7 @@ function parseArgs(argv) {
 
   options.candidate = path.resolve(options.candidate);
   options.reference = path.resolve(options.reference);
+  if (options.saveSyncedTo) options.saveSyncedTo = path.resolve(options.saveSyncedTo);
   if (options.sync === undefined) {
     options.sync = path.extname(options.candidate).toLowerCase() === '.xltm';
   }
@@ -324,6 +333,10 @@ function buildFailures(report, options) {
   failUnless(
     report.pricingProgressUI === true,
     'the visible Persian progress surface lifecycle fixture failed',
+  );
+  failUnless(
+    report.productImagePreviewUI === true,
+    'the product image preview setting/layout/cache safety fixture failed',
   );
   failUnless(
     report.searchRegression.passed === true,
@@ -1040,6 +1053,7 @@ $referencePath = $env:PATRIS_VALIDATOR_REFERENCE
 $stagePath = $env:PATRIS_VALIDATOR_STAGE_PATH
 $runSync = $env:PATRIS_VALIDATOR_SYNC -eq '1'
 $validationTimeoutMilliseconds = [int]$env:PATRIS_VALIDATOR_TIMEOUT_MS
+$saveSyncedTo = $env:PATRIS_VALIDATOR_SAVE_SYNCED_TO
 $invariant = [System.Globalization.CultureInfo]::InvariantCulture
 
 function Set-ValidatorStage([string]$stage, [string]$detail = '') {
@@ -1524,6 +1538,13 @@ function Test-PricingProgressUI([object]$excel, [object]$book) {
     $bookName = ([string]$book.Name).Replace("'", "''")
     return [bool]$excel.Run(
         "'$bookName'!ProductCatalogSync.ValidateOperationProgressUIForValidation"
+    )
+}
+
+function Test-ProductImagePreviewUI([object]$excel, [object]$book) {
+    $bookName = ([string]$book.Name).Replace("'", "''")
+    return [bool]$excel.Run(
+        "'$bookName'!ProductCatalogSync.ValidateProductImagePreviewUIForValidation"
     )
 }
 
@@ -2129,6 +2150,10 @@ function Read-SyncData([object]$book) {
                             (Matrix-Value $values $rowCount $columnCount $row 23),
                             $invariant
                         ).Trim()
+                        ImageURL = [Convert]::ToString(
+                            (Matrix-Value $values $rowCount $columnCount $row 24),
+                            $invariant
+                        ).Trim()
                     }
                 }
             }
@@ -2655,6 +2680,8 @@ try {
     $pricingWritebackUI = Test-PricingWritebackUI $excel $candidateBook
     Set-ValidatorStage 'checking_progress_ui'
     $pricingProgressUI = Test-PricingProgressUI $excel $candidateBook
+    Set-ValidatorStage 'checking_product_image_preview_ui'
+    $productImagePreviewUI = Test-ProductImagePreviewUI $excel $candidateBook
     Set-ValidatorStage 'checking_product_search'
     $candidateSearch = Test-ProductSearch $excel $candidateBook $candidateProducts.Rows
     Set-ValidatorStage 'checking_search_crash_regression'
@@ -2662,6 +2689,12 @@ try {
     Reset-SelectedProductRow $excel $candidateBook
     Set-ValidatorStage 'reading_candidate_sync_data'
     $candidateSyncData = Read-SyncData $candidateBook
+    $imageRows = @($candidateSyncData.Rows | Where-Object {
+        -not [string]::IsNullOrWhiteSpace([string]$_.ImageURL)
+    })
+    $missingImageRows = @($candidateSyncData.Rows | Where-Object {
+        [string]::IsNullOrWhiteSpace([string]$_.ImageURL)
+    })
     $candidateConfig = [pscustomobject]@{
         autoSyncOnOpen = [Convert]::ToString(
             (Sheet-Scalar $candidateBook 3 'B5'),
@@ -3041,6 +3074,9 @@ try {
             duplicateCodes = $syncDictionary.Duplicates
             missingProductCodes = $missingProductCodes
             extraCodes = $extraSyncCodes
+            imageURLRows = $imageRows.Count
+            firstImageRow = if ($imageRows.Count -gt 0) { $imageRows[0] } else { $null }
+            firstMissingImageRow = if ($missingImageRows.Count -gt 0) { $missingImageRows[0] } else { $null }
         }
         reference = [pscustomobject]@{
             path = $referencePath
@@ -3059,6 +3095,7 @@ try {
         fontAudit = $fontAudit
         pricingWritebackUI = $pricingWritebackUI
         pricingProgressUI = $pricingProgressUI
+        productImagePreviewUI = $productImagePreviewUI
         searchRegression = $searchRegression
         transientPricePreview = $transientPricePreview
         comparison = [pscustomobject]@{
@@ -3077,6 +3114,19 @@ try {
             relay109032 = $relayRegression
             wooFallback109001 = $wooFallbackRegression
         }
+    }
+    if (-not [string]::IsNullOrWhiteSpace($saveSyncedTo)) {
+        if (-not $runSync -or -not $syncSucceeded) {
+            throw 'A synchronized workbook can only be saved after a successful live synchronization.'
+        }
+        Set-ValidatorStage 'saving_validated_workbook' $saveSyncedTo
+        $saveParent = [IO.Path]::GetDirectoryName([IO.Path]::GetFullPath($saveSyncedTo))
+        if (-not (Test-Path -LiteralPath $saveParent -PathType Container)) {
+            throw "Validated workbook destination directory does not exist: $saveParent"
+        }
+        $excel.EnableEvents = $false
+        $candidateBook.SaveAs([IO.Path]::GetFullPath($saveSyncedTo), 53)
+        $report | Add-Member -NotePropertyName savedSynchronizedWorkbook -NotePropertyValue ([IO.Path]::GetFullPath($saveSyncedTo))
     }
 }
 catch {
@@ -3962,6 +4012,7 @@ function main() {
             PATRIS_VALIDATOR_REFERENCE: options.reference,
             PATRIS_VALIDATOR_SYNC: options.sync ? '1' : '0',
             PATRIS_VALIDATOR_TIMEOUT_MS: String(options.timeoutMs),
+            PATRIS_VALIDATOR_SAVE_SYNCED_TO: options.saveSyncedTo,
             PATRIS_VALIDATOR_PROCESS_IDENTITY_PATH: processIdentityPath,
             PATRIS_VALIDATOR_STAGE_PATH: stagePath,
           },

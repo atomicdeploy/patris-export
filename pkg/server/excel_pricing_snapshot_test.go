@@ -484,13 +484,14 @@ func TestExcelPricingSnapshotExcelV1UsesPositionalRowsAndSeparateCache(t *testin
 	for index, field := range payload.RowFields {
 		fieldIndex[field] = index
 	}
-	var syncKey, statusText, productName string
+	var syncKey, statusText, productName, imageURL string
 	_ = json.Unmarshal(state.Catalog.Rows[0][fieldIndex["sync_key"]], &syncKey)
 	_ = json.Unmarshal(state.Catalog.Rows[0][fieldIndex["reconciliation_status"]], &statusText)
 	_ = json.Unmarshal(state.Catalog.Rows[0][fieldIndex["name"]], &productName)
+	_ = json.Unmarshal(state.Catalog.Rows[0][fieldIndex["image_url"]], &imageURL)
 	if syncKey != "woo:100001" || statusText != "matched" || productName == "" ||
-		len(state.Catalog.Columns) != 3 {
-		t.Fatalf("projected identity=%q/%q name=%q columns=%d", syncKey, statusText, productName, len(state.Catalog.Columns))
+		imageURL != row["image_url"] || len(state.Catalog.Columns) != 3 {
+		t.Fatalf("projected identity=%q/%q name=%q image=%q columns=%d", syncKey, statusText, productName, imageURL, len(state.Catalog.Columns))
 	}
 	if payload.Integrity.StateDigest != excelPricingSnapshotDigest(payload.State) ||
 		payloadResponse.Header().Get("ETag") !=
@@ -586,7 +587,7 @@ func TestExcelPricingSnapshotExcelV1PayloadSizeForRepresentativeCatalog(t *testi
 	if err := json.Unmarshal(payload.State, &state); err != nil {
 		t.Fatal(err)
 	}
-	if len(state.Catalog.Rows) != len(rows) || len(state.Catalog.Rows[0]) != 26 ||
+	if len(state.Catalog.Rows) != len(rows) || len(state.Catalog.Rows[0]) != 27 ||
 		payload.Integrity.RowCount != len(rows) || payload.Integrity.DistinctSyncKeys != len(rows) {
 		t.Fatalf("excel-v1 representative contract failed: rows=%d fields=%d integrity=%+v", len(state.Catalog.Rows), len(state.Catalog.Rows[0]), payload.Integrity)
 	}
