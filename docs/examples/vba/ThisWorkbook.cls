@@ -7,6 +7,7 @@ Private Sub Workbook_Open()
     ProductCatalogSync.RegisterSearchHotkey
     ThisWorkbook.Worksheets(1).Activate
     ProductCatalogSync.HandleProductImageSettingChanged
+    ProductCatalogSync.PrepareLocalSearchOnOpen
     ProductCatalogSync.StartPricingEventListenerOnOpen
     ProductCatalogSync.RecoverPendingPricingIntentOnOpen
     ProductCatalogSync.ScheduleRefreshOnOpen
@@ -110,7 +111,8 @@ Private Sub Workbook_SheetSelectionChange(ByVal Sh As Object, _
     On Error GoTo CleanExit
     ProductCatalogSync.ResumeAfterCancelledClose
     If Sh Is ThisWorkbook.Worksheets(1) Then
-        ProductCatalogSync.UpdateSearchEnterHotkey Target
+        If ProductCatalogSync.UpdateSearchEnterHotkey(Target) Then _
+            GoTo CleanExit
     Else
         ProductCatalogSync.ReleaseSearchEnterHotkey
         Exit Sub

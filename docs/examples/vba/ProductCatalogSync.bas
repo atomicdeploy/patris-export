@@ -13,9 +13,10 @@ Private Const MAX_STATE_PAGES As Long = 8
 Private Const MAX_SNAPSHOT_ROWS As Long = 2000
 Private Const HTTP_TIMEOUT_MS As Long = 150000
 Private Const PRICING_HTTP_TIMEOUT_MS As Long = 600000
-Private Const SNAPSHOT_WAIT_TIMEOUT_MS As Long = 180000
+Private Const SNAPSHOT_WAIT_TIMEOUT_MS As Long = 120000
+Private Const MAX_REFRESH_WALL_SECONDS As Double = 125#
 Private Const OPEN_REFRESH_DELAY_SECONDS As Long = 2
-Private Const SEARCH_DELAY_SECONDS As Long = 0
+Private Const SEARCH_DELAY_SECONDS As Double = 0.55
 Private Const SEARCH_RETRY_LIMIT As Long = 6
 Private Const PROGRESS_RESET_SECONDS As Long = 6
 Private Const UI_PUMP_ROW_INTERVAL As Long = 25
@@ -135,6 +136,17 @@ Private mSearchScheduled As Boolean
 Private mScheduledSearchTime As Date
 Private mSearchRetryCount As Long
 Private mPendingSearchQuery As String
+Private mSearchRequestGeneration As Long
+Private mPendingSearchGeneration As Long
+Private mLastSearchSelectionSheet As String
+Private mLastSearchSelectionRow As Long
+Private mLastSearchSelectionColumn As Long
+Private mSearchIndexReady As Boolean
+Private mSearchIndexRowCount As Long
+Private mSearchIndexRevision As String
+Private mSearchIndexNames() As String
+Private mSearchIndexProductCodes() As String
+Private mSearchIndexWooIDs() As String
 Private mPricingCSRFToken As String
 Private mSessionSeconds As Double
 Private mStatePageTimingText As String
@@ -786,6 +798,7 @@ Private Sub CommitRefreshSnapshot(ByVal reconciledRows As Object, _
     settings.Range("G46").Value2 = expectedRows
     settings.Range("G47").Value2 = countSignature
 
+    InvalidateProductSearchIndex
     productRows = ImportReconciledCatalog(reconciledRows)
     EnforceConfiguredFontsAfterRefresh
     If productRows <> expectedRows Then
@@ -893,6 +906,12 @@ Public Sub ScheduleRefreshOnOpen()
     End If
     mRefreshScheduleFailed = False
     If Trim$(CStr(ConfigSheet().Range("B5").Value2)) = U("062806440647") Then
+        If HasCoherentLocalCatalog() Then
+            SetOperationProgressSurface "listener_wait", -1, _
+                U("062F06310020062D062706440020062806310631063306CC0020062A063A06CC06CC06310627062A0020062A0627063206470020062F06310020067E0633200C0632064506CC06460647061B00200641064706310633062A002006410639064406CC00200642062706270644002006270633062A06410627062F0647002006270633062A2026"), _
+                "active", True
+            Exit Sub
+        End If
         CancelScheduledRefresh
         mScheduledRefreshTime = Now + _
             TimeSerial(0, 0, OPEN_REFRESH_DELAY_SECONDS)
@@ -908,6 +927,36 @@ Public Sub ScheduleRefreshOnOpen()
 ScheduleFailed:
     mRefreshScheduled = False
     mRefreshScheduleFailed = True
+    Err.Clear
+End Sub
+
+Private Function HasCoherentLocalCatalog() As Boolean
+    Dim table As ListObject
+    Dim expectedRows As Long
+
+    On Error GoTo CleanExit
+    Set table = PriceSheet().ListObjects(PRODUCTS_TABLE)
+    If table.DataBodyRange Is Nothing Then Exit Function
+    expectedRows = CLng(Val(CStr(ConfigSheet().Range("G46").Value2)))
+    If expectedRows <= 0 Or expectedRows <> table.ListRows.Count Then _
+        Exit Function
+    If Len(Trim$(CStr(ConfigSheet().Range("G44").Value2))) = 0 Or _
+       Len(Trim$(CStr(ConfigSheet().Range("G45").Value2))) = 0 Then _
+        Exit Function
+    HasCoherentLocalCatalog = True
+CleanExit:
+End Function
+
+Public Sub PrepareLocalSearchOnOpen()
+    On Error GoTo PrepareFailed
+    If Not HasCoherentLocalCatalog() Then Exit Sub
+    SetOperationProgressSurface "search_index", -1, _
+        U("062F06310020062D062706440020062206450627062F0647200C06330627063206CC0020062C0633062A200C0648062C064806CC00200633063106CC06392026"), _
+        "active", True
+    WarmProductSearchIndex
+    Exit Sub
+PrepareFailed:
+    InvalidateProductSearchIndex
     Err.Clear
 End Sub
 
@@ -1848,7 +1897,8 @@ Private Sub HandleSnapshotWaitResponse(ByVal statusCode As Long, _
             Exit Sub
         End If
         If IsSnapshotDriftCode(mSnapshotJobCode) And _
-           mOperationSnapshotRetryCount < 3 Then
+           mOperationSnapshotRetryCount < 3 And _
+           Not RefreshWallBudgetExhausted() Then
             mOperationSnapshotRetryCount = mOperationSnapshotRetryCount + 1
             mSourceID = vbNullString
             mSourceDataset = vbNullString
@@ -1863,7 +1913,8 @@ Private Sub HandleSnapshotWaitResponse(ByVal statusCode As Long, _
 End Sub
 
 Private Function RetrySnapshotAfterSourceDrift() As Boolean
-    If mOperationSnapshotRetryCount >= 3 Then Exit Function
+    If mOperationSnapshotRetryCount >= 3 Or _
+       RefreshWallBudgetExhausted() Then Exit Function
 
     mOperationSnapshotRetryCount = mOperationSnapshotRetryCount + 1
     mSourceID = vbNullString
@@ -1874,6 +1925,12 @@ Private Function RetrySnapshotAfterSourceDrift() As Boolean
         T("source_changed"), "active", False
     BeginContractRequest "contract"
     RetrySnapshotAfterSourceDrift = True
+End Function
+
+Private Function RefreshWallBudgetExhausted() As Boolean
+    If mOperationStartedAt <= 0# Then Exit Function
+    RefreshWallBudgetExhausted = _
+        (PhaseElapsed(mOperationStartedAt) >= MAX_REFRESH_WALL_SECONDS)
 End Function
 
 Private Sub HandleSnapshotPayloadResponse(ByVal statusCode As Long, _
@@ -3001,10 +3058,49 @@ Public Sub RefreshSearchEnterHotkey()
     ReleaseSearchEnterHotkey
 End Sub
 
-Public Sub UpdateSearchEnterHotkey(ByVal target As Range)
-    ' Never bind Enter from SelectionChange. The old synchronous OnKey chain
-    ' could re-enter here from SearchProducts and exhaust Excel's VBA stack.
+Public Function UpdateSearchEnterHotkey(ByVal target As Range) As Boolean
+    Dim queueNativeEnter As Boolean
+    Dim searchInput As Range
+
+    ' Enter remains native. Detect only the completed selection movement after
+    ' Excel has left edit mode, then queue one top-level callback. Never bind or
+    ' mutate Enter from this SelectionChange path: doing so used to recurse
+    ' through Excel/VBA until the native stack was exhausted.
     ReleaseSearchEnterHotkey
+    queueNativeEnter = IsNativeSearchEnterTransition(target)
+    RememberSearchSelection target
+    If queueNativeEnter Then
+        RunNativeEnterProductSearch
+        UpdateSearchEnterHotkey = True
+        Exit Function
+    End If
+    On Error Resume Next
+    Set searchInput = ThisWorkbook.Names("ProductSearchQuery"). _
+        RefersToRange.MergeArea
+    On Error GoTo 0
+    If Not searchInput Is Nothing And Not target Is Nothing Then
+        If Not Intersect(target.Cells(1, 1), searchInput) Is Nothing Then _
+            UpdateSearchEnterHotkey = True
+    End If
+End Function
+
+Private Sub RunNativeEnterProductSearch()
+    Dim query As String
+    Dim generation As Long
+
+    ' SelectionChange is already a top-level Excel event. SearchProductsForQuery
+    ' disables events before selecting the result, so this direct native-Enter
+    ' path cannot re-enter SelectionChange. It also cancels the SheetChange
+    ' timer, preventing a delayed duplicate search or a one-query lag.
+    On Error GoTo CleanExit
+    CancelScheduledProductSearch
+    mSearchRequestGeneration = mSearchRequestGeneration + 1
+    generation = mSearchRequestGeneration
+    query = ReadSearchLiteral()
+    mPendingSearchQuery = query
+    mPendingSearchGeneration = generation
+    SearchProductsForQuery query, generation
+CleanExit:
 End Sub
 
 Public Sub ReleaseSearchEnterHotkey()
@@ -3055,7 +3151,9 @@ End Sub
 
 Public Sub QueueProductSearch()
     On Error GoTo CleanExit
+    mSearchRequestGeneration = mSearchRequestGeneration + 1
     mPendingSearchQuery = ReadSearchLiteral()
+    mPendingSearchGeneration = mSearchRequestGeneration
     mSearchRetryCount = 0
     SchedulePendingProductSearch
 CleanExit:
@@ -3064,7 +3162,10 @@ End Sub
 Private Sub SchedulePendingProductSearch()
     If mWorkbookClosing Then Exit Sub
     CancelScheduledProductSearch
-    mScheduledSearchTime = Now + TimeSerial(0, 0, SEARCH_DELAY_SECONDS)
+    ' Application.OnTime can drop a callback scheduled at the already-passed
+    ' exact value of Now. A sub-second future tick remains locally immediate
+    ' while guaranteeing execution outside SheetChange/SelectionChange.
+    mScheduledSearchTime = Now + (SEARCH_DELAY_SECONDS / 86400#)
     Application.OnTime EarliestTime:=mScheduledSearchTime, _
         Procedure:=QualifiedWorkbookMacro("RunScheduledProductSearch"), _
         Schedule:=True
@@ -3072,6 +3173,9 @@ Private Sub SchedulePendingProductSearch()
 End Sub
 
 Public Sub RunScheduledProductSearch()
+    Dim queuedQuery As String
+    Dim queuedGeneration As Long
+
     mSearchScheduled = False
     If mWorkbookClosing Then Exit Sub
     If SearchOperationBusy() Then
@@ -3086,7 +3190,9 @@ Public Sub RunScheduledProductSearch()
         Exit Sub
     End If
     mSearchRetryCount = 0
-    SearchProducts
+    queuedQuery = mPendingSearchQuery
+    queuedGeneration = mPendingSearchGeneration
+    SearchProductsForQuery queuedQuery, queuedGeneration
 End Sub
 
 Public Sub CancelScheduledProductSearch()
@@ -3110,6 +3216,11 @@ Private Function SearchOperationBusy() As Boolean
 End Function
 
 Public Sub SearchProducts()
+    SearchProductsForQuery ReadSearchLiteral(), 0
+End Sub
+
+Private Sub SearchProductsForQuery(ByVal requestedQuery As String, _
+                                   ByVal requestGeneration As Long)
     Dim table As ListObject
     Dim query As String
     Dim matches As Collection
@@ -3124,10 +3235,18 @@ Public Sub SearchProducts()
 
     ResumeAfterCancelledClose
     If SearchOperationBusy() Then
-        mPendingSearchQuery = ReadSearchLiteral()
+        If requestGeneration = 0 Then
+            mSearchRequestGeneration = mSearchRequestGeneration + 1
+            requestGeneration = mSearchRequestGeneration
+            requestedQuery = ReadSearchLiteral()
+        End If
+        mPendingSearchQuery = requestedQuery
+        mPendingSearchGeneration = requestGeneration
         SchedulePendingProductSearch
         Exit Sub
     End If
+    If requestGeneration > 0 And _
+       requestGeneration <> mPendingSearchGeneration Then Exit Sub
     eventsWereEnabled = Application.EnableEvents
     screenWasUpdating = Application.ScreenUpdating
     On Error GoTo CleanExit
@@ -3137,7 +3256,7 @@ Public Sub SearchProducts()
     cancelKeyCaptured = True
     Application.EnableCancelKey = xlErrorHandler
     Set table = PriceSheet().ListObjects(PRODUCTS_TABLE)
-    query = ReadSearchLiteral()
+    query = requestedQuery
     If Len(query) = 0 Then
         ResetProductSearchState False
         FocusProductSearch
@@ -3158,7 +3277,7 @@ Public Sub SearchProducts()
 
     If matchCount = 0 Then
         mSearchCurrentRow = 0
-        HighlightSelectedProductRow PriceSheet().Range("A1")
+        HighlightSelectedProductRow PriceSheet().Range("A1"), False
         SetSearchButtonCaption T("search_button") & " (0)"
     Else
         matchIndex = NextProductSearchMatchIndex( _
@@ -3172,7 +3291,8 @@ Public Sub SearchProducts()
         Application.EnableEvents = False
         Application.ScreenUpdating = False
         anchor.Select
-        HighlightSelectedProductRow anchor
+        RememberSearchSelection anchor
+        HighlightSelectedProductRow anchor, False
         ActiveWindow.ScrollColumn = ProductViewportColumn(table)
         ActiveWindow.ScrollRow = Application.Max(1, anchor.Row - 3)
     End If
@@ -3201,40 +3321,209 @@ Private Function ProductSearchMatchRows(ByVal table As ListObject, _
                                         ByVal query As String) As Collection
     Dim matches As New Collection
     Dim rowIndex As Long
-    Dim columnIndex As Long
-    Dim values As Variant
+    Dim normalizedQuery As String
+    Dim filteredView As Boolean
+    Dim visibleRows As Object
+    Dim rowIsVisible As Boolean
 
     If table.DataBodyRange Is Nothing Then
         Set ProductSearchMatchRows = matches
         Exit Function
     End If
-    values = table.DataBodyRange.Value2
+    normalizedQuery = NormalizeProductSearchText(query)
+    If Len(normalizedQuery) = 0 Then
+        Set ProductSearchMatchRows = matches
+        Exit Function
+    End If
+    EnsureProductSearchIndex table
+    filteredView = table.Parent.FilterMode
+    If filteredView Then Set visibleRows = VisibleProductRowMap(table)
     For rowIndex = 1 To table.DataBodyRange.Rows.Count
-        For columnIndex = 1 To table.DataBodyRange.Columns.Count
-            If Not IsError(values(rowIndex, columnIndex)) Then
-                If InStr(1, CStr(values(rowIndex, columnIndex)), _
-                         query, vbTextCompare) > 0 Then
-                    matches.Add rowIndex
-                    Exit For
-                End If
+        rowIsVisible = True
+        If filteredView Then _
+            rowIsVisible = visibleRows.Exists(CStr(rowIndex))
+        If rowIsVisible Then
+            If (Len(mSearchIndexProductCodes(rowIndex)) > 0 And _
+                mSearchIndexProductCodes(rowIndex) = normalizedQuery) Or _
+               (Len(mSearchIndexWooIDs(rowIndex)) > 0 And _
+                mSearchIndexWooIDs(rowIndex) = normalizedQuery) Or _
+               (Len(mSearchIndexNames(rowIndex)) > 0 And _
+                InStr(1, mSearchIndexNames(rowIndex), normalizedQuery, _
+                      vbBinaryCompare) > 0) Then
+                matches.Add rowIndex
             End If
-        Next columnIndex
+        End If
     Next rowIndex
     Set ProductSearchMatchRows = matches
 End Function
 
+Private Sub WarmProductSearchIndex()
+    On Error GoTo WarmFailed
+    EnsureProductSearchIndex PriceSheet().ListObjects(PRODUCTS_TABLE)
+    Exit Sub
+WarmFailed:
+    InvalidateProductSearchIndex
+    Err.Clear
+End Sub
+
+Private Sub EnsureProductSearchIndex(ByVal table As ListObject)
+    Dim rowCount As Long
+    Dim rowIndex As Long
+    Dim revision As String
+    Dim productCodes As Variant
+    Dim productNames As Variant
+    Dim wooIDs As Variant
+
+    If table.DataBodyRange Is Nothing Then
+        InvalidateProductSearchIndex
+        Exit Sub
+    End If
+    rowCount = table.DataBodyRange.Rows.Count
+    revision = Trim$(CStr(ConfigSheet().Range("G44").Value2))
+    If mSearchIndexReady And mSearchIndexRowCount = rowCount And _
+       mSearchIndexRevision = revision Then Exit Sub
+
+    InvalidateProductSearchIndex
+    productCodes = table.DataBodyRange.Columns(7).Value2
+    productNames = table.DataBodyRange.Columns(8).Value2
+    wooIDs = table.DataBodyRange.Columns(9).Value2
+    ReDim mSearchIndexProductCodes(1 To rowCount)
+    ReDim mSearchIndexNames(1 To rowCount)
+    ReDim mSearchIndexWooIDs(1 To rowCount)
+    For rowIndex = 1 To rowCount
+        mSearchIndexProductCodes(rowIndex) = _
+            SearchCellText(productCodes(rowIndex, 1))
+        mSearchIndexNames(rowIndex) = _
+            SearchCellText(productNames(rowIndex, 1))
+        mSearchIndexWooIDs(rowIndex) = _
+            SearchCellText(wooIDs(rowIndex, 1))
+    Next rowIndex
+    mSearchIndexRowCount = rowCount
+    mSearchIndexRevision = revision
+    mSearchIndexReady = True
+End Sub
+
+Private Sub InvalidateProductSearchIndex()
+    mSearchIndexReady = False
+    mSearchIndexRowCount = 0
+    mSearchIndexRevision = vbNullString
+    Erase mSearchIndexProductCodes
+    Erase mSearchIndexNames
+    Erase mSearchIndexWooIDs
+End Sub
+
+Private Function VisibleProductRowMap(ByVal table As ListObject) As Object
+    Dim visibleRows As Object
+    Dim visibleRange As Range
+    Dim area As Range
+    Dim firstTableRow As Long
+    Dim firstVisibleIndex As Long
+    Dim offset As Long
+
+    Set visibleRows = CreateObject("Scripting.Dictionary")
+    On Error GoTo CleanExit
+    firstTableRow = table.DataBodyRange.Row
+    Set visibleRange = table.DataBodyRange.Columns(1). _
+        SpecialCells(xlCellTypeVisible)
+    For Each area In visibleRange.Areas
+        firstVisibleIndex = area.Row - firstTableRow + 1
+        For offset = 0 To area.Rows.Count - 1
+            visibleRows(CStr(firstVisibleIndex + offset)) = True
+        Next offset
+    Next area
+CleanExit:
+    Set VisibleProductRowMap = visibleRows
+End Function
+
+Private Function SearchCellText(ByVal value As Variant) As String
+    If IsError(value) Or IsNull(value) Or IsEmpty(value) Then Exit Function
+    SearchCellText = NormalizeProductSearchText(CStr(value))
+End Function
+
+Private Function NormalizeProductSearchText(ByVal value As String) As String
+    Dim digitIndex As Long
+
+    value = LCase$(Trim$(value))
+    value = Replace(value, ChrW(&H64A), ChrW(&H6CC))
+    value = Replace(value, ChrW(&H643), ChrW(&H6A9))
+    value = Replace(value, ChrW(&H200C), " ")
+    value = Replace(value, ChrW(&HA0), " ")
+    For digitIndex = 0 To 9
+        value = Replace(value, ChrW(&H6F0 + digitIndex), _
+                        CStr(digitIndex))
+        value = Replace(value, ChrW(&H660 + digitIndex), _
+                        CStr(digitIndex))
+    Next digitIndex
+    Do While InStr(1, value, "  ", vbBinaryCompare) > 0
+        value = Replace(value, "  ", " ")
+    Loop
+    NormalizeProductSearchText = Trim$(value)
+End Function
+
+Private Function IsNativeSearchEnterTransition(ByVal target As Range) As Boolean
+    Dim currentCell As Range
+    Dim searchInput As Range
+    Dim table As ListObject
+    Dim currentPriceCell As Range
+    Dim currentSheetName As String
+
+    On Error GoTo CleanExit
+    If target Is Nothing Then Exit Function
+    Set currentCell = target.Cells(1, 1)
+    currentSheetName = currentCell.Worksheet.CodeName
+    If currentSheetName <> mLastSearchSelectionSheet Then Exit Function
+    If currentCell.Column <> mLastSearchSelectionColumn Or _
+       currentCell.Row <> mLastSearchSelectionRow + 1 Then Exit Function
+    If Len(ReadSearchLiteral()) = 0 Then Exit Function
+
+    Set searchInput = ThisWorkbook.Names( _
+        "ProductSearchQuery").RefersToRange.MergeArea
+    If mLastSearchSelectionRow = searchInput.Row And _
+       mLastSearchSelectionColumn = searchInput.Column Then
+        IsNativeSearchEnterTransition = True
+        Exit Function
+    End If
+    If mSearchCurrentRow <= 0 Or _
+       mLastSearchSelectionSheet <> PriceSheet().CodeName Then Exit Function
+    Set table = PriceSheet().ListObjects(PRODUCTS_TABLE)
+    If table.DataBodyRange Is Nothing Or _
+       mSearchCurrentRow > table.DataBodyRange.Rows.Count Then Exit Function
+    Set currentPriceCell = table.DataBodyRange.Cells(mSearchCurrentRow, 1)
+    If mLastSearchSelectionRow = currentPriceCell.Row And _
+       mLastSearchSelectionColumn = currentPriceCell.Column Then _
+        IsNativeSearchEnterTransition = True
+CleanExit:
+End Function
+
+Private Sub RememberSearchSelection(ByVal target As Range)
+    On Error GoTo CleanExit
+    If target Is Nothing Then Exit Sub
+    mLastSearchSelectionSheet = target.Cells(1, 1).Worksheet.CodeName
+    mLastSearchSelectionRow = target.Cells(1, 1).Row
+    mLastSearchSelectionColumn = target.Cells(1, 1).Column
+CleanExit:
+End Sub
+
 Private Function ProductRowMatchesQuery(ByVal productRow As Range, _
                                         ByVal query As String) As Boolean
-    Dim cell As Range
+    Dim normalizedQuery As String
+    Dim normalizedName As String
+    Dim normalizedProductCode As String
+    Dim normalizedWooID As String
 
-    For Each cell In productRow.Cells
-        If Not IsError(cell.Value2) Then
-            If InStr(1, CStr(cell.Value2), query, vbTextCompare) > 0 Then
-                ProductRowMatchesQuery = True
-                Exit Function
-            End If
-        End If
-    Next cell
+    normalizedQuery = NormalizeProductSearchText(query)
+    If Len(normalizedQuery) = 0 Or productRow.Columns.Count < 9 Then _
+        Exit Function
+    normalizedProductCode = SearchCellText(productRow.Cells(1, 7).Value2)
+    normalizedName = SearchCellText(productRow.Cells(1, 8).Value2)
+    normalizedWooID = SearchCellText(productRow.Cells(1, 9).Value2)
+    ProductRowMatchesQuery = _
+        (Len(normalizedProductCode) > 0 And _
+         normalizedProductCode = normalizedQuery) Or _
+        (Len(normalizedWooID) > 0 And _
+         normalizedWooID = normalizedQuery) Or _
+        (Len(normalizedName) > 0 And _
+         InStr(1, normalizedName, normalizedQuery, vbBinaryCompare) > 0)
 End Function
 
 Private Function NextProductSearchMatchIndex(ByVal matches As Collection, _
@@ -3292,7 +3581,8 @@ Private Sub SetSearchButtonCaption(ByVal caption As String)
 CleanExit:
 End Sub
 
-Public Sub HighlightSelectedProductRow(ByVal target As Range)
+Public Sub HighlightSelectedProductRow(ByVal target As Range, _
+        Optional ByVal allowPreviewAndPump As Boolean = True)
     Dim table As ListObject
     Dim selectedRow As Long
     Dim relativeRow As Long
@@ -3315,6 +3605,11 @@ Public Sub HighlightSelectedProductRow(ByVal target As Range)
         End If
     End If
     Application.EnableEvents = False
+    If Not allowPreviewAndPump Then
+        ConfigSheet().Range("G30").Value2 = selectedRow
+        ConfigSheet().Range("G48").Value2 = 0
+        GoTo CleanExit
+    End If
     previousSelectedRow = CLng(Val(CStr(ConfigSheet().Range("G30").Value2)))
     ConfigSheet().Range("G30").Value2 = 0
     ConfigSheet().Range("G48").Value2 = 0
@@ -3329,7 +3624,7 @@ Public Sub HighlightSelectedProductRow(ByVal target As Range)
         End If
     End If
     If relativeRow <= 0 Then
-        RefreshProductImagePreview 0
+        If allowPreviewAndPump Then RefreshProductImagePreview 0
         GoTo CleanExit
     End If
 
@@ -3347,8 +3642,10 @@ Public Sub HighlightSelectedProductRow(ByVal target As Range)
             End If
         End If
     End If
-    RefreshProductImagePreview relativeRow
-    PumpExcelMessages
+    If allowPreviewAndPump Then
+        RefreshProductImagePreview relativeRow
+        PumpExcelMessages
+    End If
 CleanExit:
     Application.EnableEvents = previousEvents
 End Sub
@@ -3842,11 +4139,24 @@ Public Sub RecoverPendingPricingIntentOnOpen()
     desiredValue = CanonicalCellText(settings.Range("H48").Value2)
     If settingKey <> "yuan_price" Or Len(desiredValue) = 0 Then Exit Sub
     If CanonicalCellText(settings.Range("G18").Value2) = desiredValue Then
+        ClearQueuedPricingIntent settingKey
         ClearDurablePendingPricingIntent
         Exit Sub
     End If
     settings.Range("B18").Value = CDbl(desiredValue)
     QueuePricingInputWriteback settings.Range("B18")
+End Sub
+
+Private Sub ClearQueuedPricingIntent(ByVal settingKey As String)
+    EnsureWritebackQueue
+    If mWritebackPending.Exists(settingKey) Then _
+        mWritebackPending.Remove settingKey
+    If mWritebackPendingValues.Exists(settingKey) Then _
+        mWritebackPendingValues.Remove settingKey
+    If mWritebackPendingGenerations.Exists(settingKey) Then _
+        mWritebackPendingGenerations.Remove settingKey
+    If mWritebackPending.Count = 0 And mWritebackRequest Is Nothing And _
+       Len(mWritebackStage) = 0 Then UnschedulePricingWriteback
 End Sub
 
 Private Sub EnsureWritebackQueue()
@@ -3936,8 +4246,6 @@ Public Sub RunScheduledPricingWriteback()
     mWritebackJobID = vbNullString
     mWritebackCSRFToken = vbNullString
     mWritebackPollCount = 0
-    mActiveWritebackGeneration = 0
-    mActiveWritebackDesiredValue = vbNullString
     mWritebackStage = "session"
     SetOperationProgressSurface "writeback_send", -1, _
         U("062F06310020062D062706440020062706310633062706440020062A063A06CC06CC0631"), _
@@ -4378,6 +4686,8 @@ Private Sub CompletePricingWriteback()
     mWritebackJobID = vbNullString
     mWritebackCSRFToken = vbNullString
     mWritebackPollCount = 0
+    mActiveWritebackGeneration = 0
+    mActiveWritebackDesiredValue = vbNullString
     EnsureWritebackQueue
     If mWritebackPending.Count > 0 Then SchedulePricingWriteback 1
     If completedSiteConfirmation Then
@@ -4777,7 +5087,7 @@ Public Function ValidateOperationProgressUIForValidation() As Boolean
     SetSnapshotProgress 0, 0, 0
     If Not OperationProgressStageMatchesForValidation( _
         "refresh_download", -1, _
-        U("062F06310020062D062706440020062F063106CC06270641062A0020062F0627062F0647200C06470627")) Then _
+        U("062F06310020062D062706440020062F063106CC06270641062A0020062F0627062F0647200C0647062706CC0020062C062F06CC062F0020062F06310020067E063300200627063200200632064506CC06460647061B00200641064706310633062A002006410639064406CC00200642062706280644002006270633062A06410627062F0647002006270633062A002E002E002E")) Then _
         GoTo Failed
     SetRefreshProgress "3/4"
     If Not OperationProgressStageMatchesForValidation( _
@@ -5168,7 +5478,17 @@ Private Sub RestorePricingStateSnapshot(ByVal settings As Worksheet, _
     Dim proposalAddress As Variant
     Dim preservedProposals As Object
     Dim index As Long
+    Dim previousEvents As Boolean
+    Dim previousInternalRefresh As Boolean
+    Dim restoreErrorNumber As Long
+    Dim restoreErrorSource As String
+    Dim restoreErrorDescription As String
 
+    previousEvents = Application.EnableEvents
+    previousInternalRefresh = mInternalPricingRefresh
+    On Error GoTo RestoreFailed
+    Application.EnableEvents = False
+    mInternalPricingRefresh = True
     addresses = PricingStateAddresses()
     If LBound(values) <> LBound(addresses) Or _
        UBound(values) <> UBound(addresses) Then
@@ -5194,6 +5514,20 @@ Private Sub RestorePricingStateSnapshot(ByVal settings As Worksheet, _
                 preservedProposals(CStr(proposalAddress))
         Next proposalAddress
     End If
+RestoreExit:
+    mInternalPricingRefresh = previousInternalRefresh
+    Application.EnableEvents = previousEvents
+    If restoreErrorNumber <> 0 Then
+        Err.Raise restoreErrorNumber, restoreErrorSource, _
+                  restoreErrorDescription
+    End If
+    Exit Sub
+
+RestoreFailed:
+    restoreErrorNumber = Err.Number
+    restoreErrorSource = Err.Source
+    restoreErrorDescription = Err.Description
+    Resume RestoreExit
 End Sub
 
 Private Function PricingSettingsCanonical() As String
@@ -5463,7 +5797,7 @@ Private Sub SetSnapshotProgress(ByVal completedPages As Long, _
             " (" & CStr(rowCount) & ")", "active", False
     Else
         SetOperationProgressSurface "refresh_download", -1, _
-            U("062F06310020062D062706440020062F063106CC06270641062A0020062F0627062F0647200C06470627"), _
+            U("062F06310020062D062706440020062F063106CC06270641062A0020062F0627062F0647200C0647062706CC0020062C062F06CC062F0020062F06310020067E063300200627063200200632064506CC06460647061B00200641064706310633062A002006410639064406CC00200642062706280644002006270633062A06410627062F0647002006270633062A002E002E002E"), _
             "active", False
     End If
     PumpExcelMessages
@@ -7098,9 +7432,6 @@ Private Sub ApplyWooLinks(ByVal table As ListObject, _
     Dim rowIndex As Long
 
     If table.DataBodyRange Is Nothing Or syncTable.DataBodyRange Is Nothing Then Exit Sub
-    On Error Resume Next
-    table.ListColumns(8).DataBodyRange.Hyperlinks.Delete
-    On Error GoTo 0
     For rowIndex = 1 To table.DataBodyRange.Rows.Count
         ApplyWooLinkRow table, syncTable, rowIndex
         If rowIndex Mod UI_PUMP_ROW_INTERVAL = 0 Then PumpExcelMessages
@@ -7147,6 +7478,7 @@ Private Sub ApplyWooLinkRow(ByVal table As ListObject, _
     Dim linkText As String
     Dim publicationStatus As String
     Dim linkCell As Range
+    Dim currentAddress As String
 
     On Error GoTo RowFailed
     wooID = Trim$(CStr(syncTable.DataBodyRange.Cells(rowIndex, 9).Value2))
@@ -7155,6 +7487,9 @@ Private Sub ApplyWooLinkRow(ByVal table As ListObject, _
         syncTable.DataBodyRange.Cells(rowIndex, 18).Value2)))
     Set linkCell = table.DataBodyRange.Cells(rowIndex, 8)
     linkText = CStr(linkCell.Value2)
+    If linkCell.Hyperlinks.Count > 0 Then
+        currentAddress = CStr(linkCell.Hyperlinks(1).Address)
+    End If
 
     linkCell.Value2 = linkText
     ApplyProductNameDirection linkCell
@@ -7168,15 +7503,22 @@ Private Sub ApplyWooLinkRow(ByVal table As ListObject, _
     End Select
 
     If Len(wooID) = 0 Then
+        If linkCell.Hyperlinks.Count > 0 Then linkCell.Hyperlinks.Delete
         linkCell.Font.Color = RGB(164, 40, 40)
         Exit Sub
     End If
-    If Len(linkText) = 0 Then Exit Sub
+    If Len(linkText) = 0 Then
+        If linkCell.Hyperlinks.Count > 0 Then linkCell.Hyperlinks.Delete
+        Exit Sub
+    End If
 
     If IsAllowedDigitalogicUrl(permalink) Then
-        table.Parent.Hyperlinks.Add _
-            Anchor:=linkCell, Address:=permalink, _
-            TextToDisplay:=linkText
+        If StrComp(currentAddress, permalink, vbTextCompare) <> 0 Then
+            If linkCell.Hyperlinks.Count > 0 Then linkCell.Hyperlinks.Delete
+            table.Parent.Hyperlinks.Add _
+                Anchor:=linkCell, Address:=permalink, _
+                TextToDisplay:=linkText
+        End If
         ApplyProductNameFont linkCell
         ApplyProductNameDirection linkCell
         Select Case publicationStatus
@@ -7187,6 +7529,8 @@ Private Sub ApplyWooLinkRow(ByVal table As ListObject, _
             Case Else
                 linkCell.Font.Color = RGB(164, 40, 40)
         End Select
+    ElseIf linkCell.Hyperlinks.Count > 0 Then
+        linkCell.Hyperlinks.Delete
     End If
     Exit Sub
 

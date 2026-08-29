@@ -1383,7 +1383,7 @@ func TestDynamicCalculatorVBASourceGuardsLivePricingBeforeMutation(t *testing.T)
 		"Private Sub BeginRepairRequest",
 		`StartFiniteRequest "POST", UniversalRefreshURL()`,
 		"Private Function RetrySnapshotAfterSourceDrift() As Boolean",
-		"If mOperationSnapshotRetryCount >= 3 Then Exit Function",
+		"If mOperationSnapshotRetryCount >= 3 Or _",
 		`errorCode = "canonical_source_mismatch" And _`,
 		`"snapshot_source_revision_conflict" And _`,
 		"RetrySnapshotAfterSourceDrift() Then",
@@ -1484,7 +1484,7 @@ func TestDynamicCalculatorVBASourceGuardsLivePricingBeforeMutation(t *testing.T)
 		"Public Sub SearchProducts()",
 		"Public Sub ClearProductSearch()",
 		"Public Sub RefreshSearchEnterHotkey()",
-		"Public Sub UpdateSearchEnterHotkey(ByVal target As Range)",
+		"Public Function UpdateSearchEnterHotkey(ByVal target As Range) As Boolean",
 		"Public Sub ReleaseSearchEnterHotkey()",
 		"Public Sub HandleProductSearchEnter()",
 		"Private Function ProductSearchMatchRows",
@@ -1524,7 +1524,9 @@ func TestDynamicCalculatorVBASourceGuardsLivePricingBeforeMutation(t *testing.T)
 		t.Fatal("Enter must remain native; rebinding it can recurse through selection events and exhaust Excel's VBA stack")
 	}
 	for _, required := range []string{
-		"Private Const SNAPSHOT_WAIT_TIMEOUT_MS As Long = 180000",
+		"Private Const SNAPSHOT_WAIT_TIMEOUT_MS As Long = 120000",
+		"Private Const MAX_REFRESH_WALL_SECONDS As Double = 125#",
+		"Private Const SEARCH_DELAY_SECONDS As Double = 0.55",
 		"Private Sub RestoreExcelInteractivityAfterOperation()",
 		"Application.EnableEvents = True",
 		"Public Sub StartPricingEventListenerOnOpen()",
@@ -1698,13 +1700,76 @@ func TestDynamicCalculatorVBASourceGuardsLivePricingBeforeMutation(t *testing.T)
 	}
 	for _, required := range []string{
 		"If SearchOperationBusy() Then",
+		"requestedQuery As String",
+		"requestGeneration As Long",
 		"mSearchInProgress = True",
 		"Application.EnableCancelKey = xlErrorHandler",
+		"RememberSearchSelection anchor",
 		`SetSearchButtonCaption T("search_button") & " (0)"`,
 		"mSearchInProgress = False",
 	} {
 		if !strings.Contains(searchSource, required) {
 			t.Fatalf("product search is missing its non-modal reentrancy guard: %s", required)
+		}
+	}
+	if !strings.Contains(source, "SearchProductsForQuery queuedQuery, queuedGeneration") {
+		t.Fatal("scheduled physical-Enter search must consume the captured query generation")
+	}
+	if !strings.Contains(source, "mScheduledSearchTime = Now + (SEARCH_DELAY_SECONDS / 86400#)") {
+		t.Fatal("native Enter search must use a reliable sub-second top-level callback")
+	}
+	for _, forbidden := range []string{
+		"Application.Goto", "DoEvents", "PumpExcelMessages",
+		"KickQueuedAsyncDispatch", `Application.OnKey "~",`,
+	} {
+		if strings.Contains(searchSource, forbidden) {
+			t.Fatalf("product search reintroduced synchronous event/dispatch recursion: %s", forbidden)
+		}
+	}
+	for _, required := range []string{
+		"IsNativeSearchEnterTransition(target)",
+		"RememberSearchSelection target",
+		"If queueNativeEnter Then",
+		"UpdateSearchEnterHotkey = True",
+		`Set searchInput = ThisWorkbook.Names("ProductSearchQuery"). _`,
+		"If Not Intersect(target.Cells(1, 1), searchInput) Is Nothing Then _",
+		"HighlightSelectedProductRow anchor, False",
+		"Optional ByVal allowPreviewAndPump As Boolean = True",
+		"Private Sub RunNativeEnterProductSearch()",
+		"CancelScheduledProductSearch",
+		"SearchProductsForQuery query, generation",
+		"mPendingSearchGeneration = mSearchRequestGeneration",
+		"NormalizeProductSearchText",
+		"EnsureProductSearchIndex table",
+		"table.DataBodyRange.Columns(7).Value2",
+		"table.DataBodyRange.Columns(8).Value2",
+		"table.DataBodyRange.Columns(9).Value2",
+		"mSearchIndexProductCodes(rowIndex) = normalizedQuery",
+		"mSearchIndexWooIDs(rowIndex) = normalizedQuery",
+		"filteredView = table.Parent.FilterMode",
+		"VisibleProductRowMap(table)",
+		"vbBinaryCompare",
+	} {
+		if !strings.Contains(source, required) {
+			t.Fatalf("native Enter or semantic search gate is missing: %s", required)
+		}
+	}
+	if strings.Contains(source, "table.DataBodyRange.Rows(rowIndex).EntireRow.Hidden") {
+		t.Fatal("local search must not make one Excel COM hidden-row call per product")
+	}
+	for _, required := range []string{
+		"Public Sub PrepareLocalSearchOnOpen()",
+		"Private Sub WarmProductSearchIndex()",
+		"Private Sub InvalidateProductSearchIndex()",
+		"If mSearchIndexReady And mSearchIndexRowCount = rowCount",
+		"WarmProductSearchIndex",
+		"InvalidateProductSearchIndex",
+		"ClearQueuedPricingIntent settingKey",
+		"mWritebackPendingValues.Remove settingKey",
+		"mWritebackPendingGenerations.Remove settingKey",
+	} {
+		if !strings.Contains(source, required) {
+			t.Fatalf("fast local search index lifecycle is missing: %s", required)
 		}
 	}
 
@@ -1720,6 +1785,51 @@ func TestDynamicCalculatorVBASourceGuardsLivePricingBeforeMutation(t *testing.T)
 	for _, forbidden := range []string{"BeginWritebackPoll", "StartWritebackRequest"} {
 		if strings.Contains(writebackSource, forbidden) {
 			t.Fatalf("scheduled pricing writeback must not re-enter the stale asynchronous event path: %s", forbidden)
+		}
+	}
+	postDequeueStart := strings.Index(writebackSource, `mWritebackRequestID = NewRequestID("writeback")`)
+	if postDequeueStart < 0 {
+		t.Fatal("scheduled writeback is missing its post-dequeue request boundary")
+	}
+	postDequeueSource := writebackSource[postDequeueStart:]
+	for _, forbidden := range []string{
+		"mActiveWritebackGeneration = 0",
+		"mActiveWritebackDesiredValue = vbNullString",
+	} {
+		if strings.Contains(postDequeueSource, forbidden) {
+			t.Fatalf("dequeue must preserve immutable writeback intent through send/ACK: %s", forbidden)
+		}
+	}
+	terminalWriteback := section("Private Sub CompletePricingWriteback", "Private Sub ApplyWebsiteCommittedWriteback")
+	for _, required := range []string{
+		"mActiveWritebackGeneration = 0",
+		"mActiveWritebackDesiredValue = vbNullString",
+	} {
+		if !strings.Contains(terminalWriteback, required) {
+			t.Fatalf("terminal completion must clear immutable writeback intent: %s", required)
+		}
+	}
+	restorePricing := section("Private Sub RestorePricingStateSnapshot", "Private Function PricingSettingsCanonical")
+	for _, required := range []string{
+		"previousEvents = Application.EnableEvents",
+		"previousInternalRefresh = mInternalPricingRefresh",
+		"Application.EnableEvents = False",
+		"mInternalPricingRefresh = True",
+		"mInternalPricingRefresh = previousInternalRefresh",
+		"Application.EnableEvents = previousEvents",
+	} {
+		if !strings.Contains(restorePricing, required) {
+			t.Fatalf("refresh rollback must not enqueue a server-originated pricing write: %s", required)
+		}
+	}
+	for _, required := range []string{
+		"If HasCoherentLocalCatalog() Then",
+		`SetOperationProgressSurface "listener_wait", -1`,
+		"Not RefreshWallBudgetExhausted()",
+		"Private Function RefreshWallBudgetExhausted() As Boolean",
+	} {
+		if !strings.Contains(source, required) {
+			t.Fatalf("event-first cold open or bounded snapshot fallback is missing: %s", required)
 		}
 	}
 	for _, required := range []string{
@@ -1776,10 +1886,11 @@ func TestDynamicCalculatorVBASourceGuardsLivePricingBeforeMutation(t *testing.T)
 		"Application.EnableEvents = previousEvents",
 		`Sh.Range("E20"), _`,
 		"Private Sub Workbook_SheetSelectionChange",
-		"ProductCatalogSync.UpdateSearchEnterHotkey Target",
+		"If ProductCatalogSync.UpdateSearchEnterHotkey(Target) Then _",
 		"ProductCatalogSync.HighlightSelectedProductRow Target",
 		"Call ProductCatalogSync.AuditFontsOnOpen",
 		"ProductCatalogSync.PreserveSearchLiteral",
+		"ProductCatalogSync.PrepareLocalSearchOnOpen",
 		"ProductCatalogSync.StartPricingEventListenerOnOpen",
 		"ProductCatalogSync.ScheduleRefreshOnOpen",
 		"ProductCatalogSync.CancelActivePricingOperations True",
