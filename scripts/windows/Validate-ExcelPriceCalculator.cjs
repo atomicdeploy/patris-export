@@ -4005,7 +4005,8 @@ function main() {
       if (!match) throw new Error(`missing VBA procedure: ${name}`);
       return match[0];
     };
-    const searchSource = procedure(moduleSource, 'SearchProducts');
+    const searchEntrySource = procedure(moduleSource, 'SearchProducts');
+    const searchSource = procedure(moduleSource, 'SearchProductsForQuery');
     const synchronousWritebackSource = procedure(moduleSource, 'RunSynchronousWritebackStep');
     const searchBusySource = /Private Function SearchOperationBusy\b[\s\S]*?\r?\nEnd Function/iu.exec(moduleSource)?.[0] || '';
     const enterSource = procedure(moduleSource, 'HandleProductSearchEnter');
@@ -4030,8 +4031,12 @@ function main() {
     if (foundSearchToken) {
       throw new Error(`SearchProducts contains forbidden re-entrant token: ${foundSearchToken}`);
     }
-    if (!/SEARCH_DELAY_SECONDS\s+As Long\s*=\s*0/iu.test(moduleSource)) {
-      throw new Error('Local search must queue at the next top-level callback without a one-second delay');
+    if (!/SearchProductsForQuery\s+ReadSearchLiteral\(\),\s*0/iu.test(searchEntrySource)) {
+      throw new Error('SearchProducts must enter the guarded query-bound implementation');
+    }
+    const searchDelayMatch = /SEARCH_DELAY_SECONDS\s+As Double\s*=\s*([0-9.]+)/iu.exec(moduleSource);
+    if (!searchDelayMatch || Number(searchDelayMatch[1]) <= 0 || Number(searchDelayMatch[1]) > 0.75) {
+      throw new Error('Local search must use a reliable sub-second top-level callback');
     }
     const backgroundSearchBlockers = [
       'mRefreshInProgress',
@@ -4079,6 +4084,28 @@ function main() {
         || /\bBeginWritebackPoll\b/iu.test(scheduledWritebackSource)
         || /\bStartWritebackRequest\b/iu.test(scheduledWritebackSource)) {
       throw new Error('Scheduled writeback must use the bounded loopback-only step and avoid the stale asynchronous event path');
+    }
+    const postDequeueBoundary = scheduledWritebackSource.indexOf(
+      'mWritebackRequestID = NewRequestID("writeback")',
+    );
+    if (postDequeueBoundary < 0) {
+      throw new Error('Scheduled writeback is missing its post-dequeue request boundary');
+    }
+    const postDequeueWritebackSource = scheduledWritebackSource.slice(postDequeueBoundary);
+    if (/mActiveWritebackGeneration\s*=\s*0/iu.test(postDequeueWritebackSource)
+        || /mActiveWritebackDesiredValue\s*=\s*vbNullString/iu.test(postDequeueWritebackSource)) {
+      throw new Error('Dequeued pricing intent must remain immutable until terminal confirmation');
+    }
+    if (!/mActiveWritebackGeneration\s*=\s*0/iu.test(completeWritebackSource)
+        || !/mActiveWritebackDesiredValue\s*=\s*vbNullString/iu.test(completeWritebackSource)) {
+      throw new Error('Immutable pricing intent must clear only at terminal completion');
+    }
+    if (!/IsNativeSearchEnterTransition\(target\)/iu.test(moduleSource)
+        || !/If\s+queueNativeEnter\s+Then\s+RunNativeEnterProductSearch/iu.test(moduleSource)
+        || !/Private Sub RunNativeEnterProductSearch\(\)[\s\S]*?CancelScheduledProductSearch[\s\S]*?SearchProductsForQuery\s+query,\s*generation/iu.test(moduleSource)
+        || !/RememberSearchSelection\s+anchor/iu.test(searchSource)
+        || !/mPendingSearchGeneration\s*=\s*mSearchRequestGeneration/iu.test(moduleSource)) {
+      throw new Error('Physical Enter must run one generation-bound, event-safe search after native selection movement');
     }
     if (!/mWritebackPendingValues/iu.test(queueWritebackSource)
         || !/mWritebackPendingGenerations/iu.test(queueWritebackSource)
