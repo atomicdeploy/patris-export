@@ -271,6 +271,20 @@ func (queue *excelPricingWritebackQueue) finish(job *excelPricingWritebackJob, r
 	stored.UpdatedAt = now.Format(time.RFC3339)
 }
 
+func (queue *excelPricingWritebackQueue) persistSafeRebase(job *excelPricingWritebackJob) {
+	queue.mu.Lock()
+	defer queue.mu.Unlock()
+	stored := queue.jobs[job.JobID]
+	if stored == nil || stored.Status == "superseded" || stored.ackOnly {
+		return
+	}
+	if queue.latestByKey[stored.SettingKey] != stored.JobID {
+		return
+	}
+	stored.expectedStateRevision = job.expectedStateRevision
+	stored.settings = job.settings
+}
+
 func (queue *excelPricingWritebackQueue) enqueue(request excelPricingWritebackRequest) (*excelPricingWritebackJob, error) {
 	if request.Schema != excelPricingWritebackRequestSchema {
 		return nil, errors.New("invalid_request_schema")
@@ -549,6 +563,7 @@ func (queue *excelPricingWritebackQueue) processRemote(ctx context.Context, job 
 			}
 			job.expectedStateRevision = currentDocument.StateRevision
 			job.settings.ShippingCatalogRevision = currentDocument.Settings.ShippingCatalogRevision
+			queue.persistSafeRebase(job)
 		}
 	}
 	previewID := "excel-writeback-" + job.JobID + "-preview"

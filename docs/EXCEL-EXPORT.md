@@ -201,9 +201,10 @@ dataset, and revision.
 the workbook and the Google Sheets workflow. It is the complete leaf-product
 union, not a workbook-side join: `matched`, `patris_only`, `woo_only`, and
 `ambiguous` are explicit row states; variable WooCommerce parent rows are
-excluded. A WooCommerce-backed row uses `woo:<id>` as its technical sync key.
-A Patris-only row uses `patris:<exact-product-code>`. Names are never identity
-fallbacks, and an ambiguous identity blocks apply.
+excluded. Every source-backed row uses `patris:<exact-product-code>` as its
+technical sync key, including after it becomes matched to WooCommerce. Only a
+WooCommerce-only row uses `woo:<id>`. Names are never identity fallbacks, and
+an ambiguous identity blocks apply.
 
 Each refresh uses `WinHttp.WinHttpRequest.5.1` `WithEvents` callbacks. It reads
 the product contract, creates a loopback session, starts one immutable snapshot,

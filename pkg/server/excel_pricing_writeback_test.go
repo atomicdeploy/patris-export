@@ -340,6 +340,30 @@ func TestExcelPricingWritebackRebaseAllowsLivePatrisRevisionButNotConcurrentInpu
 	}
 }
 
+func TestExcelPricingWritebackPersistsSafeRebaseForBoundedRetry(t *testing.T) {
+	queue := newExcelPricingWritebackQueue(nil)
+	jobID := "0123456789abcdef0123456789abcdef"
+	originalRevision := excelPricingRevisionForTest("original-writeback-state")
+	rebasedRevision := excelPricingRevisionForTest("rebased-writeback-state")
+	settings := validExcelPricingWritebackRequest("excel-writeback-rebase-persist", "yuan_price", 31000).Settings
+	queue.jobs[jobID] = &excelPricingWritebackJob{
+		JobID: jobID, SettingKey: "yuan_price", Status: "sending",
+		expectedStateRevision: originalRevision, settings: settings,
+	}
+	queue.latestByKey["yuan_price"] = jobID
+	clone := cloneExcelPricingWritebackJob(queue.jobs[jobID])
+	clone.expectedStateRevision = rebasedRevision
+	clone.settings.ShippingCatalogRevision = excelPricingRevisionForTest("fresh-shipping-state")
+	queue.persistSafeRebase(clone)
+	stored := queue.jobs[jobID]
+	if stored.expectedStateRevision != rebasedRevision {
+		t.Fatalf("persisted revision=%q, want %q", stored.expectedStateRevision, rebasedRevision)
+	}
+	if stored.settings.ShippingCatalogRevision != clone.settings.ShippingCatalogRevision {
+		t.Fatal("persisted retry settings did not retain the safe website-state rebase")
+	}
+}
+
 func TestExcelPricingWritebackConflictKeepsExactRemoteReason(t *testing.T) {
 	result := excelPricingWritebackErrorResult(&excelPricingRemoteError{
 		status: http.StatusConflict,

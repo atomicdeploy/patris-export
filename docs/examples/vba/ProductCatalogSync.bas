@@ -159,6 +159,8 @@ Private mPricingPreviewQueued As Boolean
 Private mPricingPreviewScheduled As Boolean
 Private mScheduledPricingPreviewTime As Date
 Private mWritebackPending As Object
+Private mWritebackPendingValues As Object
+Private mWritebackPendingGenerations As Object
 Private mWritebackRequest As AsyncWinHttpRequest
 Private mWritebackScheduled As Boolean
 Private mScheduledWritebackTime As Date
@@ -169,6 +171,9 @@ Private mWritebackRequestID As String
 Private mWritebackJobID As String
 Private mWritebackCSRFToken As String
 Private mWritebackPollCount As Long
+Private mPricingEditGeneration As Long
+Private mActiveWritebackGeneration As Long
+Private mActiveWritebackDesiredValue As String
 Private mPendingConfirmationTransactionID As String
 Private mPendingConfirmationRevision As String
 Private mPendingConfirmationDigest As String
@@ -226,6 +231,7 @@ Private mOperationRepairAttempted As Boolean
 Private mOperationSnapshotRetryCount As Long
 Private mOperationPricingStateSnapshot As Variant
 Private mOperationPricingStateCaptured As Boolean
+Private mOperationPricingEditGeneration As Long
 Private mOperationSavedPreviewDigest As String
 Private mOperationSavedPreviewExpiresAt As String
 Private mOperationSavedPreviewStateRevision As String
@@ -709,6 +715,7 @@ Private Sub BeginRefreshPipeline(ByVal silent As Boolean, _
 
     Set settings = ConfigSheet()
     mOperationPricingStateSnapshot = CapturePricingStateSnapshot(settings)
+    mOperationPricingEditGeneration = mPricingEditGeneration
     mOperationPricingStateCaptured = True
     settings.Range("G30").Value2 = 0
     settings.Range("G48").Value2 = 0
@@ -3768,6 +3775,13 @@ Public Sub QueuePricingInputWriteback(ByVal Target As Range)
                 requestProbe = BuildPricingWritebackRequest( _
                     CStr(keyValue), mWritebackRequestID)
                 mWritebackPending(CStr(keyValue)) = inputCell.Address(False, False)
+                mPricingEditGeneration = mPricingEditGeneration + 1
+                mWritebackPendingValues(CStr(keyValue)) = _
+                    CanonicalCellText(inputCell.Value2)
+                mWritebackPendingGenerations(CStr(keyValue)) = _
+                    mPricingEditGeneration
+                PersistPendingPricingIntent CStr(keyValue), _
+                    CanonicalCellText(inputCell.Value2), mPricingEditGeneration
                 MarkWritebackState CStr(keyValue), "pending", _
                     U("062F06310020063506410020062706310633062706440020062706450646002006280647002006480631062F067E06310633002006270633062A002E")
                 SetOperationProgressSurface "writeback_queued", -1, _
@@ -3795,10 +3809,58 @@ InvalidInput:
     Resume ContinueKey
 End Sub
 
+Public Sub QueueVisibleCNYProposal(ByVal Target As Range)
+    Dim settings As Worksheet
+    Dim proposedValue As Variant
+
+    If mInternalPricingRefresh Or mProposalSyncActive Or _
+       mCatalogCommitInProgress Or mWorkbookClosing Then Exit Sub
+    If Target Is Nothing Or Target.Cells.CountLarge <> 1 Then Exit Sub
+    proposedValue = Target.Value2
+    If Not IsNumeric(proposedValue) Or CDbl(proposedValue) <= 0 Or _
+       CDbl(proposedValue) <> Fix(CDbl(proposedValue)) Then
+        Target.Formula = "=IF('" & _
+            U("062A0646063806CC06450627062A") & _
+            "'!G18="""","""",'" & _
+            U("062A0646063806CC06450627062A") & "'!G18)"
+        Err.Raise vbObjectError + 791, "QueueVisibleCNYProposal", _
+                  U("06460631062E002006CC0648062A0646062A0631064A002006450639062A062806310020064606CC0633062A002E")
+    End If
+    Set settings = ConfigSheet()
+    settings.Range("B18").Value = CDbl(proposedValue)
+    QueuePricingInputWriteback settings.Range("B18")
+End Sub
+
+Public Sub RecoverPendingPricingIntentOnOpen()
+    Dim settings As Worksheet
+    Dim settingKey As String
+    Dim desiredValue As String
+
+    If mWorkbookClosing Then Exit Sub
+    Set settings = ConfigSheet()
+    settingKey = Trim$(CStr(settings.Range("H49").Value2))
+    desiredValue = CanonicalCellText(settings.Range("H48").Value2)
+    If settingKey <> "yuan_price" Or Len(desiredValue) = 0 Then Exit Sub
+    If CanonicalCellText(settings.Range("G18").Value2) = desiredValue Then
+        ClearDurablePendingPricingIntent
+        Exit Sub
+    End If
+    settings.Range("B18").Value = CDbl(desiredValue)
+    QueuePricingInputWriteback settings.Range("B18")
+End Sub
+
 Private Sub EnsureWritebackQueue()
     If mWritebackPending Is Nothing Then
         Set mWritebackPending = CreateObject("Scripting.Dictionary")
         mWritebackPending.CompareMode = vbBinaryCompare
+    End If
+    If mWritebackPendingValues Is Nothing Then
+        Set mWritebackPendingValues = CreateObject("Scripting.Dictionary")
+        mWritebackPendingValues.CompareMode = vbBinaryCompare
+    End If
+    If mWritebackPendingGenerations Is Nothing Then
+        Set mWritebackPendingGenerations = CreateObject("Scripting.Dictionary")
+        mWritebackPendingGenerations.CompareMode = vbBinaryCompare
     End If
 End Sub
 
@@ -3852,6 +3914,20 @@ Public Sub RunScheduledPricingWriteback()
     For Each pendingKey In mWritebackPending.Keys
         mWritebackSettingKey = CStr(pendingKey)
         mWritebackCellAddress = CStr(mWritebackPending(pendingKey))
+        If mWritebackPendingValues.Exists(CStr(pendingKey)) Then
+            mActiveWritebackDesiredValue = _
+                CStr(mWritebackPendingValues(CStr(pendingKey)))
+            mWritebackPendingValues.Remove CStr(pendingKey)
+        Else
+            mActiveWritebackDesiredValue = vbNullString
+        End If
+        If mWritebackPendingGenerations.Exists(CStr(pendingKey)) Then
+            mActiveWritebackGeneration = _
+                CLng(mWritebackPendingGenerations(CStr(pendingKey)))
+            mWritebackPendingGenerations.Remove CStr(pendingKey)
+        Else
+            mActiveWritebackGeneration = 0
+        End If
         mWritebackPending.Remove CStr(pendingKey)
         Exit For
     Next pendingKey
@@ -3860,6 +3936,8 @@ Public Sub RunScheduledPricingWriteback()
     mWritebackJobID = vbNullString
     mWritebackCSRFToken = vbNullString
     mWritebackPollCount = 0
+    mActiveWritebackGeneration = 0
+    mActiveWritebackDesiredValue = vbNullString
     mWritebackStage = "session"
     SetOperationProgressSurface "writeback_send", -1, _
         U("062F06310020062D062706440020062706310633062706440020062A063A06CC06CC0631"), _
@@ -4373,7 +4451,10 @@ Private Sub ApplyWebsiteCommittedWriteback(ByVal root As JsonValue, _
         Case "yuan_price", "site_confirmation"
             settings.Range("B10").Value = CDbl(confirmedValue)
             settings.Range("G18").Value = CDbl(confirmedValue)
-            inputCell.Value = CDbl(confirmedValue)
+            If Not WritebackHasNewerProposal() Then
+                inputCell.Value = CDbl(confirmedValue)
+                RestoreVisibleCNYFormula
+            End If
         Case "dollar_price"
             settings.Range("B11").Value = CDbl(confirmedValue)
             settings.Range("G19").Value = CDbl(confirmedValue)
@@ -4445,7 +4526,10 @@ Private Sub RestoreWritebackValueFromTerminal(ByVal root As JsonValue)
         Case "yuan_price", "site_confirmation"
             settings.Range("B10").Value = CDbl(confirmedValue)
             settings.Range("G18").Value = CDbl(confirmedValue)
-            inputCell.Value = CDbl(confirmedValue)
+            If Not WritebackHasNewerProposal() Then
+                inputCell.Value = CDbl(confirmedValue)
+                RestoreVisibleCNYFormula
+            End If
         Case "dollar_price"
             settings.Range("B11").Value = CDbl(confirmedValue)
             settings.Range("G19").Value = CDbl(confirmedValue)
@@ -4512,8 +4596,15 @@ Private Sub ConfirmPricingWriteback(ByVal messageText As String, _
         settings.Range("G14").Value2 = revisionText
     End If
     Select Case mWritebackSettingKey
-        Case "yuan_price": settings.Range("G18").Value = inputCell.Value
-        Case "dollar_price": settings.Range("G19").Value = inputCell.Value
+        Case "yuan_price"
+            settings.Range("B10").Value = CDbl(confirmedValue)
+            settings.Range("G18").Value = CDbl(confirmedValue)
+            If Not WritebackHasNewerProposal() Then
+                inputCell.Value = CDbl(confirmedValue)
+                RestoreVisibleCNYFormula
+                ClearDurablePendingPricingIntent
+            End If
+        Case "dollar_price": settings.Range("G19").Value = CDbl(confirmedValue)
         Case "cny_effective_date": settings.Range("G20").Value2 = _
             CanonicalDateText(inputCell.Value2)
         Case "usd_effective_date": settings.Range("H16").Value2 = _
@@ -4560,6 +4651,11 @@ Private Sub MarkWritebackState(ByVal settingKey As String, _
         Case Else: fillColor = RGB(255, 248, 231)
     End Select
     displayRange.Interior.Color = fillColor
+    If settingKey = "yuan_price" Or settingKey = "site_confirmation" Then
+        On Error Resume Next
+        ThisWorkbook.Worksheets(1).Range("M7").Interior.Color = fillColor
+        On Error GoTo 0
+    End If
     On Error Resume Next
     inputCell.Comment.Delete
     If Len(noteText) > 0 Then
@@ -4783,6 +4879,7 @@ Private Function BuildPricingWritebackRequest(ByVal settingKey As String, _
     Dim shippingRevision As String
     Dim usdEffectiveDate As String
     Dim cnyEffectiveDate As String
+    Dim yuanProposal As Variant
     Dim body As String
 
     Set settings = ConfigSheet()
@@ -4794,6 +4891,11 @@ Private Function BuildPricingWritebackRequest(ByVal settingKey As String, _
     shippingRevision = Trim$(CStr(settings.Range("H15").Value2))
     usdEffectiveDate = CanonicalDateText(settings.Range("E20").Value2)
     cnyEffectiveDate = CanonicalDateText(settings.Range("B20").Value2)
+    yuanProposal = settings.Range("B18").Value2
+    If settingKey = "yuan_price" And _
+       Len(mActiveWritebackDesiredValue) > 0 Then
+        yuanProposal = CDbl(mActiveWritebackDesiredValue)
+    End If
     ValidatePricingSettings settings, profitPercent, shippingCurrency, _
         shippingRevision, usdEffectiveDate, cnyEffectiveDate
     body = "{""schema"":" & JsonString(PRICING_WRITEBACK_REQUEST_SCHEMA) & "," & _
@@ -4805,7 +4907,7 @@ Private Function BuildPricingWritebackRequest(ByVal settingKey As String, _
         JsonString(ConfirmedWritebackValue(settingKey)) & "," & _
         """settings"":{" & _
         """dollar_price"":" & JsonNumberOrNull(settings.Range("B19").Value2) & "," & _
-        """yuan_price"":" & JsonNumberOrNull(settings.Range("B18").Value2) & "," & _
+        """yuan_price"":" & JsonNumberOrNull(yuanProposal) & "," & _
         """effective_date"":" & JsonString(cnyEffectiveDate) & "," & _
         """usd_effective_date"":" & JsonString(usdEffectiveDate) & "," & _
         """cny_effective_date"":" & JsonString(cnyEffectiveDate) & "," & _
@@ -4817,6 +4919,39 @@ Private Function BuildPricingWritebackRequest(ByVal settingKey As String, _
         """price_rounding_mode"":" & JsonString(PRICE_ROUNDING_MODE) & "}}"
     BuildPricingWritebackRequest = body
 End Function
+
+Private Sub PersistPendingPricingIntent(ByVal settingKey As String, _
+                                        ByVal desiredValue As String, _
+                                        ByVal generation As Long)
+    Dim settings As Worksheet
+
+    If settingKey <> "yuan_price" Then Exit Sub
+    Set settings = ConfigSheet()
+    settings.Range("H48").Value2 = desiredValue
+    settings.Range("H49").Value2 = settingKey
+    settings.Range("H50").Value2 = generation
+End Sub
+
+Private Sub ClearDurablePendingPricingIntent()
+    On Error Resume Next
+    ConfigSheet().Range("H48:H50").ClearContents
+    On Error GoTo 0
+End Sub
+
+Private Function WritebackHasNewerProposal() As Boolean
+    WritebackHasNewerProposal = _
+        (mWritebackSettingKey = "yuan_price") And _
+        (mPricingEditGeneration > mActiveWritebackGeneration)
+End Function
+
+Private Sub RestoreVisibleCNYFormula()
+    On Error Resume Next
+    ThisWorkbook.Worksheets(1).Range("M7").Formula = _
+        "=IF('" & U("062A0646063806CC06450627062A") & _
+        "'!G18="""","""",'" & U("062A0646063806CC06450627062A") & _
+        "'!G18)"
+    On Error GoTo 0
+End Sub
 
 Private Function ConfirmedWritebackValue(ByVal settingKey As String) As String
     Dim settings As Worksheet
@@ -5029,6 +5164,9 @@ End Function
 Private Sub RestorePricingStateSnapshot(ByVal settings As Worksheet, _
                                         ByVal values As Variant)
     Dim addresses As Variant
+    Dim proposalAddresses As Variant
+    Dim proposalAddress As Variant
+    Dim preservedProposals As Object
     Dim index As Long
 
     addresses = PricingStateAddresses()
@@ -5038,9 +5176,24 @@ Private Sub RestorePricingStateSnapshot(ByVal settings As Worksheet, _
                   "RestorePricingStateSnapshot", _
                   T("invalid_workbook")
     End If
+    If mPricingEditGeneration > mOperationPricingEditGeneration Then
+        Set preservedProposals = CreateObject("Scripting.Dictionary")
+        preservedProposals.CompareMode = vbBinaryCompare
+        proposalAddresses = Split("B18|B19|B20|E20|B21|B22|B26", "|")
+        For Each proposalAddress In proposalAddresses
+            preservedProposals(CStr(proposalAddress)) = _
+                settings.Range(CStr(proposalAddress)).Value2
+        Next proposalAddress
+    End If
     For index = LBound(addresses) To UBound(addresses)
         settings.Range(CStr(addresses(index))).Value2 = values(index)
     Next index
+    If Not preservedProposals Is Nothing Then
+        For Each proposalAddress In preservedProposals.Keys
+            settings.Range(CStr(proposalAddress)).Value2 = _
+                preservedProposals(CStr(proposalAddress))
+        Next proposalAddress
+    End If
 End Sub
 
 Private Function PricingSettingsCanonical() As String
@@ -6380,7 +6533,7 @@ Private Function ImportReconciledCatalog(ByVal reconciledRows As Object) As Long
         Select Case reconciliationStatus
             Case "matched"
                 If Len(wooIDValue) = 0 Or _
-                   syncKey <> "woo:" & wooIDValue Or _
+                   syncKey <> "patris:" & patrisCodeValue Or _
                    Len(patrisCodeValue) = 0 Then
                     Err.Raise vbObjectError + 139, _
                               "ImportReconciledCatalog", _
@@ -6676,7 +6829,7 @@ Private Sub ApplyProductTableFormulas(ByVal table As ListObject)
     If table.DataBodyRange Is Nothing Then Exit Sub
     settingsReference = "'" & U("062A0646063806CC06450627062A") & "'!"
     lookupExpression = _
-        "IF(RC[8]<>"""",""woo:""&RC[8],""patris:""&RC[6])"
+        "IF(RC[6]<>"""",""patris:""&RC[6],""woo:""&RC[8])"
     cnyRateFormula = _
         "IF(AND(ISNUMBER(ConfirmedCNYRate),ConfirmedCNYRate>0)," & _
         "ConfirmedCNYRate,VLOOKUP(" & lookupExpression & _
@@ -6839,7 +6992,7 @@ Private Sub ApplyProductTableFormatting(ByVal table As ListObject)
     ' three states distinct after every table rebuild: green means a positive
     ' calculation with no reconciliation warning, amber means a usable price
     ' with a warning, and red means the row has no usable calculated price.
-    pricingKey = "IF($J6<>"""",""woo:""&$J6,""patris:""&$H6)"
+    pricingKey = "IF($H6<>"""",""patris:""&$H6,""woo:""&$J6)"
     pricingWarning = "IFERROR(VLOOKUP(" & pricingKey & _
         ",SyncData,19,FALSE),"""")"
 
