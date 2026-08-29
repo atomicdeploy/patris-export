@@ -196,7 +196,7 @@ function structurallyMatchesDynamicPriceFormula(formula) {
     'ROUND(',
     'RC[1]',
     'RC[4]',
-    'IF(RC[8]<>"","WOO:"&RC[8],"PATRIS:"&RC[6])',
+    'IF(RC[6]<>"","PATRIS:"&RC[6],"WOO:"&RC[8])',
     'SYNCDATA,2,FALSE)',
     'SYNCDATA,3,FALSE)',
     'SYNCDATA,4,FALSE)',
@@ -1676,10 +1676,10 @@ function Read-Products([object]$book) {
                     ).Trim()
                 } else { '' }
                 $identityKey = ''
-                if ($wooID.Length -gt 0) {
-                    $identityKey = "woo:$wooID"
-                } elseif ($productCode.Length -gt 0) {
+                if ($productCode.Length -gt 0) {
                     $identityKey = "patris:$productCode"
+                } elseif ($wooID.Length -gt 0) {
+                    $identityKey = "woo:$wooID"
                 }
                 $formula = [Convert]::ToString(
                     (Matrix-Value $formulas $rowCount $columnCount $row 1),
@@ -2806,7 +2806,7 @@ try {
             'هماهنگ' {
                 if ($row.WooID.Length -eq 0 -or
                     $syncWooID -ne $row.WooID -or
-                    $row.Code -cne "woo:$($row.WooID)" -or
+                    $row.Code -cne "patris:$($row.ProductCode)" -or
                     $row.ProductCode.Length -eq 0) {
                     $invalidSyncIdentityRows += 1
                 }

@@ -195,8 +195,9 @@ counts, and rows from the complete
 Patris/WooCommerce leaf-product union. Its row identity and status are shared
 with Google Sheets:
 
-- `woo:<id>` for every WooCommerce-backed leaf row;
-- `patris:<exact-product-code>` for a Patris-only row;
+- `patris:<exact-product-code>` for every source-backed row, including when it
+  later gains or changes a WooCommerce link;
+- `woo:<id>` only for a WooCommerce-only leaf row;
 - `matched`, `patris_only`, `woo_only`, or `ambiguous` as
   `reconciliation_status`.
 
