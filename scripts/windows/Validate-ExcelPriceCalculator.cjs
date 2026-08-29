@@ -1322,7 +1322,27 @@ function Test-SearchLiteralText([object]$excel, [object]$book) {
             try {
                 $book.SaveCopyAs($reopenPath)
                 $reopenWorkbooks = $excel.Workbooks
+                $reopenCountBefore = [int]$reopenWorkbooks.Count
                 $reopenBook = $reopenWorkbooks.Open($reopenPath, 0, $true)
+                if ($null -eq $reopenBook) {
+                    $reopenCountAfter = [int]$reopenWorkbooks.Count
+                    for ($reopenIndex = $reopenCountAfter; $reopenIndex -gt $reopenCountBefore; $reopenIndex -= 1) {
+                        $candidateBook = $null
+                        try {
+                            $candidateBook = $reopenWorkbooks.Item($reopenIndex)
+                            if ($null -ne $candidateBook) {
+                                $reopenBook = $candidateBook
+                                $candidateBook = $null
+                                break
+                            }
+                        } finally {
+                            Release-ComObject $candidateBook
+                        }
+                    }
+                }
+                if ($null -eq $reopenBook) {
+                    throw "Excel did not return or expose the reopened search-literal workbook: $reopenPath"
+                }
                 Release-ComObject $reopenWorkbooks
                 $reopenWorkbooks = $null
                 $reopenName = $reopenBook.Names.Item('ProductSearchQuery')
