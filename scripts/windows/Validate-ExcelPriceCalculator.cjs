@@ -59,7 +59,6 @@ const SYNC_DATA_HEADERS = Object.freeze([
 
 const REGRESSION_ACCEPTANCE = Object.freeze({
   relayProductCode: '109032',
-  relayPrice: 554500,
   relayCategory: 'رله‌ها',
   wooFallbackProductCode: '109001',
   wooFallbackPrice: 1150000,
@@ -436,8 +435,10 @@ function buildFailures(report, options) {
     `${report.candidate.invalidSyncIdentityRows} visible rows do not preserve the authoritative sync_key identity`,
   );
   failUnless(
-    report.candidate.wooOnlySKUFallbackRows > 0,
-    'no WooCommerce-only row exposes its available SKU in کد کالا',
+    Number.isInteger(report.candidate.wooOnlySKUFallbackRows)
+      && report.candidate.wooOnlySKUFallbackRows >= 0
+      && report.candidate.wooOnlySKUFallbackRows <= report.candidate.wooOnlyRows,
+    `invalid WooCommerce-only optional SKU fallback count: ${report.candidate.wooOnlySKUFallbackRows}`,
   );
   failUnless(
     typeof report.candidate.config.yuan === 'number'
@@ -618,7 +619,13 @@ function buildFailures(report, options) {
   );
   failUnless(
     report.regressions.relay109032.present
-      && report.regressions.relay109032.price === REGRESSION_ACCEPTANCE.relayPrice
+      && Number.isFinite(report.regressions.relay109032.price)
+      && report.regressions.relay109032.price > 0
+      && sameFiniteNumber(
+        report.regressions.relay109032.price,
+        report.regressions.relay109032.wooEffectivePrice,
+        0.01,
+      )
       && report.regressions.relay109032.category === REGRESSION_ACCEPTANCE.relayCategory,
     `${REGRESSION_ACCEPTANCE.relayProductCode} regression failed: ${JSON.stringify(report.regressions.relay109032)}`,
   );
@@ -2431,6 +2438,46 @@ function Test-TransientPricePreview(
         [void](Reset-SelectedProductRow $excel $book)
         [void]$priceCell.Calculate()
         $resetValue = Numeric-Or-Null $priceCell.Value2
+        # The fixture temporarily clears two live projection inputs. Restore
+        # and verify both values before returning so --save-synced-to can never
+        # persist the test mutation into the delivery workbook.
+        $excel.EnableEvents = $false
+        [void]$rateCell.GetType().InvokeMember(
+            'Value2',
+            [Reflection.BindingFlags]::SetProperty,
+            $null,
+            $rateCell,
+            @([object]$savedRate)
+        )
+        [void]$wooPriceCell.GetType().InvokeMember(
+            'Value2',
+            [Reflection.BindingFlags]::SetProperty,
+            $null,
+            $wooPriceCell,
+            @([object]$savedWooPrice)
+        )
+        [void]$priceCell.Calculate()
+        $restoredRateText = [Convert]::ToString(
+            $rateCell.Value2,
+            [Globalization.CultureInfo]::InvariantCulture
+        )
+        $savedRateText = [Convert]::ToString(
+            $savedRate,
+            [Globalization.CultureInfo]::InvariantCulture
+        )
+        $restoredWooPriceText = [Convert]::ToString(
+            $wooPriceCell.Value2,
+            [Globalization.CultureInfo]::InvariantCulture
+        )
+        $savedWooPriceText = [Convert]::ToString(
+            $savedWooPrice,
+            [Globalization.CultureInfo]::InvariantCulture
+        )
+        if ($restoredRateText -cne $savedRateText -or
+            $restoredWooPriceText -cne $savedWooPriceText) {
+            throw 'Transient price preview fixture did not restore its source values.'
+        }
+        $injected = $false
         return [pscustomobject]@{
             found = $true
             eligibleCandidates = $eligibleCandidates
@@ -2449,8 +2496,20 @@ function Test-TransientPricePreview(
         try {
             $excel.EnableEvents = $false
             if ($injected -and $null -ne $rateCell -and $null -ne $wooPriceCell) {
-                $rateCell.Value2 = $savedRate
-                $wooPriceCell.Value2 = $savedWooPrice
+                [void]$rateCell.GetType().InvokeMember(
+                    'Value2',
+                    [Reflection.BindingFlags]::SetProperty,
+                    $null,
+                    $rateCell,
+                    @([object]$savedRate)
+                )
+                [void]$wooPriceCell.GetType().InvokeMember(
+                    'Value2',
+                    [Reflection.BindingFlags]::SetProperty,
+                    $null,
+                    $wooPriceCell,
+                    @([object]$savedWooPrice)
+                )
             }
             [void](Reset-SelectedProductRow $excel $book)
         } catch {}

@@ -40,7 +40,27 @@ try {
     $excel.DisplayAlerts = $false
     $excel.EnableEvents = $false
     $excel.AutomationSecurity = 3
-    $workbook = $excel.Workbooks.Open($resolvedOutput, 0, $false)
+    # Workbooks.Open treats an Excel template as a source for a new unsaved
+    # workbook unless Editable is explicitly true. In that default mode the
+    # module replacement succeeds in memory but Save does not update the .xltm
+    # artifact. Pass every argument through Editable so the exact copied
+    # template is opened and mutated in place.
+    $missing = [Type]::Missing
+    $workbook = $excel.Workbooks.Open(
+        $resolvedOutput,
+        0,
+        $false,
+        $missing,
+        $missing,
+        $missing,
+        $false,
+        $missing,
+        $missing,
+        $true
+    )
+    if ([IO.Path]::GetFullPath([string]$workbook.FullName) -ne $resolvedOutput) {
+        throw "Excel opened a derived workbook instead of the target template: $($workbook.FullName)"
+    }
 
     foreach ($replacement in @(
         @{ Name = 'ProductCatalogSync'; Path = $ModulePath },
