@@ -6528,7 +6528,7 @@ Private Function ImportReconciledCatalog(ByVal reconciledRows As Object) As Long
         Select Case reconciliationStatus
             Case "matched"
                 If Len(wooIDValue) = 0 Or _
-                   syncKey <> "woo:" & wooIDValue Or _
+                   syncKey <> "patris:" & patrisCodeValue Or _
                    Len(patrisCodeValue) = 0 Then
                     Err.Raise vbObjectError + 139, _
                               "ImportReconciledCatalog", _
@@ -6824,7 +6824,7 @@ Private Sub ApplyProductTableFormulas(ByVal table As ListObject)
     If table.DataBodyRange Is Nothing Then Exit Sub
     settingsReference = "'" & U("062A0646063806CC06450627062A") & "'!"
     lookupExpression = _
-        "IF(RC[8]<>"""",""woo:""&RC[8],""patris:""&RC[6])"
+        "IF(RC[6]<>"""",""patris:""&RC[6],""woo:""&RC[8])"
     cnyRateFormula = _
         "IF(AND(ISNUMBER(ConfirmedCNYRate),ConfirmedCNYRate>0)," & _
         "ConfirmedCNYRate,VLOOKUP(" & lookupExpression & _
@@ -6987,7 +6987,7 @@ Private Sub ApplyProductTableFormatting(ByVal table As ListObject)
     ' three states distinct after every table rebuild: green means a positive
     ' calculation with no reconciliation warning, amber means a usable price
     ' with a warning, and red means the row has no usable calculated price.
-    pricingKey = "IF($J6<>"""",""woo:""&$J6,""patris:""&$H6)"
+    pricingKey = "IF($H6<>"""",""patris:""&$H6,""woo:""&$J6)"
     pricingWarning = "IFERROR(VLOOKUP(" & pricingKey & _
         ",SyncData,19,FALSE),"""")"
 
