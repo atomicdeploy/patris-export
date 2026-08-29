@@ -3819,7 +3819,10 @@ Public Sub QueueVisibleCNYProposal(ByVal Target As Range)
     proposedValue = Target.Value2
     If Not IsNumeric(proposedValue) Or CDbl(proposedValue) <= 0 Or _
        CDbl(proposedValue) <> Fix(CDbl(proposedValue)) Then
-        Target.Formula = "=IF('تنظیمات'!G18="""","""",'تنظیمات'!G18)"
+        Target.Formula = "=IF('" & _
+            U("062A0646063806CC06450627062A") & _
+            "'!G18="""","""",'" & _
+            U("062A0646063806CC06450627062A") & "'!G18)"
         Err.Raise vbObjectError + 791, "QueueVisibleCNYProposal", _
                   U("06460631062E002006CC0648062A0646062A0631064A002006450639062A062806310020064606CC0633062A002E")
     End If
@@ -4944,7 +4947,9 @@ End Function
 Private Sub RestoreVisibleCNYFormula()
     On Error Resume Next
     ThisWorkbook.Worksheets(1).Range("M7").Formula = _
-        "=IF('تنظیمات'!G18="""","""",'تنظیمات'!G18)"
+        "=IF('" & U("062A0646063806CC06450627062A") & _
+        "'!G18="""","""",'" & U("062A0646063806CC06450627062A") & _
+        "'!G18)"
     On Error GoTo 0
 End Sub
 
