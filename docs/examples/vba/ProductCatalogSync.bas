@@ -6537,7 +6537,10 @@ Private Function ImportReconciledCatalog(ByVal reconciledRows As Object) As Long
                    Len(patrisCodeValue) = 0 Then
                     Err.Raise vbObjectError + 139, _
                               "ImportReconciledCatalog", _
-                              T("invalid_workbook")
+                              T("invalid_workbook") & " [sync_key=" & _
+                              syncKey & "; patris_code=" & _
+                              patrisCodeValue & "; woo_id=" & _
+                              wooIDValue & "]"
                 End If
             Case "patris_only"
                 If Len(patrisCodeValue) = 0 Or _
