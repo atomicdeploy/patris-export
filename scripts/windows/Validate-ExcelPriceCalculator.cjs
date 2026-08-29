@@ -3934,6 +3934,12 @@ function main() {
     const selectionSource = procedure(workbookSource, 'Workbook_SheetSelectionChange');
     const scheduledWritebackSource = procedure(moduleSource, 'RunScheduledPricingWriteback');
     const completeWritebackSource = procedure(moduleSource, 'CompletePricingWriteback');
+    const queueWritebackSource = procedure(moduleSource, 'QueuePricingInputWriteback');
+    const buildWritebackSource = /Private Function BuildPricingWritebackRequest\b[\s\S]*?\r?\nEnd Function/iu.exec(moduleSource)?.[0] || '';
+    const applyCommittedSource = procedure(moduleSource, 'ApplyWebsiteCommittedWriteback');
+    const restoreTerminalSource = procedure(moduleSource, 'RestoreWritebackValueFromTerminal');
+    const confirmWritebackSource = procedure(moduleSource, 'ConfirmPricingWriteback');
+    const restoreSnapshotSource = procedure(moduleSource, 'RestorePricingStateSnapshot');
     const globalStateSource = procedure(moduleSource, 'ApplyGlobalState');
     const forbiddenSearchTokens = [
       'KickQueuedAsyncDispatch',
@@ -3994,6 +4000,28 @@ function main() {
         || /\bBeginWritebackPoll\b/iu.test(scheduledWritebackSource)
         || /\bStartWritebackRequest\b/iu.test(scheduledWritebackSource)) {
       throw new Error('Scheduled writeback must use the bounded loopback-only step and avoid the stale asynchronous event path');
+    }
+    if (!/mWritebackPendingValues/iu.test(queueWritebackSource)
+        || !/mWritebackPendingGenerations/iu.test(queueWritebackSource)
+        || !/PersistPendingPricingIntent/iu.test(queueWritebackSource)
+        || !/mActiveWritebackDesiredValue/iu.test(buildWritebackSource)) {
+      throw new Error('Pricing writeback must bind an immutable desired value and edit generation to the queued job');
+    }
+    if (!/WritebackHasNewerProposal/iu.test(applyCommittedSource)
+        || !/WritebackHasNewerProposal/iu.test(restoreTerminalSource)) {
+      throw new Error('Old terminal results must not overwrite a newer pricing proposal');
+    }
+    if (!/Range\("G18"\)\.Value\s*=\s*CDbl\(confirmedValue\)/iu.test(confirmWritebackSource)
+        || /Range\("G18"\)\.Value\s*=\s*inputCell\.Value/iu.test(confirmWritebackSource)) {
+      throw new Error('Confirmed CNY baseline must come from terminal readback, never the mutable proposal cell');
+    }
+    if (!/mPricingEditGeneration\s*>\s*mOperationPricingEditGeneration/iu.test(restoreSnapshotSource)
+        || !/preservedProposals/iu.test(restoreSnapshotSource)) {
+      throw new Error('Refresh rollback must preserve pricing cells edited after snapshot capture');
+    }
+    if (!/QueueVisibleCNYProposal\s+Target/iu.test(sheetChangeSource)
+        || !/RecoverPendingPricingIntentOnOpen/iu.test(workbookSource)) {
+      throw new Error('Visible CNY edits and saved pending intent must route into the protected writeback queue');
     }
     if (!/JsonRuntime\.JsonText\(state,\s*"pricing_state_revision"\)/iu.test(globalStateSource)
         || !/settings\.Range\("G14"\)\.Value2\s*=\s*pricingStateRevision/iu.test(globalStateSource)) {

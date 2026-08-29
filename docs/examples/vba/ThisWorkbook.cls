@@ -8,6 +8,7 @@ Private Sub Workbook_Open()
     ThisWorkbook.Worksheets(1).Activate
     ProductCatalogSync.HandleProductImageSettingChanged
     ProductCatalogSync.StartPricingEventListenerOnOpen
+    ProductCatalogSync.RecoverPendingPricingIntentOnOpen
     ProductCatalogSync.ScheduleRefreshOnOpen
     Call ProductCatalogSync.AuditFontsOnOpen
     On Error GoTo 0
@@ -69,6 +70,11 @@ Private Sub Workbook_SheetChange(ByVal Sh As Object, ByVal Target As Range)
     On Error GoTo CleanExit
     ProductCatalogSync.ResumeAfterCancelledClose
     If Sh Is ThisWorkbook.Worksheets(1) Then
+        If Not Intersect(Target, Sh.Range("M7")) Is Nothing Then
+            Application.EnableEvents = False
+            ProductCatalogSync.QueueVisibleCNYProposal Target
+            GoTo CleanExit
+        End If
         If Not Intersect( _
             Target, _
             ThisWorkbook.Names("ProductSearchQuery").RefersToRange _

@@ -948,8 +948,9 @@ try {
     $profitHeader = $priceList.Range("${configSecondColumn}9")
     $profitValue = $priceList.Range("${configSecondColumn}10")
 
-    $yuanHeader.Value2 = 'بهای یوآن'
+    $yuanHeader.Value2 = 'بهای یوآن (قابل ویرایش)'
     $yuanValue.Formula = "=IF('تنظیمات'!G18="""","""",'تنظیمات'!G18)"
+    $yuanValue.AddComment('برای تغییر نرخ، عدد جدید را همین‌جا وارد کنید. تا تأیید وب‌سایت، فرمول‌های قیمت از نرخ تأییدشده استفاده می‌کنند.')
     $yuanTable = $priceList.ListObjects.Add(1, $priceList.Range("${configFirstColumn}6:${configFirstColumn}7"), $null, 1)
     $yuanTable.Name = 'Yuan_Price'
     $yuanTable.TableStyle = 'TableStyleMedium2'
