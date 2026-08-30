@@ -1660,6 +1660,27 @@ func TestDynamicCalculatorVBASourceGuardsLivePricingBeforeMutation(t *testing.T)
 			t.Fatalf("atomic refresh commit is missing %s", required)
 		}
 	}
+	for _, required := range []string{
+		`Private Const SNAPSHOT_IDENTITY_CELL As String = "G55"`,
+		"CurrentSnapshotIdentityToken()",
+		"Private Function TryCompleteUnchangedSnapshot() As Boolean",
+		`mOperationKind <> "refresh" Or mForceFreshSnapshot`,
+		`settings.Range("G14").Value2`,
+		`settings.Range("G45").Value2`,
+		`settings.Range("G46").Value2`,
+		"HasCoherentLocalCatalog()",
+		"StrictPriceParityMismatchCount() <> 0",
+		`settings.Range("B49").Value2 = mStatePageTimingText`,
+		"CompleteActiveOperation True",
+		"ArmSseListenerAfterCommit committedEventsURL",
+	} {
+		if !strings.Contains(source, required) {
+			t.Fatalf("unchanged-revision fast path is missing %s", required)
+		}
+	}
+	if strings.Contains(section("Private Function TryCompleteUnchangedSnapshot", "Private Function RetrySnapshotAfterSourceDrift"), "BeginSnapshotPayloadRequest") {
+		t.Fatal("unchanged-revision fast path must finish before downloading the payload")
+	}
 	if strings.Contains(refreshSource+beginRefreshSource, "ConfirmUnicodeMessage") {
 		t.Fatal("routine refresh status must remain inline and never open a modal dialog")
 	}

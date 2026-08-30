@@ -86,6 +86,7 @@ Private Const SNAPSHOT_FIELD_IMAGE_URL As Long = 27
 ' path, while the companion additionally requires a live verified revision
 ' before it reuses its own in-process copy.
 Private Const PRICING_SNAPSHOT_CACHE_SECONDS As Long = 300
+Private Const SNAPSHOT_IDENTITY_CELL As String = "G55"
 Private Const PRICE_ROUNDING_MODE As String = "nearest_half_up"
 Private Const LOOPBACK_PREFIX As String = "http://127.0.0.1:18080/"
 Private Const SEARCH_BUTTON_SHAPE As String = "ProductSearchButton"
@@ -857,6 +858,9 @@ Private Sub CommitRefreshSnapshot(ByVal reconciledRows As Object, _
     settings.Range("B6").Value = statusText
     settings.Range("B7").Value = Now
     settings.Range("B7").NumberFormat = "yyyy-mm-dd hh:mm"
+    settings.Range(SNAPSHOT_IDENTITY_CELL).NumberFormat = "@"
+    settings.Range(SNAPSHOT_IDENTITY_CELL).Value2 = _
+        CurrentSnapshotIdentityToken()
     mLastRefreshSucceeded = True
 
 CommitExit:
@@ -1876,7 +1880,12 @@ Private Sub HandleSnapshotStartResponse(ByVal statusCode As Long, _
     ' one-shot terminal wait is active. Bind it to the new job identity now,
     ' but do not create the first listener until the snapshot is committed.
     mSseJobID = mSnapshotJobID
-    BeginSnapshotWaitRequest
+    If mSnapshotJobStatus = "ready" Then
+        If TryCompleteUnchangedSnapshot() Then Exit Sub
+        BeginSnapshotPayloadRequest
+    Else
+        BeginSnapshotWaitRequest
+    End If
 End Sub
 
 Private Sub HandleSnapshotWaitResponse(ByVal statusCode As Long, _
@@ -1914,8 +1923,76 @@ Private Sub HandleSnapshotWaitResponse(ByVal statusCode As Long, _
         End If
         RaiseSnapshotJobFailure mSnapshotJobCode
     End If
+    If TryCompleteUnchangedSnapshot() Then Exit Sub
     BeginSnapshotPayloadRequest
 End Sub
+
+Private Function CurrentSnapshotIdentityToken() As String
+    Dim payloadRevision As String
+
+    payloadRevision = StrongETagRevision(mSnapshotExpectedETag)
+    If Not IsSHA256RevisionText(mSnapshotRevision) Or _
+       Not IsSHA256RevisionText(payloadRevision) Then Exit Function
+    CurrentSnapshotIdentityToken = mSnapshotRevision & "|" & _
+        payloadRevision
+End Function
+
+Private Function TryCompleteUnchangedSnapshot() As Boolean
+    Dim settings As Worksheet
+    Dim snapshotIdentity As String
+    Dim committedEventsURL As String
+    Dim committedJobID As String
+    Dim committedCSRFToken As String
+
+    On Error GoTo NotUnchanged
+    If mOperationKind <> "refresh" Or mForceFreshSnapshot Or _
+       mSnapshotJobStatus <> "ready" Then Exit Function
+
+    snapshotIdentity = CurrentSnapshotIdentityToken()
+    If Len(snapshotIdentity) = 0 Then Exit Function
+    Set settings = ConfigSheet()
+    If StrComp(Trim$(CStr(settings.Range( _
+           SNAPSHOT_IDENTITY_CELL).Value2)), snapshotIdentity, _
+           vbBinaryCompare) <> 0 Or _
+       StrComp(Trim$(CStr(settings.Range("G14").Value2)), _
+           mSnapshotStateRevision, vbBinaryCompare) <> 0 Or _
+       StrComp(Trim$(CStr(settings.Range("G45").Value2)), _
+           mSourceRevision, vbBinaryCompare) <> 0 Or _
+       CLng(Val(CStr(settings.Range("G46").Value2))) <> _
+           mSnapshotRowCount Then Exit Function
+    If Not HasCoherentLocalCatalog() Or _
+       CBool(settings.Range("G31").Value2) Or _
+       StrictPriceParityMismatchCount() <> 0 Then Exit Function
+
+    ValidateSseListenerPrerequisites mSnapshotEventsURL, mSnapshotJobID, _
+        mPricingCSRFToken
+    committedEventsURL = mSnapshotEventsURL
+    committedJobID = mSnapshotJobID
+    committedCSRFToken = mPricingCSRFToken
+    mOperationStateSeconds = PhaseElapsed(mOperationStateStartedAt)
+    mStatePageTimingText = "snapshot_noop=" & _
+        Format$(mOperationStateSeconds, "0.000") & "s; source=" & _
+        mSourceRevision & "; snapshot=" & mSnapshotRevision
+    settings.Range("B46").Value2 = mSessionSeconds
+    settings.Range("B47").Value2 = mOperationContractSeconds
+    settings.Range("B48").Value2 = mOperationStateSeconds
+    settings.Range("B49").NumberFormat = "@"
+    settings.Range("B49").Value2 = mStatePageTimingText
+    settings.Range("B50:B54").Value2 = 0
+    settings.Range("B7").Value = Now
+    settings.Range("B7").NumberFormat = "yyyy-mm-dd hh:mm"
+    mLastRefreshSucceeded = True
+    mForceFreshSnapshot = False
+    SetRefreshProgress "4/4"
+    CompleteActiveOperation True
+    ArmSseListenerAfterCommit committedEventsURL, committedJobID, _
+        committedCSRFToken
+    TryCompleteUnchangedSnapshot = True
+    Exit Function
+
+NotUnchanged:
+    Err.Clear
+End Function
 
 Private Function RetrySnapshotAfterSourceDrift() As Boolean
     If mOperationSnapshotRetryCount >= 3 Or _
