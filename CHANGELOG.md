@@ -27,6 +27,12 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   partner price from the first `Sharh1` slot while retaining `FOROSH` as the
   separate sale-price fact.
 
+## [1.3.7] - 2026-08-30
+
+- Mark successful catalog refresh convergence explicitly on the CNY cells with
+  the confirmed green state and a revision-bearing note; mismatched rate or
+  revision guards remain fail-closed with a visible warning state.
+
 ## [1.3.6] - 2026-08-30
 
 - Keep unchanged Excel refreshes on the verified revision fast path by treating
