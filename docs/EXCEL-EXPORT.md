@@ -156,8 +156,8 @@ and missing products. Visible categories come only from the WooCommerce/site
 record and never fall back to a Patris category code.
 
 `داشبورد` contains formula-backed catalog and publication summaries.
-`تنظیمات` contains the live site values, proposed edits, warnings, and the
-guarded preview/apply controls. Product search and clear buttons live directly
+`تنظیمات` contains the live site values, proposed edits, warnings, and one
+guarded settings **همگام‌سازی اکنون** control. Product search and clear buttons live directly
 on `محصولات`; selecting a product highlights its complete table row. Technical
 join and audit data is stored only in the `xlSheetVeryHidden` sheet
 `داده‌های همگام‌سازی`.
@@ -170,7 +170,7 @@ of overwriting the canonical empty template. If automation opens the canonical
 fetched runtime catalog without a save prompt. A pending website price update
 must reach a terminal state before that direct template can close. Saving a
 working copy as `.xlsx` creates a
-macro-free snapshot and removes the search, sync, preview/apply buttons, their
+macro-free snapshot and removes the search and sync buttons, their
 macro assignments, and the selection-highlighting controls. The logo, chart,
 tables, formulas, and synchronized values remain.
 
@@ -188,6 +188,9 @@ GET  http://127.0.0.1:18080/api/pricing-sync/snapshots/{job_id}/payload
 GET  http://127.0.0.1:18080/api/pricing-sync/events
 POST http://127.0.0.1:18080/api/pricing-sync/preview
 POST http://127.0.0.1:18080/api/pricing-sync/apply
+POST http://127.0.0.1:18080/api/pricing-sync/writebacks
+GET  http://127.0.0.1:18080/api/pricing-sync/writebacks/{job_id}
+POST http://127.0.0.1:18080/api/pricing-sync/writebacks/{job_id}/ack
 ```
 
 The `/api/pricing-sync/*` path is an integration-neutral local companion surface:
@@ -315,26 +318,23 @@ The three familiar calculator cards and table names remain:
 - `Profit` / `حاشیه سود`.
 
 They are blank in the template and filled dynamically. The Settings sheet shows
-the live site values separately from the workbook proposal. Yuan, USD, profit
-margin, and air-express shipping are one atomic settings document. A proposal
-can be previewed and applied only with the current settings and shipping-catalog
-revisions, an idempotency key, a server-bound preview digest, and an explicit
-Unicode confirmation. A rate older than seven days or a difference above seven
-percent is reported in Persian and is never silently selected.
+the live site values separately from the workbook proposal. Yuan, USD, both
+effective dates, profit margin, air-express shipping, and rounding digits are
+one atomic settings document. A rate older than seven days or a difference
+above seven percent is reported in Persian and is never silently selected.
 
 The price cards, hidden calculation inputs, and final-price formulas use only
 the live site-confirmed values. Editing a proposal cell invalidates every older
-preview and queues one nonmodal asynchronous preview callback, giving the local
-backend immediate feedback without changing live values. Repeated edits are
-coalesced; a busy finite operation retains one queued preview for its terminal
-callback rather than polling. Apply is never automatic: it still requires the
-explicit button, Unicode confirmation, current preview digest, `If-Match`, and
-the stable idempotency key. Displayed customer prices do not change until the
-apply/readback snapshot transaction finishes. A canonical-delivery mismatch may
-run one callback-driven repair before a new contract/session/snapshot sequence.
-On an uncertain response, Excel keeps the unchanged live values and preserves
-the same apply idempotency key for a safe retry. A success message is shown only
-after a fresh state readback matches the applied revision.
+preview, records only a local pending generation, and colors that field amber;
+it starts no network or mutation work. The one settings **همگام‌سازی اکنون**
+button sends exactly the changed keys with their prior confirmed values and a
+fully validated immutable settings document. The companion performs preview,
+apply, bounded retry, website readback, and ACK in its background queue. Excel
+applies the complete website-confirmed document to hidden inputs and formulas
+before ACK, preserves any newer local edit, and turns included fields green only
+after final readback. Validation, conflict, rollback, or transport failure stays
+red with a concise Persian message. Workbook-only display, warning, image, font,
+and refresh preferences are never sent to WordPress.
 
 The calculated price converts goods and freight independently through their
 declared currencies, applies the shared profit margin, and rounds once with the

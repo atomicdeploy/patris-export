@@ -83,6 +83,7 @@ try {
     $clearMacro = "'$bookName'!ProductCatalogSync.ClearProductSearch"
     $progressMacro = "'$bookName'!ProductCatalogSync.ValidateOperationProgressUIForValidation"
     $progressInitializeMacro = "'$bookName'!ProductCatalogSync.InitializeOperationProgress"
+    $pasteMacro = "'$bookName'!ProductCatalogSync.ValidateProductSearchPasteForValidation"
     $writebackMacro = "'$bookName'!ProductCatalogSync.ValidatePricingWritebackUIForValidation"
 
     $initialRows = [int]$table.ListRows.Count
@@ -122,6 +123,10 @@ try {
     Write-Host 'stage=validate_progress'
     if (-not [bool]$excel.Run($progressMacro)) {
         throw 'Visible progress lifecycle validation returned false.'
+    }
+    Write-Host 'stage=validate_merged_search_paste'
+    if (-not [bool]$excel.Run($pasteMacro)) {
+        throw 'Merged search plain-text paste validation returned false.'
     }
     Write-Host 'stage=validate_writeback_ui'
     if (-not [bool]$excel.Run($writebackMacro)) {
@@ -184,6 +189,7 @@ try {
         literal_wildcard_caption = $wildcardCaption
         filter_preserved = $true
         progress_lifecycle = $true
+        merged_search_paste = $true
         writeback_ui_lifecycle = $true
         excel_ready = [bool]$excel.Ready
         crash_event_delta = $null

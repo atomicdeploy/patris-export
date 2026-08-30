@@ -284,6 +284,10 @@ function buildFailures(report, options) {
     `the product search input did not preserve all literal-text fixtures: ${JSON.stringify(report.searchLiteral)}`,
   );
   failUnless(
+    report.searchPaste === true,
+    'plain-text paste did not stay anchored in the merged C3:E3 search surface',
+  );
+  failUnless(
     report.statusSummary.mixed.includes('3 ')
       && report.statusSummary.mixed.includes('2 ')
       && !report.statusSummary.mixed.includes('0 ')
@@ -332,6 +336,16 @@ function buildFailures(report, options) {
   failUnless(
     report.pricingProgressUI === true,
     'the visible Persian progress surface lifecycle fixture failed',
+  );
+  if (options.sync) {
+    failUnless(
+      report.pricingEventListenerActive === true,
+      'the durable Patris/WordPress event listener is not active after synchronization',
+    );
+  }
+  failUnless(
+    report.pricingEventAutoPull === true,
+    'the revision-aware Patris/WordPress event auto-pull fixture failed',
   );
   failUnless(
     report.productImagePreviewUI === true,
@@ -1391,6 +1405,13 @@ function Test-SearchLiteralText([object]$excel, [object]$book) {
         Release-ComObject $input
         Release-ComObject $definedName
     }
+}
+
+function Test-SearchPaste([object]$excel, [object]$book) {
+    $bookName = ([string]$book.Name).Replace("'", "''")
+    return [bool]$excel.Run(
+        "'$bookName'!ProductCatalogSync.ValidateProductSearchPasteForValidation"
+    )
 }
 
 function Test-FontAudit([object]$excel, [object]$book) {
@@ -2755,6 +2776,8 @@ try {
     $brandingLayout = Test-BrandingLayout $candidateBook
     Set-ValidatorStage 'checking_literal_search'
     $searchLiteral = Test-SearchLiteralText $excel $candidateBook
+    Set-ValidatorStage 'checking_merged_search_paste'
+    $searchPaste = Test-SearchPaste $excel $candidateBook
     Set-ValidatorStage 'checking_status_summary'
     $statusSummary = Test-StatusSummaryFormatter $excel $candidateBook
     Set-ValidatorStage 'reading_candidate_products'
@@ -2767,6 +2790,15 @@ try {
     $pricingWritebackUI = Test-PricingWritebackUI $excel $candidateBook
     Set-ValidatorStage 'checking_progress_ui'
     $pricingProgressUI = Test-PricingProgressUI $excel $candidateBook
+    Set-ValidatorStage 'checking_pricing_event_listener'
+    $eventMacroBookName = ([string]$candidateBook.Name).Replace("'", "''")
+    $pricingEventListenerActive = [bool]$excel.Run(
+        "'$eventMacroBookName'!ProductCatalogSync.PricingEventListenerActiveForValidation"
+    )
+    Set-ValidatorStage 'checking_pricing_event_auto_pull'
+    $pricingEventAutoPull = [bool]$excel.Run(
+        "'$eventMacroBookName'!ProductCatalogSync.ValidatePricingEventAutoPullForValidation"
+    )
     Set-ValidatorStage 'checking_product_image_preview_ui'
     $productImagePreviewUI = Test-ProductImagePreviewUI $excel $candidateBook
     Set-ValidatorStage 'checking_product_search'
@@ -3177,11 +3209,14 @@ try {
         search = $candidateSearch
         branding = $brandingLayout
         searchLiteral = $searchLiteral
+        searchPaste = $searchPaste
         statusSummary = $statusSummary
         titleDirection = $titleDirection
         fontAudit = $fontAudit
         pricingWritebackUI = $pricingWritebackUI
         pricingProgressUI = $pricingProgressUI
+        pricingEventListenerActive = $pricingEventListenerActive
+        pricingEventAutoPull = $pricingEventAutoPull
         productImagePreviewUI = $productImagePreviewUI
         searchRegression = $searchRegression
         transientPricePreview = $transientPricePreview
@@ -4010,15 +4045,22 @@ function main() {
     const synchronousWritebackSource = procedure(moduleSource, 'RunSynchronousWritebackStep');
     const searchBusySource = /Private Function SearchOperationBusy\b[\s\S]*?\r?\nEnd Function/iu.exec(moduleSource)?.[0] || '';
     const enterSource = procedure(moduleSource, 'HandleProductSearchEnter');
+    const pasteSource = procedure(moduleSource, 'PasteProductSearchText');
+    const highlightSource = procedure(moduleSource, 'HighlightSelectedProductRow');
+    const progressShapesSource = procedure(moduleSource, 'UpdateOperationProgressShapes');
     const sheetChangeSource = procedure(workbookSource, 'Workbook_SheetChange');
     const selectionSource = procedure(workbookSource, 'Workbook_SheetSelectionChange');
     const scheduledWritebackSource = procedure(moduleSource, 'RunScheduledPricingWriteback');
     const completeWritebackSource = procedure(moduleSource, 'CompletePricingWriteback');
     const queueWritebackSource = procedure(moduleSource, 'QueuePricingInputWriteback');
+    const syncSettingsSource = procedure(moduleSource, 'SyncPricingSettingsNow');
     const buildWritebackSource = /Private Function BuildPricingWritebackRequest\b[\s\S]*?\r?\nEnd Function/iu.exec(moduleSource)?.[0] || '';
+    const buildBatchWritebackSource = /Private Function BuildPricingBatchWritebackRequest\b[\s\S]*?\r?\nEnd Function/iu.exec(moduleSource)?.[0] || '';
     const applyCommittedSource = procedure(moduleSource, 'ApplyWebsiteCommittedWriteback');
+    const applyBatchSource = procedure(moduleSource, 'ApplyConfirmedSettingsForActiveBatch');
     const restoreTerminalSource = procedure(moduleSource, 'RestoreWritebackValueFromTerminal');
     const confirmWritebackSource = procedure(moduleSource, 'ConfirmPricingWriteback');
+    const confirmBatchSource = procedure(moduleSource, 'ConfirmPricingBatchWriteback');
     const restoreSnapshotSource = procedure(moduleSource, 'RestorePricingStateSnapshot');
     const globalStateSource = procedure(moduleSource, 'ApplyGlobalState');
     const forbiddenSearchTokens = [
@@ -4080,6 +4122,46 @@ function main() {
     if (/\bKickQueuedAsyncDispatch\b/iu.test(selectionSource)) {
       throw new Error('Workbook_SheetSelectionChange must not dispatch network work');
     }
+    const forbiddenSelectionTokens = [
+      'ResumeAfterCancelledClose',
+      'RefreshProductImagePreview',
+      'PumpExcelMessages',
+      '.Calculate',
+    ];
+    const foundSelectionToken = forbiddenSelectionTokens.find((token) => (
+      selectionSource.includes(token)
+    ));
+    if (foundSelectionToken) {
+      throw new Error(`Row selection contains non-local work: ${foundSelectionToken}`);
+    }
+    const forbiddenHighlightTokens = [
+      '.Calculate',
+      'RefreshProductImagePreview',
+      'PumpExcelMessages',
+      'OpenAsync',
+      'Application.OnTime',
+    ];
+    const foundHighlightToken = forbiddenHighlightTokens.find((token) => (
+      highlightSource.includes(token)
+    ));
+    if (foundHighlightToken
+        || !/Range\("G30"\)\.Value2\s*=\s*selectedRow/iu.test(highlightSource)
+        || !/Range\("G48"\)\.Value2\s*=\s*previewRow/iu.test(highlightSource)) {
+      throw new Error(`Selected-row highlight is not a bounded local marker update: ${foundHighlightToken || 'missing marker'}`);
+    }
+    if (!/Application\.OnKey\s+"\^v",\s*pasteMacro/iu.test(moduleSource)
+        || !/Application\.OnKey\s+"\+\{INSERT\}",\s*pasteMacro/iu.test(moduleSource)
+        || !/TryReadUnicodeClipboardText\(clipboardText\)/iu.test(pasteSource)
+        || !/ApplyProductSearchPasteText\(clipboardText,\s*True\)/iu.test(pasteSource)
+        || !/searchAnchor\.Value2\s*=\s*NormalizeProductSearchPasteText\(plainText\)/iu.test(moduleSource)) {
+      throw new Error('Merged search paste must intercept plain text and write only through the C3 anchor');
+    }
+    if (!/If\s+visualState\s*=\s*"neutral"\s+Then[\s\S]*?track\.Visible\s*=\s*msoFalse[\s\S]*?fill\.Visible\s*=\s*msoFalse[\s\S]*?label\.Visible\s*=\s*msoFalse/iu.test(progressShapesSource)
+        || !/Else[\s\S]*?track\.Visible\s*=\s*msoTrue[\s\S]*?fill\.Visible\s*=\s*msoTrue[\s\S]*?label\.Visible\s*=\s*msoTrue/iu.test(progressShapesSource)
+        || !/\$track\.Visible\s*=\s*\$false/u.test(buildSource)
+        || !/\$text\.Visible\s*=\s*\$false/u.test(buildSource)) {
+      throw new Error('Ready must hide the complete progress surface and active states must show it');
+    }
     if (!/\bRunSynchronousWritebackStep\b/iu.test(scheduledWritebackSource)
         || /\bBeginWritebackPoll\b/iu.test(scheduledWritebackSource)
         || /\bStartWritebackRequest\b/iu.test(scheduledWritebackSource)) {
@@ -4093,25 +4175,51 @@ function main() {
     }
     const postDequeueWritebackSource = scheduledWritebackSource.slice(postDequeueBoundary);
     if (/mActiveWritebackGeneration\s*=\s*0/iu.test(postDequeueWritebackSource)
-        || /mActiveWritebackDesiredValue\s*=\s*vbNullString/iu.test(postDequeueWritebackSource)) {
+        || /mActiveWritebackDesiredValue\s*=\s*vbNullString/iu.test(postDequeueWritebackSource)
+        || /mActiveWritebackKeys\s*=\s*vbNullString/iu.test(postDequeueWritebackSource)
+        || /mActiveWritebackRequestBody\s*=\s*vbNullString/iu.test(postDequeueWritebackSource)) {
       throw new Error('Dequeued pricing intent must remain immutable until terminal confirmation');
     }
     if (!/mActiveWritebackGeneration\s*=\s*0/iu.test(completeWritebackSource)
-        || !/mActiveWritebackDesiredValue\s*=\s*vbNullString/iu.test(completeWritebackSource)) {
+        || !/mActiveWritebackDesiredValue\s*=\s*vbNullString/iu.test(completeWritebackSource)
+        || !/mActiveWritebackKeys\s*=\s*vbNullString/iu.test(completeWritebackSource)
+        || !/mActiveWritebackRequestBody\s*=\s*vbNullString/iu.test(completeWritebackSource)) {
       throw new Error('Immutable pricing intent must clear only at terminal completion');
     }
     if (!/IsNativeSearchEnterTransition\(target\)/iu.test(moduleSource)
+        || !/If\s+Not\s+mSearchNativeEnterPending\s+Then\s+Exit Function/iu.test(moduleSource)
+        || !/mSearchNativeEnterPending\s*=\s*True/iu.test(moduleSource)
         || !/If\s+queueNativeEnter\s+Then\s+RunNativeEnterProductSearch/iu.test(moduleSource)
         || !/Private Sub RunNativeEnterProductSearch\(\)[\s\S]*?CancelScheduledProductSearch[\s\S]*?SearchProductsForQuery\s+query,\s*generation/iu.test(moduleSource)
         || !/RememberSearchSelection\s+anchor/iu.test(searchSource)
         || !/mPendingSearchGeneration\s*=\s*mSearchRequestGeneration/iu.test(moduleSource)) {
       throw new Error('Physical Enter must run one generation-bound, event-safe search after native selection movement');
     }
-    if (!/mWritebackPendingValues/iu.test(queueWritebackSource)
-        || !/mWritebackPendingGenerations/iu.test(queueWritebackSource)
-        || !/PersistPendingPricingIntent/iu.test(queueWritebackSource)
-        || !/mActiveWritebackDesiredValue/iu.test(buildWritebackSource)) {
-      throw new Error('Pricing writeback must bind an immutable desired value and edit generation to the queued job');
+    if (!/mPricingDirty\(CStr\(keyValue\)\)/iu.test(queueWritebackSource)
+        || !/mPricingDirtyGenerations\(CStr\(keyValue\)\)/iu.test(queueWritebackSource)
+        || !/MarkWritebackState\s+CStr\(keyValue\),\s*"pending"/iu.test(queueWritebackSource)
+        || /SchedulePricingWriteback|StartWritebackRequest|RunSynchronousWritebackStep|PreviewPricingChangesCore|ApplyPricingChangesCore/iu.test(queueWritebackSource)) {
+      throw new Error('A settings edit must only record an amber local proposal until Sync Now');
+    }
+    if (!/BuildPricingBatchWritebackRequest\(requestID,\s*keysCSV\)/iu.test(syncSettingsSource)
+        || !/mWritebackPending\("settings_batch"\)\s*=\s*keysCSV/iu.test(syncSettingsSource)
+        || !/mWritebackPendingValues\("settings_batch"\)\s*=\s*requestBody/iu.test(syncSettingsSource)
+        || !/mWritebackPendingGenerations\("settings_batch"\)\s*=\s*mPricingEditGeneration/iu.test(syncSettingsSource)
+        || !/SchedulePricingWriteback\s+1/iu.test(syncSettingsSource)
+        || /ConfirmUnicodeMessage/iu.test(syncSettingsSource)) {
+      throw new Error('Settings Sync Now must enqueue one immutable batch without a second confirmation dialog');
+    }
+    if (!/patris\.pricing-settings-writeback-request\/v2/iu.test(moduleSource)
+        || !/"""setting_keys""/iu.test(buildBatchWritebackSource)
+        || !/"""previous_confirmed_values""/iu.test(buildBatchWritebackSource)
+        || !/mActiveWritebackRequestBody/iu.test(scheduledWritebackSource)
+        || !/JsonRuntime\.JsonMember\(root,\s*"confirmed_settings"\)/iu.test(applyBatchSource)
+        || !/PricingKeyHasNewerProposal/iu.test(applyBatchSource)
+        || !/ClearPricingDirtyKey/iu.test(confirmBatchSource)) {
+      throw new Error('Settings batch must preserve exact fences and apply full confirmed readback generation-safely');
+    }
+    if (!/mActiveWritebackDesiredValue/iu.test(buildWritebackSource)) {
+      throw new Error('Legacy single-setting writeback must retain immutable intent fencing');
     }
     if (!/WritebackHasNewerProposal/iu.test(applyCommittedSource)
         || !/WritebackHasNewerProposal/iu.test(restoreTerminalSource)) {
@@ -4126,8 +4234,9 @@ function main() {
       throw new Error('Refresh rollback must preserve pricing cells edited after snapshot capture');
     }
     if (!/QueueVisibleCNYProposal\s+Target/iu.test(sheetChangeSource)
+        || !/QueuePricingInputWriteback\s+Target/iu.test(sheetChangeSource)
         || !/RecoverPendingPricingIntentOnOpen/iu.test(workbookSource)) {
-      throw new Error('Visible CNY edits and saved pending intent must route into the protected writeback queue');
+      throw new Error('Every website-backed settings edit must route into the local pending-state inventory');
     }
     if (!/JsonRuntime\.JsonText\(state,\s*"pricing_state_revision"\)/iu.test(globalStateSource)
         || !/settings\.Range\("G14"\)\.Value2\s*=\s*pricingStateRevision/iu.test(globalStateSource)) {
@@ -4140,12 +4249,20 @@ function main() {
     if (!/Names\.Add\('ConfirmedCNYRate',\s*\$settings\.Range\('G18'\)\)/u.test(buildSource)) {
       throw new Error('ConfirmedCNYRate must bind exactly to the hidden confirmed Settings G18 cell');
     }
+    if (!/Add-ActionButton\s+\$settings\s+'همگام‌سازی اکنون'\s+'ProductCatalogSync\.SyncPricingSettingsNow'[\s\S]*?\$settings\.Range\('A28:F29'\)\.Width/u.test(buildSource)
+        || /Add-ActionButton\s+\$settings\s+'(?:پیش‌نمایش تغییرات|اعمال تغییرات تأییدشده)'/u.test(buildSource)) {
+      throw new Error('Settings must expose one explicit full-width Sync Now batch action');
+    }
     const priceFormulaSource = /Private Sub ApplyProductTableFormulas\b[\s\S]*?\r?\nEnd Sub/iu.exec(moduleSource)?.[0] || '';
     if (!/cnyRateFormula\s*=\s*_/iu.test(priceFormulaSource)
         || !/ISNUMBER\(ConfirmedCNYRate\)/iu.test(priceFormulaSource)
         || !/ConfirmedCNYRate>0/iu.test(priceFormulaSource)
         || /PricingInputCNYRate/iu.test(priceFormulaSource)) {
       throw new Error('Product formulas must use only the confirmed website rate, never the B18 proposal');
+    }
+    if (!/ROW\(\)=ProjectedPricePreviewRow/iu.test(priceFormulaSource)
+        || /ROW\(\)=['"]?[^\r\n]*R30C7/iu.test(priceFormulaSource)) {
+      throw new Error('Selling-price preview must not depend on the yellow SelectedProductRow marker');
     }
   } catch (error) {
     console.error(`Search re-entrancy source gate failed: ${error.message}`);

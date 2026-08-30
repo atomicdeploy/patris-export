@@ -193,6 +193,7 @@ function Add-OperationProgressSurface(
     $track.Fill.ForeColor.RGB = ConvertTo-OleColor 'E8EEF4'
     $track.Line.ForeColor.RGB = ConvertTo-OleColor 'B9CCF4'
     $track.Line.Weight = 1
+    $track.Visible = $false
     $track.AlternativeText = 'نوار وضعیت عملیات؛ زمینه ثابت.'
 
     $fill = $Sheet.Shapes.AddShape(1, $Anchor.Left, $Anchor.Top, 1, $Height)
@@ -206,6 +207,7 @@ function Add-OperationProgressSurface(
     $text.Name = 'OperationProgressText'
     $text.Fill.Visible = $false
     $text.Line.Visible = $false
+    $text.Visible = $false
     $text.TextFrame2.TextRange.Text = 'آماده'
     Set-OfficeTextFont $text.TextFrame2.TextRange 10 $true '2F414B'
     $text.TextFrame2.VerticalAnchor = 3
@@ -842,27 +844,29 @@ try {
     $priceList.Range('E1').VerticalAlignment = -4108
     [void](Add-BrandLogo $priceList $LogoPath $priceList.Range('B1:B2') 190 43 $true)
 
-    $priceList.Rows(3).RowHeight = 32
+    $priceList.Rows(3).RowHeight = 34
     $priceList.Range('B3').Value2 = 'جست‌وجوی کالا (F2/F3)'
     $priceList.Range('B3').Font.Bold = $true
     $priceList.Range('B3').Font.Color = ConvertTo-OleColor '0168CD'
     $priceList.Range('B3').VerticalAlignment = -4108
-    # Keep the search surface visually wide without a merged cell. Merged cells
-    # reject ordinary paste/automation input with "can't do that to a merged
-    # cell" on some Office builds.
-    $priceList.Range('C3:E3').UnMerge()
+    # The search field is one deliberate presentation/input surface, not three
+    # independent cells. VBA always resolves edits and selection changes back
+    # to the C3 anchor so native Enter remains top-level and recursion-safe.
+    $priceList.Range('C3:E3').Merge()
     $priceList.Range('C3:E3').NumberFormat = '@'
-    $priceList.Range('C3:E3').Interior.Color = ConvertTo-OleColor 'FFFFFF'
+    $priceList.Range('C3:E3').Interior.Color = ConvertTo-OleColor 'F7FBFF'
     $priceList.Range('C3:E3').Borders.Color = ConvertTo-OleColor '0168CD'
     $priceList.Range('C3:E3').Borders.Weight = 2
-    $priceList.Range('C3:E3').Borders.Item(11).LineStyle = -4142
     $priceList.Range('C3').Font.Name = 'Yekan Bakh'
     $priceList.Range('C3').Font.Size = 12
-    $priceList.Range('C3').Font.Bold = $true
+    $priceList.Range('C3').Font.Bold = $false
     $priceList.Range('C3').Font.Color = ConvertTo-OleColor '2F414B'
     $priceList.Range('C3').HorizontalAlignment = -4152
     $priceList.Range('C3').VerticalAlignment = -4108
     $priceList.Range('C3').ReadingOrder = -5004
+    $priceList.Range('C3').IndentLevel = 1
+    $priceList.Range('C3').ShrinkToFit = $false
+    $priceList.Range('C3').WrapText = $false
     $priceList.Range('C3').Validation.Delete()
     $priceList.Range('C3').Validation.Add(0)
     $priceList.Range('C3').Validation.InputTitle = 'جست‌وجوی کالا'
@@ -1357,8 +1361,10 @@ try {
     $settings.Rows.Item(14).RowHeight = 30
     $settings.Rows.Item(22).RowHeight = 30
 
-    [void](Add-ActionButton $settings 'پیش‌نمایش تغییرات' 'ProductCatalogSync.PreviewPricingChanges' $settings.Range('A28') $settings.Range('A28:C29').Width $settings.Range('A28:C29').Height)
-    [void](Add-ActionButton $settings 'اعمال تغییرات تأییدشده' 'ProductCatalogSync.ApplyPricingChanges' $settings.Range('D28') $settings.Range('D28:F29').Width $settings.Range('D28:F29').Height)
+    # Settings edits stay local and amber until this one explicit batch action.
+    # The companion performs preview/apply/readback in its background worker;
+    # Excel turns fields green only after the website ACK is complete.
+    [void](Add-ActionButton $settings 'همگام‌سازی اکنون' 'ProductCatalogSync.SyncPricingSettingsNow' $settings.Range('A28') $settings.Range('A28:F29').Width $settings.Range('A28:F29').Height)
 
     $settings.Range('A31:F37').ClearContents()
     $settings.Range('A31').Value2 = 'نمایش تصاویر محصولات'
