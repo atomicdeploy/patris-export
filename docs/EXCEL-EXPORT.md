@@ -174,6 +174,14 @@ macro-free snapshot and removes the search and sync buttons, their
 macro assignments, and the selection-highlighting controls. The logo, chart,
 tables, formulas, and synchronized values remain.
 
+Release automation applies the same rule outside VBA. The dashboard builder
+and module updater inspect the saved OpenXML package and fail if `Products` or
+`SyncData` contains a value, formula, hyperlink, or more than one blank table
+placeholder row. The native validator also audits an `.xltm` before opening
+Excel. Its optional synchronized output is an `.xlsm` working copy only;
+saving a live-populated validation instance back as `.xltm` is rejected so a
+runtime catalog cannot be mistaken for the distributable template.
+
 The deferred refresh-on-open and **همگام‌سازی اکنون** use only the local
 Patris companion. A pristine template defaults refresh-on-open to on; its
 asynchronous network phase keeps Excel interactive and populates the workbook

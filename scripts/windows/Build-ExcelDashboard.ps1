@@ -39,6 +39,7 @@ $jsonValuePath = Join-Path $repoRoot 'docs\examples\vba\JsonValue.cls'
 $asyncWinHttpRequestPath = Join-Path $repoRoot 'docs\examples\vba\AsyncWinHttpRequest.cls'
 $pricingSseParserPath = Join-Path $repoRoot 'docs\examples\vba\PricingSseParser.cls'
 $thisWorkbookPath = Join-Path $repoRoot 'docs\examples\vba\ThisWorkbook.cls'
+$templateDataAuditPath = Join-Path $PSScriptRoot 'Test-ExcelTemplateDataFree.ps1'
 foreach ($requiredVbaSource in @(
     $vbaModulePath,
     $jsonRuntimePath,
@@ -50,6 +51,9 @@ foreach ($requiredVbaSource in @(
     if (-not (Test-Path -LiteralPath $requiredVbaSource -PathType Leaf)) {
         throw "Required VBA source is missing: $requiredVbaSource"
     }
+}
+if (-not (Test-Path -LiteralPath $templateDataAuditPath -PathType Leaf)) {
+    throw "Required empty-template release gate is missing: $templateDataAuditPath"
 }
 $excelSecurityPath = 'HKCU:\Software\Microsoft\Office\16.0\Excel\Security'
 $excelSecurityPathExisted = Test-Path $excelSecurityPath
@@ -1692,9 +1696,15 @@ try {
 
     Remove-ExcelPrivatePackageMetadata $OutputPath
 
+    # A runtime-instantiated workbook may contain a complete live catalog. Never
+    # let such a workbook become the packaged .xltm: the release artifact must
+    # retain the table/layout contract but ship zero product or SyncData rows.
+    $templateDataAudit = & $templateDataAuditPath -Path $OutputPath
+
     $hash = Get-FileHash -Algorithm SHA256 -LiteralPath $OutputPath
     $utf8NoBom = [Text.UTF8Encoding]::new($false)
     Copy-Item -LiteralPath $OutputPath -Destination $DistributionCopyPath -Force
+    $distributionDataAudit = & $templateDataAuditPath -Path $DistributionCopyPath
     $manifestEntries = @{}
     if (Test-Path -LiteralPath $ChecksumManifestPath) {
         foreach ($line in [IO.File]::ReadAllLines($ChecksumManifestPath, [Text.Encoding]::UTF8)) {
@@ -1728,6 +1738,8 @@ try {
         excel_version = $excelVersion
         vba_components = $vbaComponents
         preview_directory = $PreviewDirectory
+        template_product_records = [int]$templateDataAudit.product_records
+        distribution_product_records = [int]$distributionDataAudit.product_records
     } | ConvertTo-Json -Compress
 }
 finally {
