@@ -26,6 +26,13 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - `FOROSH` is no longer conflated with Patris' partner price. The producer reads
   partner price from the first `Sharh1` slot while retaining `FOROSH` as the
   separate sale-price fact.
+## [1.3.2] - 2026-08-30
+
+- Make unchanged Excel catalog refreshes reuse a five-minute authenticated
+  snapshot while requiring the companion's live verified source, state, and
+  catalog revision before any local cache reuse. A disconnected or changed
+  revision falls back to the full fail-closed remote snapshot path.
+
 ## [1.3.1] - 2026-07-27
 
 ### Fixed
