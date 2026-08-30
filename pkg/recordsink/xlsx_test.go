@@ -1221,8 +1221,14 @@ func TestDynamicCalculatorVBASourceGuardsLivePricingBeforeMutation(t *testing.T)
 		t.Fatal("SSE snapshot-ready handling has no semantic-change boundary")
 	}
 	snapshotReadyHandler := sseEventHandler[snapshotReadyStart : snapshotReadyStart+snapshotReadyEnd]
-	if strings.Contains(snapshotReadyHandler, "MarkSseRefreshRequired") {
-		t.Fatal("snapshot readiness must not schedule another refresh without a semantic change event")
+	for _, forbidden := range []string{
+		"MarkSseRefreshRequired",
+		"ScheduleEventDrivenRefresh",
+		"QueueSiteConfirmationDiscovery",
+	} {
+		if strings.Contains(snapshotReadyHandler, forbidden) {
+			t.Fatalf("snapshot readiness must remain completion-only, found %s", forbidden)
+		}
 	}
 	replayStart := strings.Index(sseEventHandler, `If payloadKind = "replay_required" Then`)
 	replayEnd := strings.Index(sseEventHandler, `If Len(mSseLastEventID) > 0 Then`)
@@ -1259,18 +1265,99 @@ func TestDynamicCalculatorVBASourceGuardsLivePricingBeforeMutation(t *testing.T)
 	}
 	eventValidation := section("Public Function ValidatePricingEventAutoPullForValidation", "Public Sub RegisterSearchHotkey")
 	for _, required := range []string{
-		`101, "source_changed", currentStateRevision`,
-		`102, "catalog_changed", nextStateRevision`,
-		`104, "pricing_state_changed", nextStateRevision`,
-		`106, "pricing_state_invalidated", nextPricingRevision`,
-		"mPricingEventValidationRefreshCount <> 1",
-		"mPricingEventValidationAppliedCount <> 2",
-		`CStr(settings.Range("G56").Value2) <> currentStateRevision`,
+		`101, "source_changed", nextStateRevision`,
+		`True, True, "job_cold_open"`,
+		`102, "snapshot_ready", nextStateRevision`,
+		`103, "source_changed", nextStateRevision`,
+		`104, "catalog_changed", nextStateRevision`,
+		"mPricingEventValidationRefreshCount = 1",
+		`106, "catalog_changed", thirdStateRevision`,
+		`107, "source_changed", thirdStateRevision`,
+		"mSseRefreshRevision <> thirdStateRevision",
+		"mPricingEventValidationRefreshActive = True",
+		`109, "snapshot_ready", thirdStateRevision`,
+		"ReevaluateSseRefreshRequirement",
+		`110, "catalog_changed", fourthStateRevision`,
+		`111, "source_changed", fourthStateRevision`,
+		`112, "source_changed", thirdStateRevision`,
+		`settings.Range("G56").Value2 = fourthStateRevision`,
+		"mPricingEventValidationRefreshCount <> 3",
+		`113, "pricing_state_changed", thirdStateRevision`,
+		`115, "pricing_state_invalidated", nextPricingRevision`,
+		"mPricingEventValidationAppliedCount <> 4",
+		`CStr(settings.Range("G56").Value2) <> thirdStateRevision`,
 		`CStr(settings.Range("G14").Value2) <> currentPricingRevision`,
+		"runtimeStateCaptured = True",
+		"cellStateCaptured = True",
+		"If cellStateCaptured And Not settings Is Nothing Then",
+		"If runtimeStateCaptured Then",
 	} {
 		if !strings.Contains(eventValidation, required) {
 			t.Fatalf("deterministic event auto-pull validation is missing %q", required)
 		}
+	}
+	beginRefresh := section("Private Sub BeginRefreshPipeline", "Private Sub CommitRefreshSnapshot")
+	for _, required := range []string{
+		"CancelScheduledRefresh",
+		"CancelEventDrivenRefresh",
+		"ConsumeSseRefreshRequirement",
+	} {
+		if !strings.Contains(beginRefresh, required) {
+			t.Fatalf("refresh start does not coalesce open/event timers: %s", required)
+		}
+	}
+	openRefreshScheduler := section("Public Sub ScheduleRefreshOnOpen", "Private Function HasCoherentLocalCatalog")
+	if !strings.Contains(openRefreshScheduler, "If mEventRefreshScheduled Then Exit Sub") {
+		t.Fatal("cold-open scheduling must coalesce an already queued semantic refresh")
+	}
+	markRefresh := section("Private Sub MarkSseRefreshRequired", "Private Function SseRefreshRevisionIsCurrent")
+	activeRefreshGuard := strings.Index(markRefresh, `If mOperationKind = "refresh" Or _`)
+	abortActiveRequest := strings.Index(markRefresh, "mOperationRequest.Abort")
+	if activeRefreshGuard < 0 || abortActiveRequest <= activeRefreshGuard {
+		t.Fatal("semantic events must be retained during an active refresh before any preview/apply abort path")
+	}
+	sseHandler := section("Private Sub HandlePricingSseEvent", "Private Sub QueueSiteConfirmationDiscovery")
+	for _, required := range []string{
+		"RefreshPipelineActiveForSseRetention()",
+		"revisionChanged Or RefreshPipelineActiveForSseRetention()",
+	} {
+		if !strings.Contains(sseHandler, required) {
+			t.Fatalf("active refresh can discard a valid rollback revision: %q", required)
+		}
+	}
+	for _, required := range []string{
+		"mSseRefreshRevision = eventStateRevision",
+		`mOperationKind = "apply_refresh" Then Exit Sub`,
+	} {
+		if !strings.Contains(markRefresh, required) {
+			t.Fatalf("active-refresh revision retention is missing %q", required)
+		}
+	}
+	eventScheduler := section("Private Sub ScheduleEventDrivenRefresh", "Public Sub RunEventDrivenRefresh")
+	for _, required := range []string{
+		"SseRefreshRevisionIsCurrent()",
+		"mRefreshScheduled Then Exit Sub",
+		"mEventRefreshScheduled",
+	} {
+		if !strings.Contains(eventScheduler, required) {
+			t.Fatalf("event/open refresh coalescing is missing %q", required)
+		}
+	}
+	runEventRefresh := section("Public Sub RunEventDrivenRefresh", "Private Sub CancelEventDrivenRefresh")
+	if strings.Contains(runEventRefresh, "mSseRefreshRequired = True") {
+		t.Fatal("a queued event callback firing during refresh must not manufacture a successor")
+	}
+	completeOperation := section("Private Sub CompleteActiveOperation", "Private Sub MarkRefreshPricingConvergenceState")
+	completeReset := strings.Index(completeOperation, "ResetFiniteOperationContext")
+	completeReevaluate := strings.Index(completeOperation, "ReevaluateSseRefreshRequirement")
+	if completeReset < 0 || completeReevaluate <= completeReset {
+		t.Fatal("successful refresh terminal must re-evaluate retained revisions after commit cleanup")
+	}
+	failOperation := section("Private Sub FailActiveOperation", "Private Sub RestoreExcelInteractivityAfterOperation")
+	failReset := strings.Index(failOperation, "ResetFiniteOperationContext")
+	failReevaluate := strings.Index(failOperation, "ReevaluateSseRefreshRequirement")
+	if failReset < 0 || failReevaluate <= failReset {
+		t.Fatal("failed refresh terminal must retain and re-evaluate semantic revisions")
 	}
 	pricingChangedStart := strings.Index(sseEventHandler, `Case "pricing_state_changed"`)
 	pricingInvalidatedStart := strings.Index(sseEventHandler, `Case "pricing_state_invalidated"`)
@@ -1693,6 +1780,28 @@ func TestDynamicCalculatorVBASourceGuardsLivePricingBeforeMutation(t *testing.T)
 	} {
 		if !strings.Contains(progressValidation, required) {
 			t.Fatalf("progress UI validator does not cover panel and StatusBar lifecycle: %s", required)
+		}
+	}
+	for _, required := range []string{
+		"mOperationContractSeconds = PhaseElapsed(mOperationContractStartedAt)",
+		"mSessionSeconds = PhaseElapsed(mOperationStateStartedAt)",
+		"mOperationStateSeconds = PhaseElapsed(mOperationStateStartedAt)",
+		"mReconcileSeconds = PhaseElapsed(phaseStartedAt)",
+		"mTableWriteSeconds = PhaseElapsed(phaseStartedAt)",
+		"mPricingSeconds = PhaseElapsed(phaseStartedAt)",
+		"mFormattingSeconds = PhaseElapsed(phaseStartedAt)",
+		"calculationSeconds = PhaseElapsed(calculationStartedAt)",
+		`settings.Range("B46").Value2 = mSessionSeconds`,
+		`settings.Range("B47").Value2 = mOperationContractSeconds`,
+		`settings.Range("B48").Value2 = mOperationStateSeconds`,
+		`settings.Range("B50").Value2 = mReconcileSeconds`,
+		`settings.Range("B51").Value2 = mPricingSeconds`,
+		`settings.Range("B52").Value2 = mTableWriteSeconds`,
+		`settings.Range("B53").Value2 = mFormattingSeconds`,
+		`settings.Range("B54").Value2 = calculationSeconds`,
+	} {
+		if !strings.Contains(source, required) {
+			t.Fatalf("refresh phase benchmark instrumentation is missing %q", required)
 		}
 	}
 	for _, forbidden := range []string{
@@ -2190,6 +2299,18 @@ func TestDynamicCalculatorVBASourceGuardsLivePricingBeforeMutation(t *testing.T)
 	refreshStart := strings.Index(string(thisWorkbookContent), "ProductCatalogSync.ScheduleRefreshOnOpen")
 	if listenerStart < 0 || refreshStart < 0 || listenerStart >= refreshStart {
 		t.Fatal("Workbook_Open must start the lightweight event listener before scheduling any catalog snapshot")
+	}
+	openEnd := strings.Index(string(thisWorkbookContent), "Private Sub Workbook_Activate")
+	if openEnd <= refreshStart {
+		t.Fatal("Workbook_Open section boundary is missing")
+	}
+	openSource := string(thisWorkbookContent)[:openEnd]
+	if count := strings.Count(openSource, "ProductCatalogSync.ScheduleRefreshOnOpen"); count != 1 {
+		t.Fatalf("Workbook_Open schedules %d initial refreshes, want exactly one", count)
+	}
+	if strings.Contains(openSource, "ProductCatalogSync.RunEventDrivenRefresh") ||
+		strings.Contains(openSource, "ProductCatalogSync.RefreshAllData") {
+		t.Fatal("Workbook_Open must not start a second direct/event refresh path")
 	}
 	if strings.Contains(string(thisWorkbookContent), "Application.CalculateFull") ||
 		strings.Contains(string(thisWorkbookContent), "ProductCatalogSync.RefreshOnOpen") {
