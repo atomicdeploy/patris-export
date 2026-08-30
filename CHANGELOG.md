@@ -27,6 +27,12 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   partner price from the first `Sharh1` slot while retaining `FOROSH` as the
   separate sale-price fact.
 
+## [1.3.8] - 2026-08-30
+
+- Recalculate the visible CNY mirror before marking refresh convergence, retain
+  fail-closed guard diagnostics in the warning note, and keep successful native
+  saves clean after recording post-save timing telemetry.
+
 ## [1.3.7] - 2026-08-30
 
 - Mark successful catalog refresh convergence explicitly on the CNY cells with

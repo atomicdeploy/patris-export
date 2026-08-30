@@ -506,6 +506,11 @@ Public Sub FinishWorkbookSaveTiming(ByVal success As Boolean)
     On Error Resume Next
     ConfigSheet().Range("B55").Value2 = elapsedSeconds
     If Not success Then ConfigSheet().Range("B55").Font.Color = RGB(156, 0, 6)
+    ' Workbook_AfterSave records telemetry after Excel has committed the file.
+    ' That bookkeeping must not make an otherwise successful save look dirty or
+    ' trigger a second close prompt. The persisted workbook was already written;
+    ' B55 remains runtime-only timing evidence until the next intentional save.
+    If success Then ThisWorkbook.Saved = True
     On Error GoTo 0
 End Sub
 
@@ -2423,22 +2428,21 @@ Private Sub MarkRefreshPricingConvergenceState()
     Dim priceSheet As Worksheet
     Dim confirmedRate As Double
     Dim noteText As String
+    Dim guardIssue As String
+    Dim savedErrorNumber As Long
+    Dim savedErrorSource As String
 
     On Error GoTo WarnState
     Set settings = ConfigSheet()
     Set priceSheet = PriceSheet()
-    If Not IsNumeric(settings.Range("B10").Value2) Or _
-       Not IsNumeric(settings.Range("B18").Value2) Or _
-       Not IsNumeric(settings.Range("G18").Value2) Or _
-       Not IsNumeric(priceSheet.Range("M7").Value2) Then GoTo WarnState
+    ' M7 is a visible formula mirror of G18. A snapshot commit can finish while
+    ' Excel still exposes its pre-calculation value, producing a false warning
+    ' even though all authoritative rates already agree. Calculate the one
+    ' bounded consumer cell before evaluating the fail-closed guard.
+    priceSheet.Range("M7").Calculate
+    guardIssue = RefreshPricingConvergenceIssue(settings, priceSheet)
+    If Len(guardIssue) > 0 Then GoTo WarnState
     confirmedRate = CDbl(settings.Range("B10").Value2)
-    If confirmedRate <= 0 Or _
-       CDbl(settings.Range("B18").Value2) <> confirmedRate Or _
-       CDbl(settings.Range("G18").Value2) <> confirmedRate Or _
-       CDbl(priceSheet.Range("M7").Value2) <> confirmedRate Or _
-       Not IsSHA256RevisionText(CStr(settings.Range("G14").Value2)) Or _
-       Not IsSHA256RevisionText(CStr(settings.Range("G56").Value2)) Then _
-        GoTo WarnState
     noteText = U("0647064506AF06270645200C06330627063206CC002006280627002006480628200C0633062706CC062A0020062A062306CC06CC062F00200634062F") & _
         vbCrLf & U("06450642062F06270631003A") & " " & _
         CanonicalCellText(confirmedRate) & _
@@ -2449,10 +2453,69 @@ Private Sub MarkRefreshPricingConvergenceState()
     Exit Sub
 
 WarnState:
+    savedErrorNumber = Err.Number
+    savedErrorSource = Err.Source
     Err.Clear
+    If Len(guardIssue) = 0 Then
+        guardIssue = "guard_error=" & CStr(savedErrorNumber)
+        If Len(savedErrorSource) > 0 Then _
+            guardIssue = guardIssue & "; source=" & savedErrorSource
+    End If
     MarkWritebackState "site_confirmation", "warning", _
-        U("06470634062F06270631003A002006460631062E00200647064506AF062706450020064606CC0633062A")
+        U("06470634062F06270631003A002006460631062E00200647064506AF062706450020064606CC0633062A") & _
+        vbCrLf & guardIssue
 End Sub
+
+Private Function RefreshPricingConvergenceIssue( _
+    ByVal settings As Worksheet, ByVal priceSheet As Worksheet) As String
+    Dim confirmedRate As Double
+
+    On Error GoTo GuardError
+    If Not IsNumeric(settings.Range("B10").Value2) Then
+        RefreshPricingConvergenceIssue = "non_numeric=B10"
+        Exit Function
+    End If
+    If Not IsNumeric(settings.Range("B18").Value2) Then
+        RefreshPricingConvergenceIssue = "non_numeric=B18"
+        Exit Function
+    End If
+    If Not IsNumeric(settings.Range("G18").Value2) Then
+        RefreshPricingConvergenceIssue = "non_numeric=G18"
+        Exit Function
+    End If
+    If Not IsNumeric(priceSheet.Range("M7").Value2) Then
+        RefreshPricingConvergenceIssue = "non_numeric=M7"
+        Exit Function
+    End If
+
+    confirmedRate = CDbl(settings.Range("B10").Value2)
+    If confirmedRate <= 0 Then
+        RefreshPricingConvergenceIssue = "non_positive=B10"
+        Exit Function
+    End If
+    If CDbl(settings.Range("B18").Value2) <> confirmedRate Or _
+       CDbl(settings.Range("G18").Value2) <> confirmedRate Or _
+       CDbl(priceSheet.Range("M7").Value2) <> confirmedRate Then
+        RefreshPricingConvergenceIssue = "rate_mismatch=" & _
+            "B10:" & CanonicalCellText(settings.Range("B10").Value2) & _
+            ";B18:" & CanonicalCellText(settings.Range("B18").Value2) & _
+            ";G18:" & CanonicalCellText(settings.Range("G18").Value2) & _
+            ";M7:" & CanonicalCellText(priceSheet.Range("M7").Value2)
+        Exit Function
+    End If
+    If Not IsSHA256RevisionText(CStr(settings.Range("G14").Value2)) Then
+        RefreshPricingConvergenceIssue = "invalid_revision=G14"
+        Exit Function
+    End If
+    If Not IsSHA256RevisionText(CStr(settings.Range("G56").Value2)) Then
+        RefreshPricingConvergenceIssue = "invalid_revision=G56"
+    End If
+    Exit Function
+
+GuardError:
+    RefreshPricingConvergenceIssue = "guard_error=" & CStr(Err.Number)
+    Err.Clear
+End Function
 
 Private Sub FailActiveOperation(ByVal errorNumber As Long, _
                                 ByVal errorSource As String, _
