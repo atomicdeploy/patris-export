@@ -421,6 +421,13 @@ Public Sub HandleWorkbookBeforeSave(ByVal saveAsUI As Boolean, _
         Exit Sub
     End If
     If Not saveAsUI Then
+        If WorkbookIsCanonicalTemplateAtRestTarget() Then
+            cancel = True
+            On Error Resume Next
+            ConfigSheet().Range("B6").Value2 = T("template_save_copy")
+            On Error GoTo 0
+            Exit Sub
+        End If
         BeginWorkbookSaveTiming
         Exit Sub
     End If
@@ -490,6 +497,50 @@ SaveFailed:
     Err.Raise savedErrorNumber, "HandleWorkbookBeforeSave", _
               savedErrorDescription
 End Sub
+
+Private Function WorkbookIsCanonicalTemplateAtRestTarget() As Boolean
+    On Error GoTo NotCanonicalTemplate
+    If ThisWorkbook.FileFormat <> xlOpenXMLTemplateMacroEnabled Then Exit Function
+    If Len(Trim$(ThisWorkbook.Path)) = 0 Then Exit Function
+    WorkbookIsCanonicalTemplateAtRestTarget = True
+NotCanonicalTemplate:
+End Function
+
+Private Function CanonicalTemplateHasPendingExternalWrite() As Boolean
+    If mOperationKind = "apply" Or mOperationKind = "apply_refresh" Then
+        CanonicalTemplateHasPendingExternalWrite = True
+        Exit Function
+    End If
+    If Not mWritebackRequest Is Nothing Then
+        CanonicalTemplateHasPendingExternalWrite = True
+        Exit Function
+    End If
+    If Len(mWritebackStage) > 0 Or _
+       Len(mPendingConfirmationTransactionID) > 0 Then
+        CanonicalTemplateHasPendingExternalWrite = True
+        Exit Function
+    End If
+    If Not mWritebackPending Is Nothing Then
+        CanonicalTemplateHasPendingExternalWrite = (mWritebackPending.Count > 0)
+    End If
+End Function
+
+Public Function PrepareCanonicalTemplateForClose() As Boolean
+    PrepareCanonicalTemplateForClose = True
+    If Not WorkbookIsCanonicalTemplateAtRestTarget() Then Exit Function
+    If CanonicalTemplateHasPendingExternalWrite() Then
+        PrepareCanonicalTemplateForClose = False
+        On Error Resume Next
+        ConfigSheet().Range("B6").Value2 = T("template_close_wait")
+        On Error GoTo 0
+        Exit Function
+    End If
+
+    ' Runtime catalog rows belong only to the live session. Marking the directly
+    ' opened canonical template clean makes close discard them without a save
+    ' prompt; the on-disk .xltm remains the verified empty template.
+    ThisWorkbook.Saved = True
+End Function
 
 Public Sub BeginWorkbookSaveTiming()
     If mSaveTimingActive Then Exit Sub
@@ -3366,6 +3417,31 @@ Public Sub RefreshSearchEnterHotkey()
     ' which queues one top-level search after edit mode has ended.
     ReleaseSearchEnterHotkey
 End Sub
+
+Public Function NormalizeProductSearchSelection( _
+        ByRef target As Range) As Boolean
+    Dim searchAnchor As Range
+    Dim searchSurface As Range
+    Dim previousEvents As Boolean
+
+    previousEvents = Application.EnableEvents
+    On Error GoTo CleanExit
+    If target Is Nothing Then Exit Function
+    Set searchAnchor = ThisWorkbook.Names( _
+        "ProductSearchQuery").RefersToRange
+    Set searchSurface = PriceSheet().Range("C3:E3")
+    If Intersect(target.Cells(1, 1), searchSurface) Is Nothing Then _
+        Exit Function
+    If Not Intersect(target.Cells(1, 1), searchAnchor) Is Nothing Then _
+        Exit Function
+
+    Application.EnableEvents = False
+    searchAnchor.Select
+    RememberSearchSelection searchAnchor
+    NormalizeProductSearchSelection = True
+CleanExit:
+    Application.EnableEvents = previousEvents
+End Function
 
 Public Function UpdateSearchEnterHotkey(ByVal target As Range) As Boolean
     Dim queueNativeEnter As Boolean
@@ -9724,6 +9800,10 @@ Private Function T(ByVal key As String) As String
             T = U("067E063306480646062F00200641062706CC064400200628062706CC062F00200078006C00730078002006CC062700200078006C0073006D0020062806270634062F002E")
         Case "save_overwrite"
             T = U("0641062706CC0644002006450648062C0648062F002006270633062A002E0020062C062706CC06AF063206CC0646002006340648062F061F")
+        Case "template_save_copy"
+            T = U("06280631062706CC0020062D064106380020062F0627062F0647200C0647062706CC002006320646062F0647060C00200641062706CC064400200627064406AF064800200631064806CC0020062F06CC063306A900200630062E06CC0631064700200646064506CC200C06340648062F061B002006270632002000AB0630062E06CC06310647002006280647200C0639064606480627064600BB002006280631062706CC002006460633062E06470020062E06310648062C06CC002006270633062A06410627062F0647002006A9064606CC062F002E")
+        Case "template_close_wait"
+            T = U("064206CC0645062A0020062F06310020062D0627064400200647064506AF06270645200C06330627063206CC002006280627002006480628200C0633062706CC062A002006270633062A061B0020067E06330020062706320020067E062706CC0627064600200647064506AF06270645200C06330627063206CC0020062F0648062806270631064700200641062706CC06440020063106270020062806280646062F06CC062F002E")
         Case "font_missing"
             T = U("0642064406450020067E06CC06A9063106280646062F06CC200C0634062F0647002006CC06270641062A002006460634062F")
         Case "font_drift"
