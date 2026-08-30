@@ -381,6 +381,100 @@ function Wait-PatrisTaskStopped {
     throw "The Patris Export scheduled task did not stop."
 }
 
+function Wait-PatrisTaskStarted {
+    param(
+        [Parameter(Mandatory = $true)][string]$Operation,
+        [Parameter(Mandatory = $true)][DateTime]$PreviousLastRunTime,
+        [TimeSpan]$Timeout = [TimeSpan]::FromSeconds(120),
+        [ValidateRange(1, 10000)][int]$PollMilliseconds = 500
+    )
+
+    if ($Timeout -le [TimeSpan]::Zero) {
+        throw "The scheduled-task startup timeout must be positive."
+    }
+
+    $deadline = [DateTime]::UtcNow.Add($Timeout)
+    $sawActiveTask = $false
+    $currentTask = $null
+    $currentState = "Unknown"
+    while ($true) {
+        $currentTask = Get-PatrisTask
+        if (-not $currentTask) {
+            throw "The Patris Export scheduled task disappeared during $Operation."
+        }
+
+        $currentState = [string]$currentTask.State
+        $activeTask = $currentState -in @("Running", "Queued")
+        if ($activeTask) {
+            $sawActiveTask = $true
+        }
+
+        $managedProcesses = @(Get-PatrisManagedProcessSnapshot -Task $currentTask)
+        if ($managedProcesses.Count -gt 1) {
+            throw "The scheduled task exposed multiple verified Patris Export child processes during $Operation."
+        }
+        if ($managedProcesses.Count -eq 1) {
+            if (-not $activeTask) {
+                try {
+                    [void](Stop-PatrisTaskAndDeploymentProcess -Task $currentTask)
+                } catch {
+                    throw (
+                        "A verified Patris Export child process appeared outside the active " +
+                        "scheduled-task state during {0}, and safe cleanup failed: {1}"
+                    ) -f $Operation, $_.Exception.Message
+                }
+                throw (
+                    "A verified Patris Export child process appeared after the scheduled task " +
+                    "left its active state during $Operation; the child was stopped safely."
+                )
+            }
+            Write-Host (
+                "Verified Patris Export scheduled-task child after {0}: PID {1}." -f @(
+                    $Operation,
+                    [int]$managedProcesses[0].Pid
+                )
+            )
+            return $currentTask
+        }
+
+        if (-not $activeTask) {
+            $currentInfo = Get-ScheduledTaskInfo -TaskName $TaskName -TaskPath $TaskPath
+            $runAdvanced = ([DateTime]$currentInfo.LastRunTime) -gt $PreviousLastRunTime
+            if ($sawActiveTask -or $runAdvanced) {
+                throw (
+                    "The Patris Export scheduled task exited during {0} before a verified " +
+                    "child process appeared (state={1}; LastTaskResult={2})."
+                ) -f @($Operation, $currentState, [string]$currentInfo.LastTaskResult)
+            }
+        }
+
+        if ([DateTime]::UtcNow -ge $deadline) {
+            break
+        }
+        Start-Sleep -Milliseconds $PollMilliseconds
+    }
+
+    if ($currentState -in @("Running", "Queued")) {
+        try {
+            [void](Stop-PatrisTaskAndDeploymentProcess -Task $currentTask)
+        } catch {
+            throw (
+                "The Patris Export scheduled task was still starting after {0:N1} seconds " +
+                "during {1}, and safe cleanup failed: {2}"
+            ) -f @($Timeout.TotalSeconds, $Operation, $_.Exception.Message)
+        }
+        throw (
+            "The Patris Export scheduled task was still starting after {0:N1} seconds " +
+            "during {1}; it was stopped safely before reporting failure."
+        ) -f @($Timeout.TotalSeconds, $Operation)
+    }
+
+    throw (
+        "The Patris Export scheduled task did not enter a starting state within {0:N1} " +
+        "seconds during {1}, and no verified child process appeared."
+    ) -f @($Timeout.TotalSeconds, $Operation)
+}
+
 function Wait-PatrisDeploymentProcessExit {
     param([Parameter(Mandatory = $true)][object[]]$Identity)
 
@@ -587,8 +681,11 @@ switch ($Action) {
         Register-ScheduledTask -TaskName $TaskName -TaskPath $TaskPath -InputObject $task -Force | Out-Null
         Write-Host "Installed scheduled task: $TaskPath$TaskName"
         if ($Start) {
+            $beforeStartInfo = Get-ScheduledTaskInfo -TaskName $TaskName -TaskPath $TaskPath
             Start-ScheduledTask -TaskName $TaskName -TaskPath $TaskPath
-            Start-Sleep -Seconds 2
+            [void](Wait-PatrisTaskStarted `
+                -Operation "installation start" `
+                -PreviousLastRunTime ([DateTime]$beforeStartInfo.LastRunTime))
         }
         Show-PatrisTaskStatus
         break
@@ -599,22 +696,29 @@ switch ($Action) {
             throw "Scheduled task not installed: $TaskPath$TaskName"
         }
         $managedProcesses = @(Get-PatrisManagedProcessSnapshot -Task $task)
-        if ([string]$task.State -eq "Running") {
-            if ($managedProcesses.Count -gt 0) {
+        if ([string]$task.State -in @("Running", "Queued")) {
+            if ($managedProcesses.Count -eq 1) {
                 Show-PatrisTaskStatus
                 break
             }
-            throw "The scheduled task is running without a verified Patris Export child process."
+            if ($managedProcesses.Count -gt 1) {
+                throw "The active scheduled task has multiple verified Patris Export child processes."
+            }
+            $activeTaskInfo = Get-ScheduledTaskInfo -TaskName $TaskName -TaskPath $TaskPath
+            [void](Wait-PatrisTaskStarted `
+                -Operation "start" `
+                -PreviousLastRunTime ([DateTime]$activeTaskInfo.LastRunTime))
+            Show-PatrisTaskStatus
+            break
         }
         if ($managedProcesses.Count -gt 0) {
             throw "A verified Patris Export child process exists outside the task state."
         }
+        $beforeStartInfo = Get-ScheduledTaskInfo -TaskName $TaskName -TaskPath $TaskPath
         Start-ScheduledTask -TaskName $TaskName -TaskPath $TaskPath
-        Start-Sleep -Seconds 2
-        $startedTask = Get-PatrisTask
-        if (@(Get-PatrisManagedProcessSnapshot -Task $startedTask).Count -eq 0) {
-            throw "The scheduled task did not start a verified Patris Export child process."
-        }
+        [void](Wait-PatrisTaskStarted `
+            -Operation "start" `
+            -PreviousLastRunTime ([DateTime]$beforeStartInfo.LastRunTime))
         Show-PatrisTaskStatus
     }
     "Stop" {
@@ -628,12 +732,11 @@ switch ($Action) {
             throw "Scheduled task not installed: $TaskPath$TaskName"
         }
         [void](Stop-PatrisTaskAndDeploymentProcess -Task $task)
+        $beforeRestartInfo = Get-ScheduledTaskInfo -TaskName $TaskName -TaskPath $TaskPath
         Start-ScheduledTask -TaskName $TaskName -TaskPath $TaskPath
-        Start-Sleep -Seconds 2
-        $startedTask = Get-PatrisTask
-        if (@(Get-PatrisManagedProcessSnapshot -Task $startedTask).Count -eq 0) {
-            throw "The scheduled task did not restart a verified Patris Export child process."
-        }
+        [void](Wait-PatrisTaskStarted `
+            -Operation "restart" `
+            -PreviousLastRunTime ([DateTime]$beforeRestartInfo.LastRunTime))
         Show-PatrisTaskStatus
     }
     "Status" {

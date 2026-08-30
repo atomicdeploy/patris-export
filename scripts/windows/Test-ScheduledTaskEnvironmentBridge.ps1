@@ -38,6 +38,7 @@ function Get-TestProcessStatePath {
 
 try {
     & (Join-Path $PSScriptRoot "Test-ScheduledTaskUtcIdentity.ps1")
+    & (Join-Path $PSScriptRoot "Test-ScheduledTaskStartupWait.ps1")
     New-Item -ItemType Directory -Path $testRoot | Out-Null
     $probeProgram = @'
 using System;
