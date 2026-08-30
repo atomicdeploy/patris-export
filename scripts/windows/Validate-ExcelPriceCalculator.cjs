@@ -557,8 +557,8 @@ function buildFailures(report, options) {
     'no incomplete rows preserve an existing WooCommerce effective price',
   );
   failUnless(
-    report.candidate.sourceOnlyUnsafeRows > 0,
-    'validation data contains no incomplete source-only row for the fail-closed regression check',
+    report.candidate.sourceOnlyUnsafeRows === 0,
+    `${report.candidate.sourceOnlyUnsafeRows} source-only products were not materialized on the website`,
   );
   failUnless(
     report.candidate.sourceOnlyUnsafePricedRows === 0,
@@ -1067,8 +1067,11 @@ function New-ValidatorCombinedException(
     }
     if ($exceptions.Count -eq 0) { return $null }
     if ($exceptions.Count -eq 1) { return $exceptions[0] }
+    $details = ($exceptions | ForEach-Object {
+        $_.ToString()
+    }) -join ([Environment]::NewLine + '--- cleanup boundary ---' + [Environment]::NewLine)
     return [AggregateException]::new(
-        'Excel validation and cleanup both failed.',
+        'Excel validation and cleanup both failed.' + [Environment]::NewLine + $details,
         [Exception[]]$exceptions.ToArray()
     )
 }
