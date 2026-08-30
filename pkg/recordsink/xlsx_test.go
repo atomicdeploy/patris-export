@@ -1707,6 +1707,23 @@ func TestDynamicCalculatorVBASourceGuardsLivePricingBeforeMutation(t *testing.T)
 	if strings.Contains(section("Private Function TryCompleteUnchangedSnapshot", "Private Function RetrySnapshotAfterSourceDrift"), "BeginSnapshotPayloadRequest") {
 		t.Fatal("unchanged-revision fast path must finish before downloading the payload")
 	}
+	revisionFastPath := section("Private Function TryCompleteUnchangedRevision", "Private Sub HandleSnapshotStartResponse")
+	if strings.Contains(revisionFastPath, `settings.Range("G44").Value2`) {
+		t.Fatal("revision fast path must not compare the upstream composite catalog revision with G44's dataset revision")
+	}
+	for _, required := range []string{
+		`StrongETagRevision(revisionETag) <> stateRevision`,
+		`settings.Range("G56").Value2`,
+		`settings.Range("G14").Value2`,
+		`settings.Range("G45").Value2`,
+		`settings.Range("G46").Value2`,
+		"HasCoherentLocalCatalog()",
+		"StrictPriceParityMismatchCount() <> 0",
+	} {
+		if !strings.Contains(revisionFastPath, required) {
+			t.Fatalf("revision fast path lost fail-closed guard %s", required)
+		}
+	}
 	transientRetry := section("Private Function RetrySnapshotAfterTransientFailure", "Private Function RefreshWallBudgetExhausted")
 	for _, required := range []string{
 		`Case "remote_unavailable", "canonical_source_unavailable"`,
