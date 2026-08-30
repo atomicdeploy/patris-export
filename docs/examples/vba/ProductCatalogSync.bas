@@ -33,6 +33,7 @@ Private Const PRICING_CONTRACT_CHANNEL As String = "excel-workbook"
 Private Const PRICING_CSRF_HEADER As String = "X-Patris-Excel-CSRF-Token"
 Private Const PRICING_REQUEST_SCHEMA As String = "patris.excel-pricing-companion-request/v1"
 Private Const PRICING_SESSION_SCHEMA As String = "patris.excel-pricing-companion-session/v1"
+Private Const PRICING_REVISION_SCHEMA As String = "patris.excel-pricing-companion-revision/v1"
 Private Const PRICING_WRITEBACK_REQUEST_SCHEMA As String = "patris.pricing-input-writeback-request/v1"
 Private Const PRICING_WRITEBACK_JOB_SCHEMA As String = "patris.pricing-input-writeback-job/v1"
 Private Const PRICING_CONFIRMATION_REQUEST_SCHEMA As String = "patris.pricing-confirmation-ack-request/v1"
@@ -266,6 +267,8 @@ Private mSnapshotCancelURL As String
 Private mSnapshotExpectedETag As String
 Private mSnapshotRevision As String
 Private mSnapshotStateRevision As String
+Private mSnapshotPricingStateRevision As String
+Private mSnapshotDatasetRevision As String
 Private mSnapshotCompletedPages As Long
 Private mSnapshotTotalPages As Long
 Private mSnapshotRowCount As Long
@@ -802,6 +805,7 @@ Private Sub CommitRefreshSnapshot(ByVal reconciledRows As Object, _
     settings.Range("G45").Value2 = sourceRevision
     settings.Range("G46").Value2 = expectedRows
     settings.Range("G47").Value2 = countSignature
+    settings.Range("G56").Value2 = mSnapshotStateRevision
 
     InvalidateProductSearchIndex
     productRows = ImportReconciledCatalog(reconciledRows)
@@ -1290,6 +1294,7 @@ Private Sub ResetFiniteOperationContext()
     mSnapshotExpectedETag = vbNullString
     mSnapshotRevision = vbNullString
     mSnapshotStateRevision = vbNullString
+    mSnapshotDatasetRevision = vbNullString
     mSnapshotCompletedPages = 0
     mSnapshotTotalPages = 0
     mSnapshotRowCount = 0
@@ -1563,6 +1568,8 @@ Private Sub BeginSnapshotStartRequest()
     mSnapshotExpectedETag = vbNullString
     mSnapshotRevision = vbNullString
     mSnapshotStateRevision = vbNullString
+    mSnapshotPricingStateRevision = vbNullString
+    mSnapshotDatasetRevision = vbNullString
     mSnapshotCompletedPages = 0
     mSnapshotTotalPages = 0
     mSnapshotRowCount = 0
@@ -1571,6 +1578,15 @@ Private Sub BeginSnapshotStartRequest()
     StartFiniteRequest "POST", PricingBaseURL() & "/snapshots", _
         "application/json", PricingSnapshotRequestJson(mOperationRequestID), _
         mOperationRequestID, vbNullString, True, HTTP_TIMEOUT_MS
+End Sub
+
+Private Sub BeginRevisionProbeRequest()
+    mOperationRequestID = NewRequestID("revision")
+    mOperationStage = "revision"
+    SetRefreshProgress "2/4"
+    StartFiniteRequest "POST", PricingBaseURL() & "/revision", _
+        "application/json", PricingRevisionRequestJson(mOperationRequestID), _
+        vbNullString, vbNullString, True, HTTP_TIMEOUT_MS
 End Sub
 
 Private Sub BeginSnapshotWaitRequest()
@@ -1745,6 +1761,8 @@ Private Sub HandleOperationTerminal()
             HandleContractResponse statusCode, responseBody, stageName
         Case "session"
             HandleSessionResponse statusCode, responseBody
+        Case "revision"
+            HandleRevisionResponse statusCode, responseBody
         Case "snapshot_start"
             HandleSnapshotStartResponse statusCode, responseBody
         Case "snapshot_wait"
@@ -1831,7 +1849,14 @@ Private Sub HandleSessionResponse(ByVal statusCode As Long, _
     mPricingCSRFToken = csrfToken
     mSessionSeconds = PhaseElapsed(mOperationStateStartedAt)
     Select Case mOperationKind
-        Case "refresh", "apply_refresh"
+        Case "refresh"
+            mOperationStateStartedAt = PhaseTimestamp()
+            If mForceFreshSnapshot Then
+                BeginSnapshotStartRequest
+            Else
+                BeginRevisionProbeRequest
+            End If
+        Case "apply_refresh"
             mOperationStateStartedAt = PhaseTimestamp()
             BeginSnapshotStartRequest
         Case "preview"
@@ -1843,6 +1868,90 @@ Private Sub HandleSessionResponse(ByVal statusCode As Long, _
                       T("sync_retry")
     End Select
 End Sub
+
+Private Sub HandleRevisionResponse(ByVal statusCode As Long, _
+                                   ByVal responseBody As Variant)
+    Dim responseText As String
+    Dim root As JsonValue
+
+    If statusCode < 200 Or statusCode >= 300 Then
+        BeginSnapshotStartRequest
+        Exit Sub
+    End If
+    On Error GoTo FullSnapshot
+    responseText = Utf8TextFromBytes(responseBody)
+    Set root = JsonRuntime.ParseJson(responseText)
+    If TryCompleteUnchangedRevision(root) Then Exit Sub
+
+FullSnapshot:
+    Err.Clear
+    BeginSnapshotStartRequest
+End Sub
+
+Private Function TryCompleteUnchangedRevision( _
+    ByVal root As JsonValue) As Boolean
+    Dim settings As Worksheet
+    Dim sourceValue As JsonValue
+    Dim stateRevision As String
+    Dim pricingStateRevision As String
+    Dim catalogRevision As String
+    Dim revisionETag As String
+
+    On Error GoTo NotUnchanged
+    If mOperationKind <> "refresh" Or mForceFreshSnapshot Then Exit Function
+    If root Is Nothing Or root.Kind <> "object" Or _
+       SiteText(root, "schema") <> PRICING_REVISION_SCHEMA Or _
+       RequiredWholeNumber(root, "schema_version") <> 1 Then Exit Function
+    Set sourceValue = JsonRuntime.JsonMember(root, "source")
+    If sourceValue Is Nothing Or sourceValue.Kind <> "object" Or _
+       SiteText(sourceValue, "id") <> mSourceID Or _
+       SiteText(sourceValue, "dataset") <> mSourceDataset Or _
+       SiteText(sourceValue, "revision") <> mSourceRevision Then Exit Function
+    stateRevision = SiteText(root, "state_revision")
+    pricingStateRevision = SiteText(root, "pricing_state_revision")
+    catalogRevision = SiteText(root, "catalog_revision")
+    revisionETag = SiteText(root, "etag")
+    If Not IsSHA256RevisionText(stateRevision) Or _
+       Not IsSHA256RevisionText(pricingStateRevision) Or _
+       Not IsSHA256RevisionText(catalogRevision) Or _
+       StrongETagRevision(revisionETag) <> stateRevision Then Exit Function
+
+    Set settings = ConfigSheet()
+    If StrComp(Trim$(CStr(settings.Range("G56").Value2)), _
+           stateRevision, vbBinaryCompare) <> 0 Or _
+       StrComp(Trim$(CStr(settings.Range("G14").Value2)), _
+           pricingStateRevision, vbBinaryCompare) <> 0 Or _
+       StrComp(Trim$(CStr(settings.Range("G44").Value2)), _
+           catalogRevision, vbBinaryCompare) <> 0 Or _
+       StrComp(Trim$(CStr(settings.Range("G45").Value2)), _
+           mSourceRevision, vbBinaryCompare) <> 0 Or _
+       CLng(Val(CStr(settings.Range("G46").Value2))) <= 0 Then Exit Function
+    If Not HasCoherentLocalCatalog() Or _
+       CBool(settings.Range("G31").Value2) Or _
+       StrictPriceParityMismatchCount() <> 0 Then Exit Function
+
+    mOperationStateSeconds = PhaseElapsed(mOperationStateStartedAt)
+    mStatePageTimingText = "revision_noop=" & _
+        Format$(mOperationStateSeconds, "0.000") & "s; source=" & _
+        mSourceRevision & "; state=" & stateRevision
+    settings.Range("B46").Value2 = mSessionSeconds
+    settings.Range("B47").Value2 = mOperationContractSeconds
+    settings.Range("B48").Value2 = mOperationStateSeconds
+    settings.Range("B49").NumberFormat = "@"
+    settings.Range("B49").Value2 = mStatePageTimingText
+    settings.Range("B50:B54").Value2 = 0
+    settings.Range("B7").Value = Now
+    settings.Range("B7").NumberFormat = "yyyy-mm-dd hh:mm"
+    mLastRefreshSucceeded = True
+    mForceFreshSnapshot = False
+    SetRefreshProgress "4/4"
+    CompleteActiveOperation True
+    TryCompleteUnchangedRevision = True
+    Exit Function
+
+NotUnchanged:
+    Err.Clear
+End Function
 
 Private Sub HandleSnapshotStartResponse(ByVal statusCode As Long, _
                                         ByVal responseBody As Variant)
@@ -1869,6 +1978,8 @@ Private Sub HandleSnapshotStartResponse(ByVal statusCode As Long, _
         mSnapshotEventsURL, mSnapshotJobEventsURL, mSnapshotPayloadURL, _
         mSnapshotCancelURL, _
         mSnapshotExpectedETag, mSnapshotRevision, mSnapshotStateRevision, _
+        mSnapshotPricingStateRevision, _
+        mSnapshotDatasetRevision, _
         mSnapshotCompletedPages, mSnapshotTotalPages, mSnapshotRowCount
     SetSnapshotProgress mSnapshotCompletedPages, mSnapshotTotalPages, _
         mSnapshotRowCount
@@ -1876,7 +1987,12 @@ Private Sub HandleSnapshotStartResponse(ByVal statusCode As Long, _
     ' one-shot terminal wait is active. Bind it to the new job identity now,
     ' but do not create the first listener until the snapshot is committed.
     mSseJobID = mSnapshotJobID
-    BeginSnapshotWaitRequest
+    If mSnapshotJobStatus = "ready" Then
+        If TryCompleteUnchangedSnapshot() Then Exit Sub
+        BeginSnapshotPayloadRequest
+    Else
+        BeginSnapshotWaitRequest
+    End If
 End Sub
 
 Private Sub HandleSnapshotWaitResponse(ByVal statusCode As Long, _
@@ -1892,6 +2008,8 @@ Private Sub HandleSnapshotWaitResponse(ByVal statusCode As Long, _
         mSnapshotEventsURL, mSnapshotJobEventsURL, mSnapshotPayloadURL, _
         mSnapshotCancelURL, _
         mSnapshotExpectedETag, mSnapshotRevision, mSnapshotStateRevision, _
+        mSnapshotPricingStateRevision, _
+        mSnapshotDatasetRevision, _
         mSnapshotCompletedPages, mSnapshotTotalPages, mSnapshotRowCount
     SetSnapshotProgress mSnapshotCompletedPages, mSnapshotTotalPages, _
         mSnapshotRowCount
@@ -1914,8 +2032,64 @@ Private Sub HandleSnapshotWaitResponse(ByVal statusCode As Long, _
         End If
         RaiseSnapshotJobFailure mSnapshotJobCode
     End If
+    If TryCompleteUnchangedSnapshot() Then Exit Sub
     BeginSnapshotPayloadRequest
 End Sub
+
+Private Function TryCompleteUnchangedSnapshot() As Boolean
+    Dim settings As Worksheet
+    Dim committedEventsURL As String
+    Dim committedJobID As String
+    Dim committedCSRFToken As String
+
+    On Error GoTo NotUnchanged
+    If mOperationKind <> "refresh" Or mForceFreshSnapshot Or _
+       mSnapshotJobStatus <> "ready" Then Exit Function
+
+    Set settings = ConfigSheet()
+    If StrComp(Trim$(CStr(settings.Range("G56").Value2)), _
+           mSnapshotStateRevision, vbBinaryCompare) <> 0 Or _
+       StrComp(Trim$(CStr(settings.Range("G14").Value2)), _
+           mSnapshotPricingStateRevision, vbBinaryCompare) <> 0 Or _
+       StrComp(Trim$(CStr(settings.Range("G44").Value2)), _
+           mSnapshotDatasetRevision, vbBinaryCompare) <> 0 Or _
+       StrComp(Trim$(CStr(settings.Range("G45").Value2)), _
+           mSourceRevision, vbBinaryCompare) <> 0 Or _
+       CLng(Val(CStr(settings.Range("G46").Value2))) <> _
+           mSnapshotRowCount Then Exit Function
+    If Not HasCoherentLocalCatalog() Or _
+       CBool(settings.Range("G31").Value2) Or _
+       StrictPriceParityMismatchCount() <> 0 Then Exit Function
+
+    ValidateSseListenerPrerequisites mSnapshotEventsURL, mSnapshotJobID, _
+        mPricingCSRFToken
+    committedEventsURL = mSnapshotEventsURL
+    committedJobID = mSnapshotJobID
+    committedCSRFToken = mPricingCSRFToken
+    mOperationStateSeconds = PhaseElapsed(mOperationStateStartedAt)
+    mStatePageTimingText = "snapshot_noop=" & _
+        Format$(mOperationStateSeconds, "0.000") & "s; source=" & _
+        mSourceRevision & "; snapshot=" & mSnapshotRevision
+    settings.Range("B46").Value2 = mSessionSeconds
+    settings.Range("B47").Value2 = mOperationContractSeconds
+    settings.Range("B48").Value2 = mOperationStateSeconds
+    settings.Range("B49").NumberFormat = "@"
+    settings.Range("B49").Value2 = mStatePageTimingText
+    settings.Range("B50:B54").Value2 = 0
+    settings.Range("B7").Value = Now
+    settings.Range("B7").NumberFormat = "yyyy-mm-dd hh:mm"
+    mLastRefreshSucceeded = True
+    mForceFreshSnapshot = False
+    SetRefreshProgress "4/4"
+    CompleteActiveOperation True
+    ArmSseListenerAfterCommit committedEventsURL, committedJobID, _
+        committedCSRFToken
+    TryCompleteUnchangedSnapshot = True
+    Exit Function
+
+NotUnchanged:
+    Err.Clear
+End Function
 
 Private Function RetrySnapshotAfterSourceDrift() As Boolean
     If mOperationSnapshotRetryCount >= 3 Or _
@@ -5458,7 +5632,7 @@ Private Function PricingStateAddresses() As Variant
         "B10|B11|B12|B13|B14|B15|B18|B19|B20|E20|B21|B22|B26|" & _
         "G14|G15|G18|G19|G20|G21|G22|G31|G32|G33|G34|G35|G36|" & _
         "G37|G38|G39|G40|G41|G42|G43|G44|G45|G46|G47|" & _
-        "H14|H15|H16|H17|H18|H19", _
+        "G56|H14|H15|H16|H17|H18|H19", _
         "|")
 End Function
 
@@ -5654,6 +5828,21 @@ Private Function PricingSnapshotRequestJson(ByVal requestID As String) As String
         CStr(maxAgeSeconds) & stateRevisionField & "}"
 End Function
 
+Private Function PricingRevisionRequestJson(ByVal requestID As String) As String
+    EnsureSourceIdentity
+    PricingRevisionRequestJson = _
+        "{""schema"":" & JsonString(PRICING_REQUEST_SCHEMA) & "," & _
+        """schema_version"":1," & _
+        """operation"":""revision""," & _
+        """client_id"":" & JsonString(PRICING_CONTRACT_CLIENT_ID) & "," & _
+        """channel"":" & JsonString(PRICING_CONTRACT_CHANNEL) & "," & _
+        """request_id"":" & JsonString(requestID) & "," & _
+        """source"":{" & _
+        """id"":" & JsonString(mSourceID) & "," & _
+        """dataset"":" & JsonString(mSourceDataset) & "," & _
+        """revision"":" & JsonString(mSourceRevision) & "}}"
+End Function
+
 Private Sub ParsePricingSnapshotJob(ByVal root As JsonValue, _
                                     ByVal expectedRequestID As String, _
                                     ByRef jobID As String, _
@@ -5667,6 +5856,8 @@ Private Sub ParsePricingSnapshotJob(ByVal root As JsonValue, _
                                     ByRef expectedETag As String, _
                                     ByRef snapshotRevision As String, _
                                     ByRef expectedStateRevision As String, _
+                                    ByRef pricingStateRevision As String, _
+                                    ByRef datasetRevision As String, _
                                     ByRef completedPages As Long, _
                                     ByRef totalPages As Long, _
                                     ByRef rowCount As Long)
@@ -5674,6 +5865,7 @@ Private Sub ParsePricingSnapshotJob(ByVal root As JsonValue, _
     Dim parsedRequestID As String
     Dim progress As JsonValue
     Dim sourceValue As JsonValue
+    Dim identity As JsonValue
     Dim capacity As JsonValue
     Dim previousCompletedPages As Long
     Dim previousTotalPages As Long
@@ -5776,10 +5968,16 @@ Private Sub ParsePricingSnapshotJob(ByVal root As JsonValue, _
     expectedETag = SiteText(root, "etag")
     snapshotRevision = SiteText(root, "snapshot_revision")
     expectedStateRevision = SiteText(root, "state_revision")
+    pricingStateRevision = SiteText(root, "pricing_state_revision")
+    Set identity = JsonRuntime.JsonMember(root, "identity")
+    If Not identity Is Nothing Then _
+        datasetRevision = SiteText(identity, "catalog_revision")
     If jobStatus = "ready" Then
         If Not IsSHA256RevisionText(snapshotRevision) Or _
            Not IsSHA256RevisionText(StrongETagRevision(expectedETag)) Or _
-           Not IsSHA256RevisionText(expectedStateRevision) Then
+           Not IsSHA256RevisionText(expectedStateRevision) Or _
+           Not IsSHA256RevisionText(pricingStateRevision) Or _
+           Not IsSHA256RevisionText(datasetRevision) Then
             Err.Raise vbObjectError + 130, "ParsePricingSnapshotJob", _
                       T("invalid_workbook")
         End If

@@ -3057,6 +3057,7 @@ func excelPricingSnapshotJobResponse(job *excelPricingSnapshotJob) map[string]in
 	if job.snapshot != nil {
 		response["snapshot_revision"] = job.snapshot.revision
 		response["state_revision"] = job.snapshot.stateRevision
+		response["pricing_state_revision"] = job.snapshot.pricingStateRevision
 		response["etag"] = excelPricingSnapshotETag(job.snapshot.etagRevision)
 		response["expires_at"] = job.snapshot.expiresAt
 		response["integrity"] = job.snapshot.integrity
