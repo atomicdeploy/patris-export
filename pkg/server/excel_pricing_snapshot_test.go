@@ -267,6 +267,35 @@ func TestExcelPricingSnapshotAggregatesCachesAndServesETag(t *testing.T) {
 		t.Fatalf("cached status=%#v remote calls=%d", cachedStatus, remoteCalls.Load())
 	}
 
+	// The workbook itself remains empty on disk. A long-lived companion can
+	// still serve this same validated in-memory projection promptly, but only
+	// while the authenticated bridge proves its exact revision tuple.
+	store := server.excelPricing.snapshots
+	store.mu.Lock()
+	for _, snapshot := range store.cache {
+		snapshot.createdAt = store.now().UTC().Add(-6 * time.Hour)
+	}
+	store.mu.Unlock()
+	workdayRequestID := "snapshot-start-test-workday-cache-0001"
+	workdayCached := authenticatedExcelPricingRequest(
+		http.MethodPost,
+		"/api/pricing-sync/snapshots",
+		validExcelPricingSnapshotStartBody(
+			source,
+			workdayRequestID,
+			"fa",
+			int(excelPricingSnapshotMaxCacheAge/time.Second),
+		),
+		token,
+	)
+	workdayCached.Header.Set("Idempotency-Key", workdayRequestID)
+	workdayResponse := httptest.NewRecorder()
+	server.router.ServeHTTP(workdayResponse, workdayCached)
+	if workdayResponse.Code != http.StatusOK || remoteCalls.Load() != int32(pages) {
+		t.Fatalf("workday cache status=%d remote calls=%d: %s",
+			workdayResponse.Code, remoteCalls.Load(), workdayResponse.Body.String())
+	}
+
 	revisionRequestID := "snapshot-start-test-0003"
 	revisionCached := authenticatedExcelPricingRequest(
 		http.MethodPost,

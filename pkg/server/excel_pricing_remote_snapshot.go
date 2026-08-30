@@ -29,6 +29,10 @@ const (
 
 	excelPricingRemoteSnapshotMaxResponseBytes = 32 << 20
 	excelPricingRemoteSnapshotTerminalHistory  = 256
+	// WordPress snapshot reuse stays deliberately short. The companion may keep
+	// its already-validated projection longer in RAM, but never asks the remote
+	// provider to retain or replay a day-old materialized snapshot.
+	excelPricingRemoteSnapshotMaxAge = 5 * time.Minute
 
 	excelPricingRemoteSnapshotStageRevisionFetch        = "revision_fetch"
 	excelPricingRemoteSnapshotStageTerminalSubscription = "terminal_subscription"
@@ -664,7 +668,16 @@ func (client *excelPricingRemoteSnapshotClient) Collect(
 	} else {
 		startContext, stopStart = context.WithCancel(startContext)
 	}
-	build, status, err := client.startSnapshot(startContext, requestID, maxAgeSeconds, revision)
+	remoteMaxAgeSeconds := maxAgeSeconds
+	if remoteMaxAgeSeconds > int(excelPricingRemoteSnapshotMaxAge/time.Second) {
+		remoteMaxAgeSeconds = int(excelPricingRemoteSnapshotMaxAge / time.Second)
+	}
+	build, status, err := client.startSnapshot(
+		startContext,
+		requestID,
+		remoteMaxAgeSeconds,
+		revision,
+	)
 	stopStart()
 	if err != nil {
 		if contextErr := ctx.Err(); contextErr != nil {
