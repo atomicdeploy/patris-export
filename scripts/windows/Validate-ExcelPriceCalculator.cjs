@@ -340,6 +340,10 @@ function buildFailures(report, options) {
     );
   }
   failUnless(
+    report.pricingEventAutoPull === true,
+    'the revision-aware Patris/WordPress event auto-pull fixture failed',
+  );
+  failUnless(
     report.productImagePreviewUI === true,
     'the product image preview setting/layout/cache safety fixture failed',
   );
@@ -2778,6 +2782,10 @@ try {
     $pricingEventListenerActive = [bool]$excel.Run(
         "'$eventMacroBookName'!ProductCatalogSync.PricingEventListenerActiveForValidation"
     )
+    Set-ValidatorStage 'checking_pricing_event_auto_pull'
+    $pricingEventAutoPull = [bool]$excel.Run(
+        "'$eventMacroBookName'!ProductCatalogSync.ValidatePricingEventAutoPullForValidation"
+    )
     Set-ValidatorStage 'checking_product_image_preview_ui'
     $productImagePreviewUI = Test-ProductImagePreviewUI $excel $candidateBook
     Set-ValidatorStage 'checking_product_search'
@@ -3194,6 +3202,7 @@ try {
         pricingWritebackUI = $pricingWritebackUI
         pricingProgressUI = $pricingProgressUI
         pricingEventListenerActive = $pricingEventListenerActive
+        pricingEventAutoPull = $pricingEventAutoPull
         productImagePreviewUI = $productImagePreviewUI
         searchRegression = $searchRegression
         transientPricePreview = $transientPricePreview

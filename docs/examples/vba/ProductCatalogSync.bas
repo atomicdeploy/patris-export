@@ -286,6 +286,11 @@ Private mSseRefreshRequired As Boolean
 Private mRefreshAfterSiteConfirmation As Boolean
 Private mEventRefreshScheduled As Boolean
 Private mEventRefreshTime As Date
+Private mPricingEventValidationMode As Boolean
+Private mPricingEventValidationRefreshScheduled As Boolean
+Private mPricingEventValidationConfirmationQueued As Boolean
+Private mPricingEventValidationRefreshCount As Long
+Private mPricingEventValidationAppliedCount As Long
 Private mWorkbookClosing As Boolean
 Private mResumeRefreshAfterCancelledClose As Boolean
 Private mCatalogCommitInProgress As Boolean
@@ -2064,9 +2069,9 @@ Private Sub HandleSnapshotStartResponse(ByVal statusCode As Long, _
         mSnapshotCompletedPages, mSnapshotTotalPages, mSnapshotRowCount
     SetSnapshotProgress mSnapshotCompletedPages, mSnapshotTotalPages, _
         mSnapshotRowCount
-    ' An already-established durable listener may observe this job while the
-    ' one-shot terminal wait is active. Bind it to the new job identity now,
-    ' but do not create the first listener until the snapshot is committed.
+    ' Workbook_Open owns the lightweight listener independently of this slow
+    ' snapshot lane. Bind that listener to the new job identity, but never make
+    ' snapshot start responsible for listener creation or availability.
     mSseJobID = mSnapshotJobID
     If mSnapshotJobStatus = "ready" Then
         If TryCompleteUnchangedSnapshot() Then Exit Sub
@@ -2745,7 +2750,9 @@ End Sub
 
 Public Function PricingEventListenerActiveForValidation() As Boolean
     PricingEventListenerActiveForValidation = _
-        (Not mSseRequest Is Nothing) And Not mSseManualStop
+        Not mSseManualStop And Len(mSseEventsURL) > 0 And _
+        ((Not mSseRequest Is Nothing) Or _
+         (Not mSseSessionRequest Is Nothing) Or mSseReconnectScheduled)
 End Function
 
 Private Sub EnsureSseListener(ByVal eventsURL As String, _
@@ -3039,6 +3046,37 @@ Private Sub DrainSseChunks(ByVal requestValue As AsyncWinHttpRequest)
     End If
 End Sub
 
+Private Function PricingEventRevisionChanged(ByVal eventKind As String, _
+                                             ByVal stateRevision As String, _
+                                             ByVal pricingRevision As String) As Boolean
+    Dim currentRevision As String
+    Dim candidateRevision As String
+
+    Select Case eventKind
+        Case "source_changed", "catalog_changed"
+            candidateRevision = Trim$(stateRevision)
+            If Len(candidateRevision) = 0 Then
+                ' A local Patris file notification has no remote composite yet.
+                ' Its new identity can only be established by a fresh snapshot.
+                PricingEventRevisionChanged = True
+                Exit Function
+            End If
+            currentRevision = Trim$(CStr(ConfigSheet().Range("G56").Value2))
+
+        Case "pricing_state_changed", "pricing_state_invalidated"
+            candidateRevision = Trim$(pricingRevision)
+            If Len(candidateRevision) = 0 Then _
+                candidateRevision = Trim$(stateRevision)
+            currentRevision = Trim$(CStr(ConfigSheet().Range("G14").Value2))
+
+        Case Else
+            Exit Function
+    End Select
+
+    PricingEventRevisionChanged = _
+        (StrComp(candidateRevision, currentRevision, vbBinaryCompare) <> 0)
+End Function
+
 Private Sub HandlePricingSseEvent(ByVal eventValue As Object)
     Dim eventID As String
     Dim eventName As String
@@ -3052,6 +3090,8 @@ Private Sub HandlePricingSseEvent(ByVal eventValue As Object)
     Dim currentSnapshotConfirmation As Boolean
     Dim expectedApplyMutationEvent As Boolean
     Dim eventStateRevision As String
+    Dim eventPricingRevision As String
+    Dim revisionChanged As Boolean
     Dim verified As Boolean
     Dim stale As Boolean
     Dim alreadyForcingFreshSnapshot As Boolean
@@ -3090,7 +3130,6 @@ Private Sub HandlePricingSseEvent(ByVal eventValue As Object)
         mSseLastEventID = vbNullString
         alreadyForcingFreshSnapshot = mForceFreshSnapshot Or _
             Len(mRequiredSnapshotStateRevision) > 0
-        mForceFreshSnapshot = True
         InvalidatePricingPreview
         If (mOperationKind = "refresh" Or _
             mOperationKind = "apply_refresh") And _
@@ -3098,7 +3137,10 @@ Private Sub HandlePricingSseEvent(ByVal eventValue As Object)
             ' The active request is already a max_age_seconds=0 rebuild.
             mForceFreshSnapshot = True
         Else
-            MarkSseRefreshRequired
+            ' A history gap proves that a semantic event may have been missed,
+            ' not that the authoritative revision changed. Probe the protected
+            ' composite first; only a verified difference starts a fresh build.
+            MarkSseRefreshRequired False
         End If
         If Not mSseRequest Is Nothing Then mSseRequest.Abort
         Exit Sub
@@ -3110,8 +3152,11 @@ Private Sub HandlePricingSseEvent(ByVal eventValue As Object)
 
     eventJobID = SiteText(change, "job_id")
     eventStateRevision = SiteText(change, "state_revision")
+    eventPricingRevision = SiteText(change, "pricing_state_revision")
     verified = BooleanValue(JsonRuntime.JsonText(change, "verified"))
     stale = BooleanValue(JsonRuntime.JsonText(change, "stale"))
+    revisionChanged = PricingEventRevisionChanged( _
+        payloadKind, eventStateRevision, eventPricingRevision)
     currentSnapshotConfirmation = (Len(mSseJobID) > 0 And _
         eventJobID = mSseJobID And verified)
     Select Case payloadKind
@@ -3125,34 +3170,47 @@ Private Sub HandlePricingSseEvent(ByVal eventValue As Object)
             ' source/catalog/pricing-state cases below and remain coalesced.
 
         Case "source_changed", "catalog_changed"
-            If Not stale Then GoTo InvalidEvent
-            If Not currentSnapshotConfirmation Then MarkSseRefreshRequired
+            If Not stale Or (Len(eventStateRevision) > 0 And _
+               Not IsSHA256RevisionText(eventStateRevision)) Then _
+                GoTo InvalidEvent
+            If revisionChanged And Not currentSnapshotConfirmation Then _
+                MarkSseRefreshRequired
 
         Case "pricing_state_changed"
-            If Not stale Or Not IsSHA256RevisionText(eventStateRevision) Then _
+            If Len(eventPricingRevision) = 0 Then _
+                eventPricingRevision = eventStateRevision
+            If Not stale Or _
+               Not IsSHA256RevisionText(eventPricingRevision) Then _
                 GoTo InvalidEvent
-            expectedApplyMutationEvent = _
-                IsExpectedApplyMutationEvent(eventStateRevision)
-            If expectedApplyMutationEvent Then
-                PreserveExpectedApplyMutationEvent
-            ElseIf Not currentSnapshotConfirmation Then
-                ' Apply and ACK the website-confirmed settings first. Starting
-                ' a full catalog refresh here can project the previous value
-                ' back into the writeback queue while the confirmation request
-                ' is still active, producing a false concurrent-change error.
-                mRefreshAfterSiteConfirmation = True
-                QueueSiteConfirmationDiscovery
+            If revisionChanged Then
+                expectedApplyMutationEvent = _
+                    IsExpectedApplyMutationEvent(eventPricingRevision)
+                If expectedApplyMutationEvent Then
+                    PreserveExpectedApplyMutationEvent
+                ElseIf Not currentSnapshotConfirmation Then
+                    ' Apply and ACK the website-confirmed settings first.
+                    ' Starting a full catalog refresh here can project the
+                    ' previous value back into the writeback queue while the
+                    ' confirmation request is active.
+                    mRefreshAfterSiteConfirmation = True
+                    QueueSiteConfirmationDiscovery
+                End If
             End If
 
         Case "pricing_state_invalidated"
-            If Not stale Or Not IsSHA256RevisionText(eventStateRevision) Then _
+            If Len(eventPricingRevision) = 0 Then _
+                eventPricingRevision = eventStateRevision
+            If Not stale Or _
+               Not IsSHA256RevisionText(eventPricingRevision) Then _
                 GoTo InvalidEvent
-            expectedApplyMutationEvent = _
-                IsExpectedApplyMutationEvent(eventStateRevision)
-            If expectedApplyMutationEvent Then
-                PreserveExpectedApplyMutationEvent
-            Else
-                MarkSseRefreshRequired
+            If revisionChanged Then
+                expectedApplyMutationEvent = _
+                    IsExpectedApplyMutationEvent(eventPricingRevision)
+                If expectedApplyMutationEvent Then
+                    PreserveExpectedApplyMutationEvent
+                Else
+                    MarkSseRefreshRequired
+                End If
             End If
 
         Case Else
@@ -3169,6 +3227,10 @@ InvalidEvent:
 End Sub
 
 Private Sub QueueSiteConfirmationDiscovery()
+    If mPricingEventValidationMode Then
+        mPricingEventValidationConfirmationQueued = True
+        Exit Sub
+    End If
     If mWorkbookClosing Then Exit Sub
     EnsureWritebackQueue
     If Len(mWritebackStage) > 0 And _
@@ -3208,9 +3270,14 @@ Private Sub PreserveExpectedApplyMutationEvent()
     End If
 End Sub
 
-Private Sub MarkSseRefreshRequired()
+Private Sub MarkSseRefreshRequired( _
+        Optional ByVal forceFreshSnapshot As Boolean = True)
     mSseRefreshRequired = True
-    mForceFreshSnapshot = True
+    If forceFreshSnapshot Then mForceFreshSnapshot = True
+    If mPricingEventValidationMode Then
+        ScheduleEventDrivenRefresh
+        Exit Sub
+    End If
     InvalidatePricingPreview
     If Len(mOperationKind) > 0 Then
         If mOperationKind = "preview" Or mOperationKind = "apply" Then _
@@ -3367,6 +3434,14 @@ Private Sub CancelSseReconnect()
 End Sub
 
 Private Sub ScheduleEventDrivenRefresh()
+    If mPricingEventValidationMode Then
+        If Not mPricingEventValidationRefreshScheduled Then
+            mPricingEventValidationRefreshCount = _
+                mPricingEventValidationRefreshCount + 1
+        End If
+        mPricingEventValidationRefreshScheduled = True
+        Exit Sub
+    End If
     If mSaveRenameSchedulesSuspended Then
         mSaveRenameEventRefreshPending = True
         Exit Sub
@@ -3391,6 +3466,16 @@ ScheduleFailed:
 End Sub
 
 Public Sub RunEventDrivenRefresh()
+    If mPricingEventValidationMode Then
+        If mPricingEventValidationRefreshScheduled And _
+           mSseRefreshRequired And mForceFreshSnapshot Then
+            mPricingEventValidationAppliedCount = _
+                mPricingEventValidationAppliedCount + 1
+        End If
+        mPricingEventValidationRefreshScheduled = False
+        mSseRefreshRequired = False
+        Exit Sub
+    End If
     mEventRefreshScheduled = False
     If mWorkbookClosing Then Exit Sub
     If mRefreshInProgress Or mPricingActionInProgress Then
@@ -3410,6 +3495,169 @@ Private Sub CancelEventDrivenRefresh()
     On Error GoTo 0
     mEventRefreshScheduled = False
 End Sub
+
+Private Function PricingEventFixtureForValidation( _
+        ByVal eventID As Long, ByVal eventKind As String, _
+        ByVal stateRevision As String, _
+        ByVal pricingRevision As String) As Object
+    Dim eventValue As Object
+    Dim eventData As String
+
+    eventData = "{""schema"":" & _
+        JsonString(PRICING_SNAPSHOT_EVENT_SCHEMA) & "," & _
+        """sequence"":" & CStr(eventID) & "," & _
+        """kind"":" & JsonString(eventKind) & "," & _
+        """change"":{""schema"":" & _
+        JsonString(PRICING_SNAPSHOT_EVENT_SCHEMA) & "," & _
+        """kind"":" & JsonString(eventKind) & "," & _
+        """state_revision"":" & JsonString(stateRevision)
+    If Len(pricingRevision) > 0 Then
+        eventData = eventData & ",""pricing_state_revision"":" & _
+            JsonString(pricingRevision)
+    End If
+    eventData = eventData & ",""stale"":true,""verified"":true}}"
+
+    Set eventValue = CreateObject("Scripting.Dictionary")
+    eventValue.CompareMode = vbBinaryCompare
+    eventValue.Add "id", CStr(eventID)
+    eventValue.Add "event", eventKind
+    eventValue.Add "data", eventData
+    Set PricingEventFixtureForValidation = eventValue
+End Function
+
+Public Function ValidatePricingEventAutoPullForValidation() As Boolean
+    Dim settings As Worksheet
+    Dim eventValue As Object
+    Dim originalStateRevision As Variant
+    Dim originalPricingRevision As Variant
+    Dim originalLastEventID As String
+    Dim originalRefreshRequired As Boolean
+    Dim originalForceFreshSnapshot As Boolean
+    Dim originalRefreshAfterConfirmation As Boolean
+    Dim originalInternalRefresh As Boolean
+    Dim originalEvents As Boolean
+    Dim originalSaved As Boolean
+    Dim currentStateRevision As String
+    Dim nextStateRevision As String
+    Dim currentPricingRevision As String
+    Dim nextPricingRevision As String
+
+    On Error GoTo ValidationFailed
+    If Len(mOperationKind) > 0 Or mRefreshInProgress Or _
+       mPricingActionInProgress Or mPricingEventValidationMode Then _
+        Exit Function
+
+    Set settings = ConfigSheet()
+    originalStateRevision = settings.Range("G56").Value2
+    originalPricingRevision = settings.Range("G14").Value2
+    originalLastEventID = mSseLastEventID
+    originalRefreshRequired = mSseRefreshRequired
+    originalForceFreshSnapshot = mForceFreshSnapshot
+    originalRefreshAfterConfirmation = mRefreshAfterSiteConfirmation
+    originalInternalRefresh = mInternalPricingRefresh
+    originalEvents = Application.EnableEvents
+    originalSaved = ThisWorkbook.Saved
+
+    currentStateRevision = "sha256:" & String$(64, "1")
+    nextStateRevision = "sha256:" & String$(64, "2")
+    currentPricingRevision = "sha256:" & String$(64, "3")
+    nextPricingRevision = "sha256:" & String$(64, "4")
+
+    Application.EnableEvents = False
+    mInternalPricingRefresh = True
+    settings.Range("G56").Value2 = currentStateRevision
+    settings.Range("G14").Value2 = currentPricingRevision
+    mInternalPricingRefresh = originalInternalRefresh
+    Application.EnableEvents = originalEvents
+
+    mPricingEventValidationMode = True
+    mPricingEventValidationRefreshScheduled = False
+    mPricingEventValidationConfirmationQueued = False
+    mPricingEventValidationRefreshCount = 0
+    mPricingEventValidationAppliedCount = 0
+    mSseRefreshRequired = False
+    mForceFreshSnapshot = False
+    mRefreshAfterSiteConfirmation = False
+    mSseLastEventID = "100"
+
+    Set eventValue = PricingEventFixtureForValidation( _
+        101, "source_changed", currentStateRevision, vbNullString)
+    HandlePricingSseEvent eventValue
+    If mPricingEventValidationRefreshScheduled Or _
+       mSseRefreshRequired Then GoTo ValidationFailed
+
+    Set eventValue = PricingEventFixtureForValidation( _
+        102, "catalog_changed", nextStateRevision, vbNullString)
+    HandlePricingSseEvent eventValue
+    Set eventValue = PricingEventFixtureForValidation( _
+        103, "source_changed", nextStateRevision, vbNullString)
+    HandlePricingSseEvent eventValue
+    If Not mPricingEventValidationRefreshScheduled Or _
+       Not mSseRefreshRequired Or Not mForceFreshSnapshot Or _
+       mPricingEventValidationRefreshCount <> 1 Then _
+        GoTo ValidationFailed
+    RunEventDrivenRefresh
+    If mPricingEventValidationAppliedCount <> 1 Or _
+       mSseRefreshRequired Then GoTo ValidationFailed
+
+    Set eventValue = PricingEventFixtureForValidation( _
+        104, "pricing_state_changed", nextStateRevision, _
+        currentPricingRevision)
+    HandlePricingSseEvent eventValue
+    If mPricingEventValidationConfirmationQueued Or _
+       mPricingEventValidationRefreshScheduled Then _
+        GoTo ValidationFailed
+
+    Set eventValue = PricingEventFixtureForValidation( _
+        105, "pricing_state_changed", nextStateRevision, _
+        nextPricingRevision)
+    HandlePricingSseEvent eventValue
+    If Not mPricingEventValidationConfirmationQueued Or _
+       mPricingEventValidationRefreshScheduled Then _
+        GoTo ValidationFailed
+
+    Set eventValue = PricingEventFixtureForValidation( _
+        106, "pricing_state_invalidated", nextPricingRevision, _
+        vbNullString)
+    HandlePricingSseEvent eventValue
+    If Not mPricingEventValidationRefreshScheduled Or _
+       mPricingEventValidationRefreshCount <> 2 Then _
+        GoTo ValidationFailed
+    RunEventDrivenRefresh
+    If mPricingEventValidationAppliedCount <> 2 Or _
+       mSseLastEventID <> "106" Or _
+       CStr(settings.Range("G56").Value2) <> currentStateRevision Or _
+       CStr(settings.Range("G14").Value2) <> currentPricingRevision Then _
+        GoTo ValidationFailed
+
+    ValidatePricingEventAutoPullForValidation = True
+    GoTo ValidationExit
+
+ValidationFailed:
+    ValidatePricingEventAutoPullForValidation = False
+
+ValidationExit:
+    On Error Resume Next
+    mPricingEventValidationMode = False
+    If Not settings Is Nothing Then
+        Application.EnableEvents = False
+        mInternalPricingRefresh = True
+        settings.Range("G56").Value2 = originalStateRevision
+        settings.Range("G14").Value2 = originalPricingRevision
+    End If
+    mInternalPricingRefresh = originalInternalRefresh
+    Application.EnableEvents = originalEvents
+    mSseLastEventID = originalLastEventID
+    mSseRefreshRequired = originalRefreshRequired
+    mForceFreshSnapshot = originalForceFreshSnapshot
+    mRefreshAfterSiteConfirmation = originalRefreshAfterConfirmation
+    mPricingEventValidationRefreshScheduled = False
+    mPricingEventValidationConfirmationQueued = False
+    mPricingEventValidationRefreshCount = 0
+    mPricingEventValidationAppliedCount = 0
+    If originalSaved Then ThisWorkbook.Saved = True
+    On Error GoTo 0
+End Function
 
 Public Sub RegisterSearchHotkey()
     Dim activeBook As Workbook

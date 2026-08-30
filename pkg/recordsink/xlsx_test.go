@@ -1029,7 +1029,7 @@ func TestDynamicCalculatorVBASourceGuardsLivePricingBeforeMutation(t *testing.T)
 		}
 	}
 	if strings.Contains(startHandler, "EnsureSseListener") {
-		t.Fatal("cold refresh must not subscribe to durable SSE before the first atomic commit")
+		t.Fatal("snapshot start must not own or gate the independently started durable listener")
 	}
 	waitHandler := section("Private Sub HandleSnapshotWaitResponse", "Private Sub HandleSnapshotPayloadResponse")
 	if !strings.Contains(waitHandler, "BeginSnapshotPayloadRequest") || strings.Contains(waitHandler, "Do While") {
@@ -1203,7 +1203,9 @@ func TestDynamicCalculatorVBASourceGuardsLivePricingBeforeMutation(t *testing.T)
 		`Case "pricing_state_changed"`,
 		`Case "pricing_state_invalidated"`,
 		"eventStateRevision = SiteText(change, \"state_revision\")",
-		"IsExpectedApplyMutationEvent(eventStateRevision)",
+		"eventPricingRevision = SiteText(change, \"pricing_state_revision\")",
+		"revisionChanged = PricingEventRevisionChanged(",
+		"IsExpectedApplyMutationEvent(eventPricingRevision)",
 		"PreserveExpectedApplyMutationEvent",
 	} {
 		if !strings.Contains(sseEventHandler, required) {
@@ -1221,6 +1223,54 @@ func TestDynamicCalculatorVBASourceGuardsLivePricingBeforeMutation(t *testing.T)
 	snapshotReadyHandler := sseEventHandler[snapshotReadyStart : snapshotReadyStart+snapshotReadyEnd]
 	if strings.Contains(snapshotReadyHandler, "MarkSseRefreshRequired") {
 		t.Fatal("snapshot readiness must not schedule another refresh without a semantic change event")
+	}
+	replayStart := strings.Index(sseEventHandler, `If payloadKind = "replay_required" Then`)
+	replayEnd := strings.Index(sseEventHandler, `If Len(mSseLastEventID) > 0 Then`)
+	if replayStart < 0 || replayEnd <= replayStart {
+		t.Fatal("SSE replay-reset handling boundaries are missing")
+	}
+	replayHandler := sseEventHandler[replayStart:replayEnd]
+	if !strings.Contains(replayHandler, "MarkSseRefreshRequired False") {
+		t.Fatal("an event-history gap must conditionally probe the protected revision before forcing a snapshot")
+	}
+	revisionGuard := section("Private Function PricingEventRevisionChanged", "Private Sub HandlePricingSseEvent")
+	for _, required := range []string{
+		`Case "source_changed", "catalog_changed"`,
+		`ConfigSheet().Range("G56").Value2`,
+		`Case "pricing_state_changed", "pricing_state_invalidated"`,
+		`ConfigSheet().Range("G14").Value2`,
+		`StrComp(candidateRevision, currentRevision, vbBinaryCompare) <> 0`,
+	} {
+		if !strings.Contains(revisionGuard, required) {
+			t.Fatalf("revision-aware SSE no-op guard is missing %q", required)
+		}
+	}
+	listenerValidation := section("Public Function PricingEventListenerActiveForValidation", "Private Sub EnsureSseListener")
+	for _, required := range []string{
+		"Not mSseManualStop",
+		"Len(mSseEventsURL) > 0",
+		"Not mSseRequest Is Nothing",
+		"Not mSseSessionRequest Is Nothing",
+		"mSseReconnectScheduled",
+	} {
+		if !strings.Contains(listenerValidation, required) {
+			t.Fatalf("listener lifecycle validation is missing %q", required)
+		}
+	}
+	eventValidation := section("Public Function ValidatePricingEventAutoPullForValidation", "Public Sub RegisterSearchHotkey")
+	for _, required := range []string{
+		`101, "source_changed", currentStateRevision`,
+		`102, "catalog_changed", nextStateRevision`,
+		`104, "pricing_state_changed", nextStateRevision`,
+		`106, "pricing_state_invalidated", nextPricingRevision`,
+		"mPricingEventValidationRefreshCount <> 1",
+		"mPricingEventValidationAppliedCount <> 2",
+		`CStr(settings.Range("G56").Value2) <> currentStateRevision`,
+		`CStr(settings.Range("G14").Value2) <> currentPricingRevision`,
+	} {
+		if !strings.Contains(eventValidation, required) {
+			t.Fatalf("deterministic event auto-pull validation is missing %q", required)
+		}
 	}
 	pricingChangedStart := strings.Index(sseEventHandler, `Case "pricing_state_changed"`)
 	pricingInvalidatedStart := strings.Index(sseEventHandler, `Case "pricing_state_invalidated"`)
@@ -1576,6 +1626,7 @@ func TestDynamicCalculatorVBASourceGuardsLivePricingBeforeMutation(t *testing.T)
 		"Application.EnableEvents = True",
 		"Public Sub StartPricingEventListenerOnOpen()",
 		"Public Function PricingEventListenerActiveForValidation() As Boolean",
+		"Public Function ValidatePricingEventAutoPullForValidation() As Boolean",
 		`If mWritebackSettingKey = "site_confirmation" Then`,
 		`confirmedValue = CanonicalCellText(settings.Range("G18").Value2)`,
 	} {
@@ -2026,6 +2077,11 @@ func TestDynamicCalculatorVBASourceGuardsLivePricingBeforeMutation(t *testing.T)
 	if strings.Contains(string(thisWorkbookContent), "If Not ProductCatalogSync.AuditFontsOnOpen Then Exit Sub") {
 		t.Fatal("font audit failure must not suppress scheduled population")
 	}
+	listenerStart := strings.Index(string(thisWorkbookContent), "ProductCatalogSync.StartPricingEventListenerOnOpen")
+	refreshStart := strings.Index(string(thisWorkbookContent), "ProductCatalogSync.ScheduleRefreshOnOpen")
+	if listenerStart < 0 || refreshStart < 0 || listenerStart >= refreshStart {
+		t.Fatal("Workbook_Open must start the lightweight event listener before scheduling any catalog snapshot")
+	}
 	if strings.Contains(string(thisWorkbookContent), "Application.CalculateFull") ||
 		strings.Contains(string(thisWorkbookContent), "ProductCatalogSync.RefreshOnOpen") {
 		t.Fatal("Workbook_Open must paint the UI before scheduling live synchronization")
@@ -2125,6 +2181,9 @@ func TestDynamicCalculatorValidatorHandlesEmptyProductTable(t *testing.T) {
 		`ProductCatalogSync.AsyncPricingIdleForValidation`,
 		`ProductCatalogSync.LastPricingOperationSucceededForValidation`,
 		`ProductCatalogSync.LastPricingOperationErrorForValidation`,
+		`ProductCatalogSync.ValidatePricingEventAutoPullForValidation`,
+		`pricingEventAutoPull = $pricingEventAutoPull`,
+		`report.pricingEventAutoPull === true`,
 		`function Test-RetryableExcelComRejection`,
 		`RPC_E_CALL_REJECTED`,
 		`RPC_E_SERVERCALL_RETRYLATER`,
