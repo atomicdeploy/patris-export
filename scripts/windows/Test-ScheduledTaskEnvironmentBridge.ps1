@@ -37,6 +37,7 @@ function Get-TestProcessStatePath {
 }
 
 try {
+    & (Join-Path $PSScriptRoot "Test-ScheduledTaskUtcIdentity.ps1")
     New-Item -ItemType Directory -Path $testRoot | Out-Null
     $probeProgram = @'
 using System;
@@ -368,7 +369,7 @@ public static class Sleeper
         Set-Acl -LiteralPath $blockedRoot -AclObject $restoreAcl
     }
 
-    Write-Host "Scheduled-task environment bridge passed name-only import and fail-closed tests."
+    Write-Host "Scheduled-task environment bridge passed UTC identity, name-only import, and fail-closed tests."
 } finally {
     [Environment]::SetEnvironmentVariable($variableName, $previousUserValue, "User")
     [Environment]::SetEnvironmentVariable($variableName, $previousProcessValue, "Process")

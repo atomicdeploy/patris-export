@@ -99,6 +99,26 @@ function Get-PatrisTask {
     Get-ScheduledTask -TaskName $TaskName -TaskPath $TaskPath -ErrorAction SilentlyContinue
 }
 
+function ConvertTo-PatrisUtcInstant {
+    param([Parameter(Mandatory = $true)][object]$Value)
+
+    # PowerShell 7 can materialize an ISO-8601 JSON string as DateTime. Casting
+    # that value back to string drops its Kind and fractional seconds, so a
+    # subsequent DateTime.Parse(...).ToUniversalTime() can both shift the
+    # instant by the local offset and lose the exact process-start ticks.
+    if ($Value -is [DateTimeOffset]) {
+        return ([DateTimeOffset]$Value).ToUniversalTime()
+    }
+    if ($Value -is [DateTime]) {
+        return ([DateTimeOffset]::new([DateTime]$Value)).ToUniversalTime()
+    }
+    return [DateTimeOffset]::Parse(
+        [string]$Value,
+        [Globalization.CultureInfo]::InvariantCulture,
+        [Globalization.DateTimeStyles]::RoundtripKind
+    ).ToUniversalTime()
+}
+
 function New-PatrisProcessIdentity {
     param([Parameter(Mandatory = $true)]$Process)
 
@@ -183,14 +203,12 @@ function Get-PatrisTrackedDeploymentProcess {
                 -not [string]$state.launcher_start_time_utc) {
                 throw "invalid launch reservation"
             }
-            $launcherStart = [DateTime]::Parse(
-                [string]$state.launcher_start_time_utc,
-                [Globalization.CultureInfo]::InvariantCulture,
-                [Globalization.DateTimeStyles]::RoundtripKind
-            ).ToUniversalTime()
+            $launcherStart = ConvertTo-PatrisUtcInstant -Value (
+                $state.launcher_start_time_utc
+            )
             $launcherIdentity = Get-PatrisProcessIdentityById -ProcessId ([int]$state.launcher_pid)
             $launcherMatches = $launcherIdentity -and
-                $launcherIdentity.StartTimeUtc.Ticks -eq $launcherStart.Ticks
+                $launcherIdentity.StartTimeUtc.Ticks -eq $launcherStart.UtcTicks
             $reservedChildren = @()
             foreach ($candidate in @(
                 Get-CimInstance Win32_Process -Filter (
@@ -252,15 +270,11 @@ function Get-PatrisTrackedDeploymentProcess {
         }
         $identity = Get-PatrisProcessIdentityById -ProcessId ([int]$state.pid)
         if ($identity) {
-            $recordedStart = [DateTime]::Parse(
-                [string]$state.start_time_utc,
-                [Globalization.CultureInfo]::InvariantCulture,
-                [Globalization.DateTimeStyles]::RoundtripKind
-            ).ToUniversalTime()
+            $recordedStart = ConvertTo-PatrisUtcInstant -Value $state.start_time_utc
             if (-not $identity.Executable.Equals(
                 [IO.Path]::GetFullPath($exe),
                 [StringComparison]::OrdinalIgnoreCase
-            ) -or $identity.StartTimeUtc.Ticks -ne $recordedStart.Ticks) {
+            ) -or $identity.StartTimeUtc.Ticks -ne $recordedStart.UtcTicks) {
                 throw "stale or reused process identity"
             }
             return @($identity)
