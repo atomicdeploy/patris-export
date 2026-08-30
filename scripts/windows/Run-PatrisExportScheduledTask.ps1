@@ -72,6 +72,26 @@ function Get-DefaultProcessStatePath {
     ) ($digest.Substring(0, 32) + ".json")
 }
 
+function ConvertTo-PatrisUtcInstant {
+    param([Parameter(Mandatory = $true)][object]$Value)
+
+    # PowerShell 7 can materialize an ISO-8601 JSON string as DateTime. Casting
+    # that value back to string drops its Kind and fractional seconds, so a
+    # subsequent DateTime.Parse(...).ToUniversalTime() can both shift the
+    # instant by the local offset and lose the exact process-start ticks.
+    if ($Value -is [DateTimeOffset]) {
+        return ([DateTimeOffset]$Value).ToUniversalTime()
+    }
+    if ($Value -is [DateTime]) {
+        return ([DateTimeOffset]::new([DateTime]$Value)).ToUniversalTime()
+    }
+    return [DateTimeOffset]::Parse(
+        [string]$Value,
+        [Globalization.CultureInfo]::InvariantCulture,
+        [Globalization.DateTimeStyles]::RoundtripKind
+    ).ToUniversalTime()
+}
+
 if (-not (Test-Path -LiteralPath $Executable -PathType Leaf)) {
     throw "Patris Export executable not found: $Executable"
 }
@@ -170,13 +190,11 @@ try {
             }
             $existingProcess = Get-Process -Id ([int]$existingState.pid) -ErrorAction SilentlyContinue
             if ($existingProcess) {
-                $existingStart = [DateTime]::Parse(
-                    [string]$existingState.start_time_utc,
-                    [Globalization.CultureInfo]::InvariantCulture,
-                    [Globalization.DateTimeStyles]::RoundtripKind
-                ).ToUniversalTime()
+                $existingStart = ConvertTo-PatrisUtcInstant -Value (
+                    $existingState.start_time_utc
+                )
                 try {
-                    if ($existingProcess.StartTime.ToUniversalTime().Ticks -eq $existingStart.Ticks -and
+                    if ($existingProcess.StartTime.ToUniversalTime().Ticks -eq $existingStart.UtcTicks -and
                         [IO.Path]::GetFullPath([string]$existingProcess.Path).Equals(
                             [IO.Path]::GetFullPath($Executable),
                             [StringComparison]::OrdinalIgnoreCase

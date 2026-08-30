@@ -65,6 +65,10 @@ jobs:
       shell: cmd
       run: powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File .\scripts\windows\Test-ScheduledTaskEnvironmentBridge.ps1
 
+    - name: Test PowerShell Core scheduled-task UTC identity
+      shell: pwsh
+      run: .\scripts\windows\Test-ScheduledTaskUtcIdentity.ps1
+
     - name: Audit and test optional pxlib backends
       shell: pwsh
       run: |
