@@ -388,3 +388,89 @@ func TestCopyVerifiedBlankXLTMRequiresAndPreservesDataEmptyTemplate(t *testing.T
 		t.Fatalf("rejected XLTM was finalized: %v", err)
 	}
 }
+
+func TestCanonicalDigitalogicXLTMShipsNoStaticCatalogRecords(t *testing.T) {
+	templatePath, err := filepath.Abs(filepath.Join(
+		"..", "..", "docs", "examples", "لیست قیمت دیجیتالاجیک.xltm",
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, target := range []string{"table:Products", "table:SyncData"} {
+		output := filepath.Join(t.TempDir(), strings.TrimPrefix(target, "table:")+".xltm")
+		report, err := CopyVerifiedBlankXLTM(output, TrustedOfficeContract{
+			TemplatePath: templatePath,
+			Target:       target,
+		})
+		if err != nil {
+			t.Fatalf("canonical %s data-free gate failed: %v", target, err)
+		}
+		if !report.DataEmpty || report.RecordCount != 0 || report.SourceSHA256 != report.OutputSHA256 {
+			t.Fatalf("canonical %s unexpectedly contains persisted records: %+v", target, report)
+		}
+	}
+}
+
+func TestExcelTemplateReleaseGuardsAndRuntimeRefreshContract(t *testing.T) {
+	repoRoot := filepath.Join("..", "..")
+	checks := []struct {
+		path  string
+		parts []string
+	}{
+		{
+			path: filepath.Join(repoRoot, "scripts", "windows", "Build-ExcelDashboard.ps1"),
+			parts: []string{
+				"Test-ExcelTemplateDataFree.ps1",
+				"$templateDataAuditPath -Path $OutputPath",
+				"$templateDataAuditPath -Path $DistributionCopyPath",
+			},
+		},
+		{
+			path: filepath.Join(repoRoot, "scripts", "windows", "Update-ExcelWorkbookModules.ps1"),
+			parts: []string{
+				"$templateDataAuditPath -Path $resolvedInput",
+				"$templateDataAuditPath -Path $resolvedOutput",
+			},
+		},
+		{
+			path: filepath.Join(repoRoot, "scripts", "windows", "Test-ExcelSearchProgressDelivery.ps1"),
+			parts: []string{
+				"$templateDataAuditPath -Path $CandidatePath",
+			},
+		},
+		{
+			path: filepath.Join(repoRoot, "scripts", "windows", "Validate-ExcelPriceCalculator.cjs"),
+			parts: []string{
+				"saving live rows into the release .xltm template is forbidden",
+				"assertReleaseTemplateIsDataFree(options.candidate)",
+				"$candidateBook.SaveAs([IO.Path]::GetFullPath($saveSyncedTo), 52)",
+			},
+		},
+		{
+			path: filepath.Join(repoRoot, "docs", "examples", "vba", "ThisWorkbook.cls"),
+			parts: []string{
+				"Private Sub Workbook_Open()",
+				"ProductCatalogSync.ScheduleRefreshOnOpen",
+			},
+		},
+		{
+			path: filepath.Join(repoRoot, "docs", "examples", "vba", "ProductCatalogSync.bas"),
+			parts: []string{
+				"Public Sub RefreshAllData",
+				"Private Sub CommitRefreshSnapshot",
+				"ScheduleEventDrivenRefresh",
+			},
+		},
+	}
+	for _, check := range checks {
+		source, err := os.ReadFile(check.path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, part := range check.parts {
+			if !strings.Contains(string(source), part) {
+				t.Errorf("%s is missing fail-closed release guard %q", check.path, part)
+			}
+		}
+	}
+}

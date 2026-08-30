@@ -10,6 +10,13 @@ $CandidatePath = [IO.Path]::GetFullPath($CandidatePath)
 if (-not (Test-Path -LiteralPath $CandidatePath -PathType Leaf)) {
     throw "Candidate workbook does not exist: $CandidatePath"
 }
+if ([IO.Path]::GetExtension($CandidatePath) -ieq '.xltm') {
+    $templateDataAuditPath = Join-Path $PSScriptRoot 'Test-ExcelTemplateDataFree.ps1'
+    if (-not (Test-Path -LiteralPath $templateDataAuditPath -PathType Leaf)) {
+        throw "Required empty-template release gate is missing: $templateDataAuditPath"
+    }
+    [void](& $templateDataAuditPath -Path $CandidatePath)
+}
 if ($SearchCycles -lt 3 -or $SearchCycles -gt 500) {
     throw 'SearchCycles must be between 3 and 500.'
 }

@@ -21,8 +21,15 @@ function Get-VbaCodeBody([string]$Path) {
 
 $resolvedInput = [IO.Path]::GetFullPath($InputPath)
 $resolvedOutput = [IO.Path]::GetFullPath($OutputPath)
+$templateDataAuditPath = Join-Path $PSScriptRoot 'Test-ExcelTemplateDataFree.ps1'
 if (-not (Test-Path -LiteralPath $resolvedInput -PathType Leaf)) {
     throw "Input workbook not found: $resolvedInput"
+}
+if ([IO.Path]::GetExtension($resolvedInput) -ieq '.xltm') {
+    if (-not (Test-Path -LiteralPath $templateDataAuditPath -PathType Leaf)) {
+        throw "Required empty-template release gate is missing: $templateDataAuditPath"
+    }
+    [void](& $templateDataAuditPath -Path $resolvedInput)
 }
 New-Item -ItemType Directory -Path (Split-Path -Parent $resolvedOutput) -Force | Out-Null
 Copy-Item -LiteralPath $resolvedInput -Destination $resolvedOutput -Force
@@ -94,6 +101,10 @@ try {
     } else {
         Remove-ItemProperty -Path $excelSecurityPath -Name AccessVBOM -ErrorAction SilentlyContinue
     }
+}
+
+if ([IO.Path]::GetExtension($resolvedOutput) -ieq '.xltm') {
+    [void](& $templateDataAuditPath -Path $resolvedOutput)
 }
 
 Get-Item -LiteralPath $resolvedOutput | Select-Object FullName, Length, LastWriteTime
