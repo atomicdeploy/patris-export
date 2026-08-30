@@ -225,6 +225,122 @@ func TestExcelPricingWritebackWorkerUsesPreviewApplyIdempotencyAndReadback(t *te
 	t.Fatalf("writeback did not confirm: %#v", server.excelPricingWrites.get(accepted.JobID))
 }
 
+func TestExcelPricingBatchWritebackReturnsFullWebsiteReadbackBeforeACK(t *testing.T) {
+	initialRevision := excelPricingRevisionForTest("batch-initial")
+	confirmedRevision := excelPricingRevisionForTest("batch-confirmed")
+	previewDigest := excelPricingRevisionForTest("batch-preview")
+	settingsDigest := excelPricingRevisionForTest("batch-settings")
+	request := validExcelPricingWritebackRequest("excel-settings-batch-remote", "yuan_price", 30000)
+	request.Schema = excelPricingWritebackBatchRequestSchema
+	request.SettingKey = ""
+	request.PreviousConfirmedValue = ""
+	request.SettingKeys = []string{"yuan_price", "profit_margin_percent"}
+	request.PreviousConfirmedValues = map[string]string{
+		"yuan_price": "29500", "profit_margin_percent": "30",
+	}
+	request.ExpectedStateRevision = initialRevision
+	request.Settings.ProfitMarginPercent = json.Number("31")
+	current := request.Settings
+	current.YuanPrice = 29500
+	current.ProfitMarginPercent = json.Number("30")
+	var applied atomic.Bool
+	var acked atomic.Bool
+	remote := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/preview"):
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"schema": excelPricingPreviewSchema, "state_revision": initialRevision,
+				"preview_digest": previewDigest,
+			})
+		case strings.HasSuffix(r.URL.Path, "/apply"):
+			applied.Store(true)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"schema": excelPricingApplySchema, "state_revision": confirmedRevision,
+				"settings": request.Settings,
+				"confirmation": map[string]interface{}{
+					"schema": excelPricingConfirmationSchema, "status": "awaiting_ack",
+					"transaction_id":            "ptx_abcdef0123456789abcdef0123456789",
+					"committed_revision":        confirmedRevision,
+					"committed_settings_digest": settingsDigest,
+					"ack_deadline":              time.Now().Add(time.Minute).Unix(),
+					"ack_path":                  "/wp-json/digitalogic/pricing/sync/ack",
+					"consumer_id":               excelPricingContractClientID,
+					"channel":                   excelPricingContractChannel,
+				},
+			})
+		case strings.HasSuffix(r.URL.Path, "/ack"):
+			acked.Store(true)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"schema": excelPricingConfirmationSchema, "status": "acknowledged",
+				"transaction_id": "ptx_abcdef0123456789abcdef0123456789",
+			})
+		case strings.HasSuffix(r.URL.Path, "/state"):
+			settings := current
+			revision := initialRevision
+			status := "clear"
+			if applied.Load() {
+				settings = request.Settings
+				revision = confirmedRevision
+				status = "awaiting_ack"
+			}
+			if acked.Load() {
+				status = "clear"
+			}
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"schema": excelPricingStateSchema, "state_revision": revision,
+				"settings": settings, "confirmation": map[string]interface{}{
+					"schema": excelPricingConfirmationSchema, "status": status,
+				},
+			})
+		default:
+			t.Fatalf("unexpected remote path %q", r.URL.Path)
+		}
+	}))
+	defer remote.Close()
+	server := newExcelPricingTestServer(t, remote.URL+"/wp-json/digitalogic/patris/product-sync")
+	token := openExcelPricingSession(t, server)
+	body, _ := json.Marshal(request)
+	response := httptest.NewRecorder()
+	server.router.ServeHTTP(response, authenticatedExcelPricingRequest(
+		http.MethodPost, "/api/pricing-sync/writebacks", string(body), token,
+	))
+	if response.Code != http.StatusAccepted {
+		t.Fatalf("batch enqueue status=%d: %s", response.Code, response.Body.String())
+	}
+	var accepted excelPricingWritebackJob
+	if err := json.Unmarshal(response.Body.Bytes(), &accepted); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(4 * time.Second)
+	ackSent := false
+	for time.Now().Before(deadline) {
+		job := server.excelPricingWrites.get(accepted.JobID)
+		if job != nil && job.Status == "awaiting_excel" && !ackSent {
+			if job.ConfirmedSettings == nil || job.ConfirmedSettings.YuanPrice != 30000 ||
+				job.ConfirmedSettings.ProfitMarginPercent != json.Number("31") ||
+				job.ConfirmedValues["yuan_price"] != "30000" ||
+				job.ConfirmedValues["profit_margin_percent"] != "31" {
+				t.Fatalf("batch website readback=%#v", job)
+			}
+			if _, err := server.excelPricingWrites.acknowledge(job.JobID); err != nil {
+				t.Fatal(err)
+			}
+			ackSent = true
+		}
+		if job != nil && job.Status == "confirmed" {
+			if !ackSent || job.ConfirmedSettings == nil ||
+				job.ConfirmedValues["yuan_price"] != "30000" ||
+				job.ConfirmedValues["profit_margin_percent"] != "31" {
+				t.Fatalf("confirmed batch=%#v", job)
+			}
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("batch writeback did not confirm: %#v", server.excelPricingWrites.get(accepted.JobID))
+}
+
 func TestExcelPricingWritebackNoopConfirmsFromReadbackWithoutApply(t *testing.T) {
 	confirmedRevision := excelPricingRevisionForTest("writeback-noop-confirmed")
 	settings := validExcelPricingWritebackRequest("excel-writeback-test-0006", "yuan_price", 29500).Settings
@@ -337,6 +453,119 @@ func TestExcelPricingWritebackRebaseAllowsLivePatrisRevisionButNotConcurrentInpu
 	}
 	if rebased.ShippingCatalogRevision == excelPricingRevisionForTest("new-live-patris-revision") {
 		t.Fatal("WordPress shipping revision was incorrectly coupled to the Patris product-source revision")
+	}
+}
+
+func TestExcelPricingBatchWritebackAcceptsOnlyChangedDeclaredSettings(t *testing.T) {
+	queue := newExcelPricingWritebackQueue(nil)
+	request := validExcelPricingWritebackRequest(
+		"excel-settings-batch-0001", "yuan_price", 30000,
+	)
+	request.Schema = excelPricingWritebackBatchRequestSchema
+	request.SettingKey = ""
+	request.PreviousConfirmedValue = ""
+	request.SettingKeys = []string{"yuan_price", "profit_margin_percent"}
+	request.PreviousConfirmedValues = map[string]string{
+		"yuan_price": "29500", "profit_margin_percent": "30",
+	}
+	request.Settings.ProfitMarginPercent = json.Number("31")
+	job, err := queue.enqueue(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if job.SettingKey != "settings_batch" ||
+		len(job.SettingKeys) != 2 ||
+		job.DesiredValues["yuan_price"] != "30000" ||
+		job.DesiredValues["profit_margin_percent"] != "31" {
+		t.Fatalf("batch job=%#v", job)
+	}
+
+	// Enqueue owns an immutable copy of every conflict fence and desired value.
+	request.PreviousConfirmedValues["yuan_price"] = "1"
+	request.SettingKeys[0] = "dollar_price"
+	request.Settings.YuanPrice = 1
+	stored := queue.get(job.JobID)
+	if stored.SettingKeys[0] != "yuan_price" ||
+		stored.previousConfirmedValues["yuan_price"] != "29500" ||
+		stored.settings.YuanPrice != 30000 {
+		t.Fatalf("queued intent was mutable: %#v", stored)
+	}
+
+	unchanged := validExcelPricingWritebackRequest(
+		"excel-settings-batch-0002", "yuan_price", 30000,
+	)
+	unchanged.Schema = excelPricingWritebackBatchRequestSchema
+	unchanged.SettingKey = ""
+	unchanged.PreviousConfirmedValue = ""
+	unchanged.SettingKeys = []string{"yuan_price"}
+	unchanged.PreviousConfirmedValues = map[string]string{"yuan_price": "30000"}
+	if _, err := queue.enqueue(unchanged); err == nil || err.Error() != "unchanged_setting" {
+		t.Fatalf("unchanged batch error=%v", err)
+	}
+
+	extraFence := unchanged
+	extraFence.PreviousConfirmedValues = map[string]string{
+		"yuan_price": "29500", "dollar_price": "187891",
+	}
+	if _, err := queue.enqueue(extraFence); err == nil || err.Error() != "unexpected_previous_confirmed_value" {
+		t.Fatalf("extra batch fence error=%v", err)
+	}
+}
+
+func TestExcelPricingWritebackCannotReplaceInFlightWebsiteTransaction(t *testing.T) {
+	queue := newExcelPricingWritebackQueue(nil)
+	request := validExcelPricingWritebackRequest("excel-writeback-inflight-0001", "yuan_price", 29500)
+	job, err := queue.enqueue(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	queue.mu.Lock()
+	queue.jobs[job.JobID].Status = "awaiting_excel"
+	queue.mu.Unlock()
+	newer := validExcelPricingWritebackRequest("excel-writeback-inflight-0002", "yuan_price", 29600)
+	if _, err := queue.enqueue(newer); err == nil || err.Error() != "writeback_in_flight" {
+		t.Fatalf("overlapping in-flight writeback error=%v", err)
+	}
+	if got := queue.get(job.JobID); got == nil || got.Status != "awaiting_excel" {
+		t.Fatalf("in-flight transaction was superseded: %#v", got)
+	}
+}
+
+func TestExcelPricingBatchWritebackRebaseFencesAllAndOnlyChangedSettings(t *testing.T) {
+	proposed := validExcelPricingWritebackRequest(
+		"excel-settings-batch-rebase", "yuan_price", 30000,
+	).Settings
+	proposed.ProfitMarginPercent = json.Number("31")
+	current := proposed
+	current.YuanPrice = 29500
+	current.ProfitMarginPercent = json.Number("30")
+	current.ShippingCatalogRevision = excelPricingRevisionForTest("fresh-shipping")
+	keys := []string{"yuan_price", "profit_margin_percent"}
+	if !excelPricingSettingsEqualExceptKeys(current, proposed, keys) {
+		t.Fatal("declared batch settings should be safely rebased together")
+	}
+	job := &excelPricingWritebackJob{
+		SettingKey: "settings_batch", SettingKeys: keys,
+		DesiredValues: map[string]string{
+			"yuan_price": "30000", "profit_margin_percent": "31",
+		},
+		previousConfirmedValues: map[string]string{
+			"yuan_price": "29500", "profit_margin_percent": "30",
+		},
+	}
+	values, err := excelPricingWritebackValues(current, job)
+	if err != nil || !excelPricingWritebackCurrentValuesSafe(values, job) {
+		t.Fatalf("safe batch values=%v error=%v", values, err)
+	}
+	current.DollarPrice++
+	if excelPricingSettingsEqualExceptKeys(current, proposed, keys) {
+		t.Fatal("an undeclared website setting change must remain a conflict")
+	}
+	current.DollarPrice = proposed.DollarPrice
+	current.YuanPrice = 29700
+	values, _ = excelPricingWritebackValues(current, job)
+	if excelPricingWritebackCurrentValuesSafe(values, job) {
+		t.Fatal("a third value for a declared setting must remain a conflict")
 	}
 }
 

@@ -1361,8 +1361,10 @@ try {
     $settings.Rows.Item(14).RowHeight = 30
     $settings.Rows.Item(22).RowHeight = 30
 
-    [void](Add-ActionButton $settings 'پیش‌نمایش تغییرات' 'ProductCatalogSync.PreviewPricingChanges' $settings.Range('A28') $settings.Range('A28:C29').Width $settings.Range('A28:C29').Height)
-    [void](Add-ActionButton $settings 'اعمال تغییرات تأییدشده' 'ProductCatalogSync.ApplyPricingChanges' $settings.Range('D28') $settings.Range('D28:F29').Width $settings.Range('D28:F29').Height)
+    # Settings edits stay local and amber until this one explicit batch action.
+    # The companion performs preview/apply/readback in its background worker;
+    # Excel turns fields green only after the website ACK is complete.
+    [void](Add-ActionButton $settings 'همگام‌سازی اکنون' 'ProductCatalogSync.SyncPricingSettingsNow' $settings.Range('A28') $settings.Range('A28:F29').Width $settings.Range('A28:F29').Height)
 
     $settings.Range('A31:F37').ClearContents()
     $settings.Range('A31').Value2 = 'نمایش تصاویر محصولات'

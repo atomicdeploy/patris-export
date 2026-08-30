@@ -1473,6 +1473,14 @@ func TestDynamicCalculatorVBASourceGuardsLivePricingBeforeMutation(t *testing.T)
 		"Private Sub HandleWritebackTerminal",
 		"Private Function BuildPricingWritebackRequest",
 		`Private Const PRICING_WRITEBACK_REQUEST_SCHEMA As String = "patris.pricing-input-writeback-request/v1"`,
+		`Private Const PRICING_WRITEBACK_BATCH_REQUEST_SCHEMA As String = "patris.pricing-settings-writeback-request/v2"`,
+		"Public Sub SyncPricingSettingsNow()",
+		"Private Function BuildPricingBatchWritebackRequest(",
+		`"""setting_keys"":" & keysJSON`,
+		`"""previous_confirmed_values"":" & previousJSON`,
+		"Private Sub ApplyConfirmedSettingsForActiveBatch(",
+		`JsonRuntime.JsonMember(root, "confirmed_settings")`,
+		"Private Sub ConfirmPricingBatchWriteback",
 		`Case "yuan_price", "site_confirmation": addressText = "B18"`,
 		`Private Const PRICING_CONFIRMATION_REQUEST_SCHEMA As String = "patris.pricing-confirmation-ack-request/v1"`,
 		`Case "awaiting_excel"`,
@@ -1762,6 +1770,38 @@ func TestDynamicCalculatorVBASourceGuardsLivePricingBeforeMutation(t *testing.T)
 		strings.Contains(proposalChangeSource, "ApplyPricingChangesCore") {
 		t.Fatal("editing a proposal must not start network preview/apply automatically")
 	}
+	queueWriteback := section("Public Sub QueuePricingInputWriteback", "Public Sub QueueVisibleCNYProposal")
+	for _, forbidden := range []string{
+		"SchedulePricingWriteback", "SchedulePricingPreview",
+		"PreviewPricingChangesCore", "ApplyPricingChangesCore",
+		"StartWritebackRequest", "RunSynchronousWritebackStep",
+	} {
+		if strings.Contains(queueWriteback, forbidden) {
+			t.Fatalf("editing a settings cell must remain local until Sync Now: %s", forbidden)
+		}
+	}
+	for _, required := range []string{
+		"mPricingDirty(CStr(keyValue))", `MarkWritebackState CStr(keyValue), "pending"`,
+		"ClearPricingDirtyKey CStr(keyValue)",
+	} {
+		if !strings.Contains(queueWriteback, required) {
+			t.Fatalf("settings edit pending-state guard is missing %s", required)
+		}
+	}
+	syncNow := section("Public Sub SyncPricingSettingsNow", "Private Function PricingDirtyKeysCSV")
+	for _, required := range []string{
+		"BuildPricingBatchWritebackRequest(requestID, keysCSV)",
+		`mWritebackPending("settings_batch") = keysCSV`,
+		`mWritebackPendingValues("settings_batch") = requestBody`,
+		"mWritebackPendingGenerations", "SchedulePricingWriteback 1",
+	} {
+		if !strings.Contains(syncNow, required) {
+			t.Fatalf("explicit settings Sync Now action is missing %s", required)
+		}
+	}
+	if strings.Contains(syncNow, "ConfirmUnicodeMessage") {
+		t.Fatal("settings Sync Now must be the explicit action and must not open a second confirmation dialog")
+	}
 
 	refreshSource := section("Public Sub RefreshAllData", "Private Sub BeginRefreshPipeline")
 	if !strings.Contains(refreshSource, "BeginRefreshPipeline silent, False") {
@@ -1983,9 +2023,8 @@ func TestDynamicCalculatorVBASourceGuardsLivePricingBeforeMutation(t *testing.T)
 		"If mSearchIndexReady And mSearchIndexRowCount = rowCount",
 		"WarmProductSearchIndex",
 		"InvalidateProductSearchIndex",
-		"ClearQueuedPricingIntent settingKey",
-		"mWritebackPendingValues.Remove settingKey",
-		"mWritebackPendingGenerations.Remove settingKey",
+		"ClearPricingDirtyKey",
+		"mPricingDirtyGenerations.Remove settingKey",
 	} {
 		if !strings.Contains(source, required) {
 			t.Fatalf("fast local search index lifecycle is missing: %s", required)
@@ -2014,6 +2053,8 @@ func TestDynamicCalculatorVBASourceGuardsLivePricingBeforeMutation(t *testing.T)
 	for _, forbidden := range []string{
 		"mActiveWritebackGeneration = 0",
 		"mActiveWritebackDesiredValue = vbNullString",
+		"mActiveWritebackKeys = vbNullString",
+		"mActiveWritebackRequestBody = vbNullString",
 	} {
 		if strings.Contains(postDequeueSource, forbidden) {
 			t.Fatalf("dequeue must preserve immutable writeback intent through send/ACK: %s", forbidden)
@@ -2023,6 +2064,8 @@ func TestDynamicCalculatorVBASourceGuardsLivePricingBeforeMutation(t *testing.T)
 	for _, required := range []string{
 		"mActiveWritebackGeneration = 0",
 		"mActiveWritebackDesiredValue = vbNullString",
+		"mActiveWritebackKeys = vbNullString",
+		"mActiveWritebackRequestBody = vbNullString",
 	} {
 		if !strings.Contains(terminalWriteback, required) {
 			t.Fatalf("terminal completion must clear immutable writeback intent: %s", required)
@@ -2608,6 +2651,9 @@ func TestDynamicCalculatorBuilderStylesPersianButtonsAndChartText(t *testing.T) 
 		"Set-OfficeTextFont $chart.Legend.Format.TextFrame2.TextRange",
 		"'تعداد رقم گردکردن قیمت'",
 		"'تعداد رقم گردکردن قیمت پیشنهادی'",
+		"'همگام‌سازی اکنون'",
+		"'ProductCatalogSync.SyncPricingSettingsNow'",
+		"$settings.Range('A28:F29').Width",
 	} {
 		if !strings.Contains(source, required) {
 			t.Fatalf("canonical builder is missing Persian font/rounding guard: %s", required)

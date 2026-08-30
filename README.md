@@ -633,7 +633,11 @@ The canonical macro workbook uses the loopback-only `POST
 preview, and explicitly apply global pricing settings without storing the
 remote credential. Patris injects the protected product-sync credential and
 exact canonical source identity, then regenerates, delivers, and verifies the
-canonical product contract after apply. See [Excel pricing-settings
+canonical product contract after apply. Website-backed proposal cells stay
+local and amber until the workbook's single **همگام‌سازی اکنون** action sends
+their exact changed keys through the loopback `/api/pricing-sync/writebacks`
+queue. Green requires the website ACK plus readback; failures remain red and
+workbook-only preferences are never sent. See [Excel pricing-settings
 companion](docs/EXCEL-PRICING-SYNC.md).
 
 No client-specific pricing-route aliases are registered; unknown prefixes

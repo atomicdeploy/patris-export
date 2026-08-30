@@ -7,7 +7,7 @@ credential.
 
 ## Local loopback contract
 
-All routes are `POST` and accept JSON only:
+The direct pricing routes are `POST` and accept JSON only:
 
 ```text
 /api/pricing-sync/session
@@ -16,8 +16,17 @@ All routes are `POST` and accept JSON only:
 /api/pricing-sync/apply
 ```
 
-These four generalized routes are the complete local pricing surface. No
-client-specific alias prefix is registered; unknown prefixes return `404`.
+The workbook's explicit settings action uses the companion's loopback-only
+background writeback surface:
+
+```text
+POST /api/pricing-sync/writebacks
+GET  /api/pricing-sync/writebacks/{job_id}
+POST /api/pricing-sync/writebacks/{job_id}/ack
+POST /api/pricing-sync/confirmations
+```
+
+No client-specific alias prefix is registered; unknown prefixes return `404`.
 
 The session route accepts `{}` and returns:
 
@@ -152,6 +161,41 @@ shipping amount/currency/catalog revision, state revision, idempotency, and
 confirmation are validated before network access. All pricing settings are one
 atomic document; shipping is never applied separately.
 
+### Explicit settings batch
+
+Changing a website-backed proposal cell does not make a request. Excel records
+the changed key and edit generation locally, keeps formulas on the last
+site-confirmed values, and colors the proposal amber. The single
+**همگام‌سازی اکنون** action submits
+`patris.pricing-settings-writeback-request/v2` with:
+
+- only the changed setting keys;
+- the previous site-confirmed value for every changed key;
+- one immutable, fully validated settings document required by the remote
+  atomic pricing contract; and
+- the exact expected website state revision.
+
+The changed keys are CNY rate, USD rate, CNY effective date, USD effective
+date, profit margin, air-express price per kilogram, and price-rounding digits.
+An unchanged key is rejected from a v2 batch. The companion previews and
+applies the document with stable idempotency keys in its single background
+worker, safely rebases only when all declared keys still have their prior or
+desired values and every undeclared setting is unchanged, and retries
+boundedly. A newer Excel edit supersedes an older pending intent by key.
+
+Excel receives the complete confirmed settings readback when the website has
+committed the transaction. It updates all confirmed cells and formulas from
+that document before acknowledging the transaction, then colors each included
+proposal green only after the ACK and a second website readback. A newer local
+edit is preserved and remains amber. Validation, conflict, transport, rollback,
+or readback failure is red with a short Persian message; it is never reported
+as success.
+
+Workbook-only settings are deliberately not sent to WordPress: refresh on
+open, price-difference and rate-age warning thresholds, product-image preview,
+and font/display policy. Endpoint, live-value, status, timing, revision, and
+hidden guard cells are not editable website inputs.
+
 ## Protected remote boundary
 
 The companion uses the existing `send_updates.url` only to derive the exact
@@ -262,13 +306,12 @@ On the Persian `تنظیمات` sheet:
 
 1. Open the template and let its deferred refresh populate `محصولات`, or
    select **همگام‌سازی اکنون** for an explicit reload.
-2. Review or edit the highlighted yuan/dollar rates, effective date, profit
-   margin, or air-express shipping price. Editing one of those proposal cells
-   invalidates the previous preview without starting network or mutation work.
-   Select **پیش‌نمایش تغییرات** when the proposal is ready.
-3. Review every warning in that confirmation and approve it only when the
-   proposed document is correct. The separate preview/apply buttons remain
-   available as a manual fallback.
+2. Review or edit the highlighted yuan/dollar rates, their effective dates,
+   profit margin, air-express shipping price, or rounding digits. Changed cells
+   remain local and amber; formulas continue using confirmed live values.
+3. Select **همگام‌سازی اکنون** once to send the changed settings as one batch.
+   There is no second confirmation dialog. Wait for green confirmation; red
+   means the website did not provide the required acknowledgement/readback.
 
 Changing any setting or refreshing state after preview invalidates the local
 apply guard. The remote service independently enforces the exact revision,
