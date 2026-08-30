@@ -2403,6 +2403,7 @@ Private Sub CompleteActiveOperation(ByVal success As Boolean)
     RestoreOperationCancelKey
     RestoreOperationStatusBar
     If success Then
+        If completedKind = "refresh" Then MarkRefreshPricingConvergenceState
         SetOperationProgressSurface "completed", 100, _
             U("06280647200C063106480632063106330627064606CC002006A906270645064400200634062F"), _
             "confirmed", True
@@ -2415,6 +2416,42 @@ Private Sub CompleteActiveOperation(ByVal success As Boolean)
     End If
     If mPricingPreviewQueued And Not mWorkbookClosing Then _
         SchedulePricingPreview
+End Sub
+
+Private Sub MarkRefreshPricingConvergenceState()
+    Dim settings As Worksheet
+    Dim priceSheet As Worksheet
+    Dim confirmedRate As Double
+    Dim noteText As String
+
+    On Error GoTo WarnState
+    Set settings = ConfigSheet()
+    Set priceSheet = PriceSheet()
+    If Not IsNumeric(settings.Range("B10").Value2) Or _
+       Not IsNumeric(settings.Range("B18").Value2) Or _
+       Not IsNumeric(settings.Range("G18").Value2) Or _
+       Not IsNumeric(priceSheet.Range("M7").Value2) Then GoTo WarnState
+    confirmedRate = CDbl(settings.Range("B10").Value2)
+    If confirmedRate <= 0 Or _
+       CDbl(settings.Range("B18").Value2) <> confirmedRate Or _
+       CDbl(settings.Range("G18").Value2) <> confirmedRate Or _
+       CDbl(priceSheet.Range("M7").Value2) <> confirmedRate Or _
+       Not IsSHA256RevisionText(CStr(settings.Range("G14").Value2)) Or _
+       Not IsSHA256RevisionText(CStr(settings.Range("G56").Value2)) Then _
+        GoTo WarnState
+    noteText = U("0647064506AF06270645200C06330627063206CC002006280627002006480628200C0633062706CC062A0020062A062306CC06CC062F00200634062F") & _
+        vbCrLf & U("06450642062F06270631003A") & " " & _
+        CanonicalCellText(confirmedRate) & _
+        vbCrLf & U("06460633062E0647003A") & " " & _
+        CStr(settings.Range("G14").Value2) & _
+        vbCrLf & "state_revision: " & CStr(settings.Range("G56").Value2)
+    MarkWritebackState "site_confirmation", "confirmed", noteText
+    Exit Sub
+
+WarnState:
+    Err.Clear
+    MarkWritebackState "site_confirmation", "warning", _
+        U("06470634062F06270631003A002006460631062E00200647064506AF062706450020064606CC0633062A")
 End Sub
 
 Private Sub FailActiveOperation(ByVal errorNumber As Long, _
