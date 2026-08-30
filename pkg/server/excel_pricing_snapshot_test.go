@@ -287,6 +287,33 @@ func TestExcelPricingSnapshotAggregatesCachesAndServesETag(t *testing.T) {
 	if revisionStatus["cached"] != true || remoteCalls.Load() != int32(pages) {
 		t.Fatalf("revision cache=%#v remote calls=%d", revisionStatus, remoteCalls.Load())
 	}
+
+	// Age alone is never sufficient for a local replay. If the authenticated
+	// revision bridge cannot verify the exact source/state/catalog tuple, the
+	// request must take the full collector path even while the cache is young.
+	server.excelPricing.snapshotRevisionCurrent = func(canonical.Source, string, string) bool {
+		return false
+	}
+	unverifiedRequestID := "snapshot-start-test-unverified-0001"
+	unverified := authenticatedExcelPricingRequest(
+		http.MethodPost,
+		"/api/pricing-sync/snapshots",
+		validExcelPricingSnapshotStartBody(source, unverifiedRequestID, "fa", 60),
+		token,
+	)
+	unverified.Header.Set("Idempotency-Key", unverifiedRequestID)
+	unverifiedResponse := httptest.NewRecorder()
+	server.router.ServeHTTP(unverifiedResponse, unverified)
+	if unverifiedResponse.Code != http.StatusAccepted {
+		t.Fatalf("unverified start status=%d, want 202: %s",
+			unverifiedResponse.Code, unverifiedResponse.Body.String())
+	}
+	unverifiedJobID := excelPricingSnapshotJobIDForTest(t, unverifiedResponse.Body.Bytes())
+	waitForExcelPricingSnapshotStatus(t, server, token, unverifiedJobID, "ready")
+	if remoteCalls.Load() != int32(pages*2) {
+		t.Fatalf("unverified cache reached remote %d times, want %d",
+			remoteCalls.Load(), pages*2)
+	}
 }
 
 func TestExcelPricingSnapshotReadyReplayPublishesReturnedCachedJob(t *testing.T) {

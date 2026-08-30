@@ -447,16 +447,18 @@ func (s *Server) handlePostExcelPricingSnapshot(w http.ResponseWriter, r *http.R
 
 	if cached := store.cache[cacheKey]; cached != nil {
 		age := now.Sub(cached.createdAt)
-		ageAllowed := request.MaxAgeSeconds > 0 && age >= 0 &&
-			age <= time.Duration(request.MaxAgeSeconds)*time.Second
-		revisionAllowed := request.ExpectedStateRevision != "" &&
-			request.ExpectedStateRevision == cached.stateRevision &&
-			s.excelPricing.snapshotRevisionCurrent != nil &&
+		revisionCurrent := s.excelPricing.snapshotRevisionCurrent != nil &&
 			s.excelPricing.snapshotRevisionCurrent(
 				request.Source,
 				cached.stateRevision,
 				cached.upstreamCatalogRevision,
 			)
+		ageAllowed := request.MaxAgeSeconds > 0 && age >= 0 &&
+			age <= time.Duration(request.MaxAgeSeconds)*time.Second &&
+			revisionCurrent
+		revisionAllowed := request.ExpectedStateRevision != "" &&
+			request.ExpectedStateRevision == cached.stateRevision &&
+			revisionCurrent
 		if ageAllowed || revisionAllowed {
 			job := &excelPricingSnapshotJob{
 				id:                    jobID,

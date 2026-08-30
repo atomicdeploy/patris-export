@@ -80,7 +80,12 @@ Private Const SNAPSHOT_FIELD_PATRIS_FINAL_PRICE As Long = 24
 Private Const SNAPSHOT_FIELD_SALE_PRICE As Long = 25
 Private Const SNAPSHOT_FIELD_PUBLICATION_STATUS As Long = 26
 Private Const SNAPSHOT_FIELD_IMAGE_URL As Long = 27
-Private Const PRICING_SNAPSHOT_CACHE_SECONDS As Long = 30
+' WordPress validates the exact live source and state revision before it reuses
+' a snapshot. Keep that authenticated snapshot warm long enough for ordinary
+' consecutive refreshes; changed revisions still force the full fail-closed
+' path, while the companion additionally requires a live verified revision
+' before it reuses its own in-process copy.
+Private Const PRICING_SNAPSHOT_CACHE_SECONDS As Long = 300
 Private Const PRICE_ROUNDING_MODE As String = "nearest_half_up"
 Private Const LOOPBACK_PREFIX As String = "http://127.0.0.1:18080/"
 Private Const SEARCH_BUTTON_SHAPE As String = "ProductSearchButton"
