@@ -52,7 +52,14 @@ $verifiedResult = & {
         [pscustomobject]@{ State = "Running" }
     }
     function Get-PatrisManagedProcessSnapshot {
-        param($Task)
+        param($Task, [switch]$AllowTransientObservation)
+        if ($script:startupPoll -eq 1) {
+            $exception = [InvalidOperationException]::new(
+                "Synthetic transient process-state observation."
+            )
+            $exception.Data["PatrisTransientProcessStateObservation"] = $true
+            throw $exception
+        }
         if ($script:startupPoll -ge 3) {
             return [pscustomobject]@{
                 Pid          = 4242
@@ -61,6 +68,12 @@ $verifiedResult = & {
             }
         }
         return @()
+    }
+    function Test-PatrisTransientProcessStateError {
+        param($ErrorRecord)
+        return $ErrorRecord.Exception.Data[
+            "PatrisTransientProcessStateObservation"
+        ] -eq $true
     }
     function Get-ScheduledTaskInfo {
         [pscustomobject]@{
@@ -248,4 +261,4 @@ if ($startCommands.Count -ne 3 -or $waitCommands.Count -ne 4 -or $fixedSleeps.Co
     throw "Start, restart, or install-start still bypasses the bounded verified-child wait."
 }
 
-Write-Host "Scheduled-task startup wait passed delayed-child, exited, bounded-cleanup, and never-started tests."
+Write-Host "Scheduled-task startup wait passed transient-state, delayed-child, exited, bounded-cleanup, and never-started tests."
