@@ -165,7 +165,11 @@ join and audit data is stored only in the `xlSheetVeryHidden` sheet
 The template is empty at rest: it contains no product rows, prices, cached
 responses, or credential material. Opening an `.xltm` creates a separate
 macro-enabled workbook instance, so **Save As** writes a working copy instead
-of overwriting the canonical empty template. Saving as `.xlsx` creates a
+of overwriting the canonical empty template. If automation opens the canonical
+`.xltm` itself directly, ordinary **Save** is rejected and closing discards the
+fetched runtime catalog without a save prompt. A pending website price update
+must reach a terminal state before that direct template can close. Saving a
+working copy as `.xlsx` creates a
 macro-free snapshot and removes the search, sync, preview/apply buttons, their
 macro assignments, and the selection-highlighting controls. The logo, chart,
 tables, formulas, and synchronized values remain.

@@ -37,6 +37,10 @@ End Sub
 
 Private Sub Workbook_BeforeClose(Cancel As Boolean)
     On Error Resume Next
+    If Not ProductCatalogSync.PrepareCanonicalTemplateForClose() Then
+        Cancel = True
+        Exit Sub
+    End If
     ProductCatalogSync.CancelActivePricingOperations True
     ProductCatalogSync.CancelScheduledRefresh
     ProductCatalogSync.CancelScheduledProductSearch
@@ -111,6 +115,8 @@ Private Sub Workbook_SheetSelectionChange(ByVal Sh As Object, _
     On Error GoTo CleanExit
     ProductCatalogSync.ResumeAfterCancelledClose
     If Sh Is ThisWorkbook.Worksheets(1) Then
+        If ProductCatalogSync.NormalizeProductSearchSelection(Target) Then _
+            GoTo CleanExit
         If ProductCatalogSync.UpdateSearchEnterHotkey(Target) Then _
             GoTo CleanExit
     Else

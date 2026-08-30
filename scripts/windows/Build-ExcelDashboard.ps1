@@ -847,11 +847,15 @@ try {
     $priceList.Range('B3').Font.Bold = $true
     $priceList.Range('B3').Font.Color = ConvertTo-OleColor '0168CD'
     $priceList.Range('B3').VerticalAlignment = -4108
-    $priceList.Range('C3:E3').Merge()
+    # Keep the search surface visually wide without a merged cell. Merged cells
+    # reject ordinary paste/automation input with "can't do that to a merged
+    # cell" on some Office builds.
+    $priceList.Range('C3:E3').UnMerge()
     $priceList.Range('C3:E3').NumberFormat = '@'
-    $priceList.Range('C3').Interior.Color = ConvertTo-OleColor 'FFFFFF'
+    $priceList.Range('C3:E3').Interior.Color = ConvertTo-OleColor 'FFFFFF'
     $priceList.Range('C3:E3').Borders.Color = ConvertTo-OleColor '0168CD'
     $priceList.Range('C3:E3').Borders.Weight = 2
+    $priceList.Range('C3:E3').Borders.Item(11).LineStyle = -4142
     $priceList.Range('C3').Font.Name = 'Yekan Bakh'
     $priceList.Range('C3').Font.Size = 12
     $priceList.Range('C3').Font.Bold = $true
