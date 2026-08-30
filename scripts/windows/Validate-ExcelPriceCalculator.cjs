@@ -284,6 +284,10 @@ function buildFailures(report, options) {
     `the product search input did not preserve all literal-text fixtures: ${JSON.stringify(report.searchLiteral)}`,
   );
   failUnless(
+    report.searchPaste === true,
+    'plain-text paste did not stay anchored in the merged C3:E3 search surface',
+  );
+  failUnless(
     report.statusSummary.mixed.includes('3 ')
       && report.statusSummary.mixed.includes('2 ')
       && !report.statusSummary.mixed.includes('0 ')
@@ -1401,6 +1405,13 @@ function Test-SearchLiteralText([object]$excel, [object]$book) {
         Release-ComObject $input
         Release-ComObject $definedName
     }
+}
+
+function Test-SearchPaste([object]$excel, [object]$book) {
+    $bookName = ([string]$book.Name).Replace("'", "''")
+    return [bool]$excel.Run(
+        "'$bookName'!ProductCatalogSync.ValidateProductSearchPasteForValidation"
+    )
 }
 
 function Test-FontAudit([object]$excel, [object]$book) {
@@ -2765,6 +2776,8 @@ try {
     $brandingLayout = Test-BrandingLayout $candidateBook
     Set-ValidatorStage 'checking_literal_search'
     $searchLiteral = Test-SearchLiteralText $excel $candidateBook
+    Set-ValidatorStage 'checking_merged_search_paste'
+    $searchPaste = Test-SearchPaste $excel $candidateBook
     Set-ValidatorStage 'checking_status_summary'
     $statusSummary = Test-StatusSummaryFormatter $excel $candidateBook
     Set-ValidatorStage 'reading_candidate_products'
@@ -3196,6 +3209,7 @@ try {
         search = $candidateSearch
         branding = $brandingLayout
         searchLiteral = $searchLiteral
+        searchPaste = $searchPaste
         statusSummary = $statusSummary
         titleDirection = $titleDirection
         fontAudit = $fontAudit
@@ -4031,6 +4045,9 @@ function main() {
     const synchronousWritebackSource = procedure(moduleSource, 'RunSynchronousWritebackStep');
     const searchBusySource = /Private Function SearchOperationBusy\b[\s\S]*?\r?\nEnd Function/iu.exec(moduleSource)?.[0] || '';
     const enterSource = procedure(moduleSource, 'HandleProductSearchEnter');
+    const pasteSource = procedure(moduleSource, 'PasteProductSearchText');
+    const highlightSource = procedure(moduleSource, 'HighlightSelectedProductRow');
+    const progressShapesSource = procedure(moduleSource, 'UpdateOperationProgressShapes');
     const sheetChangeSource = procedure(workbookSource, 'Workbook_SheetChange');
     const selectionSource = procedure(workbookSource, 'Workbook_SheetSelectionChange');
     const scheduledWritebackSource = procedure(moduleSource, 'RunScheduledPricingWriteback');
@@ -4101,6 +4118,46 @@ function main() {
     if (/\bKickQueuedAsyncDispatch\b/iu.test(selectionSource)) {
       throw new Error('Workbook_SheetSelectionChange must not dispatch network work');
     }
+    const forbiddenSelectionTokens = [
+      'ResumeAfterCancelledClose',
+      'RefreshProductImagePreview',
+      'PumpExcelMessages',
+      '.Calculate',
+    ];
+    const foundSelectionToken = forbiddenSelectionTokens.find((token) => (
+      selectionSource.includes(token)
+    ));
+    if (foundSelectionToken) {
+      throw new Error(`Row selection contains non-local work: ${foundSelectionToken}`);
+    }
+    const forbiddenHighlightTokens = [
+      '.Calculate',
+      'RefreshProductImagePreview',
+      'PumpExcelMessages',
+      'OpenAsync',
+      'Application.OnTime',
+    ];
+    const foundHighlightToken = forbiddenHighlightTokens.find((token) => (
+      highlightSource.includes(token)
+    ));
+    if (foundHighlightToken
+        || !/Range\("G30"\)\.Value2\s*=\s*selectedRow/iu.test(highlightSource)
+        || !/Range\("G48"\)\.Value2\s*=\s*previewRow/iu.test(highlightSource)) {
+      throw new Error(`Selected-row highlight is not a bounded local marker update: ${foundHighlightToken || 'missing marker'}`);
+    }
+    if (!/Application\.OnKey\s+"\^v",\s*pasteMacro/iu.test(moduleSource)
+        || !/Application\.OnKey\s+"\+\{INSERT\}",\s*pasteMacro/iu.test(moduleSource)
+        || !/TryReadUnicodeClipboardText\(clipboardText\)/iu.test(pasteSource)
+        || !/ApplyProductSearchPasteText\(clipboardText,\s*True\)/iu.test(pasteSource)
+        || !/searchAnchor\.Value2\s*=\s*NormalizeProductSearchPasteText\(plainText\)/iu.test(moduleSource)) {
+      throw new Error('Merged search paste must intercept plain text and write only through the C3 anchor');
+    }
+    if (!/If\s+visualState\s*=\s*"neutral"\s+Then[\s\S]*?track\.Visible\s*=\s*msoFalse[\s\S]*?fill\.Visible\s*=\s*msoFalse[\s\S]*?label\.Visible\s*=\s*msoFalse/iu.test(progressShapesSource)
+        || !/Else[\s\S]*?track\.Visible\s*=\s*msoTrue[\s\S]*?fill\.Visible\s*=\s*msoTrue[\s\S]*?label\.Visible\s*=\s*msoTrue/iu.test(progressShapesSource)
+        || !/\$track\.Visible\s*=\s*\$false/u.test(buildSource)
+        || !/\$text\.Visible\s*=\s*\$false/u.test(buildSource)) {
+      throw new Error('Ready must hide the complete progress surface and active states must show it');
+    }
     if (!/\bRunSynchronousWritebackStep\b/iu.test(scheduledWritebackSource)
         || /\bBeginWritebackPoll\b/iu.test(scheduledWritebackSource)
         || /\bStartWritebackRequest\b/iu.test(scheduledWritebackSource)) {
@@ -4122,6 +4179,8 @@ function main() {
       throw new Error('Immutable pricing intent must clear only at terminal completion');
     }
     if (!/IsNativeSearchEnterTransition\(target\)/iu.test(moduleSource)
+        || !/If\s+Not\s+mSearchNativeEnterPending\s+Then\s+Exit Function/iu.test(moduleSource)
+        || !/mSearchNativeEnterPending\s*=\s*True/iu.test(moduleSource)
         || !/If\s+queueNativeEnter\s+Then\s+RunNativeEnterProductSearch/iu.test(moduleSource)
         || !/Private Sub RunNativeEnterProductSearch\(\)[\s\S]*?CancelScheduledProductSearch[\s\S]*?SearchProductsForQuery\s+query,\s*generation/iu.test(moduleSource)
         || !/RememberSearchSelection\s+anchor/iu.test(searchSource)
@@ -4167,6 +4226,10 @@ function main() {
         || !/ConfirmedCNYRate>0/iu.test(priceFormulaSource)
         || /PricingInputCNYRate/iu.test(priceFormulaSource)) {
       throw new Error('Product formulas must use only the confirmed website rate, never the B18 proposal');
+    }
+    if (!/ROW\(\)=ProjectedPricePreviewRow/iu.test(priceFormulaSource)
+        || /ROW\(\)=['"]?[^\r\n]*R30C7/iu.test(priceFormulaSource)) {
+      throw new Error('Selling-price preview must not depend on the yellow SelectedProductRow marker');
     }
   } catch (error) {
     console.error(`Search re-entrancy source gate failed: ${error.message}`);

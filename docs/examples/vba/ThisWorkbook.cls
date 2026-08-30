@@ -113,17 +113,18 @@ End Sub
 Private Sub Workbook_SheetSelectionChange(ByVal Sh As Object, _
                                            ByVal Target As Range)
     On Error GoTo CleanExit
-    ProductCatalogSync.ResumeAfterCancelledClose
     If Sh Is ThisWorkbook.Worksheets(1) Then
         If ProductCatalogSync.NormalizeProductSearchSelection(Target) Then _
             GoTo CleanExit
         If ProductCatalogSync.UpdateSearchEnterHotkey(Target) Then _
             GoTo CleanExit
     Else
+        ProductCatalogSync.ReleaseSearchPasteHotkey
         ProductCatalogSync.ReleaseSearchEnterHotkey
         Exit Sub
     End If
     ProductCatalogSync.HighlightSelectedProductRow Target
+    ProductCatalogSync.QueueProductImagePreviewForSelection Target
 CleanExit:
 End Sub
 
@@ -133,6 +134,7 @@ Private Sub Workbook_SheetActivate(ByVal Sh As Object)
     If Sh Is ThisWorkbook.Worksheets(1) Then
         ProductCatalogSync.RefreshSearchEnterHotkey
     Else
+        ProductCatalogSync.ReleaseSearchPasteHotkey
         ProductCatalogSync.ReleaseSearchEnterHotkey
     End If
 CleanExit:

@@ -18,6 +18,7 @@ Private Const MAX_REFRESH_WALL_SECONDS As Double = 125#
 Private Const OPEN_REFRESH_DELAY_SECONDS As Long = 2
 Private Const SEARCH_DELAY_SECONDS As Double = 0.55
 Private Const SEARCH_RETRY_LIMIT As Long = 6
+Private Const SEARCH_PASTE_MAX_CHARS As Long = 2048
 Private Const PROGRESS_RESET_SECONDS As Long = 6
 Private Const UI_PUMP_ROW_INTERVAL As Long = 25
 Private Const MAX_PRICING_RESPONSE_CHARS As Long = 4194304
@@ -97,6 +98,7 @@ Private Const PRODUCT_IMAGE_SHAPE As String = "ProductImagePreview"
 Private Const PRODUCT_IMAGE_CACHE_LIMIT As Long = 16
 Private Const PRODUCT_IMAGE_MAX_BYTES As Long = 2097152
 Private Const PRODUCT_IMAGE_TIMEOUT_MS As Long = 15000
+Private Const IMAGE_PREVIEW_DELAY_SECONDS As Double = 0.35
 Private Const DEFAULT_PERSIAN_FONT As String = "Yekan Bakh"
 Private Const DEFAULT_LATIN_FONT As String = "Segoe UI"
 Private Const DEFAULT_FANUM_FONT As String = "Yekan Bakh FaNum"
@@ -115,6 +117,7 @@ Private Const RECONCILED_COLUMN_KEYS As String = _
     "image_url,updated_at,sync_status,sync_error,record_revision"
 Private Const MB_RIGHT As Long = &H80000
 Private Const MB_RTLREADING As Long = &H100000
+Private Const CF_UNICODETEXT As Long = 13
 
 Private mSourceID As String
 Private mSourceDataset As String
@@ -132,6 +135,7 @@ Private mSaveRenameSchedulesSuspended As Boolean
 Private mSaveRenameRefreshPending As Boolean
 Private mSaveRenameAsyncPending As Boolean
 Private mSaveRenamePreviewPending As Boolean
+Private mSaveRenameImagePreviewPending As Boolean
 Private mSaveRenameWritebackPending As Boolean
 Private mSaveRenameEventRefreshPending As Boolean
 Private mSaveRenameSseReconnectPending As Boolean
@@ -144,6 +148,8 @@ Private mSearchRetryCount As Long
 Private mPendingSearchQuery As String
 Private mSearchRequestGeneration As Long
 Private mPendingSearchGeneration As Long
+Private mSearchNativeEnterPending As Boolean
+Private mSearchPasteHotkeyRegistered As Boolean
 Private mLastSearchSelectionSheet As String
 Private mLastSearchSelectionRow As Long
 Private mLastSearchSelectionColumn As Long
@@ -203,6 +209,9 @@ Private mImageRequestURL As String
 Private mImageRequestRow As Long
 Private mImageGeneration As Long
 Private mImageRequestGeneration As Long
+Private mImagePreviewScheduled As Boolean
+Private mScheduledImagePreviewTime As Date
+Private mPendingImagePreviewRow As Long
 
 ' Finite HTTP work is serialized through one callback-driven request lane.
 ' The SSE request is deliberately separate so it can remain connected after
@@ -305,6 +314,23 @@ Private Declare PtrSafe Function MessageBoxW Lib "user32" ( _
     ByVal messagePointer As LongPtr, _
     ByVal titlePointer As LongPtr, _
     ByVal messageType As Long) As Long
+Private Declare PtrSafe Function OpenClipboard Lib "user32" ( _
+    ByVal windowHandle As LongPtr) As Long
+Private Declare PtrSafe Function CloseClipboard Lib "user32" () As Long
+Private Declare PtrSafe Function IsClipboardFormatAvailable Lib "user32" ( _
+    ByVal clipboardFormat As Long) As Long
+Private Declare PtrSafe Function GetClipboardData Lib "user32" ( _
+    ByVal clipboardFormat As Long) As LongPtr
+Private Declare PtrSafe Function GlobalLock Lib "kernel32" ( _
+    ByVal memoryHandle As LongPtr) As LongPtr
+Private Declare PtrSafe Function GlobalUnlock Lib "kernel32" ( _
+    ByVal memoryHandle As LongPtr) As Long
+Private Declare PtrSafe Function lstrlenW Lib "kernel32" ( _
+    ByVal valuePointer As LongPtr) As Long
+Private Declare PtrSafe Sub CopyMemory Lib "kernel32" Alias "RtlMoveMemory" ( _
+    ByVal destinationPointer As LongPtr, _
+    ByVal sourcePointer As LongPtr, _
+    ByVal byteCount As LongPtr)
 Private Declare PtrSafe Function BCryptOpenAlgorithmProvider Lib "bcrypt.dll" ( _
     ByRef algorithmHandle As LongPtr, ByVal algorithmIdentifier As LongPtr, _
     ByVal implementation As LongPtr, ByVal flags As Long) As Long
@@ -333,6 +359,23 @@ Private Declare Function MessageBoxW Lib "user32" ( _
     ByVal messagePointer As Long, _
     ByVal titlePointer As Long, _
     ByVal messageType As Long) As Long
+Private Declare Function OpenClipboard Lib "user32" ( _
+    ByVal windowHandle As Long) As Long
+Private Declare Function CloseClipboard Lib "user32" () As Long
+Private Declare Function IsClipboardFormatAvailable Lib "user32" ( _
+    ByVal clipboardFormat As Long) As Long
+Private Declare Function GetClipboardData Lib "user32" ( _
+    ByVal clipboardFormat As Long) As Long
+Private Declare Function GlobalLock Lib "kernel32" ( _
+    ByVal memoryHandle As Long) As Long
+Private Declare Function GlobalUnlock Lib "kernel32" ( _
+    ByVal memoryHandle As Long) As Long
+Private Declare Function lstrlenW Lib "kernel32" ( _
+    ByVal valuePointer As Long) As Long
+Private Declare Sub CopyMemory Lib "kernel32" Alias "RtlMoveMemory" ( _
+    ByVal destinationPointer As Long, _
+    ByVal sourcePointer As Long, _
+    ByVal byteCount As Long)
 Private Declare Function BCryptOpenAlgorithmProvider Lib "bcrypt.dll" ( _
     ByRef algorithmHandle As Long, ByVal algorithmIdentifier As Long, _
     ByVal implementation As Long, ByVal flags As Long) As Long
@@ -370,6 +413,9 @@ Public Sub ValidateWorkbook()
     ValidateStatusSummaryFormatter
     ValidateSearchLiteralRuntime
     ValidateSearchSurfaceRuntime
+    If Not ValidateProductSearchPasteForValidation() Then
+        Err.Raise vbObjectError + 773, "ValidateWorkbook", T("invalid_workbook")
+    End If
     ValidateAsyncComponentsRuntime
     If Not ValidatePricingWritebackUIForValidation() Then
         Err.Raise vbObjectError + 771, "ValidateWorkbook", T("invalid_workbook")
@@ -711,6 +757,7 @@ Private Sub SuspendQualifiedSchedulesForSaveAs()
             mSaveRenameAsyncPending = True
     End If
     mSaveRenamePreviewPending = mPricingPreviewScheduled
+    mSaveRenameImagePreviewPending = mImagePreviewScheduled
     mSaveRenameWritebackPending = mWritebackScheduled
     If Not mWritebackPending Is Nothing Then
         If mWritebackPending.Count > 0 Or Len(mWritebackStage) > 0 Then _
@@ -724,6 +771,7 @@ Private Sub SuspendQualifiedSchedulesForSaveAs()
     CancelScheduledRefresh
     UnscheduleQueuedAsyncDispatch
     CancelScheduledPricingPreview False
+    CancelScheduledProductImagePreview
     UnschedulePricingWriteback
     CancelEventDrivenRefresh
     If mSseReconnectScheduled Then
@@ -740,6 +788,7 @@ Private Sub ResumeQualifiedSchedulesAfterSaveAs()
     Dim refreshPending As Boolean
     Dim asyncPending As Boolean
     Dim previewPending As Boolean
+    Dim imagePreviewPending As Boolean
     Dim writebackPending As Boolean
     Dim eventRefreshPending As Boolean
     Dim sseReconnectPending As Boolean
@@ -749,6 +798,7 @@ Private Sub ResumeQualifiedSchedulesAfterSaveAs()
     refreshPending = mSaveRenameRefreshPending
     asyncPending = mSaveRenameAsyncPending
     previewPending = mSaveRenamePreviewPending
+    imagePreviewPending = mSaveRenameImagePreviewPending
     writebackPending = mSaveRenameWritebackPending
     eventRefreshPending = mSaveRenameEventRefreshPending
     sseReconnectPending = mSaveRenameSseReconnectPending
@@ -759,6 +809,7 @@ Private Sub ResumeQualifiedSchedulesAfterSaveAs()
     mSaveRenameRefreshPending = False
     mSaveRenameAsyncPending = False
     mSaveRenamePreviewPending = False
+    mSaveRenameImagePreviewPending = False
     mSaveRenameWritebackPending = False
     mSaveRenameEventRefreshPending = False
     mSaveRenameSseReconnectPending = False
@@ -770,6 +821,7 @@ Private Sub ResumeQualifiedSchedulesAfterSaveAs()
     If refreshPending Then ScheduleRefreshOnOpen
     If asyncPending Then ScheduleQueuedAsyncDispatch
     If previewPending Then SchedulePricingPreview
+    If imagePreviewPending Then ScheduleProductImagePreview
     If writebackPending And mWritebackRequest Is Nothing Then _
         SchedulePricingWriteback 1
     If eventRefreshPending Then ScheduleEventDrivenRefresh
@@ -789,6 +841,7 @@ Private Sub BeginRefreshPipeline(ByVal silent As Boolean, _
     Dim settings As Worksheet
 
     On Error GoTo BeginFailed
+    CancelScheduledProductImagePreview
     CancelProductImagePreview True
     CancelScheduledRefresh
     If Not afterApply Then
@@ -1172,9 +1225,13 @@ Private Sub UpdateOperationProgressShapes(ByVal targetSheet As Worksheet, _
     fill.Top = track.Top
     fill.Height = track.Height
     If visualState = "neutral" Then
+        track.Visible = msoFalse
         fill.Visible = msoFalse
+        label.Visible = msoFalse
     Else
+        track.Visible = msoTrue
         fill.Visible = msoTrue
+        label.Visible = msoTrue
         If percentValue < 0 Then
             targetWidth = track.Width * 0.22
         Else
@@ -1268,6 +1325,7 @@ Public Sub CancelActivePricingOperations( _
              Not mSseSessionRequest Is Nothing)
         mWorkbookClosing = True
         CancelQueuedAsyncDispatch
+        CancelScheduledProductImagePreview
         CancelProductImagePreview True
     End If
     CancelScheduledRefresh
@@ -3680,13 +3738,14 @@ End Sub
 Public Sub UnregisterSearchHotkey()
     Application.OnKey "{F2}"
     Application.OnKey "{F3}"
+    ReleaseSearchPasteHotkey
     ReleaseSearchEnterHotkey
 End Sub
 
 Public Sub RefreshSearchEnterHotkey()
     ' Enter remains Excel-native. Committing the search cell raises SheetChange,
     ' which queues one top-level search after edit mode has ended.
-    ReleaseSearchEnterHotkey
+    RefreshSearchPasteHotkey
 End Sub
 
 Public Function NormalizeProductSearchSelection( _
@@ -3709,6 +3768,7 @@ Public Function NormalizeProductSearchSelection( _
     Application.EnableEvents = False
     searchAnchor.Select
     RememberSearchSelection searchAnchor
+    RegisterSearchPasteHotkey
     NormalizeProductSearchSelection = True
 CleanExit:
     Application.EnableEvents = previousEvents
@@ -3722,7 +3782,7 @@ Public Function UpdateSearchEnterHotkey(ByVal target As Range) As Boolean
     ' Excel has left edit mode, then queue one top-level callback. Never bind or
     ' mutate Enter from this SelectionChange path: doing so used to recurse
     ' through Excel/VBA until the native stack was exhausted.
-    ReleaseSearchEnterHotkey
+    UpdateSearchPasteHotkey target
     queueNativeEnter = IsNativeSearchEnterTransition(target)
     RememberSearchSelection target
     If queueNativeEnter Then
@@ -3750,6 +3810,7 @@ Private Sub RunNativeEnterProductSearch()
     ' timer, preventing a delayed duplicate search or a one-query lag.
     On Error GoTo CleanExit
     CancelScheduledProductSearch
+    mSearchNativeEnterPending = False
     mSearchRequestGeneration = mSearchRequestGeneration + 1
     generation = mSearchRequestGeneration
     query = ReadSearchLiteral()
@@ -3760,8 +3821,187 @@ CleanExit:
 End Sub
 
 Public Sub ReleaseSearchEnterHotkey()
-    Application.OnKey "~"
+    ' Enter is never rebound. This compatibility entry point intentionally
+    ' remains a no-op for existing workbook lifecycle calls.
 End Sub
+
+Private Sub RefreshSearchPasteHotkey()
+    Dim activeBook As Workbook
+    Dim activeCellValue As Range
+
+    On Error GoTo ReleaseBinding
+    Set activeBook = Application.ActiveWorkbook
+    If activeBook Is Nothing Then GoTo ReleaseBinding
+    If Not activeBook Is ThisWorkbook Then GoTo ReleaseBinding
+    Set activeCellValue = Application.ActiveCell
+    UpdateSearchPasteHotkey activeCellValue
+    Exit Sub
+
+ReleaseBinding:
+    ReleaseSearchPasteHotkey
+End Sub
+
+Private Sub UpdateSearchPasteHotkey(ByVal target As Range)
+    Dim searchSurface As Range
+
+    On Error GoTo ReleaseBinding
+    If target Is Nothing Then GoTo ReleaseBinding
+    If Not target.Worksheet Is PriceSheet() Then GoTo ReleaseBinding
+    Set searchSurface = ThisWorkbook.Names( _
+        "ProductSearchQuery").RefersToRange.MergeArea
+    If Intersect(target.Cells(1, 1), searchSurface) Is Nothing Then _
+        GoTo ReleaseBinding
+    RegisterSearchPasteHotkey
+    Exit Sub
+
+ReleaseBinding:
+    ReleaseSearchPasteHotkey
+End Sub
+
+Private Sub RegisterSearchPasteHotkey()
+    Dim pasteMacro As String
+
+    If mSearchPasteHotkeyRegistered Then Exit Sub
+    pasteMacro = QualifiedWorkbookMacro("PasteProductSearchText")
+    Application.OnKey "^v", pasteMacro
+    Application.OnKey "+{INSERT}", pasteMacro
+    mSearchPasteHotkeyRegistered = True
+End Sub
+
+Public Sub ReleaseSearchPasteHotkey()
+    If Not mSearchPasteHotkeyRegistered Then Exit Sub
+    On Error Resume Next
+    Application.OnKey "^v"
+    Application.OnKey "+{INSERT}"
+    mSearchPasteHotkeyRegistered = False
+    On Error GoTo 0
+End Sub
+
+Public Sub PasteProductSearchText()
+    Dim activeBook As Workbook
+    Dim activeCellValue As Range
+    Dim searchSurface As Range
+    Dim clipboardText As String
+
+    On Error GoTo CleanExit
+    Set activeBook = Application.ActiveWorkbook
+    If activeBook Is Nothing Then Exit Sub
+    If Not activeBook Is ThisWorkbook Then Exit Sub
+    Set activeCellValue = Application.ActiveCell
+    If activeCellValue Is Nothing Then Exit Sub
+    Set searchSurface = ThisWorkbook.Names( _
+        "ProductSearchQuery").RefersToRange.MergeArea
+    If Not activeCellValue.Worksheet Is searchSurface.Worksheet Then Exit Sub
+    If Intersect(activeCellValue.Cells(1, 1), searchSurface) Is Nothing Then _
+        Exit Sub
+    If Not TryReadUnicodeClipboardText(clipboardText) Then Exit Sub
+    If ApplyProductSearchPasteText(clipboardText, True) Then _
+        RegisterSearchPasteHotkey
+CleanExit:
+End Sub
+
+Private Function ApplyProductSearchPasteText(ByVal plainText As String, _
+        ByVal queueSearch As Boolean) As Boolean
+    Dim searchAnchor As Range
+    Dim previousEvents As Boolean
+    Dim writeSucceeded As Boolean
+
+    previousEvents = Application.EnableEvents
+    On Error GoTo CleanExit
+    Set searchAnchor = ThisWorkbook.Names( _
+        "ProductSearchQuery").RefersToRange
+    Application.EnableEvents = False
+    searchAnchor.MergeArea.NumberFormat = "@"
+    searchAnchor.Value2 = NormalizeProductSearchPasteText(plainText)
+    RememberSearchSelection searchAnchor
+    writeSucceeded = True
+CleanExit:
+    Application.EnableEvents = previousEvents
+    If writeSucceeded And queueSearch Then QueueProductSearch
+    ApplyProductSearchPasteText = writeSucceeded
+End Function
+
+Private Function NormalizeProductSearchPasteText( _
+        ByVal plainText As String) As String
+    Dim normalized As String
+
+    normalized = Left$(plainText, SEARCH_PASTE_MAX_CHARS)
+    normalized = Replace(normalized, vbNullChar, vbNullString)
+    normalized = Replace(normalized, vbCrLf, " ")
+    normalized = Replace(normalized, vbCr, " ")
+    normalized = Replace(normalized, vbLf, " ")
+    normalized = Replace(normalized, vbTab, " ")
+    Do While InStr(1, normalized, "  ", vbBinaryCompare) > 0
+        normalized = Replace(normalized, "  ", " ")
+    Loop
+    NormalizeProductSearchPasteText = Trim$(normalized)
+End Function
+
+Private Function TryReadUnicodeClipboardText( _
+        ByRef clipboardText As String) As Boolean
+    Dim clipboardOpened As Boolean
+    Dim characterCount As Long
+#If VBA7 Then
+    Dim dataHandle As LongPtr
+    Dim dataPointer As LongPtr
+#Else
+    Dim dataHandle As Long
+    Dim dataPointer As Long
+#End If
+
+    On Error GoTo CleanExit
+    If IsClipboardFormatAvailable(CF_UNICODETEXT) = 0 Then Exit Function
+    If OpenClipboard(Application.hwnd) = 0 Then Exit Function
+    clipboardOpened = True
+    dataHandle = GetClipboardData(CF_UNICODETEXT)
+    If dataHandle = 0 Then GoTo CleanExit
+    dataPointer = GlobalLock(dataHandle)
+    If dataPointer = 0 Then GoTo CleanExit
+    characterCount = lstrlenW(dataPointer)
+    If characterCount > SEARCH_PASTE_MAX_CHARS Then _
+        characterCount = SEARCH_PASTE_MAX_CHARS
+    If characterCount > 0 Then
+        clipboardText = String$(characterCount, vbNullChar)
+        CopyMemory StrPtr(clipboardText), dataPointer, characterCount * 2
+    Else
+        clipboardText = vbNullString
+    End If
+    TryReadUnicodeClipboardText = True
+CleanExit:
+    On Error Resume Next
+    If dataPointer <> 0 Then GlobalUnlock dataHandle
+    If clipboardOpened Then CloseClipboard
+    On Error GoTo 0
+End Function
+
+Public Function ValidateProductSearchPasteForValidation() As Boolean
+    Dim searchAnchor As Range
+    Dim originalValue As Variant
+    Dim previousEvents As Boolean
+
+    previousEvents = Application.EnableEvents
+    On Error GoTo Failed
+    Set searchAnchor = ThisWorkbook.Names( _
+        "ProductSearchQuery").RefersToRange
+    originalValue = searchAnchor.Value2
+    If Not ApplyProductSearchPasteText( _
+        "001234" & vbCrLf & vbTab, False) Then GoTo Failed
+    If ReadSearchLiteral() <> "001234" Or _
+       searchAnchor.MergeArea.Address(False, False) <> "C3:E3" Or _
+       CStr(searchAnchor.MergeArea.NumberFormat) <> "@" Then GoTo Failed
+    Application.EnableEvents = False
+    searchAnchor.Value2 = originalValue
+    Application.EnableEvents = previousEvents
+    ValidateProductSearchPasteForValidation = True
+    Exit Function
+
+Failed:
+    On Error Resume Next
+    Application.EnableEvents = False
+    If Not searchAnchor Is Nothing Then searchAnchor.Value2 = originalValue
+    Application.EnableEvents = previousEvents
+    On Error GoTo 0
+End Function
 
 Public Sub HandleProductSearchEnter()
     QueueProductSearch
@@ -3801,12 +4041,14 @@ Public Sub FocusProductSearch()
     Set table = PriceSheet().ListObjects(PRODUCTS_TABLE)
     searchInput.MergeArea.NumberFormat = "@"
     searchInput.Select
+    RegisterSearchPasteHotkey
     ActiveWindow.ScrollColumn = ProductViewportColumn(table)
 CleanExit:
 End Sub
 
 Public Sub QueueProductSearch()
     On Error GoTo CleanExit
+    mSearchNativeEnterPending = True
     mSearchRequestGeneration = mSearchRequestGeneration + 1
     mPendingSearchQuery = ReadSearchLiteral()
     mPendingSearchGeneration = mSearchRequestGeneration
@@ -3833,6 +4075,7 @@ Public Sub RunScheduledProductSearch()
     Dim queuedGeneration As Long
 
     mSearchScheduled = False
+    mSearchNativeEnterPending = False
     If mWorkbookClosing Then Exit Sub
     If SearchOperationBusy() Then
         mSearchRetryCount = mSearchRetryCount + 1
@@ -3872,6 +4115,7 @@ Private Function SearchOperationBusy() As Boolean
 End Function
 
 Public Sub SearchProducts()
+    mSearchNativeEnterPending = False
     SearchProductsForQuery ReadSearchLiteral(), 0
 End Sub
 
@@ -3933,7 +4177,7 @@ Private Sub SearchProductsForQuery(ByVal requestedQuery As String, _
 
     If matchCount = 0 Then
         mSearchCurrentRow = 0
-        HighlightSelectedProductRow PriceSheet().Range("A1"), False
+        HighlightSelectedProductRow PriceSheet().Range("A1")
         SetSearchButtonCaption T("search_button") & " (0)"
     Else
         matchIndex = NextProductSearchMatchIndex( _
@@ -3948,7 +4192,7 @@ Private Sub SearchProductsForQuery(ByVal requestedQuery As String, _
         Application.ScreenUpdating = False
         anchor.Select
         RememberSearchSelection anchor
-        HighlightSelectedProductRow anchor, False
+        HighlightSelectedProductRow anchor
         ActiveWindow.ScrollColumn = ProductViewportColumn(table)
         ActiveWindow.ScrollRow = Application.Max(1, anchor.Row - 3)
     End If
@@ -4124,6 +4368,7 @@ Private Function IsNativeSearchEnterTransition(ByVal target As Range) As Boolean
     Dim currentSheetName As String
 
     On Error GoTo CleanExit
+    If Not mSearchNativeEnterPending Then Exit Function
     If target Is Nothing Then Exit Function
     Set currentCell = target.Cells(1, 1)
     currentSheetName = currentCell.Worksheet.CodeName
@@ -4237,77 +4482,134 @@ Private Sub SetSearchButtonCaption(ByVal caption As String)
 CleanExit:
 End Sub
 
-Public Sub HighlightSelectedProductRow(ByVal target As Range, _
-        Optional ByVal allowPreviewAndPump As Boolean = True)
+Public Sub HighlightSelectedProductRow(ByVal target As Range)
     Dim table As ListObject
+    Dim settings As Worksheet
     Dim selectedRow As Long
     Dim relativeRow As Long
-    Dim previousSelectedRow As Long
-    Dim previousRelativeRow As Long
-    Dim basePrice As Variant
-    Dim previewPrice As Variant
+    Dim previewRow As Long
+    Dim currentSelectedRow As Long
+    Dim currentPreviewRow As Long
     Dim previousEvents As Boolean
-    Dim priceCell As Range
-    Dim previousPriceCell As Range
 
     If mCatalogCommitInProgress Then Exit Sub
     previousEvents = Application.EnableEvents
     On Error GoTo CleanExit
+    If target Is Nothing Then Exit Sub
     Set table = PriceSheet().ListObjects(PRODUCTS_TABLE)
+    Set settings = ConfigSheet()
     If Not table.DataBodyRange Is Nothing Then
         If Not Intersect(target.Cells(1, 1), table.DataBodyRange) Is Nothing Then
             selectedRow = target.Row
             relativeRow = selectedRow - table.DataBodyRange.Row + 1
         End If
     End If
+    currentSelectedRow = CLng(Val(CStr(settings.Range("G30").Value2)))
+    currentPreviewRow = CLng(Val(CStr(settings.Range("G48").Value2)))
+    If relativeRow > 0 Then
+        If currentPreviewRow = selectedRow Then
+            previewRow = selectedRow
+        Else
+            previewRow = ProductPreviewCandidateRow(table, relativeRow)
+        End If
+    End If
     Application.EnableEvents = False
-    If Not allowPreviewAndPump Then
-        ConfigSheet().Range("G30").Value2 = selectedRow
-        ConfigSheet().Range("G48").Value2 = 0
-        GoTo CleanExit
-    End If
-    previousSelectedRow = CLng(Val(CStr(ConfigSheet().Range("G30").Value2)))
-    ConfigSheet().Range("G30").Value2 = 0
-    ConfigSheet().Range("G48").Value2 = 0
-    If Not table.DataBodyRange Is Nothing And previousSelectedRow > 0 Then
-        previousRelativeRow = previousSelectedRow - _
-            table.DataBodyRange.Row + 1
-        If previousRelativeRow >= 1 And _
-           previousRelativeRow <= table.DataBodyRange.Rows.Count Then
-            Set previousPriceCell = _
-                table.DataBodyRange.Cells(previousRelativeRow, 1)
-            previousPriceCell.Calculate
-        End If
-    End If
-    If relativeRow <= 0 Then
-        If allowPreviewAndPump Then RefreshProductImagePreview 0
-        GoTo CleanExit
-    End If
-
-    Set priceCell = table.DataBodyRange.Cells(relativeRow, 1)
-    priceCell.Calculate
-    basePrice = priceCell.Value2
-    ConfigSheet().Range("G30").Value2 = selectedRow
-    priceCell.Calculate
-    previewPrice = priceCell.Value2
-    If Not IsError(basePrice) And Not IsError(previewPrice) Then
-        If Len(CanonicalCellText(basePrice)) = 0 And _
-           IsNumeric(previewPrice) Then
-            If CDbl(previewPrice) > 0 Then
-                ConfigSheet().Range("G48").Value2 = selectedRow
-            End If
-        End If
-    End If
-    If allowPreviewAndPump Then
-        RefreshProductImagePreview relativeRow
-        PumpExcelMessages
-    End If
+    If currentSelectedRow <> selectedRow Then _
+        settings.Range("G30").Value2 = selectedRow
+    If currentPreviewRow <> previewRow Then _
+        settings.Range("G48").Value2 = previewRow
 CleanExit:
     Application.EnableEvents = previousEvents
 End Sub
 
+Private Function ProductPreviewCandidateRow(ByVal table As ListObject, _
+        ByVal relativeRow As Long) As Long
+    Dim basePrice As Variant
+    Dim stockValue As Variant
+
+    If table.DataBodyRange Is Nothing Then Exit Function
+    If relativeRow < 1 Or relativeRow > table.DataBodyRange.Rows.Count Then _
+        Exit Function
+    basePrice = table.DataBodyRange.Cells(relativeRow, 1).Value2
+    stockValue = table.DataBodyRange.Cells(relativeRow, 6).Value2
+    If IsError(basePrice) Or IsError(stockValue) Then Exit Function
+    If Len(CanonicalCellText(basePrice)) > 0 Or _
+       Len(CanonicalCellText(stockValue)) = 0 Or _
+       Not IsNumeric(stockValue) Then Exit Function
+    If CDbl(stockValue) <= 0 Then _
+        ProductPreviewCandidateRow = table.DataBodyRange.Row + relativeRow - 1
+End Function
+
 Public Sub HandleProductImageSettingChanged()
+    CancelScheduledProductImagePreview
     RefreshProductImagePreview SelectedProductRelativeRow()
+End Sub
+
+Public Sub QueueProductImagePreviewForSelection(ByVal target As Range)
+    Dim table As ListObject
+    Dim relativeRow As Long
+
+    On Error GoTo CleanExit
+    If mWorkbookClosing Then Exit Sub
+    If Not ProductImagesEnabled() Then
+        CancelScheduledProductImagePreview
+        Exit Sub
+    End If
+    If Not target Is Nothing Then
+        Set table = PriceSheet().ListObjects(PRODUCTS_TABLE)
+        If Not table.DataBodyRange Is Nothing Then
+            If Not Intersect(target.Cells(1, 1), _
+                             table.DataBodyRange) Is Nothing Then
+                relativeRow = target.Row - table.DataBodyRange.Row + 1
+            End If
+        End If
+    End If
+    mPendingImagePreviewRow = relativeRow
+    ScheduleProductImagePreview
+CleanExit:
+End Sub
+
+Private Sub ScheduleProductImagePreview()
+    If mSaveRenameSchedulesSuspended Then
+        mSaveRenameImagePreviewPending = True
+        Exit Sub
+    End If
+    If mWorkbookClosing Then Exit Sub
+    CancelScheduledProductImagePreview
+    On Error GoTo ScheduleFailed
+    mScheduledImagePreviewTime = Now + _
+        (IMAGE_PREVIEW_DELAY_SECONDS / 86400#)
+    Application.OnTime EarliestTime:=mScheduledImagePreviewTime, _
+        Procedure:=QualifiedWorkbookMacro( _
+            "RunScheduledProductImagePreview"), _
+        Schedule:=True
+    mImagePreviewScheduled = True
+    Exit Sub
+
+ScheduleFailed:
+    mImagePreviewScheduled = False
+    Err.Clear
+End Sub
+
+Public Sub RunScheduledProductImagePreview()
+    Dim pendingRow As Long
+
+    mImagePreviewScheduled = False
+    If mWorkbookClosing Then Exit Sub
+    pendingRow = mPendingImagePreviewRow
+    If pendingRow <> SelectedProductRelativeRow() Then Exit Sub
+    RefreshProductImagePreview pendingRow
+End Sub
+
+Private Sub CancelScheduledProductImagePreview()
+    If Not mImagePreviewScheduled Then Exit Sub
+    On Error Resume Next
+    Application.OnTime EarliestTime:=mScheduledImagePreviewTime, _
+        Procedure:=QualifiedWorkbookMacro( _
+            "RunScheduledProductImagePreview"), _
+        Schedule:=False
+    mImagePreviewScheduled = False
+    On Error GoTo 0
 End Sub
 
 Private Sub RefreshProductImagePreview(ByVal relativeRow As Long)
@@ -5721,6 +6023,8 @@ Public Function ValidateOperationProgressUIForValidation() As Boolean
     Dim sheetName As Variant
 
     On Error GoTo Failed
+    InitializeOperationProgress
+    If Not OperationProgressReadyHiddenForValidation() Then GoTo Failed
     For Each sheetName In Array(PriceSheet().Name, ConfigSheet().Name)
         Set targetSheet = ThisWorkbook.Worksheets(CStr(sheetName))
         Set track = targetSheet.Shapes(PROGRESS_TRACK_SHAPE)
@@ -5770,6 +6074,7 @@ Public Function ValidateOperationProgressUIForValidation() As Boolean
            fill.Fill.ForeColor.RGB <> RGB(22, 163, 74) Then GoTo Failed
     Next sheetName
     InitializeOperationProgress
+    If Not OperationProgressReadyHiddenForValidation() Then GoTo Failed
     ValidateOperationProgressUIForValidation = True
     Exit Function
 
@@ -5777,6 +6082,28 @@ Failed:
     On Error Resume Next
     InitializeOperationProgress
     On Error GoTo 0
+End Function
+
+Private Function OperationProgressReadyHiddenForValidation() As Boolean
+    Dim targetSheet As Worksheet
+    Dim track As Shape
+    Dim fill As Shape
+    Dim label As Shape
+    Dim sheetName As Variant
+
+    If VarType(Application.StatusBar) <> vbBoolean Then Exit Function
+    If CBool(Application.StatusBar) Then Exit Function
+    For Each sheetName In Array(PriceSheet().Name, ConfigSheet().Name)
+        Set targetSheet = ThisWorkbook.Worksheets(CStr(sheetName))
+        Set track = targetSheet.Shapes(PROGRESS_TRACK_SHAPE)
+        Set fill = targetSheet.Shapes(PROGRESS_FILL_SHAPE)
+        Set label = targetSheet.Shapes(PROGRESS_TEXT_SHAPE)
+        If track.Visible <> msoFalse Or fill.Visible <> msoFalse Or _
+           label.Visible <> msoFalse Then Exit Function
+        If InStr(1, label.AlternativeText, "stage=ready", _
+                 vbBinaryCompare) = 0 Then Exit Function
+    Next sheetName
+    OperationProgressReadyHiddenForValidation = True
 End Function
 
 Private Function OperationProgressStageMatchesForValidation( _
@@ -5806,6 +6133,8 @@ Private Function OperationProgressStageMatchesForValidation( _
         Set track = targetSheet.Shapes(PROGRESS_TRACK_SHAPE)
         Set fill = targetSheet.Shapes(PROGRESS_FILL_SHAPE)
         Set label = targetSheet.Shapes(PROGRESS_TEXT_SHAPE)
+        If track.Visible <> msoTrue Or fill.Visible <> msoTrue Or _
+           label.Visible <> msoTrue Then Exit Function
         If StrComp(label.TextFrame2.TextRange.Text, expectedText, _
                    vbBinaryCompare) <> 0 Then Exit Function
         If InStr(1, label.TextFrame2.TextRange.Text, forbiddenText, _
@@ -7943,8 +8272,8 @@ Private Sub ApplyProductTableFormulas(ByVal table As ListObject)
     priceFormula = _
         "=LET(basePrice," & basePriceFormula & ",projectedPrice," & _
         projectedFormula & ",IF(AND(basePrice="""",RC[5]<>""""," & _
-        "RC[5]<=0,ROW()=" & settingsReference & _
-        "R30C7),projectedPrice,basePrice))"
+        "RC[5]<=0,ROW()=ProjectedPricePreviewRow)," & _
+        "projectedPrice,basePrice))"
     On Error GoTo LegacyFormula
     table.ListColumns(1).DataBodyRange.Formula2R1C1 = priceFormula
     Exit Sub

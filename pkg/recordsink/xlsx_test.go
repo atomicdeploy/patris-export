@@ -1570,6 +1570,12 @@ func TestDynamicCalculatorVBASourceGuardsLivePricingBeforeMutation(t *testing.T)
 		"Public Function NormalizeProductSearchSelection(",
 		`Set searchSurface = PriceSheet().Range("C3:E3")`,
 		"searchAnchor.Select",
+		"Public Sub PasteProductSearchText()",
+		"Private Function TryReadUnicodeClipboardText(",
+		`Application.OnKey "^v", pasteMacro`,
+		`Application.OnKey "+{INSERT}", pasteMacro`,
+		"searchAnchor.Value2 = NormalizeProductSearchPasteText(plainText)",
+		"Public Function ValidateProductSearchPasteForValidation() As Boolean",
 		"Public Function UpdateSearchEnterHotkey(ByVal target As Range) As Boolean",
 		"Public Sub ReleaseSearchEnterHotkey()",
 		"Public Sub HandleProductSearchEnter()",
@@ -1644,6 +1650,22 @@ func TestDynamicCalculatorVBASourceGuardsLivePricingBeforeMutation(t *testing.T)
 	if strings.Count(progressSurface, "displayText = messageText") < 2 {
 		t.Fatal("neutral and indeterminate progress must display the useful stage message without an internal-state prefix")
 	}
+	progressShapes := section(
+		"Private Sub UpdateOperationProgressShapes",
+		"Private Sub ScheduleOperationProgressReset",
+	)
+	for _, required := range []string{
+		"track.Visible = msoFalse",
+		"fill.Visible = msoFalse",
+		"label.Visible = msoFalse",
+		"track.Visible = msoTrue",
+		"fill.Visible = msoTrue",
+		"label.Visible = msoTrue",
+	} {
+		if !strings.Contains(progressShapes, required) {
+			t.Fatalf("Ready/active progress visibility lifecycle is missing: %s", required)
+		}
+	}
 	progressValidation := section("Public Function ValidateOperationProgressUIForValidation", "Private Function WritebackCell")
 	for _, required := range []string{
 		`SetRefreshProgress "1/4"`,
@@ -1657,6 +1679,7 @@ func TestDynamicCalculatorVBASourceGuardsLivePricingBeforeMutation(t *testing.T)
 		`"refresh_validate", 70`,
 		`"refresh_apply", 90`,
 		`"completed", 100`,
+		"OperationProgressReadyHiddenForValidation",
 		"CStr(Application.StatusBar)",
 		"label.TextFrame2.TextRange.Text",
 	} {
@@ -1714,10 +1737,25 @@ func TestDynamicCalculatorVBASourceGuardsLivePricingBeforeMutation(t *testing.T)
 	if highlightStart < 0 || proposalChangeStart <= highlightStart || previewStart <= proposalChangeStart {
 		t.Fatal("selection or proposal-change handlers are missing")
 	}
-	highlightSource := source[highlightStart:proposalChangeStart]
-	if strings.Contains(highlightSource, "table.DataBodyRange.Calculate") ||
-		strings.Count(highlightSource, "priceCell.Calculate") < 2 {
-		t.Fatal("selection must calculate only the previous/current price cells")
+	highlightSource := section(
+		"Public Sub HighlightSelectedProductRow",
+		"Private Function ProductPreviewCandidateRow",
+	)
+	for _, forbidden := range []string{
+		".Calculate", "RefreshProductImagePreview", "PumpExcelMessages",
+		"OpenAsync", "Application.OnTime",
+	} {
+		if strings.Contains(highlightSource, forbidden) {
+			t.Fatalf("selected-row highlight contains non-local work: %s", forbidden)
+		}
+	}
+	for _, required := range []string{
+		`settings.Range("G30").Value2 = selectedRow`,
+		`settings.Range("G48").Value2 = previewRow`,
+	} {
+		if !strings.Contains(highlightSource, required) {
+			t.Fatalf("selected-row highlight is missing local marker update: %s", required)
+		}
 	}
 	proposalChangeSource := source[proposalChangeStart:previewStart]
 	if strings.Contains(proposalChangeSource, "PreviewPricingChangesCore") ||
@@ -1901,8 +1939,13 @@ func TestDynamicCalculatorVBASourceGuardsLivePricingBeforeMutation(t *testing.T)
 		"UpdateSearchEnterHotkey = True",
 		`Set searchInput = ThisWorkbook.Names("ProductSearchQuery"). _`,
 		"If Not Intersect(target.Cells(1, 1), searchInput) Is Nothing Then _",
-		"HighlightSelectedProductRow anchor, False",
-		"Optional ByVal allowPreviewAndPump As Boolean = True",
+		"HighlightSelectedProductRow anchor",
+		"Public Sub HighlightSelectedProductRow(ByVal target As Range)",
+		`settings.Range("G30").Value2 = selectedRow`,
+		`settings.Range("G48").Value2 = previewRow`,
+		"ROW()=ProjectedPricePreviewRow",
+		"mSearchNativeEnterPending = True",
+		"If Not mSearchNativeEnterPending Then Exit Function",
 		"Private Sub RunNativeEnterProductSearch()",
 		"CancelScheduledProductSearch",
 		"SearchProductsForQuery query, generation",
@@ -1924,6 +1967,14 @@ func TestDynamicCalculatorVBASourceGuardsLivePricingBeforeMutation(t *testing.T)
 	}
 	if strings.Contains(source, "table.DataBodyRange.Rows(rowIndex).EntireRow.Hidden") {
 		t.Fatal("local search must not make one Excel COM hidden-row call per product")
+	}
+	previewFormulaSource := section(
+		"Private Sub ApplyProductTableFormulas",
+		"Private Sub ApplyProductTableFormatting",
+	)
+	if strings.Contains(previewFormulaSource, `R30C7),projectedPrice`) ||
+		!strings.Contains(previewFormulaSource, "ROW()=ProjectedPricePreviewRow") {
+		t.Fatal("yellow selection marker must not invalidate every selling-price formula")
 	}
 	for _, required := range []string{
 		"Public Sub PrepareLocalSearchOnOpen()",
@@ -2059,6 +2110,7 @@ func TestDynamicCalculatorVBASourceGuardsLivePricingBeforeMutation(t *testing.T)
 		"If ProductCatalogSync.NormalizeProductSearchSelection(Target) Then",
 		"If ProductCatalogSync.UpdateSearchEnterHotkey(Target) Then _",
 		"ProductCatalogSync.HighlightSelectedProductRow Target",
+		"ProductCatalogSync.QueueProductImagePreviewForSelection Target",
 		"Call ProductCatalogSync.AuditFontsOnOpen",
 		"ProductCatalogSync.PreserveSearchLiteral",
 		"ProductCatalogSync.PrepareLocalSearchOnOpen",
@@ -2073,6 +2125,20 @@ func TestDynamicCalculatorVBASourceGuardsLivePricingBeforeMutation(t *testing.T)
 	}
 	if strings.Contains(string(thisWorkbookContent), "Application.EnableEvents = True") {
 		t.Fatal("ThisWorkbook event handlers must restore the caller's prior event state")
+	}
+	selectionStart := strings.Index(string(thisWorkbookContent), "Private Sub Workbook_SheetSelectionChange")
+	selectionEnd := strings.Index(string(thisWorkbookContent), "Private Sub Workbook_SheetActivate")
+	if selectionStart < 0 || selectionEnd <= selectionStart {
+		t.Fatal("ThisWorkbook selected-row event section is missing")
+	}
+	selectionSource := string(thisWorkbookContent)[selectionStart:selectionEnd]
+	for _, forbidden := range []string{
+		"ResumeAfterCancelledClose", "RefreshProductImagePreview",
+		"PumpExcelMessages", ".Calculate", "KickQueuedAsyncDispatch",
+	} {
+		if strings.Contains(selectionSource, forbidden) {
+			t.Fatalf("Workbook_SheetSelectionChange contains non-local work: %s", forbidden)
+		}
 	}
 	if strings.Contains(string(thisWorkbookContent), "If Not ProductCatalogSync.AuditFontsOnOpen Then Exit Sub") {
 		t.Fatal("font audit failure must not suppress scheduled population")
@@ -2506,6 +2572,8 @@ func TestDynamicCalculatorBuilderStylesPersianButtonsAndChartText(t *testing.T) 
 		"$settings.Range('B5').Value2 = 'بله'",
 		"$priceList.Range('C3:E3').NumberFormat = '@'",
 		"$priceList.Range('C3:E3').Merge()",
+		"$track.Visible = $false",
+		"$text.Visible = $false",
 		"$priceList.Range('C3:E3').Interior.Color = ConvertTo-OleColor 'F7FBFF'",
 		"$searchButton.Name = 'ProductSearchButton'",
 		"$searchButton.AlternativeText = ",

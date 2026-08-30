@@ -193,6 +193,7 @@ function Add-OperationProgressSurface(
     $track.Fill.ForeColor.RGB = ConvertTo-OleColor 'E8EEF4'
     $track.Line.ForeColor.RGB = ConvertTo-OleColor 'B9CCF4'
     $track.Line.Weight = 1
+    $track.Visible = $false
     $track.AlternativeText = 'نوار وضعیت عملیات؛ زمینه ثابت.'
 
     $fill = $Sheet.Shapes.AddShape(1, $Anchor.Left, $Anchor.Top, 1, $Height)
@@ -206,6 +207,7 @@ function Add-OperationProgressSurface(
     $text.Name = 'OperationProgressText'
     $text.Fill.Visible = $false
     $text.Line.Visible = $false
+    $text.Visible = $false
     $text.TextFrame2.TextRange.Text = 'آماده'
     Set-OfficeTextFont $text.TextFrame2.TextRange 10 $true '2F414B'
     $text.TextFrame2.VerticalAnchor = 3
