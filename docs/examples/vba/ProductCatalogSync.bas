@@ -6688,8 +6688,15 @@ Private Function OperationProgressReadyHiddenForValidation() As Boolean
     Dim label As Shape
     Dim sheetName As Variant
 
-    If VarType(Application.StatusBar) <> vbBoolean Then Exit Function
-    If CBool(Application.StatusBar) Then Exit Function
+    Dim statusValue As Variant
+
+    statusValue = Application.StatusBar
+    If VarType(statusValue) = vbBoolean Then
+        If CBool(statusValue) Then Exit Function
+    ElseIf StrComp(Trim$(CStr(statusValue)), "FALSE", _
+                   vbTextCompare) <> 0 Then
+        Exit Function
+    End If
     For Each sheetName In Array(PriceSheet().Name, ConfigSheet().Name)
         Set targetSheet = ThisWorkbook.Worksheets(CStr(sheetName))
         Set track = targetSheet.Shapes(PROGRESS_TRACK_SHAPE)
@@ -8771,6 +8778,7 @@ Private Sub ApplyProductTableFormulas(ByVal table As ListObject)
     Dim cnyRateFormula As String
 
     If table.DataBodyRange Is Nothing Then Exit Sub
+    EnsureConfirmedCNYRateName
     settingsReference = "'" & U("062A0646063806CC06450627062A") & "'!"
     lookupExpression = _
         "IF(RC[6]<>"""",""patris:""&RC[6],""woo:""&RC[8])"
@@ -8879,6 +8887,41 @@ Private Sub ApplyProductTableFormulas(ByVal table As ListObject)
 LegacyFormula:
     Err.Clear
     table.ListColumns(1).DataBodyRange.FormulaR1C1 = priceFormula
+End Sub
+
+Private Sub EnsureConfirmedCNYRateName()
+    Dim confirmedName As Name
+    Dim confirmedRange As Range
+    Dim expectedRange As Range
+
+    On Error GoTo InvalidWorkbook
+    Set expectedRange = ConfigSheet().Range("G18")
+    On Error Resume Next
+    Set confirmedName = ThisWorkbook.Names("ConfirmedCNYRate")
+    On Error GoTo InvalidWorkbook
+    If Not confirmedName Is Nothing Then
+        On Error Resume Next
+        Set confirmedRange = confirmedName.RefersToRange
+        On Error GoTo InvalidWorkbook
+        If Not confirmedRange Is Nothing Then
+            If confirmedRange.Parent.CodeName = expectedRange.Parent.CodeName And _
+               confirmedRange.Address(False, False) = expectedRange.Address(False, False) Then _
+                Exit Sub
+        End If
+        confirmedName.Delete
+    End If
+    ThisWorkbook.Names.Add Name:="ConfirmedCNYRate", _
+        RefersTo:=expectedRange
+    Set confirmedName = ThisWorkbook.Names("ConfirmedCNYRate")
+    Set confirmedRange = confirmedName.RefersToRange
+    If confirmedRange.Parent.CodeName <> expectedRange.Parent.CodeName Or _
+       confirmedRange.Address(False, False) <> expectedRange.Address(False, False) Then _
+        GoTo InvalidWorkbook
+    Exit Sub
+
+InvalidWorkbook:
+    Err.Raise vbObjectError + 130, "EnsureConfirmedCNYRateName", _
+              T("invalid_workbook")
 End Sub
 
 Private Sub ApplyProductTableFormatting(ByVal table As ListObject)

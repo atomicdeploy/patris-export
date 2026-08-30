@@ -84,6 +84,32 @@ try {
         $codeModule.AddFromString((Get-VbaCodeBody $replacement.Path))
     }
 
+    # Older data-free templates predate the confirmed website-rate name used
+    # by the live formulas. Repair that structural binding while the copied
+    # template is already open. Runtime VBA independently verifies the same
+    # binding before applying formulas so damaged copies still fail closed.
+    $settings = $null
+    $confirmedName = $null
+    $confirmedRange = $null
+    try {
+        $settings = $workbook.Worksheets.Item(3)
+        try { $workbook.Names.Item('ConfirmedCNYRate').Delete() } catch {}
+        [void]$workbook.Names.Add('ConfirmedCNYRate', $settings.Range('G18'))
+        $confirmedName = $workbook.Names.Item('ConfirmedCNYRate')
+        $confirmedRange = $confirmedName.RefersToRange
+        if (
+            [string]$confirmedRange.Parent.CodeName -cne [string]$settings.CodeName -or
+            [string]$confirmedRange.Address($false, $false) -cne 'G18'
+        ) {
+            throw 'ConfirmedCNYRate was not bound exactly to Settings!G18.'
+        }
+    }
+    finally {
+        if ($confirmedRange) { [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($confirmedRange) }
+        if ($confirmedName) { [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($confirmedName) }
+        if ($settings) { [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($settings) }
+    }
+
     $workbook.Save()
 } finally {
     if ($workbook) {
