@@ -86,7 +86,6 @@ Private Const SNAPSHOT_FIELD_IMAGE_URL As Long = 27
 ' path, while the companion additionally requires a live verified revision
 ' before it reuses its own in-process copy.
 Private Const PRICING_SNAPSHOT_CACHE_SECONDS As Long = 300
-Private Const SNAPSHOT_IDENTITY_CELL As String = "G55"
 Private Const PRICE_ROUNDING_MODE As String = "nearest_half_up"
 Private Const LOOPBACK_PREFIX As String = "http://127.0.0.1:18080/"
 Private Const SEARCH_BUTTON_SHAPE As String = "ProductSearchButton"
@@ -267,6 +266,7 @@ Private mSnapshotCancelURL As String
 Private mSnapshotExpectedETag As String
 Private mSnapshotRevision As String
 Private mSnapshotStateRevision As String
+Private mSnapshotDatasetRevision As String
 Private mSnapshotCompletedPages As Long
 Private mSnapshotTotalPages As Long
 Private mSnapshotRowCount As Long
@@ -858,9 +858,6 @@ Private Sub CommitRefreshSnapshot(ByVal reconciledRows As Object, _
     settings.Range("B6").Value = statusText
     settings.Range("B7").Value = Now
     settings.Range("B7").NumberFormat = "yyyy-mm-dd hh:mm"
-    settings.Range(SNAPSHOT_IDENTITY_CELL).NumberFormat = "@"
-    settings.Range(SNAPSHOT_IDENTITY_CELL).Value2 = _
-        CurrentSnapshotIdentityToken()
     mLastRefreshSucceeded = True
 
 CommitExit:
@@ -1294,6 +1291,7 @@ Private Sub ResetFiniteOperationContext()
     mSnapshotExpectedETag = vbNullString
     mSnapshotRevision = vbNullString
     mSnapshotStateRevision = vbNullString
+    mSnapshotDatasetRevision = vbNullString
     mSnapshotCompletedPages = 0
     mSnapshotTotalPages = 0
     mSnapshotRowCount = 0
@@ -1567,6 +1565,7 @@ Private Sub BeginSnapshotStartRequest()
     mSnapshotExpectedETag = vbNullString
     mSnapshotRevision = vbNullString
     mSnapshotStateRevision = vbNullString
+    mSnapshotDatasetRevision = vbNullString
     mSnapshotCompletedPages = 0
     mSnapshotTotalPages = 0
     mSnapshotRowCount = 0
@@ -1873,6 +1872,7 @@ Private Sub HandleSnapshotStartResponse(ByVal statusCode As Long, _
         mSnapshotEventsURL, mSnapshotJobEventsURL, mSnapshotPayloadURL, _
         mSnapshotCancelURL, _
         mSnapshotExpectedETag, mSnapshotRevision, mSnapshotStateRevision, _
+        mSnapshotDatasetRevision, _
         mSnapshotCompletedPages, mSnapshotTotalPages, mSnapshotRowCount
     SetSnapshotProgress mSnapshotCompletedPages, mSnapshotTotalPages, _
         mSnapshotRowCount
@@ -1901,6 +1901,7 @@ Private Sub HandleSnapshotWaitResponse(ByVal statusCode As Long, _
         mSnapshotEventsURL, mSnapshotJobEventsURL, mSnapshotPayloadURL, _
         mSnapshotCancelURL, _
         mSnapshotExpectedETag, mSnapshotRevision, mSnapshotStateRevision, _
+        mSnapshotDatasetRevision, _
         mSnapshotCompletedPages, mSnapshotTotalPages, mSnapshotRowCount
     SetSnapshotProgress mSnapshotCompletedPages, mSnapshotTotalPages, _
         mSnapshotRowCount
@@ -1927,19 +1928,8 @@ Private Sub HandleSnapshotWaitResponse(ByVal statusCode As Long, _
     BeginSnapshotPayloadRequest
 End Sub
 
-Private Function CurrentSnapshotIdentityToken() As String
-    Dim payloadRevision As String
-
-    payloadRevision = StrongETagRevision(mSnapshotExpectedETag)
-    If Not IsSHA256RevisionText(mSnapshotRevision) Or _
-       Not IsSHA256RevisionText(payloadRevision) Then Exit Function
-    CurrentSnapshotIdentityToken = mSnapshotRevision & "|" & _
-        payloadRevision
-End Function
-
 Private Function TryCompleteUnchangedSnapshot() As Boolean
     Dim settings As Worksheet
-    Dim snapshotIdentity As String
     Dim committedEventsURL As String
     Dim committedJobID As String
     Dim committedCSRFToken As String
@@ -1948,12 +1938,9 @@ Private Function TryCompleteUnchangedSnapshot() As Boolean
     If mOperationKind <> "refresh" Or mForceFreshSnapshot Or _
        mSnapshotJobStatus <> "ready" Then Exit Function
 
-    snapshotIdentity = CurrentSnapshotIdentityToken()
-    If Len(snapshotIdentity) = 0 Then Exit Function
     Set settings = ConfigSheet()
-    If StrComp(Trim$(CStr(settings.Range( _
-           SNAPSHOT_IDENTITY_CELL).Value2)), snapshotIdentity, _
-           vbBinaryCompare) <> 0 Or _
+    If StrComp(Trim$(CStr(settings.Range("G44").Value2)), _
+           mSnapshotDatasetRevision, vbBinaryCompare) <> 0 Or _
        StrComp(Trim$(CStr(settings.Range("G14").Value2)), _
            mSnapshotStateRevision, vbBinaryCompare) <> 0 Or _
        StrComp(Trim$(CStr(settings.Range("G45").Value2)), _
@@ -5744,6 +5731,7 @@ Private Sub ParsePricingSnapshotJob(ByVal root As JsonValue, _
                                     ByRef expectedETag As String, _
                                     ByRef snapshotRevision As String, _
                                     ByRef expectedStateRevision As String, _
+                                    ByRef datasetRevision As String, _
                                     ByRef completedPages As Long, _
                                     ByRef totalPages As Long, _
                                     ByRef rowCount As Long)
@@ -5751,6 +5739,7 @@ Private Sub ParsePricingSnapshotJob(ByVal root As JsonValue, _
     Dim parsedRequestID As String
     Dim progress As JsonValue
     Dim sourceValue As JsonValue
+    Dim identity As JsonValue
     Dim capacity As JsonValue
     Dim previousCompletedPages As Long
     Dim previousTotalPages As Long
@@ -5853,10 +5842,14 @@ Private Sub ParsePricingSnapshotJob(ByVal root As JsonValue, _
     expectedETag = SiteText(root, "etag")
     snapshotRevision = SiteText(root, "snapshot_revision")
     expectedStateRevision = SiteText(root, "state_revision")
+    Set identity = JsonRuntime.JsonMember(root, "identity")
+    If Not identity Is Nothing Then _
+        datasetRevision = SiteText(identity, "catalog_revision")
     If jobStatus = "ready" Then
         If Not IsSHA256RevisionText(snapshotRevision) Or _
            Not IsSHA256RevisionText(StrongETagRevision(expectedETag)) Or _
-           Not IsSHA256RevisionText(expectedStateRevision) Then
+           Not IsSHA256RevisionText(expectedStateRevision) Or _
+           Not IsSHA256RevisionText(datasetRevision) Then
             Err.Raise vbObjectError + 130, "ParsePricingSnapshotJob", _
                       T("invalid_workbook")
         End If

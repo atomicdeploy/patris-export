@@ -1661,10 +1661,11 @@ func TestDynamicCalculatorVBASourceGuardsLivePricingBeforeMutation(t *testing.T)
 		}
 	}
 	for _, required := range []string{
-		`Private Const SNAPSHOT_IDENTITY_CELL As String = "G55"`,
-		"CurrentSnapshotIdentityToken()",
+		"mSnapshotDatasetRevision As String",
+		`datasetRevision = SiteText(identity, "catalog_revision")`,
 		"Private Function TryCompleteUnchangedSnapshot() As Boolean",
 		`mOperationKind <> "refresh" Or mForceFreshSnapshot`,
+		`settings.Range("G44").Value2`,
 		`settings.Range("G14").Value2`,
 		`settings.Range("G45").Value2`,
 		`settings.Range("G46").Value2`,

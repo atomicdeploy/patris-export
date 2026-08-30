@@ -29,9 +29,9 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 ## [1.3.2] - 2026-08-30
 
 - Complete ordinary Excel refreshes as a bounded no-op when the authenticated
-  snapshot revision, payload ETag digest, pricing state revision, source
+  job's stable catalog dataset revision, pricing state revision, source
   revision, row count, local catalog coherence, identity status, and strict
-  price parity all match the last committed workbook snapshot. Changed or
+  price parity all match the committed workbook snapshot. Changed or
   unverified identities still use the full fail-closed download and commit.
 
 - Make unchanged Excel catalog refreshes reuse a five-minute authenticated
