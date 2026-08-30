@@ -27,6 +27,12 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   partner price from the first `Sharh1` slot while retaining `FOROSH` as the
   separate sale-price fact.
 
+## [1.3.5] - 2026-08-30
+
+- Retry transient Excel catalog snapshot bridge failures within the existing
+  bounded refresh budget while keeping configuration, identity, and integrity
+  failures fail-closed.
+
 ## [1.3.4] - 2026-08-30
 
 - Preserve and drain completed asynchronous Excel requests when

@@ -1389,10 +1389,14 @@ func TestDynamicCalculatorVBASourceGuardsLivePricingBeforeMutation(t *testing.T)
 		"Private Sub BeginRepairRequest",
 		`StartFiniteRequest "POST", UniversalRefreshURL()`,
 		"Private Function RetrySnapshotAfterSourceDrift() As Boolean",
+		"Private Function RetrySnapshotAfterTransientFailure(",
 		"If mOperationSnapshotRetryCount >= 3 Or _",
 		`errorCode = "canonical_source_mismatch" And _`,
 		`"snapshot_source_revision_conflict" And _`,
 		"RetrySnapshotAfterSourceDrift() Then",
+		`If RetrySnapshotAfterTransientFailure(errorCode) Then Exit Sub`,
+		`If RetrySnapshotAfterTransientFailure(mSnapshotJobCode) Then Exit Sub`,
+		`Case "remote_unavailable", "canonical_source_unavailable"`,
 		`BeginContractRequest "contract"`,
 		`(StrComp(Trim$(address), UniversalRefreshURL(), vbTextCompare) = 0)`,
 		`JsonRuntime.JsonText(root, "source_revision")`,
@@ -1702,6 +1706,21 @@ func TestDynamicCalculatorVBASourceGuardsLivePricingBeforeMutation(t *testing.T)
 	}
 	if strings.Contains(section("Private Function TryCompleteUnchangedSnapshot", "Private Function RetrySnapshotAfterSourceDrift"), "BeginSnapshotPayloadRequest") {
 		t.Fatal("unchanged-revision fast path must finish before downloading the payload")
+	}
+	transientRetry := section("Private Function RetrySnapshotAfterTransientFailure", "Private Function RefreshWallBudgetExhausted")
+	for _, required := range []string{
+		`Case "remote_unavailable", "canonical_source_unavailable"`,
+		"mOperationSnapshotRetryCount >= 3",
+		"RefreshWallBudgetExhausted()",
+		`BeginContractRequest "contract"`,
+	} {
+		if !strings.Contains(transientRetry, required) {
+			t.Fatalf("transient snapshot retry is missing %s", required)
+		}
+	}
+	if strings.Contains(transientRetry, "remote_not_configured") ||
+		strings.Contains(transientRetry, "snapshot_integrity_failed") {
+		t.Fatal("configuration and integrity failures must remain fail-closed")
 	}
 	if !strings.Contains(section("Private Sub HandleSessionResponse", "Private Sub HandleRevisionResponse"), "BeginRevisionProbeRequest") {
 		t.Fatal("ordinary refresh must probe the verified revision before starting a snapshot")

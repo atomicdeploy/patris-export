@@ -1966,6 +1966,7 @@ Private Sub HandleSnapshotStartResponse(ByVal statusCode As Long, _
            RetrySnapshotAfterSourceDrift() Then
             Exit Sub
         End If
+        If RetrySnapshotAfterTransientFailure(errorCode) Then Exit Sub
         RaiseSnapshotHTTPError statusCode, responseText
     End If
     Set root = JsonRuntime.ParseJson(responseText)
@@ -2010,6 +2011,7 @@ Private Sub HandleSnapshotWaitResponse(ByVal statusCode As Long, _
     SetSnapshotProgress mSnapshotCompletedPages, mSnapshotTotalPages, _
         mSnapshotRowCount
     If mSnapshotJobStatus <> "ready" Then
+        If RetrySnapshotAfterTransientFailure(mSnapshotJobCode) Then Exit Sub
         If LCase$(Trim$(mSnapshotJobCode)) = _
            "snapshot_source_revision_conflict" And _
            RetrySnapshotAfterSourceDrift() Then
@@ -2100,6 +2102,33 @@ Private Function RetrySnapshotAfterSourceDrift() As Boolean
         T("source_changed"), "active", False
     BeginContractRequest "contract"
     RetrySnapshotAfterSourceDrift = True
+End Function
+
+Private Function RetrySnapshotAfterTransientFailure( _
+    ByVal errorCode As String) As Boolean
+
+    Select Case LCase$(Trim$(errorCode))
+        Case "remote_unavailable", "canonical_source_unavailable"
+            ' A verified local bridge can briefly lose either the canonical
+            ' source read or the protected WordPress fetch. Retry only these
+            ' explicitly transient failures. Configuration, identity, and
+            ' integrity errors remain fail-closed.
+        Case Else
+            Exit Function
+    End Select
+
+    If mOperationSnapshotRetryCount >= 3 Or _
+       RefreshWallBudgetExhausted() Then Exit Function
+
+    mOperationSnapshotRetryCount = mOperationSnapshotRetryCount + 1
+    mSourceID = vbNullString
+    mSourceDataset = vbNullString
+    mSourceRevision = vbNullString
+    mOperationContractStartedAt = PhaseTimestamp()
+    SetOperationProgressSurface "refresh_request", -1, _
+        T("sync_retry"), "active", False
+    BeginContractRequest "contract"
+    RetrySnapshotAfterTransientFailure = True
 End Function
 
 Private Function RefreshWallBudgetExhausted() As Boolean
