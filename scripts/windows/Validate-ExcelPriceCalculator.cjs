@@ -92,7 +92,7 @@ function usage() {
     '  --sync                 Run ProductCatalogSync.RefreshAllData silently before validation',
     '  --no-sync              Validate without running the live synchronization macro',
     '  --strict-reference     Fail on every comparable weight/rate difference from the archive',
-    '  --save-synced-to PATH  Save the fully validated synchronized workbook to PATH',
+    '  --save-synced-to PATH  Save the validated runtime workbook as .xlsm (never .xltm)',
     '  --json                 Print the complete machine-readable report',
     '  --timeout-ms NUMBER    Excel validation timeout in milliseconds (default: 240000)',
     '  --self-test-native-excel-timeout  Force a hidden native Excel timeout safety test',
@@ -174,7 +174,16 @@ function parseArgs(argv) {
 
   options.candidate = path.resolve(options.candidate);
   options.reference = path.resolve(options.reference);
-  if (options.saveSyncedTo) options.saveSyncedTo = path.resolve(options.saveSyncedTo);
+  if (options.saveSyncedTo) {
+    options.saveSyncedTo = path.resolve(options.saveSyncedTo);
+    const synchronizedExtension = path.extname(options.saveSyncedTo).toLowerCase();
+    if (synchronizedExtension !== '.xlsm') {
+      throw new Error(
+        '--save-synced-to requires an .xlsm working-copy path; '
+          + 'saving live rows into the release .xltm template is forbidden',
+      );
+    }
+  }
   if (options.sync === undefined) {
     options.sync = path.extname(options.candidate).toLowerCase() === '.xltm';
   }
@@ -3247,7 +3256,10 @@ try {
             throw "Validated workbook destination directory does not exist: $saveParent"
         }
         $excel.EnableEvents = $false
-        $candidateBook.SaveAs([IO.Path]::GetFullPath($saveSyncedTo), 53)
+        # Persist synchronized runtime data only as a macro-enabled working
+        # workbook. File format 53 is XLTM and would bake live catalog rows
+        # into the supposedly data-empty release template.
+        $candidateBook.SaveAs([IO.Path]::GetFullPath($saveSyncedTo), 52)
         $report | Add-Member -NotePropertyName savedSynchronizedWorkbook -NotePropertyValue ([IO.Path]::GetFullPath($saveSyncedTo))
     }
 }
@@ -3999,6 +4011,52 @@ Start-Sleep -Seconds 60
   }
 }
 
+function assertReleaseTemplateIsDataFree(candidatePath) {
+  if (path.extname(candidatePath).toLowerCase() !== '.xltm') return;
+  const auditScript = path.join(
+    repoRoot,
+    'scripts',
+    'windows',
+    'Test-ExcelTemplateDataFree.ps1',
+  );
+  if (!fs.existsSync(auditScript)) {
+    throw new Error(`empty-template release gate is missing: ${auditScript}`);
+  }
+  const audit = spawnSync(
+    'powershell.exe',
+    [
+      '-NoLogo',
+      '-NoProfile',
+      '-NonInteractive',
+      '-ExecutionPolicy',
+      'Bypass',
+      '-File',
+      auditScript,
+      '-Path',
+      candidatePath,
+    ],
+    {
+      cwd: repoRoot,
+      encoding: 'utf8',
+      maxBuffer: 4 * 1024 * 1024,
+      timeout: 30000,
+      windowsHide: true,
+    },
+  );
+  if (audit.error) {
+    throw new Error(`empty-template audit could not run: ${audit.error.message}`);
+  }
+  if (audit.status !== 0) {
+    const detail = [audit.stderr, audit.stdout]
+      .map((value) => String(value || '').trim())
+      .filter(Boolean)
+      .join(' ');
+    throw new Error(
+      `release .xltm contains persisted product/runtime records${detail ? `: ${detail}` : ''}`,
+    );
+  }
+}
+
 function main() {
   let options;
   try {
@@ -4298,6 +4356,13 @@ function main() {
       process.exitCode = 2;
       return;
     }
+  }
+  try {
+    assertReleaseTemplateIsDataFree(options.candidate);
+  } catch (error) {
+    console.error(`Template data-free gate failed: ${error.message}`);
+    process.exitCode = 1;
+    return;
   }
 
   const tempDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'patris-excel-validator-'));
