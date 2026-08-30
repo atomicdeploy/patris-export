@@ -28,6 +28,18 @@ function Read-ZipText([IO.Compression.ZipArchive]$Archive, [string]$EntryName) {
     }
 }
 
+function Get-SHA256FileHex([string]$Path) {
+    $stream = [IO.File]::OpenRead($Path)
+    $sha256 = [Security.Cryptography.SHA256]::Create()
+    try {
+        return [BitConverter]::ToString($sha256.ComputeHash($stream)).Replace('-', '').ToLowerInvariant()
+    }
+    finally {
+        $sha256.Dispose()
+        $stream.Dispose()
+    }
+}
+
 function Resolve-PackagePart([string]$BasePart, [string]$Target) {
     if ([string]::IsNullOrWhiteSpace($Target)) {
         throw "Office package relationship from $BasePart has no target."
@@ -250,7 +262,7 @@ function Test-ExcelTemplateDataFree([string]$WorkbookPath) {
         return [pscustomobject]@{
             passed = $true
             path = $resolvedPath
-            sha256 = (Get-FileHash -LiteralPath $resolvedPath -Algorithm SHA256).Hash.ToLowerInvariant()
+            sha256 = Get-SHA256FileHex $resolvedPath
             product_records = 0
             runtime_records = 0
             tables = $reports
