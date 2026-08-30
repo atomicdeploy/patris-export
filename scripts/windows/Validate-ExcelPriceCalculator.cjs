@@ -333,6 +333,12 @@ function buildFailures(report, options) {
     report.pricingProgressUI === true,
     'the visible Persian progress surface lifecycle fixture failed',
   );
+  if (options.sync) {
+    failUnless(
+      report.pricingEventListenerActive === true,
+      'the durable Patris/WordPress event listener is not active after synchronization',
+    );
+  }
   failUnless(
     report.productImagePreviewUI === true,
     'the product image preview setting/layout/cache safety fixture failed',
@@ -2767,6 +2773,11 @@ try {
     $pricingWritebackUI = Test-PricingWritebackUI $excel $candidateBook
     Set-ValidatorStage 'checking_progress_ui'
     $pricingProgressUI = Test-PricingProgressUI $excel $candidateBook
+    Set-ValidatorStage 'checking_pricing_event_listener'
+    $eventMacroBookName = ([string]$candidateBook.Name).Replace("'", "''")
+    $pricingEventListenerActive = [bool]$excel.Run(
+        "'$eventMacroBookName'!ProductCatalogSync.PricingEventListenerActiveForValidation"
+    )
     Set-ValidatorStage 'checking_product_image_preview_ui'
     $productImagePreviewUI = Test-ProductImagePreviewUI $excel $candidateBook
     Set-ValidatorStage 'checking_product_search'
@@ -3182,6 +3193,7 @@ try {
         fontAudit = $fontAudit
         pricingWritebackUI = $pricingWritebackUI
         pricingProgressUI = $pricingProgressUI
+        pricingEventListenerActive = $pricingEventListenerActive
         productImagePreviewUI = $productImagePreviewUI
         searchRegression = $searchRegression
         transientPricePreview = $transientPricePreview

@@ -364,6 +364,7 @@ Public Sub ValidateWorkbook()
     ValidateFontPolicyRuntime
     ValidateStatusSummaryFormatter
     ValidateSearchLiteralRuntime
+    ValidateSearchSurfaceRuntime
     ValidateAsyncComponentsRuntime
     If Not ValidatePricingWritebackUIForValidation() Then
         Err.Raise vbObjectError + 771, "ValidateWorkbook", T("invalid_workbook")
@@ -384,6 +385,28 @@ Public Sub ValidateWorkbook()
        PriceSheet().Columns("K").ColumnWidth < 34# Then
         Err.Raise vbObjectError + 93, "ValidateWorkbook", T("invalid_workbook")
     End If
+End Sub
+
+Private Sub ValidateSearchSurfaceRuntime()
+    Dim searchAnchor As Range
+    Dim searchSurface As Range
+    Dim searchSheet As Worksheet
+
+    On Error GoTo InvalidSurface
+    Set searchAnchor = ThisWorkbook.Names( _
+        "ProductSearchQuery").RefersToRange
+    Set searchSurface = searchAnchor.MergeArea
+    Set searchSheet = PriceSheet()
+    If Not CBool(searchAnchor.MergeCells) Or _
+       Not searchAnchor.Worksheet Is searchSheet Or _
+       searchAnchor.Address(False, False) <> "C3" Or _
+       searchSurface.Address(False, False) <> "C3:E3" Or _
+       CStr(searchSurface.NumberFormat) <> "@" Then GoTo InvalidSurface
+    Exit Sub
+
+InvalidSurface:
+    Err.Raise vbObjectError + 772, "ValidateSearchSurfaceRuntime", _
+              T("invalid_workbook")
 End Sub
 
 Private Sub ValidateAsyncComponentsRuntime()

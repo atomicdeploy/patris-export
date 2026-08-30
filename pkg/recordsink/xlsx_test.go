@@ -857,6 +857,18 @@ func TestDynamicCalculatorTemplatesPreservePersianPriceListContracts(t *testing.
 				(searchStyle.CustomNumFmt == nil || *searchStyle.CustomNumFmt != "@") {
 				t.Fatalf("search input C3 number format = %+v, want literal text (@)", searchStyle)
 			}
+			priceMergeCells, mergeErr := book.GetMergeCells(priceSheet, true)
+			if mergeErr != nil {
+				t.Fatal(mergeErr)
+			}
+			priceMerges := make(map[string]bool, len(priceMergeCells))
+			for index := range priceMergeCells {
+				priceMerges[priceMergeCells[index].GetStartAxis()+":"+
+					priceMergeCells[index].GetEndAxis()] = true
+			}
+			if !priceMerges["C3:E3"] {
+				t.Fatalf("%s search input is not merged across C3:E3; merges=%v", priceSheet, priceMerges)
+			}
 
 			syncTables, syncTableErr := book.GetTables(syncSheet)
 			if syncTableErr != nil {
@@ -1476,6 +1488,7 @@ func TestDynamicCalculatorVBASourceGuardsLivePricingBeforeMutation(t *testing.T)
 		"Public Function AsyncPricingIdleForValidation() As Boolean",
 		"Public Function LastPricingOperationSucceededForValidation() As Boolean",
 		"ValidateAsyncComponentsRuntime",
+		"ValidateSearchSurfaceRuntime",
 		"ValidateProjectionIntegrityGuard",
 		"ProjectionIntegrityFixtureRejected",
 		"Private Function SafeStatusError",
@@ -2433,8 +2446,8 @@ func TestDynamicCalculatorBuilderStylesPersianButtonsAndChartText(t *testing.T) 
 		"$settings.Rows.Item(1).RowHeight = 60",
 		"$settings.Range('B5').Value2 = 'بله'",
 		"$priceList.Range('C3:E3').NumberFormat = '@'",
-		"$priceList.Range('C3:E3').UnMerge()",
-		"$priceList.Range('C3:E3').Borders.Item(11).LineStyle = -4142",
+		"$priceList.Range('C3:E3').Merge()",
+		"$priceList.Range('C3:E3').Interior.Color = ConvertTo-OleColor 'F7FBFF'",
 		"$searchButton.Name = 'ProductSearchButton'",
 		"$searchButton.AlternativeText = ",
 		"[void]$workbook.Names.Add($setting.Name, $settings.Range(\"B${row}\"))",

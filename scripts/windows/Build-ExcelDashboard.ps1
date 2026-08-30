@@ -842,27 +842,29 @@ try {
     $priceList.Range('E1').VerticalAlignment = -4108
     [void](Add-BrandLogo $priceList $LogoPath $priceList.Range('B1:B2') 190 43 $true)
 
-    $priceList.Rows(3).RowHeight = 32
+    $priceList.Rows(3).RowHeight = 34
     $priceList.Range('B3').Value2 = 'جست‌وجوی کالا (F2/F3)'
     $priceList.Range('B3').Font.Bold = $true
     $priceList.Range('B3').Font.Color = ConvertTo-OleColor '0168CD'
     $priceList.Range('B3').VerticalAlignment = -4108
-    # Keep the search surface visually wide without a merged cell. Merged cells
-    # reject ordinary paste/automation input with "can't do that to a merged
-    # cell" on some Office builds.
-    $priceList.Range('C3:E3').UnMerge()
+    # The search field is one deliberate presentation/input surface, not three
+    # independent cells. VBA always resolves edits and selection changes back
+    # to the C3 anchor so native Enter remains top-level and recursion-safe.
+    $priceList.Range('C3:E3').Merge()
     $priceList.Range('C3:E3').NumberFormat = '@'
-    $priceList.Range('C3:E3').Interior.Color = ConvertTo-OleColor 'FFFFFF'
+    $priceList.Range('C3:E3').Interior.Color = ConvertTo-OleColor 'F7FBFF'
     $priceList.Range('C3:E3').Borders.Color = ConvertTo-OleColor '0168CD'
     $priceList.Range('C3:E3').Borders.Weight = 2
-    $priceList.Range('C3:E3').Borders.Item(11).LineStyle = -4142
     $priceList.Range('C3').Font.Name = 'Yekan Bakh'
     $priceList.Range('C3').Font.Size = 12
-    $priceList.Range('C3').Font.Bold = $true
+    $priceList.Range('C3').Font.Bold = $false
     $priceList.Range('C3').Font.Color = ConvertTo-OleColor '2F414B'
     $priceList.Range('C3').HorizontalAlignment = -4152
     $priceList.Range('C3').VerticalAlignment = -4108
     $priceList.Range('C3').ReadingOrder = -5004
+    $priceList.Range('C3').IndentLevel = 1
+    $priceList.Range('C3').ShrinkToFit = $false
+    $priceList.Range('C3').WrapText = $false
     $priceList.Range('C3').Validation.Delete()
     $priceList.Range('C3').Validation.Add(0)
     $priceList.Range('C3').Validation.InputTitle = 'جست‌وجوی کالا'
