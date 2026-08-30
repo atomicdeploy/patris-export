@@ -1661,12 +1661,27 @@ func TestDynamicCalculatorVBASourceGuardsLivePricingBeforeMutation(t *testing.T)
 		}
 	}
 	for _, required := range []string{
+		"PRICING_REVISION_SCHEMA As String",
+		"Private Sub BeginRevisionProbeRequest()",
+		`PricingBaseURL() & "/revision"`,
+		`Case "revision"`,
+		"Private Sub HandleRevisionResponse",
+		"Private Function TryCompleteUnchangedRevision",
+		`settings.Range("G56").Value2`,
+		`SiteText(root, "pricing_state_revision")`,
+		`mOperationKind <> "refresh" Or mForceFreshSnapshot`,
+		"HasCoherentLocalCatalog()",
+		"StrictPriceParityMismatchCount() <> 0",
+		`mStatePageTimingText = "revision_noop="`,
+		"CompleteActiveOperation True",
 		"mSnapshotDatasetRevision As String",
+		"mSnapshotPricingStateRevision As String",
 		`datasetRevision = SiteText(identity, "catalog_revision")`,
 		"Private Function TryCompleteUnchangedSnapshot() As Boolean",
 		`mOperationKind <> "refresh" Or mForceFreshSnapshot`,
 		`settings.Range("G44").Value2`,
 		`settings.Range("G14").Value2`,
+		`settings.Range("G56").Value2`,
 		`settings.Range("G45").Value2`,
 		`settings.Range("G46").Value2`,
 		"HasCoherentLocalCatalog()",
@@ -1681,6 +1696,9 @@ func TestDynamicCalculatorVBASourceGuardsLivePricingBeforeMutation(t *testing.T)
 	}
 	if strings.Contains(section("Private Function TryCompleteUnchangedSnapshot", "Private Function RetrySnapshotAfterSourceDrift"), "BeginSnapshotPayloadRequest") {
 		t.Fatal("unchanged-revision fast path must finish before downloading the payload")
+	}
+	if !strings.Contains(section("Private Sub HandleSessionResponse", "Private Sub HandleRevisionResponse"), "BeginRevisionProbeRequest") {
+		t.Fatal("ordinary refresh must probe the verified revision before starting a snapshot")
 	}
 	if strings.Contains(refreshSource+beginRefreshSource, "ConfirmUnicodeMessage") {
 		t.Fatal("routine refresh status must remain inline and never open a modal dialog")

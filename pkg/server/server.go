@@ -268,6 +268,7 @@ func (s *Server) setupRoutes() {
 	// Pricing sync is a general-purpose integration surface. It is deliberately
 	// not named after any one client (Excel, spreadsheet, or otherwise).
 	s.router.HandleFunc("/api/pricing-sync/session", s.handlePostExcelPricingSession).Methods("POST")
+	s.router.HandleFunc("/api/pricing-sync/revision", s.handlePostExcelPricingRevision).Methods("POST")
 	s.router.HandleFunc("/api/pricing-sync/state", s.handlePostExcelPricingState).Methods("POST")
 	s.router.HandleFunc("/api/pricing-sync/preview", s.handlePostExcelPricingPreview).Methods("POST")
 	s.router.HandleFunc("/api/pricing-sync/apply", s.handlePostExcelPricingApply).Methods("POST")

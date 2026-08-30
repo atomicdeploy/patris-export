@@ -29,6 +29,7 @@ import (
 const (
 	excelPricingLocalRequestSchema  = "patris.excel-pricing-companion-request/v1"
 	excelPricingSessionSchema       = "patris.excel-pricing-companion-session/v1"
+	excelPricingRevisionSchema      = "patris.excel-pricing-companion-revision/v1"
 	excelPricingRemoteRequestSchema = "digitalogic.pricing-sync-request/v1"
 	excelPricingStateSchema         = "digitalogic.pricing-sync-state/v1"
 	excelPricingPreviewSchema       = "digitalogic.pricing-sync-preview/v1"
@@ -227,6 +228,85 @@ func (s *Server) handlePostExcelPricingSession(w http.ResponseWriter, r *http.Re
 
 func (s *Server) handlePostExcelPricingState(w http.ResponseWriter, r *http.Request) {
 	s.handleExcelPricingOperation(w, r, "state")
+}
+
+type excelPricingRevisionResponse struct {
+	Schema                string           `json:"schema"`
+	SchemaVersion         int              `json:"schema_version"`
+	Source                canonical.Source `json:"source"`
+	StateRevision         string           `json:"state_revision"`
+	PricingStateRevision  string           `json:"pricing_state_revision"`
+	PricingPolicyRevision string           `json:"pricing_policy_revision"`
+	CatalogRevision       string           `json:"catalog_revision"`
+	ETag                  string           `json:"etag"`
+}
+
+// handlePostExcelPricingRevision provides a small authenticated preflight for
+// unchanged consumers. It never substitutes a cached guess: the companion
+// verifies the current Patris source, then reads the protected WordPress
+// revision representation directly. Any missing, changed, or unverifiable
+// identity makes the workbook fall back to the full snapshot path.
+func (s *Server) handlePostExcelPricingRevision(w http.ResponseWriter, r *http.Request) {
+	setExcelPricingResponseHeaders(w)
+	if !excelPricingLocalRequestAllowed(r) ||
+		!singleHeaderEquals(r, excelPricingClientHeader, excelPricingClientID) ||
+		!s.excelPricing.authorizedSession(r) {
+		writeExcelPricingError(w, http.StatusForbidden, "local_session_required")
+		return
+	}
+	if !singleJSONContentType(r) {
+		writeExcelPricingError(w, http.StatusUnsupportedMediaType, "json_required")
+		return
+	}
+	var local excelPricingLocalRequest
+	if err := decodeBoundedJSON(w, r, excelPricingMaxRequestBytes, &local); err != nil {
+		writeExcelPricingError(w, http.StatusBadRequest, "invalid_request")
+		return
+	}
+	if err := validateExcelPricingLocalRequest(r, "revision", local); err != nil {
+		writeExcelPricingError(w, http.StatusBadRequest, "invalid_request")
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
+	defer cancel()
+	cfg := s.Config()
+	matches, err := s.excelPricingStateSourceMatches(ctx, local.Source, cfg)
+	if err != nil {
+		writeExcelPricingError(w, http.StatusServiceUnavailable, "canonical_source_unavailable")
+		return
+	}
+	if !matches {
+		writeExcelPricingError(w, http.StatusConflict, "canonical_source_mismatch")
+		return
+	}
+	client, err := newExcelPricingRemoteSnapshotClient(
+		cfg.SendUpdates,
+		*local.Source,
+		excelPricingRemoteSnapshotClientOptions{
+			HTTPClient: s.excelPricing.client,
+			Terminals:  newExcelPricingRemoteSnapshotTerminalHub(),
+		},
+	)
+	if err != nil {
+		writeExcelPricingError(w, http.StatusServiceUnavailable, "remote_not_configured")
+		return
+	}
+	revision, err := client.fetchRevision(ctx)
+	if err != nil {
+		writeExcelPricingError(w, http.StatusBadGateway, "revision_unavailable")
+		return
+	}
+	writeExcelPricingJSON(w, http.StatusOK, excelPricingRevisionResponse{
+		Schema:                excelPricingRevisionSchema,
+		SchemaVersion:         1,
+		Source:                *local.Source,
+		StateRevision:         revision.StateRevision,
+		PricingStateRevision:  revision.PricingStateRevision,
+		PricingPolicyRevision: revision.PricingPolicyRevision,
+		CatalogRevision:       revision.CatalogRevision,
+		ETag:                  revision.ETag,
+	})
 }
 
 func (s *Server) handlePostExcelPricingPreview(w http.ResponseWriter, r *http.Request) {
@@ -640,6 +720,17 @@ func validateExcelPricingLocalRequest(r *http.Request, operation string, request
 		return errors.New("request identity is invalid")
 	}
 	switch operation {
+	case "revision":
+		if len(request.ProductChanges) != 0 || request.Source == nil ||
+			strings.TrimSpace(request.Source.ID) == "" ||
+			strings.TrimSpace(request.Source.Dataset) == "" ||
+			!isSHA256Revision(request.Source.Revision) || request.Page != 0 ||
+			request.Limit != 0 || request.Locale != "" || request.Projection != "" ||
+			request.IdempotencyKey != "" || request.ExpectedStateRevision != "" ||
+			request.Settings != nil || request.PreviewDigest != "" ||
+			request.Confirmation != "" {
+			return errors.New("revision request is invalid")
+		}
 	case "state":
 		if len(request.ProductChanges) != 0 {
 			return errors.New("state request has product changes")

@@ -1037,6 +1037,110 @@ func validExcelPricingStateBody(source canonical.Source, page, limit int) string
 	return string(encoded)
 }
 
+func validExcelPricingRevisionBody(source canonical.Source) string {
+	payload := map[string]interface{}{
+		"schema":         excelPricingLocalRequestSchema,
+		"schema_version": 1,
+		"operation":      "revision",
+		"client_id":      excelPricingContractClientID,
+		"channel":        excelPricingContractChannel,
+		"request_id":     "excel-revision-test-0001",
+		"source":         source,
+	}
+	encoded, _ := json.Marshal(payload)
+	return string(encoded)
+}
+
+func TestExcelPricingRevisionProbeReadsProtectedCurrentIdentity(t *testing.T) {
+	fixture := newExcelPricingRemoteSnapshotFixture(t, "")
+	defer fixture.Close()
+	source := excelPricingStateSourceForTest()
+	fixture.source = source
+	fixture.revision.Source = source
+
+	server := newExcelPricingTestServer(
+		t,
+		fixture.server.URL+"/wp-json/digitalogic/product-sync",
+	)
+	t.Setenv("PATRIS_TEST_EXCEL_PRICING_SECRET", "test-remote-snapshot-secret-value")
+	server.excelPricing.canonical = canonicalProjectionSequence(source)
+	token := openExcelPricingSession(t, server)
+	request := authenticatedExcelPricingRequest(
+		http.MethodPost,
+		"/api/pricing-sync/revision",
+		validExcelPricingRevisionBody(source),
+		token,
+	)
+	response := httptest.NewRecorder()
+	server.router.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("revision status=%d: %s", response.Code, response.Body.String())
+	}
+	var payload excelPricingRevisionResponse
+	if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.Schema != excelPricingRevisionSchema || payload.SchemaVersion != 1 ||
+		payload.Source != source || payload.StateRevision != fixture.revision.StateRevision ||
+		payload.PricingStateRevision != fixture.revision.PricingStateRevision ||
+		payload.PricingPolicyRevision != fixture.revision.PricingPolicyRevision ||
+		payload.CatalogRevision != fixture.revision.CatalogRevision ||
+		payload.ETag != `"`+fixture.revision.StateRevision+`"` {
+		t.Fatalf("unexpected revision response: %+v", payload)
+	}
+	fixture.mu.Lock()
+	revisionCalls := fixture.revisionCalls
+	fixture.mu.Unlock()
+	if revisionCalls != 1 {
+		t.Fatalf("remote revision calls=%d, want 1", revisionCalls)
+	}
+}
+
+func TestExcelPricingRevisionProbeFailsClosed(t *testing.T) {
+	remoteCalls := atomic.Int32{}
+	remote := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		remoteCalls.Add(1)
+		http.Error(w, "unavailable", http.StatusServiceUnavailable)
+	}))
+	defer remote.Close()
+	source := excelPricingStateSourceForTest()
+	server := newExcelPricingTestServer(t, remote.URL+"/wp-json/digitalogic/product-sync")
+	server.excelPricing.canonical = canonicalProjectionSequence(source)
+	token := openExcelPricingSession(t, server)
+
+	request := authenticatedExcelPricingRequest(
+		http.MethodPost,
+		"/api/pricing-sync/revision",
+		validExcelPricingRevisionBody(source),
+		token,
+	)
+	response := httptest.NewRecorder()
+	server.router.ServeHTTP(response, request)
+	if response.Code != http.StatusBadGateway ||
+		!strings.Contains(response.Body.String(), "revision_unavailable") ||
+		remoteCalls.Load() != 1 {
+		t.Fatalf("unexpected failed-closed response status=%d calls=%d body=%s",
+			response.Code, remoteCalls.Load(), response.Body.String())
+	}
+
+	wrong := source
+	wrong.Revision = excelPricingRevisionForTest("wrong-source")
+	request = authenticatedExcelPricingRequest(
+		http.MethodPost,
+		"/api/pricing-sync/revision",
+		validExcelPricingRevisionBody(wrong),
+		token,
+	)
+	response = httptest.NewRecorder()
+	server.router.ServeHTTP(response, request)
+	if response.Code != http.StatusConflict ||
+		!strings.Contains(response.Body.String(), "canonical_source_mismatch") ||
+		remoteCalls.Load() != 1 {
+		t.Fatalf("source mismatch reached remote: status=%d calls=%d body=%s",
+			response.Code, remoteCalls.Load(), response.Body.String())
+	}
+}
+
 func jsonMapForTest(t *testing.T, value interface{}) map[string]interface{} {
 	t.Helper()
 	encoded, err := json.Marshal(value)

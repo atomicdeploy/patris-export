@@ -26,6 +26,14 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - `FOROSH` is no longer conflated with Patris' partner price. The producer reads
   partner price from the first `Sharh1` slot while retaining `FOROSH` as the
   separate sale-price fact.
+
+## [1.3.3] - 2026-08-30
+
+- Add a bounded authenticated revision probe so an unchanged Excel catalog can
+  finish without starting a remote snapshot build. The workbook persists and
+  compares the composite, pricing, catalog, and Patris source revisions plus
+  its local row/coherence/parity gates; changed or unverifiable state still
+  falls back to the complete fail-closed snapshot.
 ## [1.3.2] - 2026-08-30
 
 - Complete ordinary Excel refreshes as a bounded no-op when the authenticated
