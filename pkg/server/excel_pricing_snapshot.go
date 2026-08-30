@@ -33,10 +33,15 @@ const (
 	excelPricingSnapshotStageLocalProjection     = "local_projection"
 	excelPricingSnapshotEventSchema              = "patris.pricing-state-event/v1"
 
-	excelPricingSnapshotPageSize         = 250
-	excelPricingSnapshotMaxPages         = 8
-	excelPricingSnapshotRetryAfterMS     = 1000
-	excelPricingSnapshotMaxCacheAge      = 5 * time.Minute
+	excelPricingSnapshotPageSize     = 250
+	excelPricingSnapshotMaxPages     = 8
+	excelPricingSnapshotRetryAfterMS = 1000
+	// Product rows are cached only in this process and are reusable only while
+	// the authenticated event bridge verifies the exact source/state/catalog
+	// tuple. Keeping that revision-fenced projection for a workday prevents an
+	// empty production template from rebuilding the same 1,000+ row snapshot on
+	// every open; an event, reconnect gap, or process restart still fails closed.
+	excelPricingSnapshotMaxCacheAge      = 24 * time.Hour
 	excelPricingSnapshotRetention        = 15 * time.Minute
 	excelPricingSnapshotOperationTimeout = 8 * time.Minute
 	excelPricingSnapshotHeartbeat        = time.Second

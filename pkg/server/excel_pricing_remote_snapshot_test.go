@@ -46,6 +46,7 @@ type excelPricingRemoteSnapshotFixture struct {
 	mu                      sync.Mutex
 	revisionCalls           int
 	startCalls              int
+	startMaxAgeSeconds      int
 	bulkCalls               int
 	statusCalls             int
 	cancelCalls             int
@@ -114,6 +115,27 @@ func TestExcelPricingRemoteSnapshotReadyUsesOneBulkFetchWithoutStatusPolling(t *
 		t.Fatalf("projected row = %s", result.ProjectedRows[0])
 	}
 	fixture.assertCalls(t, 1, 1, 1, 0, 0)
+}
+
+func TestExcelPricingRemoteSnapshotCapsProviderCacheAgeForLongLocalReuse(t *testing.T) {
+	fixture := newExcelPricingRemoteSnapshotFixture(t, "ready")
+	defer fixture.Close()
+
+	client := fixture.Client(t)
+	if _, err := client.Collect(
+		context.Background(),
+		fixture.requestID,
+		int(excelPricingSnapshotMaxCacheAge/time.Second),
+	); err != nil {
+		t.Fatalf("Collect() error = %v", err)
+	}
+	fixture.mu.Lock()
+	providerAge := fixture.startMaxAgeSeconds
+	fixture.mu.Unlock()
+	if providerAge != int(excelPricingRemoteSnapshotMaxAge/time.Second) {
+		t.Fatalf("provider max_age_seconds=%d, want %d", providerAge,
+			int(excelPricingRemoteSnapshotMaxAge/time.Second))
+	}
 }
 
 func TestExcelPricingRemoteSnapshotColdTerminalEventCannotRacePOST(t *testing.T) {
@@ -1600,6 +1622,9 @@ func (fixture *excelPricingRemoteSnapshotFixture) handle(w http.ResponseWriter, 
 			http.Error(w, "bad start", http.StatusBadRequest)
 			return
 		}
+		fixture.mu.Lock()
+		fixture.startMaxAgeSeconds = request.MaxAgeSeconds
+		fixture.mu.Unlock()
 		if fixture.acceptAnyID {
 			fixture.mu.Lock()
 			fixture.requestID = request.RequestID

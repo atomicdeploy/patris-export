@@ -13,7 +13,7 @@ Private Const MAX_STATE_PAGES As Long = 8
 Private Const MAX_SNAPSHOT_ROWS As Long = 2000
 Private Const HTTP_TIMEOUT_MS As Long = 150000
 Private Const PRICING_HTTP_TIMEOUT_MS As Long = 600000
-Private Const SNAPSHOT_WAIT_TIMEOUT_MS As Long = 120000
+Private Const SNAPSHOT_WAIT_TIMEOUT_MS As Long = 360000
 Private Const MAX_REFRESH_WALL_SECONDS As Double = 125#
 Private Const OPEN_REFRESH_DELAY_SECONDS As Long = 2
 Private Const SEARCH_DELAY_SECONDS As Double = 0.55
@@ -88,7 +88,10 @@ Private Const SNAPSHOT_FIELD_IMAGE_URL As Long = 27
 ' consecutive refreshes; changed revisions still force the full fail-closed
 ' path, while the companion additionally requires a live verified revision
 ' before it reuses its own in-process copy.
-Private Const PRICING_SNAPSHOT_CACHE_SECONDS As Long = 300
+' The companion stores only a revision-fenced in-memory projection. This does
+' not persist product rows in the template or on disk; any event/disconnect
+' makes the cache ineligible until the live composite is authenticated again.
+Private Const PRICING_SNAPSHOT_CACHE_SECONDS As Long = 86400
 Private Const PRICE_ROUNDING_MODE As String = "nearest_half_up"
 Private Const LOOPBACK_PREFIX As String = "http://127.0.0.1:18080/"
 Private Const SEARCH_BUTTON_SHAPE As String = "ProductSearchButton"

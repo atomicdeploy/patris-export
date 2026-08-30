@@ -1720,7 +1720,8 @@ func TestDynamicCalculatorVBASourceGuardsLivePricingBeforeMutation(t *testing.T)
 		t.Fatal("Enter must remain native; rebinding it can recurse through selection events and exhaust Excel's VBA stack")
 	}
 	for _, required := range []string{
-		"Private Const SNAPSHOT_WAIT_TIMEOUT_MS As Long = 120000",
+		"Private Const SNAPSHOT_WAIT_TIMEOUT_MS As Long = 360000",
+		"Private Const PRICING_SNAPSHOT_CACHE_SECONDS As Long = 86400",
 		"Private Const MAX_REFRESH_WALL_SECONDS As Double = 125#",
 		"Private Const SEARCH_DELAY_SECONDS As Double = 0.55",
 		"Private Sub RestoreExcelInteractivityAfterOperation()",
