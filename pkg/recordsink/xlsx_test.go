@@ -1445,7 +1445,7 @@ func TestDynamicCalculatorVBASourceGuardsLivePricingBeforeMutation(t *testing.T)
 		`Case "warning": fillColor = RGB(255, 242, 204)`,
 		"Private Sub MarkRefreshPricingConvergenceState()",
 		`If completedKind = "refresh" Then MarkRefreshPricingConvergenceState`,
-		`priceSheet.Range("M7").Calculate`,
+		`productsSheet.Range("M7").Calculate`,
 		"Private Function RefreshPricingConvergenceIssue(",
 		`RefreshPricingConvergenceIssue = "rate_mismatch=" & _`,
 		`MarkWritebackState "site_confirmation", "confirmed", noteText`,

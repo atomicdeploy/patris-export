@@ -2425,7 +2425,7 @@ End Sub
 
 Private Sub MarkRefreshPricingConvergenceState()
     Dim settings As Worksheet
-    Dim priceSheet As Worksheet
+    Dim productsSheet As Worksheet
     Dim confirmedRate As Double
     Dim noteText As String
     Dim guardIssue As String
@@ -2434,13 +2434,13 @@ Private Sub MarkRefreshPricingConvergenceState()
 
     On Error GoTo WarnState
     Set settings = ConfigSheet()
-    Set priceSheet = PriceSheet()
+    Set productsSheet = PriceSheet()
     ' M7 is a visible formula mirror of G18. A snapshot commit can finish while
     ' Excel still exposes its pre-calculation value, producing a false warning
     ' even though all authoritative rates already agree. Calculate the one
     ' bounded consumer cell before evaluating the fail-closed guard.
-    priceSheet.Range("M7").Calculate
-    guardIssue = RefreshPricingConvergenceIssue(settings, priceSheet)
+    productsSheet.Range("M7").Calculate
+    guardIssue = RefreshPricingConvergenceIssue(settings, productsSheet)
     If Len(guardIssue) > 0 Then GoTo WarnState
     confirmedRate = CDbl(settings.Range("B10").Value2)
     noteText = U("0647064506AF06270645200C06330627063206CC002006280627002006480628200C0633062706CC062A0020062A062306CC06CC062F00200634062F") & _
@@ -2467,7 +2467,7 @@ WarnState:
 End Sub
 
 Private Function RefreshPricingConvergenceIssue( _
-    ByVal settings As Worksheet, ByVal priceSheet As Worksheet) As String
+    ByVal settings As Worksheet, ByVal productsSheet As Worksheet) As String
     Dim confirmedRate As Double
 
     On Error GoTo GuardError
@@ -2483,7 +2483,7 @@ Private Function RefreshPricingConvergenceIssue( _
         RefreshPricingConvergenceIssue = "non_numeric=G18"
         Exit Function
     End If
-    If Not IsNumeric(priceSheet.Range("M7").Value2) Then
+    If Not IsNumeric(productsSheet.Range("M7").Value2) Then
         RefreshPricingConvergenceIssue = "non_numeric=M7"
         Exit Function
     End If
@@ -2495,12 +2495,12 @@ Private Function RefreshPricingConvergenceIssue( _
     End If
     If CDbl(settings.Range("B18").Value2) <> confirmedRate Or _
        CDbl(settings.Range("G18").Value2) <> confirmedRate Or _
-       CDbl(priceSheet.Range("M7").Value2) <> confirmedRate Then
+       CDbl(productsSheet.Range("M7").Value2) <> confirmedRate Then
         RefreshPricingConvergenceIssue = "rate_mismatch=" & _
             "B10:" & CanonicalCellText(settings.Range("B10").Value2) & _
             ";B18:" & CanonicalCellText(settings.Range("B18").Value2) & _
             ";G18:" & CanonicalCellText(settings.Range("G18").Value2) & _
-            ";M7:" & CanonicalCellText(priceSheet.Range("M7").Value2)
+            ";M7:" & CanonicalCellText(productsSheet.Range("M7").Value2)
         Exit Function
     End If
     If Not IsSHA256RevisionText(CStr(settings.Range("G14").Value2)) Then

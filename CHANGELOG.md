@@ -27,6 +27,12 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   partner price from the first `Sharh1` slot while retaining `FOROSH` as the
   separate sale-price fact.
 
+## [1.3.9] - 2026-08-30
+
+- Avoid the VBA case-insensitive `priceSheet`/`PriceSheet()` name collision so
+  the refresh convergence guard reads the actual products sheet instead of an
+  uninitialized object.
+
 ## [1.3.8] - 2026-08-30
 
 - Recalculate the visible CNY mirror before marking refresh convergence, retain
