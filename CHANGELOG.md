@@ -27,6 +27,12 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   partner price from the first `Sharh1` slot while retaining `FOROSH` as the
   separate sale-price fact.
 
+## [1.3.4] - 2026-08-30
+
+- Preserve and drain completed asynchronous Excel requests when
+  `Application.OnTime` is transiently rejected by a simultaneous top-level
+  product search, instead of failing an otherwise healthy background refresh.
+
 ## [1.3.3] - 2026-08-30
 
 - Add a bounded authenticated revision probe so an unchanged Excel catalog can
