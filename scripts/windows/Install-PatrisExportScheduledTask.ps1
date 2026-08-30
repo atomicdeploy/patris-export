@@ -95,6 +95,67 @@ function Get-DefaultProcessStatePath {
 
 $processStatePath = Get-DefaultProcessStatePath -ExecutablePath $exe
 
+function New-PatrisTransientProcessStateException {
+    param(
+        [Parameter(Mandatory = $true)][string]$Message,
+        [AllowNull()][Exception]$InnerException = $null
+    )
+
+    $exception = if ($InnerException) {
+        [InvalidOperationException]::new($Message, $InnerException)
+    } else {
+        [InvalidOperationException]::new($Message)
+    }
+    $exception.Data["PatrisTransientProcessStateObservation"] = $true
+    return $exception
+}
+
+function Test-PatrisTransientProcessStateError {
+    param([Parameter(Mandatory = $true)]$ErrorRecord)
+
+    $exception = if ($ErrorRecord -is [Management.Automation.ErrorRecord]) {
+        $ErrorRecord.Exception
+    } elseif ($ErrorRecord -is [Exception]) {
+        $ErrorRecord
+    } else {
+        $null
+    }
+    while ($exception) {
+        if ($exception.Data["PatrisTransientProcessStateObservation"] -eq $true) {
+            return $true
+        }
+        $exception = $exception.InnerException
+    }
+    return $false
+}
+
+function Read-PatrisProcessState {
+    param([switch]$AllowTransientObservation)
+
+    try {
+        $stateJson = Get-Content -LiteralPath $processStatePath -Raw -ErrorAction Stop
+    } catch {
+        $exception = $_.Exception
+        $transientReadFailure = $exception -is [IO.IOException] -or
+            $exception -is [Management.Automation.ItemNotFoundException]
+        while (-not $transientReadFailure -and $exception.InnerException) {
+            $exception = $exception.InnerException
+            $transientReadFailure = $exception -is [IO.IOException] -or
+                $exception -is [Management.Automation.ItemNotFoundException]
+        }
+        if ($AllowTransientObservation -and $transientReadFailure) {
+            throw (New-PatrisTransientProcessStateException `
+                -Message "Scheduled-task process state is temporarily unreadable during startup." `
+                -InnerException $_.Exception)
+        }
+        throw
+    }
+
+    # Parsing and contract validation are deliberately outside the transient
+    # read classification. Stable malformed or foreign state must fail closed.
+    return $stateJson | ConvertFrom-Json -ErrorAction Stop
+}
+
 function Get-PatrisTask {
     Get-ScheduledTask -TaskName $TaskName -TaskPath $TaskPath -ErrorAction SilentlyContinue
 }
@@ -130,7 +191,10 @@ function New-PatrisProcessIdentity {
 }
 
 function Get-PatrisProcessIdentityById {
-    param([Parameter(Mandatory = $true)][int]$ProcessId)
+    param(
+        [Parameter(Mandatory = $true)][int]$ProcessId,
+        [switch]$AllowTransientObservation
+    )
 
     for ($attempt = 0; $attempt -lt 2; $attempt++) {
         $process = Get-Process -Id $ProcessId -ErrorAction SilentlyContinue
@@ -144,6 +208,11 @@ function Get-PatrisProcessIdentityById {
                 return $null
             }
             if ($attempt -eq 1) {
+                if ($AllowTransientObservation) {
+                    throw (New-PatrisTransientProcessStateException `
+                        -Message "The live process identity is temporarily unavailable during startup." `
+                        -InnerException $_.Exception)
+                }
                 throw "Unable to verify the identity of live process $ProcessId."
             }
         }
@@ -180,11 +249,14 @@ function Test-PatrisOwnedTaskAction {
 }
 
 function Get-PatrisTrackedDeploymentProcess {
+    param([switch]$AllowTransientObservation)
+
     if (-not (Test-Path -LiteralPath $processStatePath -PathType Leaf)) {
         return @()
     }
     try {
-        $state = Get-Content -LiteralPath $processStatePath -Raw | ConvertFrom-Json
+        $state = Read-PatrisProcessState `
+            -AllowTransientObservation:$AllowTransientObservation
         $schemaVersion = [int]$state.schema_version
         if ([string]$state.schema -ne "patris.scheduled-task-process" -or
             $schemaVersion -notin @(1, 2) -or
@@ -206,20 +278,44 @@ function Get-PatrisTrackedDeploymentProcess {
             $launcherStart = ConvertTo-PatrisUtcInstant -Value (
                 $state.launcher_start_time_utc
             )
-            $launcherIdentity = Get-PatrisProcessIdentityById -ProcessId ([int]$state.launcher_pid)
-            $launcherMatches = $launcherIdentity -and
-                $launcherIdentity.StartTimeUtc.Ticks -eq $launcherStart.UtcTicks
+            $launcherIdentity = Get-PatrisProcessIdentityById `
+                -ProcessId ([int]$state.launcher_pid) `
+                -AllowTransientObservation:$AllowTransientObservation
+            if ($launcherIdentity -and
+                $launcherIdentity.StartTimeUtc.Ticks -ne $launcherStart.UtcTicks) {
+                throw "stale or reused launcher process identity"
+            }
+            if (-not $launcherIdentity -and $AllowTransientObservation) {
+                throw (New-PatrisTransientProcessStateException `
+                    -Message "The reserved launcher identity is temporarily unavailable during startup.")
+            }
+            $launcherMatches = [bool]$launcherIdentity
             $reservedChildren = @()
-            foreach ($candidate in @(
-                Get-CimInstance Win32_Process -Filter (
-                    "ParentProcessId = {0}" -f [int]$state.launcher_pid
-                ) -ErrorAction Stop
-            )) {
+            try {
+                $childCandidates = @(
+                    Get-CimInstance Win32_Process -Filter (
+                        "ParentProcessId = {0}" -f [int]$state.launcher_pid
+                    ) -ErrorAction Stop
+                )
+            } catch {
+                if ($AllowTransientObservation) {
+                    throw (New-PatrisTransientProcessStateException `
+                        -Message "Scheduled-task child identity enumeration is temporarily unavailable during startup." `
+                        -InnerException $_.Exception)
+                }
+                throw
+            }
+            foreach ($candidate in $childCandidates) {
                 try {
                     $candidatePath = [IO.Path]::GetFullPath([string]$candidate.ExecutablePath)
                 } catch {
                     if (-not (Get-Process -Id ([int]$candidate.ProcessId) -ErrorAction SilentlyContinue)) {
                         continue
+                    }
+                    if ($AllowTransientObservation) {
+                        throw (New-PatrisTransientProcessStateException `
+                            -Message "A reserved child path is temporarily unavailable during startup." `
+                            -InnerException $_.Exception)
                     }
                     throw "unable to verify reserved child path"
                 }
@@ -241,7 +337,9 @@ function Get-PatrisTrackedDeploymentProcess {
                     ) -lt 0) {
                     throw "reserved child command does not match the managed server"
                 }
-                $identity = Get-PatrisProcessIdentityById -ProcessId ([int]$candidate.ProcessId)
+                $identity = Get-PatrisProcessIdentityById `
+                    -ProcessId ([int]$candidate.ProcessId) `
+                    -AllowTransientObservation:$AllowTransientObservation
                 if (-not $identity -or $identity.StartTimeUtc -lt $launcherStart) {
                     continue
                 }
@@ -268,7 +366,9 @@ function Get-PatrisTrackedDeploymentProcess {
             ($schemaVersion -eq 2 -and [string]$state.status -ne "running")) {
             throw "invalid running state"
         }
-        $identity = Get-PatrisProcessIdentityById -ProcessId ([int]$state.pid)
+        $identity = Get-PatrisProcessIdentityById `
+            -ProcessId ([int]$state.pid) `
+            -AllowTransientObservation:$AllowTransientObservation
         if ($identity) {
             $recordedStart = ConvertTo-PatrisUtcInstant -Value $state.start_time_utc
             if (-not $identity.Executable.Equals(
@@ -279,10 +379,20 @@ function Get-PatrisTrackedDeploymentProcess {
             }
             return @($identity)
         }
+        if ($AllowTransientObservation) {
+            throw (New-PatrisTransientProcessStateException `
+                -Message "The recorded child identity is temporarily unavailable during startup.")
+        }
         Remove-Item -LiteralPath $processStatePath -Force -ErrorAction Stop
         return @()
     } catch {
-        throw "Scheduled-task process state is invalid; refusing to terminate a process: $processStatePath"
+        if (Test-PatrisTransientProcessStateError -ErrorRecord $_) {
+            throw $_.Exception
+        }
+        throw (
+            "Scheduled-task process state is invalid ({0}); refusing to terminate a " +
+            "process: {1}"
+        ) -f @($_.Exception.Message, $processStatePath)
     }
 }
 
@@ -334,9 +444,15 @@ function Get-PatrisLegacyTaskChildProcess {
 }
 
 function Get-PatrisManagedProcessSnapshot {
-    param($Task)
+    param(
+        $Task,
+        [switch]$AllowTransientObservation
+    )
 
-    $tracked = @(Get-PatrisTrackedDeploymentProcess)
+    $tracked = @(
+        Get-PatrisTrackedDeploymentProcess `
+            -AllowTransientObservation:$AllowTransientObservation
+    )
     if ($tracked.Count -gt 0) {
         return $tracked
     }
@@ -409,7 +525,19 @@ function Wait-PatrisTaskStarted {
             $sawActiveTask = $true
         }
 
-        $managedProcesses = @(Get-PatrisManagedProcessSnapshot -Task $currentTask)
+        $managedProcesses = @()
+        try {
+            $managedProcesses = @(
+                Get-PatrisManagedProcessSnapshot `
+                    -Task $currentTask `
+                    -AllowTransientObservation:$activeTask
+            )
+        } catch {
+            if (-not $activeTask -or
+                -not (Test-PatrisTransientProcessStateError -ErrorRecord $_)) {
+                throw
+            }
+        }
         if ($managedProcesses.Count -gt 1) {
             throw "The scheduled task exposed multiple verified Patris Export child processes during $Operation."
         }
