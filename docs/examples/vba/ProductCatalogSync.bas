@@ -1390,8 +1390,10 @@ Public Sub KickQueuedAsyncDispatch()
     End If
 
     ' This entrypoint is called only from normal Excel workbook/input events,
-    ' never from a WinHTTP callback. It is the deterministic non-polling fault
-    ' handoff if Excel rejected the callback's one-shot OnTime request.
+    ' never from a WinHTTP callback. It is the deterministic non-polling
+    ' handoff if Excel transiently rejected the callback's one-shot OnTime
+    ' request while another top-level macro (for example product search) was
+    ' running.
     If hasPendingDispatch And Not mAsyncDispatchActive And _
        Not mAsyncDispatchScheduled Then
         If mAsyncDispatchErrorNumber <> 0 Then
@@ -1436,17 +1438,11 @@ Public Sub DispatchQueuedAsyncRequests()
     On Error GoTo DispatchFailed
     mAsyncDispatchActive = True
     If mAsyncDispatchErrorNumber <> 0 Then
-        If Len(mOperationKind) > 0 Then
-            pendingToken = mAsyncDispatchErrorNumber
-            mAsyncDispatchErrorNumber = 0
-            If Not mAsyncDispatchPending Is Nothing Then _
-                mAsyncDispatchPending.RemoveAll
-            FailActiveOperation pendingToken, _
-                "ScheduleQueuedAsyncDispatch", _
-                mAsyncDispatchErrorDescription
-            mAsyncDispatchErrorDescription = vbNullString
-            GoTo DispatchExit
-        End If
+        ' Application.OnTime may reject a callback only because Excel is busy
+        ' in another top-level macro. Reaching this public entrypoint proves
+        ' Excel is callable again, so keep the completed request tokens and
+        ' drain them here instead of turning a transient scheduler collision
+        ' into a failed refresh.
         mAsyncDispatchErrorNumber = 0
         mAsyncDispatchErrorDescription = vbNullString
     End If

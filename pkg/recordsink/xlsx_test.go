@@ -1135,12 +1135,18 @@ func TestDynamicCalculatorVBASourceGuardsLivePricingBeforeMutation(t *testing.T)
 	dispatchHandler := section("Public Sub DispatchQueuedAsyncRequests", "Private Sub CancelQueuedAsyncDispatch")
 	for _, required := range []string{
 		"mAsyncDispatchErrorNumber",
-		"FailActiveOperation pendingToken",
+		"mAsyncDispatchErrorNumber = 0",
+		"mAsyncDispatchErrorDescription = vbNullString",
 		"DispatchAsyncRequest pendingToken",
 	} {
 		if !strings.Contains(dispatchHandler, required) {
 			t.Fatalf("deferred async dispatcher is missing post-callback handling: %s", required)
 		}
+	}
+	scheduleFailureHandler := section("    If mAsyncDispatchErrorNumber <> 0 Then", "    End If")
+	if strings.Contains(scheduleFailureHandler, "FailActiveOperation") ||
+		strings.Contains(scheduleFailureHandler, "mAsyncDispatchPending.RemoveAll") {
+		t.Fatal("a transient OnTime collision must preserve and drain completed requests")
 	}
 	payloadHandler := section("Private Sub HandleSnapshotPayloadResponse", "Private Sub HandlePreviewResponse")
 	rawHashPosition := strings.Index(payloadHandler, "SHA256RevisionBytes(responseBody)")
