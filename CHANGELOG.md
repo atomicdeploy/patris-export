@@ -27,6 +27,14 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   partner price from the first `Sharh1` slot while retaining `FOROSH` as the
   separate sale-price fact.
 
+## [1.3.6] - 2026-08-30
+
+- Keep unchanged Excel refreshes on the verified revision fast path by treating
+  the upstream composite catalog revision and the reconciled workbook dataset
+  revision as separate identities; the strong composite state ETag, pricing
+  revision, source identity, row count, local coherence, and price parity remain
+  mandatory fail-closed guards.
+
 ## [1.3.5] - 2026-08-30
 
 - Retry transient Excel catalog snapshot bridge failures within the existing

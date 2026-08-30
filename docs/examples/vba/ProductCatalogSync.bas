@@ -1917,11 +1917,16 @@ Private Function TryCompleteUnchangedRevision( _
            stateRevision, vbBinaryCompare) <> 0 Or _
        StrComp(Trim$(CStr(settings.Range("G14").Value2)), _
            pricingStateRevision, vbBinaryCompare) <> 0 Or _
-       StrComp(Trim$(CStr(settings.Range("G44").Value2)), _
-           catalogRevision, vbBinaryCompare) <> 0 Or _
        StrComp(Trim$(CStr(settings.Range("G45").Value2)), _
            mSourceRevision, vbBinaryCompare) <> 0 Or _
        CLng(Val(CStr(settings.Range("G46").Value2))) <= 0 Then Exit Function
+    ' catalogRevision is the upstream composite catalog identity. G44 stores
+    ' the reconciled Excel dataset revision instead, so comparing those two
+    ' distinct typed identities makes every unchanged refresh fall through to
+    ' a full snapshot. The strong state ETag already binds the composite
+    ' pricing/catalog state; retain the separately typed pricing/source/count
+    ' and local-coherence guards here, while G44 remains guarded against the
+    ' snapshot dataset revision in TryCompleteUnchangedSnapshot.
     If Not HasCoherentLocalCatalog() Or _
        CBool(settings.Range("G31").Value2) Or _
        StrictPriceParityMismatchCount() <> 0 Then Exit Function
