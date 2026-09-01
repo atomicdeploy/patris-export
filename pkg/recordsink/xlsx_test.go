@@ -2621,10 +2621,16 @@ func TestDynamicCalculatorValidatorHandlesEmptyProductTable(t *testing.T) {
 		`PATRIS_VALIDATOR_TIMEOUT_MS`,
 		`VALIDATOR_HOST_STARTUP_CLEANUP_GRACE_MS`,
 		`foreach ($fixture in @('2.4', '25.40', '12/3', '01.02', '001234'`,
+		`[void]$excel.Goto($priceCell, $false)`,
+		`$neutralCell = $sheet.Range('C3')`,
+		`$expected = -5002`,
 	} {
 		if !strings.Contains(source, required) {
 			t.Fatalf("native validator is missing the empty-table guard: %s", required)
 		}
+	}
+	if strings.Contains(source, `[void]$priceCell.Select()`) {
+		t.Fatal("native validator must not depend on Range.Select in hidden Excel")
 	}
 	validatorMainStart := strings.LastIndex(source, `function main() {`)
 	validatorResultErrorRelative := -1
@@ -2677,6 +2683,7 @@ func TestDynamicCalculatorValidatorHandlesEmptyProductTable(t *testing.T) {
 	releaseReference := strings.LastIndex(mainPowerShell, `Release-ComObject $referenceBook`)
 	closeCandidate := strings.LastIndex(mainPowerShell, `$candidateBook.Close($false)`)
 	releaseCandidate := strings.LastIndex(mainPowerShell, `Release-ComObject $candidateBook`)
+	releaseWorkbooks := strings.LastIndex(mainPowerShell, `Release-ComObject $workbooks`)
 	quitExcel := strings.LastIndex(mainPowerShell, `$excel.Quit()`)
 	releaseExcel := strings.LastIndex(mainPowerShell, `Release-ComObject $excel`)
 	waitForProcess := strings.LastIndex(mainPowerShell, `$exitResult = Wait-ValidatorProcessExit $excelProcessIdentity 15000 @(0)`)
@@ -2693,7 +2700,7 @@ func TestDynamicCalculatorValidatorHandlesEmptyProductTable(t *testing.T) {
 			firstWorkbooksUse = runtimeStart + firstWorkbooksUseRelative
 		}
 	}
-	if closeReference < 0 || releaseReference < 0 || closeCandidate < 0 || releaseCandidate < 0 ||
+	if closeReference < 0 || releaseReference < 0 || closeCandidate < 0 || releaseCandidate < 0 || releaseWorkbooks < 0 ||
 		quitExcel < 0 || releaseExcel < 0 || waitForProcess < 0 || writeReport < 0 ||
 		getExcelIdentity < 0 || writeUnassignedIdentity < 0 || assignExcelJob < 0 || writeAssignedIdentity < 0 ||
 		runtimeStart < 0 || firstWorkbooksUse < 0 {
@@ -2705,9 +2712,12 @@ func TestDynamicCalculatorValidatorHandlesEmptyProductTable(t *testing.T) {
 		t.Fatal("native validator must persist exact Excel identity, explicitly job-fence it, confirm the fence, then use the workbook")
 	}
 	if !(closeReference < releaseReference && releaseReference < closeCandidate &&
-		closeCandidate < releaseCandidate && releaseCandidate < quitExcel &&
+		closeCandidate < releaseCandidate && releaseCandidate < releaseWorkbooks && releaseWorkbooks < quitExcel &&
 		quitExcel < releaseExcel && releaseExcel < waitForProcess && waitForProcess < writeReport) {
-		t.Fatal("native validator must close/release workbooks before Quit, release Excel, wait for exact PID, then report")
+		t.Fatal("native validator must close/release child workbooks, release their Workbooks parent before Quit, release Excel, wait for exact PID, then report")
+	}
+	if strings.Count(mainPowerShell[runtimeStart:], `Release-ComObject $workbooks`) != 1 {
+		t.Fatal("native validator must keep its Workbooks parent alive until final teardown")
 	}
 
 	preQuitBarrier := strings.LastIndex(mainPowerShell[:quitExcel], `Invoke-ComFinalizerBarrier`)
@@ -2725,6 +2735,94 @@ func TestDynamicCalculatorValidatorHandlesEmptyProductTable(t *testing.T) {
 	if strings.Count(barrierBody, `[GC]::Collect()`) != 2 ||
 		strings.Count(barrierBody, `[GC]::WaitForPendingFinalizers()`) != 2 {
 		t.Fatal("native validator finalizer barrier must use two collect/finalizer passes")
+	}
+}
+
+func TestDynamicCalculatorValidatorKeepsSearchLiteralParentAlive(t *testing.T) {
+	path := filepath.Join("..", "..", "scripts", "windows", "Validate-ExcelPriceCalculator.cjs")
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := strings.ReplaceAll(string(content), "\r\n", "\n")
+	start := strings.Index(source, `function Test-SearchLiteralText`)
+	endRelative := -1
+	if start >= 0 {
+		endRelative = strings.Index(source[start:], `function Test-SearchPaste`)
+	}
+	if start < 0 || endRelative < 0 {
+		t.Fatal("native validator is missing the search-literal persistence boundary")
+	}
+	body := source[start : start+endRelative]
+	openBook := strings.Index(body, `$reopenBook = $reopenWorkbooks.Open(`)
+	readNames := strings.Index(body, `$value = $reopenBook.Names`)
+	readName := strings.Index(body, `$value = $reopenNames.Item('ProductSearchQuery')`)
+	releaseInput := strings.Index(body, `Release-ComObject $reopenInput`)
+	releaseName := strings.Index(body, `Release-ComObject $reopenName`)
+	releaseNames := strings.Index(body, `Release-ComObject $reopenNames`)
+	closeBook := strings.Index(body, `$reopenBook.Close($false)`)
+	releaseBook := strings.Index(body, `Release-ComObject $reopenBook`)
+	releaseWorkbooks := strings.Index(body, `Release-ComObject $reopenWorkbooks`)
+	if openBook < 0 || readNames < 0 || readName < 0 || releaseInput < 0 || releaseName < 0 || releaseNames < 0 ||
+		closeBook < 0 || releaseBook < 0 || releaseWorkbooks < 0 {
+		t.Fatal("native validator is missing the search-literal COM lifetime markers")
+	}
+	if !strings.Contains(body, `Open the temporary`) ||
+		!strings.Contains(body[openBook:readNames], `$missing`) ||
+		!strings.Contains(body, `Invoke-ExcelBusyRetry {`) ||
+		strings.Count(body, `return [pscustomobject]@{ Value = $value }`) < 3 ||
+		!strings.Contains(body, `Excel has not exposed the reopened Names collection yet.`) ||
+		!strings.Contains(body, `reading the reopened search input range`) {
+		t.Fatal("native validator must open the temporary .xltm itself in explicit editable mode")
+	}
+	if !(openBook < readNames && readNames < readName && readName < releaseInput &&
+		releaseInput < releaseName && releaseName < releaseNames && releaseNames < closeBook &&
+		closeBook < releaseBook && releaseBook < releaseWorkbooks) {
+		t.Fatal("native validator must keep Workbooks alive until the reopened template and its child COM objects are released")
+	}
+}
+
+func TestDynamicCalculatorValidatorMatchesRuntimeSearchContract(t *testing.T) {
+	path := filepath.Join("..", "..", "scripts", "windows", "Validate-ExcelPriceCalculator.cjs")
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := strings.ReplaceAll(string(content), "\r\n", "\n")
+	start := strings.Index(source, `function Search-MatchingRows`)
+	endRelative := -1
+	if start >= 0 {
+		endRelative = strings.Index(source[start:], `function Select-SearchQuery`)
+	}
+	if start < 0 || endRelative < 0 {
+		t.Fatal("native validator is missing its search-contract mirror")
+	}
+	body := source[start : start+endRelative]
+	for _, required := range []string{`$_.ProductCode`, `$_.WooID`, `$_.ProductName`} {
+		if !strings.Contains(body, required) {
+			t.Fatalf("native validator search mirror is missing %s", required)
+		}
+	}
+	if strings.Contains(body, `$_.SearchText`) {
+		t.Fatal("native validator must not treat partial codes or unrelated table columns as runtime search matches")
+	}
+	selectorStart := strings.Index(source, `function Select-SearchQuery`)
+	selectorEndRelative := -1
+	if selectorStart >= 0 {
+		selectorEndRelative = strings.Index(source[selectorStart:], `function Read-SearchButtonState`)
+	}
+	if selectorStart < 0 || selectorEndRelative < 0 {
+		t.Fatal("native validator is missing its search-query selector")
+	}
+	selector := source[selectorStart : selectorStart+selectorEndRelative]
+	if !strings.Contains(selector, `[string]$row.ProductName`) ||
+		!strings.Contains(selector, `[string]$row.ProductCode`) ||
+		!strings.Contains(selector, `$matchingRows.Count -ge 1`) {
+		t.Fatal("native validator must fall back to a bounded exact runtime search when the catalog has no multi-result title")
+	}
+	if !strings.Contains(source, `report.search.secondOrdinal === (report.search.total > 1 ? 2 : 1)`) ||
+		!strings.Contains(source, `$expectedRows[[Math]::Min(1, $expectedRows.Count - 1)].Row`) {
+		t.Fatal("native validator must accept a truthful single-result search without indexing a missing second row")
 	}
 }
 
