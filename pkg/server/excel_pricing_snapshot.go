@@ -42,6 +42,7 @@ const (
 	// empty production template from rebuilding the same 1,000+ row snapshot on
 	// every open; an event, reconnect gap, or process restart still fails closed.
 	excelPricingSnapshotMaxCacheAge      = 24 * time.Hour
+	excelPricingSnapshotRevisionProbeTTL = 5 * time.Second
 	excelPricingSnapshotRetention        = 15 * time.Minute
 	excelPricingSnapshotOperationTimeout = 8 * time.Minute
 	excelPricingSnapshotHeartbeat        = time.Second
@@ -151,6 +152,85 @@ type excelPricingSnapshotCollector func(
 	excelPricingSnapshotStartRequest,
 	updateout.Config,
 ) (*excelPricingSnapshot, string)
+
+type excelPricingSnapshotCacheAttestation struct {
+	current bool
+	drift   *excelPricingRemoteRevision
+	err     error
+}
+
+func excelPricingSnapshotCacheLocallyAllowed(
+	request excelPricingSnapshotStartRequest,
+	cached *excelPricingSnapshot,
+	now time.Time,
+) bool {
+	if cached == nil {
+		return false
+	}
+	if request.ExpectedStateRevision != "" {
+		return request.ExpectedStateRevision == cached.stateRevision
+	}
+	age := now.Sub(cached.createdAt)
+	return request.MaxAgeSeconds > 0 && age >= 0 &&
+		age <= time.Duration(request.MaxAgeSeconds)*time.Second
+}
+
+func (s *Server) attestExcelPricingSnapshotCache(
+	ctx context.Context,
+	cfg updateout.Config,
+	source canonical.Source,
+	cacheKey string,
+	cached *excelPricingSnapshot,
+) excelPricingSnapshotCacheAttestation {
+	if cached == nil {
+		return excelPricingSnapshotCacheAttestation{err: errExcelPricingRemoteRevision}
+	}
+	if current := s.excelPricing.snapshotRevisionCurrent; current != nil &&
+		current(source, cached.stateRevision, cached.upstreamCatalogRevision) {
+		return excelPricingSnapshotCacheAttestation{current: true}
+	}
+	probeContext, cancelProbe := context.WithTimeout(
+		ctx,
+		excelPricingSnapshotRevisionProbeTTL,
+	)
+	remoteRevision, err := s.probeExcelPricingRemoteRevisionCoalesced(
+		probeContext,
+		cfg,
+		source,
+		cacheKey,
+	)
+	cancelProbe()
+	if err != nil ||
+		!validExcelPricingRemoteRevisionParts(
+			remoteRevision.StateRevision,
+			remoteRevision.CatalogRevision,
+			remoteRevision.PricingStateRevision,
+			remoteRevision.PricingPolicyRevision,
+		) ||
+		!isStrongExcelPricingRevisionETag(
+			remoteRevision.ETag,
+			remoteRevision.StateRevision,
+		) {
+		if err == nil {
+			err = errExcelPricingRemoteRevision
+		}
+		return excelPricingSnapshotCacheAttestation{err: err}
+	}
+	if remoteRevision.StateRevision == cached.stateRevision &&
+		remoteRevision.CatalogRevision == cached.upstreamCatalogRevision {
+		return excelPricingSnapshotCacheAttestation{current: true}
+	}
+	drift := excelPricingRemoteRevision{
+		Source:                source,
+		StateRevision:         remoteRevision.StateRevision,
+		CatalogRevision:       remoteRevision.CatalogRevision,
+		PricingStateRevision:  remoteRevision.PricingStateRevision,
+		PricingPolicyRevision: remoteRevision.PricingPolicyRevision,
+		ETag:                  remoteRevision.ETag,
+		ValidationOrigin:      "snapshot_cache_revision_probe",
+	}
+	return excelPricingSnapshotCacheAttestation{drift: &drift}
+}
 
 type excelPricingStateChangeEvent struct {
 	Schema                   string                        `json:"schema"`
@@ -400,7 +480,8 @@ func (s *Server) handlePostExcelPricingSnapshot(w http.ResponseWriter, r *http.R
 		writeExcelPricingError(w, http.StatusBadRequest, "invalid_request")
 		return
 	}
-	matches, err := s.excelPricingStateSourceMatches(r.Context(), &request.Source, s.Config())
+	appConfig := s.Config()
+	matches, err := s.excelPricingStateSourceMatches(r.Context(), &request.Source, appConfig)
 	if err != nil {
 		writeExcelPricingError(w, http.StatusServiceUnavailable, "canonical_source_unavailable")
 		return
@@ -409,7 +490,7 @@ func (s *Server) handlePostExcelPricingSnapshot(w http.ResponseWriter, r *http.R
 		writeExcelPricingError(w, http.StatusConflict, "canonical_source_mismatch")
 		return
 	}
-	cfg := s.Config().SendUpdates
+	cfg := appConfig.SendUpdates
 	if _, _, _, err := resolveExcelPricingRemote(cfg, "state"); err != nil {
 		writeExcelPricingError(w, http.StatusServiceUnavailable, "remote_not_configured")
 		return
@@ -428,16 +509,8 @@ func (s *Server) handlePostExcelPricingSnapshot(w http.ResponseWriter, r *http.R
 	idempotencyKey := excelPricingSnapshotIdempotencyKey(owner, request.RequestID)
 
 	store := s.excelPricing.snapshots
-	store.mu.Lock()
-	store.pruneLocked(now)
-	if existingID, exists := store.idempotency[idempotencyKey]; exists {
-		existing := store.jobs[existingID]
-		if existing == nil || existing.fingerprint != fingerprint {
-			store.mu.Unlock()
-			writeExcelPricingError(w, http.StatusConflict, "idempotency_conflict")
-			return
-		}
-		if existing.status == "ready" && existing.snapshot != nil {
+	writeExistingLocked := func(existing *excelPricingSnapshotJob, publishReady bool) {
+		if publishReady && existing.status == "ready" && existing.snapshot != nil {
 			store.publishSnapshotReadyLocked(existing, "snapshot_idempotent_replayed")
 		}
 		response := excelPricingSnapshotJobResponse(existing)
@@ -447,24 +520,113 @@ func (s *Server) handlePostExcelPricingSnapshot(w http.ResponseWriter, r *http.R
 		}
 		store.mu.Unlock()
 		writeExcelPricingJSON(w, status, response)
-		return
 	}
 
-	if cached := store.cache[cacheKey]; cached != nil {
-		age := now.Sub(cached.createdAt)
-		revisionCurrent := s.excelPricing.snapshotRevisionCurrent != nil &&
-			s.excelPricing.snapshotRevisionCurrent(
-				request.Source,
-				cached.stateRevision,
-				cached.upstreamCatalogRevision,
-			)
-		ageAllowed := request.MaxAgeSeconds > 0 && age >= 0 &&
-			age <= time.Duration(request.MaxAgeSeconds)*time.Second &&
-			revisionCurrent
-		revisionAllowed := request.ExpectedStateRevision != "" &&
-			request.ExpectedStateRevision == cached.stateRevision &&
-			revisionCurrent
-		if ageAllowed || revisionAllowed {
+	// At most two revision checks are useful: the second observes a cache/job
+	// that changed while the first authenticated probe was in flight. Beyond
+	// that, a new request falls through to the collector and an idempotent replay
+	// fails closed rather than waiting through an unbounded revision race.
+	for cacheAttempt := 0; cacheAttempt < 2; cacheAttempt++ {
+		now = store.now().UTC()
+		store.mu.Lock()
+		store.pruneLocked(now)
+		existingID, replay := store.idempotency[idempotencyKey]
+		var existing *excelPricingSnapshotJob
+		var cached *excelPricingSnapshot
+		if replay {
+			existing = store.jobs[existingID]
+			if existing == nil || existing.fingerprint != fingerprint {
+				store.mu.Unlock()
+				writeExcelPricingError(w, http.StatusConflict, "idempotency_conflict")
+				return
+			}
+			if existing.status != "ready" || existing.snapshot == nil {
+				writeExistingLocked(existing, false)
+				return
+			}
+			cached = existing.snapshot
+		} else {
+			cached = store.cache[cacheKey]
+			if !excelPricingSnapshotCacheLocallyAllowed(request, cached, now) {
+				goto StartFreshSnapshotLocked
+			}
+		}
+		cacheGeneration := store.generation
+		store.mu.Unlock()
+
+		// The event subscriber remains the zero-I/O fast path. During a stream
+		// gap, concurrent callers share one bounded authenticated revision probe.
+		// No result can be committed until the exact captured pointer/generation
+		// (or idempotent job) is proven again under the store lock.
+		attestation := s.attestExcelPricingSnapshotCache(
+			r.Context(),
+			cfg,
+			request.Source,
+			cacheKey,
+			cached,
+		)
+		// A caller that disconnected while waiting for the shared probe owns no
+		// background snapshot work. Healthy joined callers can still consume the
+		// server-owned result and decide whether to reuse or rebuild.
+		if r.Context().Err() != nil {
+			return
+		}
+
+		now = store.now().UTC()
+		store.mu.Lock()
+		store.pruneLocked(now)
+		fenceCurrent := store.generation == cacheGeneration
+		if replay {
+			currentID, stillExists := store.idempotency[idempotencyKey]
+			current := store.jobs[currentID]
+			if !stillExists || current == nil {
+				// A ready job can legitimately age out while the authenticated
+				// probe is in flight. Retry the same request as a fresh
+				// idempotency reservation instead of inventing a conflict.
+				store.mu.Unlock()
+				continue
+			}
+			if current.fingerprint != fingerprint {
+				store.mu.Unlock()
+				writeExcelPricingError(w, http.StatusConflict, "idempotency_conflict")
+				return
+			}
+			fenceCurrent = fenceCurrent && current == existing &&
+				current.status == "ready" && current.snapshot == cached
+			if !fenceCurrent && (current.status != "ready" || current.snapshot == nil) {
+				writeExistingLocked(current, false)
+				return
+			}
+		} else {
+			if _, appeared := store.idempotency[idempotencyKey]; appeared {
+				store.mu.Unlock()
+				continue
+			}
+			fenceCurrent = fenceCurrent && store.cache[cacheKey] == cached
+			if fenceCurrent && !excelPricingSnapshotCacheLocallyAllowed(request, cached, now) {
+				// Max-age is a commit-time promise. A cache that crossed the
+				// caller's bound while the probe ran must not be returned.
+				goto StartFreshSnapshotLocked
+			}
+		}
+
+		driftFence := fenceCurrent && store.cache[cacheKey] == cached
+		if attestation.drift != nil && driftFence {
+			cancel := store.invalidateRemoteRevisionLocked(*attestation.drift)
+			store.mu.Unlock()
+			if cancel != nil {
+				cancel()
+			}
+			// The snapshot generation is already fenced. Discard the canonical
+			// projection before any retry can collect the authenticated new tuple.
+			s.invalidateCanonicalProjection(true)
+			continue
+		}
+		if attestation.current && fenceCurrent {
+			if replay {
+				writeExistingLocked(existing, true)
+				return
+			}
 			job := &excelPricingSnapshotJob{
 				id:                    jobID,
 				owner:                 owner,
@@ -500,7 +662,39 @@ func (s *Server) handlePostExcelPricingSnapshot(w http.ResponseWriter, r *http.R
 			writeExcelPricingJSON(w, http.StatusOK, response)
 			return
 		}
+		if attestation.err != nil && replay && fenceCurrent {
+			store.mu.Unlock()
+			writeExcelPricingError(w, http.StatusServiceUnavailable,
+				"snapshot_revision_unavailable")
+			return
+		}
+		if attestation.err != nil && !replay && fenceCurrent {
+			goto StartFreshSnapshotLocked
+		}
+		store.mu.Unlock()
 	}
+
+	now = store.now().UTC()
+	store.mu.Lock()
+	store.pruneLocked(now)
+	if existingID, exists := store.idempotency[idempotencyKey]; exists {
+		existing := store.jobs[existingID]
+		if existing == nil || existing.fingerprint != fingerprint {
+			store.mu.Unlock()
+			writeExcelPricingError(w, http.StatusConflict, "idempotency_conflict")
+			return
+		}
+		if existing.status == "ready" && existing.snapshot != nil {
+			store.mu.Unlock()
+			writeExcelPricingError(w, http.StatusServiceUnavailable,
+				"snapshot_revision_unavailable")
+			return
+		}
+		writeExistingLocked(existing, false)
+		return
+	}
+
+StartFreshSnapshotLocked:
 
 	if store.activeJobID != "" {
 		leader := store.jobs[store.activeJobID]
@@ -1558,6 +1752,21 @@ func (s *Server) notifyExcelPricingRemoteRevisionChanged(
 
 	store := s.excelPricing.snapshots
 	store.mu.Lock()
+	cancel := store.invalidateRemoteRevisionLocked(revision)
+	store.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	return nil
+}
+
+// invalidateRemoteRevisionLocked applies an already authenticated revision to
+// the snapshot generation. Callers that obtained the revision outside the
+// lock must first prove that their captured cache pointer and generation still
+// match; this keeps duplicate probes from cancelling a newer collector.
+func (store *excelPricingSnapshotStore) invalidateRemoteRevisionLocked(
+	revision excelPricingRemoteRevision,
+) context.CancelFunc {
 	previous := store.lastVerifiedChangeLocked()
 	kind := "pricing_state_changed"
 	code := "snapshot_pricing_state_changed"
@@ -1600,11 +1809,7 @@ func (s *Server) notifyExcelPricingRemoteRevisionChanged(
 	}
 	bindExcelPricingPreviousState(&event, previous)
 	store.publishChangeLocked(event)
-	store.mu.Unlock()
-	if cancel != nil {
-		cancel()
-	}
-	return nil
+	return cancel
 }
 
 func (store *excelPricingSnapshotStore) lastVerifiedChangeLocked() *excelPricingStateChangeEvent {

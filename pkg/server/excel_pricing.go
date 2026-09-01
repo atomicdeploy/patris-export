@@ -128,6 +128,16 @@ type excelPricingState struct {
 
 	snapshotCollector       excelPricingSnapshotCollector
 	snapshotRevisionCurrent func(canonical.Source, string, string) bool
+	snapshotRevisionProbe   func(context.Context, canonical.Source) (excelPricingRemoteSnapshotRevision, error)
+	snapshotRevisionProbeMu sync.Mutex
+	snapshotRevisionProbes  map[string]*excelPricingSnapshotRevisionProbeFlight
+}
+
+type excelPricingSnapshotRevisionProbeFlight struct {
+	done     chan struct{}
+	revision excelPricingRemoteSnapshotRevision
+	err      error
+	waiters  int
 }
 
 type excelPricingRemoteResponse struct {
@@ -280,20 +290,16 @@ func (s *Server) handlePostExcelPricingRevision(w http.ResponseWriter, r *http.R
 		writeExcelPricingError(w, http.StatusConflict, "canonical_source_mismatch")
 		return
 	}
-	client, err := newExcelPricingRemoteSnapshotClient(
+	revision, err := s.probeExcelPricingRemoteRevision(
+		ctx,
 		cfg.SendUpdates,
 		*local.Source,
-		excelPricingRemoteSnapshotClientOptions{
-			HTTPClient: s.excelPricing.client,
-			Terminals:  newExcelPricingRemoteSnapshotTerminalHub(),
-		},
 	)
 	if err != nil {
-		writeExcelPricingError(w, http.StatusServiceUnavailable, "remote_not_configured")
-		return
-	}
-	revision, err := client.fetchRevision(ctx)
-	if err != nil {
+		if errors.Is(err, errExcelPricingRemoteSnapshotConfiguration) {
+			writeExcelPricingError(w, http.StatusServiceUnavailable, "remote_not_configured")
+			return
+		}
 		writeExcelPricingError(w, http.StatusBadGateway, "revision_unavailable")
 		return
 	}
@@ -307,6 +313,100 @@ func (s *Server) handlePostExcelPricingRevision(w http.ResponseWriter, r *http.R
 		CatalogRevision:       revision.CatalogRevision,
 		ETag:                  revision.ETag,
 	})
+}
+
+func (s *Server) probeExcelPricingRemoteRevision(
+	ctx context.Context,
+	cfg updateout.Config,
+	source canonical.Source,
+) (excelPricingRemoteSnapshotRevision, error) {
+	if s == nil || s.excelPricing == nil {
+		return excelPricingRemoteSnapshotRevision{}, errExcelPricingRemoteSnapshotConfiguration
+	}
+	if probe := s.excelPricing.snapshotRevisionProbe; probe != nil {
+		return probe(ctx, source)
+	}
+	client, err := newExcelPricingRemoteSnapshotClient(
+		cfg,
+		source,
+		excelPricingRemoteSnapshotClientOptions{
+			HTTPClient: s.excelPricing.client,
+			Terminals:  newExcelPricingRemoteSnapshotTerminalHub(),
+		},
+	)
+	if err != nil {
+		return excelPricingRemoteSnapshotRevision{}, err
+	}
+	return client.fetchRevision(ctx)
+}
+
+func (s *Server) probeExcelPricingRemoteRevisionCoalesced(
+	ctx context.Context,
+	cfg updateout.Config,
+	source canonical.Source,
+	cacheKey string,
+) (excelPricingRemoteSnapshotRevision, error) {
+	if s == nil || s.excelPricing == nil {
+		return excelPricingRemoteSnapshotRevision{}, errExcelPricingRemoteSnapshotConfiguration
+	}
+	material, err := json.Marshal(updateout.Normalize(cfg))
+	if err != nil {
+		return excelPricingRemoteSnapshotRevision{}, errExcelPricingRemoteSnapshotConfiguration
+	}
+	digest := sha256.Sum256(material)
+	flightKey := cacheKey + "\x00" + hex.EncodeToString(digest[:])
+	state := s.excelPricing
+	state.snapshotRevisionProbeMu.Lock()
+	if state.snapshotRevisionProbes == nil {
+		state.snapshotRevisionProbes = make(map[string]*excelPricingSnapshotRevisionProbeFlight)
+	}
+	if existing := state.snapshotRevisionProbes[flightKey]; existing != nil {
+		existing.waiters++
+		state.snapshotRevisionProbeMu.Unlock()
+		select {
+		case <-ctx.Done():
+			return excelPricingRemoteSnapshotRevision{}, ctx.Err()
+		case <-existing.done:
+			return existing.revision, existing.err
+		}
+	}
+	flight := &excelPricingSnapshotRevisionProbeFlight{done: make(chan struct{})}
+	state.snapshotRevisionProbes[flightKey] = flight
+	state.snapshotRevisionProbeMu.Unlock()
+
+	// The authenticated probe belongs to the companion, not to whichever HTTP
+	// request happened to create the flight. A disconnected leader must not
+	// cancel the shared upstream request for healthy waiters. Every caller still
+	// uses its own context to bound how long it waits for this server-owned work.
+	parent := s.backgroundCtx
+	if parent == nil {
+		parent = context.Background()
+	}
+	go func() {
+		probeContext, cancelProbe := context.WithTimeout(
+			parent,
+			excelPricingSnapshotRevisionProbeTTL,
+		)
+		defer cancelProbe()
+		flight.revision, flight.err = s.probeExcelPricingRemoteRevision(
+			probeContext,
+			cfg,
+			source,
+		)
+		state.snapshotRevisionProbeMu.Lock()
+		if state.snapshotRevisionProbes[flightKey] == flight {
+			delete(state.snapshotRevisionProbes, flightKey)
+		}
+		close(flight.done)
+		state.snapshotRevisionProbeMu.Unlock()
+	}()
+
+	select {
+	case <-ctx.Done():
+		return excelPricingRemoteSnapshotRevision{}, ctx.Err()
+	case <-flight.done:
+		return flight.revision, flight.err
+	}
 }
 
 func (s *Server) handlePostExcelPricingPreview(w http.ResponseWriter, r *http.Request) {

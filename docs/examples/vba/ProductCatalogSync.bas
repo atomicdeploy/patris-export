@@ -13,7 +13,7 @@ Private Const MAX_STATE_PAGES As Long = 8
 Private Const MAX_SNAPSHOT_ROWS As Long = 2000
 Private Const HTTP_TIMEOUT_MS As Long = 150000
 Private Const PRICING_HTTP_TIMEOUT_MS As Long = 600000
-Private Const SNAPSHOT_WAIT_TIMEOUT_MS As Long = 360000
+Private Const SNAPSHOT_WAIT_TIMEOUT_MS As Long = 120000
 Private Const MAX_REFRESH_WALL_SECONDS As Double = 125#
 Private Const OPEN_REFRESH_DELAY_SECONDS As Long = 2
 Private Const SEARCH_PASTE_MAX_CHARS As Long = 2048
@@ -167,6 +167,10 @@ Private mReconcileSeconds As Double
 Private mPricingSeconds As Double
 Private mTableWriteSeconds As Double
 Private mFormattingSeconds As Double
+Private mWooLinkProjectionValidated As Boolean
+Private mWooLinkProjectionRows As Long
+Private mWooLinkExpectedDistinctNames As Long
+Private mWooLinkActualDistinctNames As Long
 Private mSaveTimingStartedAt As Double
 Private mSaveTimingActive As Boolean
 Private mRefreshInProgress As Boolean
@@ -2054,7 +2058,13 @@ Private Sub HandleOperationTerminal()
         Exit Sub
     End If
     If errorNumber <> 0 Then
-        FailActiveOperation errorNumber, stageName, errorDescription
+        If SnapshotWaitRequestTimedOut( _
+                stageName, errorNumber, errorDescription) Then
+            FailActiveOperation errorNumber, "snapshot_wait_timeout", _
+                T("snapshot_timeout")
+        Else
+            FailActiveOperation errorNumber, stageName, errorDescription
+        End If
         Exit Sub
     End If
 
@@ -2087,6 +2097,18 @@ Private Sub HandleOperationTerminal()
 TerminalFailed:
     FailActiveOperation Err.Number, "HandleOperationTerminal", Err.Description
 End Sub
+
+Private Function SnapshotWaitRequestTimedOut(ByVal stageName As String, _
+        ByVal errorNumber As Long, ByVal errorDescription As String) As Boolean
+    Dim lowered As String
+
+    If StrComp(Trim$(stageName), "snapshot_wait", _
+               vbTextCompare) <> 0 Then Exit Function
+    lowered = LCase$(Trim$(errorDescription))
+    SnapshotWaitRequestTimedOut = errorNumber = 12002 Or _
+        errorNumber = -2147012894 Or InStr(lowered, "timeout") > 0 Or _
+        InStr(lowered, "timed out") > 0
+End Function
 
 Private Sub HandleContractResponse(ByVal statusCode As Long, _
                                    ByVal responseBody As Variant, _
@@ -2821,6 +2843,7 @@ Private Sub FailActiveOperation(ByVal errorNumber As Long, _
     Dim failedKind As String
     Dim statusText As String
     Dim wasCancelled As Boolean
+    Dim keepTerminalFailure As Boolean
 
     If mOperationFinishing Then Exit Sub
     mOperationFinishing = True
@@ -2828,6 +2851,8 @@ Private Sub FailActiveOperation(ByVal errorNumber As Long, _
     statusText = SafeOperationStatusError(errorSource, errorDescription)
     If Len(Trim$(statusText)) = 0 Then statusText = T("sync_failed")
     wasCancelled = mOperationCancelRequested
+    keepTerminalFailure = (StrComp(Trim$(errorSource), _
+        "snapshot_wait_timeout", vbTextCompare) = 0)
 
     On Error Resume Next
     If (mSnapshotJobStatus = "running" Or _
@@ -2880,6 +2905,7 @@ Private Sub FailActiveOperation(ByVal errorNumber As Long, _
     ReleaseRefreshCancelHotkey
     RestoreOperationCancelKey
     RestoreOperationStatusBar
+    If keepTerminalFailure Then CancelOperationProgressReset
     If Not mWorkbookClosing Then
         If wasCancelled Then
             SetOperationProgressSurface "cancelled", 0, _
@@ -2888,12 +2914,13 @@ Private Sub FailActiveOperation(ByVal errorNumber As Long, _
         Else
             SetOperationProgressSurface "failed", 0, _
                 U("06280647200C063106480632063106330627064606CC0020064606270645064806410642002006280648062F") & _
-                ": " & statusText, "failed", True
+                ": " & statusText, "failed", Not keepTerminalFailure
         End If
     End If
     RefreshSearchEnterHotkey
     ResetFiniteOperationContext
-    If Not wasCancelled And Not mWorkbookClosing Then _
+    If Not wasCancelled And Not keepTerminalFailure And _
+       Not mWorkbookClosing Then _
         ReevaluateSseRefreshRequirement
     If mPricingPreviewQueued And Not mWorkbookClosing Then _
         SchedulePricingPreview
@@ -6830,6 +6857,13 @@ Public Function ValidateOperationProgressUIForValidation() As Boolean
     If StrComp(SafeOperationStatusError( _
             "ValidateWorkbook", T("invalid_workbook")), _
             T("invalid_workbook"), vbBinaryCompare) <> 0 Then GoTo Failed
+    If StrComp(SafeOperationStatusError( _
+            "snapshot_wait_timeout", "technical timeout"), _
+            T("snapshot_timeout"), vbBinaryCompare) <> 0 Then GoTo Failed
+    If Not SnapshotWaitRequestTimedOut( _
+            "snapshot_wait", 12002, "technical timeout") Then GoTo Failed
+    If SnapshotWaitRequestTimedOut( _
+            "snapshot_payload", 12002, "technical timeout") Then GoTo Failed
     InitializeOperationProgress
     If Not OperationProgressReadyHiddenForValidation() Then GoTo Failed
     For Each sheetName In Array(PriceSheet().Name, ConfigSheet().Name)
@@ -6884,6 +6918,11 @@ Public Function ValidateOperationProgressUIForValidation() As Boolean
         U("062E0637062706CC002006330631064806CC0633"), "failed", False
     If Not OperationProgressTerminalHiddenForValidation( _
         "failed", U("062E0637062706CC002006330631064806CC0633")) Then GoTo Failed
+    SetOperationProgressSurface "snapshot_wait_timeout", 0, _
+        T("snapshot_timeout"), "failed", False
+    If Not OperationProgressTerminalHiddenForValidation( _
+        "snapshot_wait_timeout", T("snapshot_timeout")) Then GoTo Failed
+    If mProgressResetScheduled Then GoTo Failed
     InitializeOperationProgress
     If Not OperationProgressReadyHiddenForValidation() Then GoTo Failed
     ValidateOperationProgressUIForValidation = True
@@ -9091,7 +9130,10 @@ Private Function ImportReconciledCatalog(ByVal reconciledRows As Object) As Long
     phaseStartedAt = PhaseTimestamp()
     ReplaceTableData table, mainOutput, dataRows, PRODUCT_COLUMN_COUNT
     ReplaceTableData syncTable, syncOutput, dataRows, SYNC_COLUMN_COUNT
+    ResetWooLinkProjectionValidation
     ApplyWooLinkFormulas table, wooLinkOutput
+    ValidateWooLinkProjection table.ListColumns(8).DataBodyRange, _
+        wooLinkOutput, mainOutput
     mTableWriteSeconds = PhaseElapsed(phaseStartedAt)
     phaseStartedAt = PhaseTimestamp()
     ApplyProductTableFormulas table
@@ -9536,15 +9578,178 @@ End Function
 
 Private Sub ApplyWooLinkFormulas(ByVal table As ListObject, _
                                  ByRef formulas() As Variant)
+    Dim target As Range
+    Dim autoFillWasEnabled As Boolean
+    Dim autoFillCaptured As Boolean
+    Dim savedErrorNumber As Long
+    Dim savedErrorSource As String
+    Dim savedErrorDescription As String
+
     If table.DataBodyRange Is Nothing Then Exit Sub
-    On Error GoTo LegacyFormula
-    table.ListColumns(8).DataBodyRange.Formula2 = formulas
+    Set target = table.ListColumns(8).DataBodyRange
+    On Error GoTo ApplyFailed
+
+    ' A ListObject calculated column normally replaces every member with the
+    ' first formula assigned to it. This payload intentionally contains a
+    ' different literal name and URL for every row, so fence that application-
+    ' wide auto-fill behavior around the single bulk range assignment. Always
+    ' restore the user's Excel setting, including the legacy-formula fallback.
+    autoFillWasEnabled = Application.AutoCorrect.AutoFillFormulasInLists
+    autoFillCaptured = True
+    Application.AutoCorrect.AutoFillFormulasInLists = False
+    If Not TryApplyWooLinkFormula2(target, formulas) Then _
+        target.Formula = formulas
+
+ApplyExit:
+    If autoFillCaptured Then
+        On Error Resume Next
+        Application.AutoCorrect.AutoFillFormulasInLists = autoFillWasEnabled
+        If savedErrorNumber = 0 And Err.Number <> 0 Then
+            savedErrorNumber = Err.Number
+            savedErrorSource = Err.Source
+            savedErrorDescription = Err.Description
+        End If
+        Err.Clear
+        On Error GoTo 0
+    End If
+    If savedErrorNumber <> 0 Then
+        Err.Raise savedErrorNumber, savedErrorSource, savedErrorDescription
+    End If
     Exit Sub
+
+ApplyFailed:
+    savedErrorNumber = Err.Number
+    savedErrorSource = Err.Source
+    savedErrorDescription = Err.Description
+    Resume ApplyExit
+End Sub
+
+Private Function TryApplyWooLinkFormula2(ByVal target As Range, _
+                                         ByRef formulas() As Variant) As Boolean
+    On Error GoTo Formula2Unavailable
+    target.Formula2 = formulas
+    TryApplyWooLinkFormula2 = True
+    Exit Function
+
+Formula2Unavailable:
+    Err.Clear
+End Function
+
+Private Sub ResetWooLinkProjectionValidation()
+    mWooLinkProjectionValidated = False
+    mWooLinkProjectionRows = 0
+    mWooLinkExpectedDistinctNames = 0
+    mWooLinkActualDistinctNames = 0
+End Sub
+
+Private Sub ValidateWooLinkProjection(ByVal target As Range, _
+                                      ByRef expectedFormulas() As Variant, _
+                                      ByRef expectedRows() As Variant)
+    Dim actualFormulas As Variant
+    Dim actualValues As Variant
+    Dim expectedNames As Object
+    Dim actualNames As Object
+    Dim expectedNameKeys As Variant
+    Dim rowIndex As Long
+    Dim rowCount As Long
+    Dim expectedFormula As String
+    Dim actualFormula As String
+    Dim expectedName As String
+    Dim actualName As String
+
+    ResetWooLinkProjectionValidation
+    rowCount = target.Rows.Count
+    If rowCount < 1 Or UBound(expectedFormulas, 1) <> rowCount Or _
+       UBound(expectedRows, 1) <> rowCount Then GoTo InvalidProjection
+
+    ' Calculate and read each whole column once. The comparisons below stay in
+    ' VBA memory and prove that the literal snapshot name/link for every row
+    ' survived ListObject calculated-column behavior without per-row COM.
+    target.Calculate
+    actualFormulas = ReadWooLinkFormulaArray(target)
+    actualValues = target.Value2
+    Set expectedNames = CreateObject("Scripting.Dictionary")
+    Set actualNames = CreateObject("Scripting.Dictionary")
+    expectedNames.CompareMode = vbBinaryCompare
+    actualNames.CompareMode = vbBinaryCompare
+
+    For rowIndex = 1 To rowCount
+        expectedFormula = CStr(expectedFormulas(rowIndex, 1))
+        actualFormula = CStr(BulkColumnValue(actualFormulas, rowIndex))
+        expectedName = CStr(expectedRows(rowIndex, 8))
+        actualName = CStr(BulkColumnValue(actualValues, rowIndex))
+        If StrComp(actualFormula, expectedFormula, vbBinaryCompare) <> 0 Or _
+           StrComp(actualName, expectedName, vbBinaryCompare) <> 0 Then _
+            GoTo InvalidProjection
+        If Not expectedNames.Exists(expectedName) Then _
+            expectedNames.Add expectedName, True
+        If Not actualNames.Exists(actualName) Then _
+            actualNames.Add actualName, True
+    Next rowIndex
+
+    If expectedNames.Count <> actualNames.Count Then GoTo InvalidProjection
+    expectedNameKeys = expectedNames.Keys
+    For rowIndex = 0 To expectedNames.Count - 1
+        expectedName = CStr(expectedNameKeys(rowIndex))
+        If Not actualNames.Exists(expectedName) Then GoTo InvalidProjection
+    Next rowIndex
+    If rowCount > 1 Then
+        If StrComp(CStr(expectedFormulas(1, 1)), _
+                   CStr(expectedFormulas(2, 1)), vbBinaryCompare) <> 0 And _
+           StrComp(CStr(BulkColumnValue(actualFormulas, 1)), _
+                   CStr(BulkColumnValue(actualFormulas, 2)), _
+                   vbBinaryCompare) = 0 Then GoTo InvalidProjection
+        If StrComp(CStr(expectedRows(1, 8)), CStr(expectedRows(2, 8)), _
+                   vbBinaryCompare) <> 0 And _
+           StrComp(CStr(BulkColumnValue(actualValues, 1)), _
+                   CStr(BulkColumnValue(actualValues, 2)), _
+                   vbBinaryCompare) = 0 Then GoTo InvalidProjection
+    End If
+
+    mWooLinkProjectionRows = rowCount
+    mWooLinkExpectedDistinctNames = expectedNames.Count
+    mWooLinkActualDistinctNames = actualNames.Count
+    mWooLinkProjectionValidated = True
+    Exit Sub
+
+InvalidProjection:
+    ResetWooLinkProjectionValidation
+    Err.Raise vbObjectError + 243, "ValidateWooLinkProjection", _
+              T("sync_retry")
+End Sub
+
+Private Function ReadWooLinkFormulaArray(ByVal target As Range) As Variant
+    On Error GoTo LegacyFormula
+    ReadWooLinkFormulaArray = target.Formula2
+    Exit Function
 
 LegacyFormula:
     Err.Clear
-    table.ListColumns(8).DataBodyRange.Formula = formulas
-End Sub
+    ReadWooLinkFormulaArray = target.Formula
+End Function
+
+Public Function ValidateWooLinkProjectionForValidation() As Boolean
+    ValidateWooLinkProjectionForValidation = _
+        mWooLinkProjectionValidated And mWooLinkProjectionRows > 0 And _
+        mWooLinkExpectedDistinctNames = mWooLinkActualDistinctNames
+End Function
+
+Public Function WooLinkProjectionRowsForValidation() As Long
+    WooLinkProjectionRowsForValidation = mWooLinkProjectionRows
+End Function
+
+Public Function WooLinkExpectedDistinctNamesForValidation() As Long
+    WooLinkExpectedDistinctNamesForValidation = _
+        mWooLinkExpectedDistinctNames
+End Function
+
+Public Function WooLinkActualDistinctNamesForValidation() As Long
+    WooLinkActualDistinctNamesForValidation = mWooLinkActualDistinctNames
+End Function
+
+Public Function WooLinkDistinctNamesForValidation() As Long
+    WooLinkDistinctNamesForValidation = mWooLinkActualDistinctNames
+End Function
 
 Private Function PriceParitySummary() As Variant
     Dim table As ListObject
@@ -10538,6 +10743,11 @@ End Function
 
 Private Function SafeOperationStatusError(ByVal errorSource As String, _
         ByVal message As String) As String
+    If StrComp(Trim$(errorSource), "snapshot_wait_timeout", _
+               vbTextCompare) = 0 Then
+        SafeOperationStatusError = T("snapshot_timeout")
+        Exit Function
+    End If
     If InStr(1, Trim$(message), T("invalid_workbook"), _
              vbBinaryCompare) = 1 And _
        Not IsLocalWorkbookContractErrorSource(errorSource) Then
@@ -11319,6 +11529,8 @@ Private Function T(ByVal key As String) As String
             T = U("0647064506AF06270645200C06330627063206CC002006270646062C06270645002006460634062F003A")
         Case "sync_retry"
             T = U("06270631062A062806270637002006280627002006330631064806CC06330020064206CC0645062A200C06AF06300627063106CC002006A9062706450644002006460634062F002E00200644063706410627064B002006860646062F00200644062D063806470020062F06CC06AF06310020062F064806280627063106470020062A064406270634002006A9064606CC062F002E")
+        Case "snapshot_timeout"
+            T = U("062F063106CC06270641062A0020062F0627062F0647200C064706270020062F06310020064506470644062A00200645064206310631002006A9062706450644002006460634062F002E0020062F064806280627063106470020062A064406270634002006A9064606CC062F002E")
         Case "button_ok"
             T = U("0628062706340647")
         Case "button_yes"

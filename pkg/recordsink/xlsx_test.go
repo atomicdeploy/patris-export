@@ -1423,7 +1423,11 @@ func TestDynamicCalculatorVBASourceGuardsLivePricingBeforeMutation(t *testing.T)
 		"Private Function BuildWooLinkFormula",
 		`BuildWooLinkFormula = "=IFERROR(HYPERLINK("`,
 		"Private Sub ApplyWooLinkFormulas",
-		"table.ListColumns(8).DataBodyRange.Formula2 = formulas",
+		"Application.AutoCorrect.AutoFillFormulasInLists = False",
+		"Application.AutoCorrect.AutoFillFormulasInLists = autoFillWasEnabled",
+		"Private Function TryApplyWooLinkFormula2",
+		"target.Formula2 = formulas",
+		"target.Formula = formulas",
 	} {
 		if !strings.Contains(source, required) {
 			t.Fatalf("bulk WooCommerce-link projection is missing %q", required)
@@ -1729,7 +1733,7 @@ func TestDynamicCalculatorVBASourceGuardsLivePricingBeforeMutation(t *testing.T)
 		t.Fatal("Enter must remain native; rebinding it can recurse through selection events and exhaust Excel's VBA stack")
 	}
 	for _, required := range []string{
-		"Private Const SNAPSHOT_WAIT_TIMEOUT_MS As Long = 360000",
+		"Private Const SNAPSHOT_WAIT_TIMEOUT_MS As Long = 120000",
 		"Private Const PRICING_SNAPSHOT_CACHE_SECONDS As Long = 86400",
 		"Private Const MAX_REFRESH_WALL_SECONDS As Double = 125#",
 		"Private Const PRICING_WRITEBACK_DEBOUNCE_SECONDS As Long = 2",
@@ -1739,6 +1743,12 @@ func TestDynamicCalculatorVBASourceGuardsLivePricingBeforeMutation(t *testing.T)
 		"Public Function PricingEventListenerActiveForValidation() As Boolean",
 		"Public Function ValidatePricingEventAutoPullForValidation() As Boolean",
 		"Private Function SafeOperationStatusError",
+		"Private Function SnapshotWaitRequestTimedOut",
+		`FailActiveOperation errorNumber, "snapshot_wait_timeout", _`,
+		`SafeOperationStatusError = T("snapshot_timeout")`,
+		`"failed", Not keepTerminalFailure`,
+		"If keepTerminalFailure Then CancelOperationProgressReset",
+		"Not keepTerminalFailure And _",
 		`If mWritebackSettingKey = "site_confirmation" Then`,
 		`confirmedValue = CanonicalCellText(settings.Range("G18").Value2)`,
 	} {
@@ -1788,6 +1798,10 @@ func TestDynamicCalculatorVBASourceGuardsLivePricingBeforeMutation(t *testing.T)
 		"OperationProgressReadyHiddenForValidation",
 		"OperationProgressTerminalHiddenForValidation",
 		`"failed", 0`,
+		`"snapshot_wait_timeout", 0`,
+		`If mProgressResetScheduled Then GoTo Failed`,
+		`InStr(1, CStr(Application.StatusBar), "0%"`,
+		`InStr(1, label.TextFrame2.TextRange.Text, "0%"`,
 		"CStr(Application.StatusBar)",
 		"label.TextFrame2.TextRange.Text",
 	} {
@@ -3139,6 +3153,49 @@ func TestExcelRefreshChangedSnapshotUsesBulkCOMBoundaries(t *testing.T) {
 		if strings.Contains(importCatalog, forbidden) {
 			t.Fatalf("changed-snapshot apply contains per-row Excel work: %s", forbidden)
 		}
+	}
+	wooLinks := section("Private Sub ApplyWooLinkFormulas", "Private Function PriceParitySummary")
+	for _, required := range []string{
+		"Set target = table.ListColumns(8).DataBodyRange",
+		"autoFillWasEnabled = Application.AutoCorrect.AutoFillFormulasInLists",
+		"Application.AutoCorrect.AutoFillFormulasInLists = False",
+		"If Not TryApplyWooLinkFormula2(target, formulas) Then",
+		"target.Formula = formulas",
+		"Application.AutoCorrect.AutoFillFormulasInLists = autoFillWasEnabled",
+		"target.Formula2 = formulas",
+		"Private Sub ValidateWooLinkProjection",
+		"target.Calculate",
+		"actualValues = target.Value2",
+		"BulkColumnValue(actualFormulas, rowIndex)",
+		"mWooLinkExpectedDistinctNames = expectedNames.Count",
+		"mWooLinkActualDistinctNames = actualNames.Count",
+		"Public Function ValidateWooLinkProjectionForValidation() As Boolean",
+		"Public Function WooLinkExpectedDistinctNamesForValidation() As Long",
+		"Public Function WooLinkActualDistinctNamesForValidation() As Long",
+	} {
+		if !strings.Contains(wooLinks, required) {
+			t.Fatalf("bulk per-row WooCommerce-link assignment is missing %q", required)
+		}
+	}
+	for _, forbidden := range []string{
+		".Cells(", "Hyperlinks.Add", "Hyperlinks.Delete",
+		"Application.AutoCorrect.AutoFillFormulasInLists = True",
+	} {
+		if strings.Contains(wooLinks, forbidden) {
+			t.Fatalf("WooCommerce-link assignment must remain one bulk COM write: %s", forbidden)
+		}
+	}
+	capture := strings.Index(wooLinks,
+		"autoFillWasEnabled = Application.AutoCorrect.AutoFillFormulasInLists")
+	captured := strings.Index(wooLinks, "autoFillCaptured = True")
+	disable := strings.Index(wooLinks,
+		"Application.AutoCorrect.AutoFillFormulasInLists = False")
+	bulk := strings.Index(wooLinks, "TryApplyWooLinkFormula2(target, formulas)")
+	restore := strings.Index(wooLinks,
+		"Application.AutoCorrect.AutoFillFormulasInLists = autoFillWasEnabled")
+	if capture < 0 || captured <= capture || disable <= captured || bulk <= disable ||
+		restore <= bulk {
+		t.Fatal("WooCommerce-link auto-fill fence must capture, disable, bulk-assign, and restore in order")
 	}
 	parity := section("Private Function PriceParitySummary", "Private Function BuildPricingRequest")
 	for _, required := range []string{
