@@ -92,6 +92,17 @@ try {
     $progressInitializeMacro = "'$bookName'!ProductCatalogSync.InitializeOperationProgress"
     $pasteMacro = "'$bookName'!ProductCatalogSync.ValidateProductSearchPasteForValidation"
     $writebackMacro = "'$bookName'!ProductCatalogSync.ValidatePricingWritebackUIForValidation"
+    $freshnessMacro = "'$bookName'!ProductCatalogSync.ValidateCurrencyFreshnessUIForValidation"
+    $instanceMacro = "'$bookName'!ProductCatalogSync.WorkbookInstanceTokenForValidation"
+    $openCountMacro = "'$bookName'!ProductCatalogSync.WorkbookOpenCountForValidation"
+    $closeRequestedMacro = "'$bookName'!ProductCatalogSync.WorkbookCloseRequestedForValidation"
+    $lifecycleMacro = "'$bookName'!ProductCatalogSync.WorkbookLifecycleTelemetryForValidation"
+    $initialInstanceToken = [string]$excel.Run($instanceMacro)
+    if ([string]::IsNullOrWhiteSpace($initialInstanceToken) -or
+        [int]$excel.Run($openCountMacro) -ne 1 -or
+        [bool]$excel.Run($closeRequestedMacro)) {
+        throw 'Workbook lifecycle telemetry was not initialized cleanly.'
+    }
 
     $initialRows = [int]$table.ListRows.Count
     if ($initialRows -eq 0) {
@@ -139,6 +150,10 @@ try {
     if (-not [bool]$excel.Run($writebackMacro)) {
         throw 'Writeback color/comment lifecycle validation returned false.'
     }
+    Write-Host 'stage=validate_currency_freshness'
+    if (-not [bool]$excel.Run($freshnessMacro)) {
+        throw 'Currency freshness icon/color/comment validation returned false.'
+    }
 
     Write-Host 'stage=repeated_search'
     Set-SearchQuery $excel $queryRange '109032'
@@ -150,6 +165,11 @@ try {
         }
         if (-not [bool]$excel.Ready) {
             throw "Excel was not ready after search cycle $index."
+        }
+        if ([string]$excel.Run($instanceMacro) -ne $initialInstanceToken -or
+            [int]$excel.Run($openCountMacro) -ne 1 -or
+            [bool]$excel.Run($closeRequestedMacro)) {
+            throw "Workbook instance changed or requested close during search cycle $index."
         }
     }
     [void]$excel.Run($clearMacro)
@@ -198,6 +218,9 @@ try {
         progress_lifecycle = $true
         merged_search_paste = $true
         writeback_ui_lifecycle = $true
+        currency_freshness_ui = $true
+        workbook_instance_stable = $true
+        workbook_lifecycle = [string]$excel.Run($lifecycleMacro)
         excel_ready = [bool]$excel.Ready
         crash_event_delta = $null
         crash_dump_delta = $null
