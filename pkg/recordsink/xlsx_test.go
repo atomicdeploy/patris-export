@@ -1425,9 +1425,16 @@ func TestDynamicCalculatorVBASourceGuardsLivePricingBeforeMutation(t *testing.T)
 		"Private Sub ApplyWooLinkFormulas",
 		"Application.AutoCorrect.AutoFillFormulasInLists = False",
 		"Application.AutoCorrect.AutoFillFormulasInLists = autoFillWasEnabled",
+		"Application.EnableEvents = False",
+		"Application.EnableEvents = eventsWereEnabled",
+		"Set stagingReservation = WooLinkStagingRange()",
 		"Private Function TryApplyWooLinkFormula2",
-		"target.Formula2 = formulas",
-		"target.Formula = formulas",
+		"mWooLinkFormula2Applied = TryApplyWooLinkFormula2(staging, formulas)",
+		"staging.Formula = formulas",
+		"staging.Copy",
+		"target.PasteSpecial xlPasteFormulas",
+		"Application.CutCopyMode = False",
+		"Public Function WooLinkStagingEmptyForValidation() As Boolean",
 	} {
 		if !strings.Contains(source, required) {
 			t.Fatalf("bulk WooCommerce-link projection is missing %q", required)
@@ -1447,6 +1454,7 @@ func TestDynamicCalculatorVBASourceGuardsLivePricingBeforeMutation(t *testing.T)
 		`Attribute VB_Name = "ProductCatalogSync"`,
 		`Private Const SYNC_TABLE As String = "SyncData"`,
 		`Private Const SYNC_COLUMN_COUNT As Long = 24`,
+		`Private Const WOO_LINK_STAGING_COLUMN As Long = 26`,
 		`Private Const PRICING_CLIENT_HEADER As String = "X-Patris-Excel-Client"`,
 		`Private Const PRICING_CSRF_HEADER As String = "X-Patris-Excel-CSRF-Token"`,
 		`Private Const PRICING_SESSION_SCHEMA As String = "patris.excel-pricing-companion-session/v1"`,
@@ -3157,14 +3165,29 @@ func TestExcelRefreshChangedSnapshotUsesBulkCOMBoundaries(t *testing.T) {
 	wooLinks := section("Private Sub ApplyWooLinkFormulas", "Private Function PriceParitySummary")
 	for _, required := range []string{
 		"Set target = table.ListColumns(8).DataBodyRange",
+		"Set stagingReservation = WooLinkStagingRange()",
+		"target.Rows.Count > MAX_SNAPSHOT_ROWS",
 		"autoFillWasEnabled = Application.AutoCorrect.AutoFillFormulasInLists",
+		"eventsWereEnabled = Application.EnableEvents",
 		"Application.AutoCorrect.AutoFillFormulasInLists = False",
-		"If Not TryApplyWooLinkFormula2(target, formulas) Then",
-		"target.Formula = formulas",
+		"Application.EnableEvents = False",
+		"stagingReservation.ClearContents",
+		"mWooLinkFormula2Applied = TryApplyWooLinkFormula2(staging, formulas)",
+		"staging.Formula = formulas",
+		"staging.Copy",
+		"target.PasteSpecial xlPasteFormulas",
+		"Application.CutCopyMode = False",
 		"Application.AutoCorrect.AutoFillFormulasInLists = autoFillWasEnabled",
-		"target.Formula2 = formulas",
+		"Application.EnableEvents = eventsWereEnabled",
+		"staging.Formula2 = formulas",
+		"Private Function WooLinkStagingRange() As Range",
+		"WOO_LINK_STAGING_COLUMN).Resize(MAX_SNAPSHOT_ROWS, 1)",
+		"Public Function WooLinkStagingEmptyForValidation() As Boolean",
+		"Application.WorksheetFunction.CountA(staging) = 0",
 		"Private Sub ValidateWooLinkProjection",
+		"If Not WooLinkStagingEmptyForValidation() Then GoTo InvalidProjection",
 		"target.Calculate",
+		"target, mWooLinkFormula2Applied",
 		"actualValues = target.Value2",
 		"BulkColumnValue(actualFormulas, rowIndex)",
 		"mWooLinkExpectedDistinctNames = expectedNames.Count",
@@ -3178,8 +3201,11 @@ func TestExcelRefreshChangedSnapshotUsesBulkCOMBoundaries(t *testing.T) {
 		}
 	}
 	for _, forbidden := range []string{
-		".Cells(", "Hyperlinks.Add", "Hyperlinks.Delete",
+		"Hyperlinks.Add", "Hyperlinks.Delete",
 		"Application.AutoCorrect.AutoFillFormulasInLists = True",
+		"TryApplyWooLinkFormula2(target, formulas)",
+		"target.Formula = formulas",
+		"target.Formula2 = formulas",
 	} {
 		if strings.Contains(wooLinks, forbidden) {
 			t.Fatalf("WooCommerce-link assignment must remain one bulk COM write: %s", forbidden)
@@ -3190,12 +3216,18 @@ func TestExcelRefreshChangedSnapshotUsesBulkCOMBoundaries(t *testing.T) {
 	captured := strings.Index(wooLinks, "autoFillCaptured = True")
 	disable := strings.Index(wooLinks,
 		"Application.AutoCorrect.AutoFillFormulasInLists = False")
-	bulk := strings.Index(wooLinks, "TryApplyWooLinkFormula2(target, formulas)")
+	stage := strings.Index(wooLinks, "TryApplyWooLinkFormula2(staging, formulas)")
+	copyAt := strings.Index(wooLinks, "staging.Copy")
+	pasteAt := strings.Index(wooLinks, "target.PasteSpecial xlPasteFormulas")
+	clearAt := strings.LastIndex(wooLinks, "stagingReservation.ClearContents")
 	restore := strings.Index(wooLinks,
 		"Application.AutoCorrect.AutoFillFormulasInLists = autoFillWasEnabled")
-	if capture < 0 || captured <= capture || disable <= captured || bulk <= disable ||
-		restore <= bulk {
-		t.Fatal("WooCommerce-link auto-fill fence must capture, disable, bulk-assign, and restore in order")
+	restoreEvents := strings.Index(wooLinks,
+		"Application.EnableEvents = eventsWereEnabled")
+	if capture < 0 || captured <= capture || disable <= captured || stage <= disable ||
+		copyAt <= stage || pasteAt <= copyAt || clearAt <= pasteAt || restore <= clearAt ||
+		restoreEvents <= restore {
+		t.Fatal("WooCommerce-link staging must capture state, bulk-stage, single-paste, clear, and restore in order")
 	}
 	parity := section("Private Function PriceParitySummary", "Private Function BuildPricingRequest")
 	for _, required := range []string{

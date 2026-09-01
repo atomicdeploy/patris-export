@@ -8,6 +8,7 @@ Private Const SHIPPING_TABLE As String = "Shipping"
 Private Const PROFIT_TABLE As String = "Profit"
 Private Const PRODUCT_COLUMN_COUNT As Long = 10
 Private Const SYNC_COLUMN_COUNT As Long = 24
+Private Const WOO_LINK_STAGING_COLUMN As Long = 26
 Private Const SNAPSHOT_PAGE_SIZE As Long = 250
 Private Const MAX_STATE_PAGES As Long = 8
 Private Const MAX_SNAPSHOT_ROWS As Long = 2000
@@ -171,6 +172,7 @@ Private mWooLinkProjectionValidated As Boolean
 Private mWooLinkProjectionRows As Long
 Private mWooLinkExpectedDistinctNames As Long
 Private mWooLinkActualDistinctNames As Long
+Private mWooLinkFormula2Applied As Boolean
 Private mSaveTimingStartedAt As Double
 Private mSaveTimingActive As Boolean
 Private mRefreshInProgress As Boolean
@@ -521,6 +523,9 @@ Public Sub ValidateWorkbook()
     End If
     If syncTable.ListColumns.Count <> SYNC_COLUMN_COUNT Then
         Err.Raise vbObjectError + 92, "ValidateWorkbook", T("invalid_workbook")
+    End If
+    If Not WooLinkStagingEmptyForValidation() Then
+        Err.Raise vbObjectError + 94, "ValidateWorkbook", T("invalid_workbook")
     End If
     If PriceSheet().Columns("B").ColumnWidth < 20# Or _
        PriceSheet().Columns("K").ColumnWidth < 34# Then
@@ -9579,39 +9584,82 @@ End Function
 Private Sub ApplyWooLinkFormulas(ByVal table As ListObject, _
                                  ByRef formulas() As Variant)
     Dim target As Range
+    Dim staging As Range
+    Dim stagingReservation As Range
     Dim autoFillWasEnabled As Boolean
     Dim autoFillCaptured As Boolean
+    Dim eventsWereEnabled As Boolean
+    Dim eventsCaptured As Boolean
     Dim savedErrorNumber As Long
     Dim savedErrorSource As String
     Dim savedErrorDescription As String
 
     If table.DataBodyRange Is Nothing Then Exit Sub
     Set target = table.ListColumns(8).DataBodyRange
+    If target.Rows.Count > MAX_SNAPSHOT_ROWS Then
+        Err.Raise vbObjectError + 244, "ApplyWooLinkFormulas", _
+                  T("invalid_workbook")
+    End If
+    Set stagingReservation = WooLinkStagingRange()
+    Set staging = stagingReservation.Cells(1, 1).Resize( _
+        target.Rows.Count, 1)
     On Error GoTo ApplyFailed
 
     ' A ListObject calculated column normally replaces every member with the
-    ' first formula assigned to it. This payload intentionally contains a
-    ' different literal name and URL for every row, so fence that application-
-    ' wide auto-fill behavior around the single bulk range assignment. Always
-    ' restore the user's Excel setting, including the legacy-formula fallback.
+    ' first formula assigned to it even when AutoFillFormulasInLists is False.
+    ' Stage the complete array on the hidden technical sheet, then paste all
+    ' formulas into the calculated column as one operation. Native Excel keeps
+    ' every literal name and URL on that clipboard path. The fixed reservation
+    ' is bounded and must be empty both before and after every application.
     autoFillWasEnabled = Application.AutoCorrect.AutoFillFormulasInLists
     autoFillCaptured = True
+    eventsWereEnabled = Application.EnableEvents
+    eventsCaptured = True
     Application.AutoCorrect.AutoFillFormulasInLists = False
-    If Not TryApplyWooLinkFormula2(target, formulas) Then _
-        target.Formula = formulas
+    Application.EnableEvents = False
+    stagingReservation.ClearContents
+    mWooLinkFormula2Applied = TryApplyWooLinkFormula2(staging, formulas)
+    If Not mWooLinkFormula2Applied Then _
+        staging.Formula = formulas
+    staging.Copy
+    target.PasteSpecial xlPasteFormulas
 
 ApplyExit:
+    On Error Resume Next
+    Application.CutCopyMode = False
+    If savedErrorNumber = 0 And Err.Number <> 0 Then
+        savedErrorNumber = Err.Number
+        savedErrorSource = "ApplyWooLinkFormulas.CutCopyMode"
+        savedErrorDescription = Err.Description
+    End If
+    Err.Clear
+    If Not stagingReservation Is Nothing Then _
+        stagingReservation.ClearContents
+    If savedErrorNumber = 0 And Err.Number <> 0 Then
+        savedErrorNumber = Err.Number
+        savedErrorSource = "ApplyWooLinkFormulas.ClearStaging"
+        savedErrorDescription = Err.Description
+    End If
+    Err.Clear
     If autoFillCaptured Then
-        On Error Resume Next
         Application.AutoCorrect.AutoFillFormulasInLists = autoFillWasEnabled
         If savedErrorNumber = 0 And Err.Number <> 0 Then
             savedErrorNumber = Err.Number
-            savedErrorSource = Err.Source
+            savedErrorSource = "ApplyWooLinkFormulas.RestoreAutoFill"
             savedErrorDescription = Err.Description
         End If
         Err.Clear
-        On Error GoTo 0
     End If
+    If eventsCaptured Then
+        Application.EnableEvents = eventsWereEnabled
+        If savedErrorNumber = 0 And Err.Number <> 0 Then
+            savedErrorNumber = Err.Number
+            savedErrorSource = "ApplyWooLinkFormulas.RestoreEvents"
+            savedErrorDescription = Err.Description
+        End If
+        Err.Clear
+    End If
+    On Error GoTo 0
     If savedErrorNumber <> 0 Then
         Err.Raise savedErrorNumber, savedErrorSource, savedErrorDescription
     End If
@@ -9624,15 +9672,33 @@ ApplyFailed:
     Resume ApplyExit
 End Sub
 
-Private Function TryApplyWooLinkFormula2(ByVal target As Range, _
+Private Function TryApplyWooLinkFormula2(ByVal staging As Range, _
                                          ByRef formulas() As Variant) As Boolean
     On Error GoTo Formula2Unavailable
-    target.Formula2 = formulas
+    staging.Formula2 = formulas
     TryApplyWooLinkFormula2 = True
     Exit Function
 
 Formula2Unavailable:
     Err.Clear
+End Function
+
+Private Function WooLinkStagingRange() As Range
+    Set WooLinkStagingRange = SyncSheet().Cells( _
+        1, WOO_LINK_STAGING_COLUMN).Resize(MAX_SNAPSHOT_ROWS, 1)
+End Function
+
+Public Function WooLinkStagingEmptyForValidation() As Boolean
+    Dim staging As Range
+
+    On Error GoTo Failed
+    Set staging = WooLinkStagingRange()
+    WooLinkStagingEmptyForValidation = _
+        (Application.WorksheetFunction.CountA(staging) = 0)
+    Exit Function
+
+Failed:
+    WooLinkStagingEmptyForValidation = False
 End Function
 
 Private Sub ResetWooLinkProjectionValidation()
@@ -9661,12 +9727,14 @@ Private Sub ValidateWooLinkProjection(ByVal target As Range, _
     rowCount = target.Rows.Count
     If rowCount < 1 Or UBound(expectedFormulas, 1) <> rowCount Or _
        UBound(expectedRows, 1) <> rowCount Then GoTo InvalidProjection
+    If Not WooLinkStagingEmptyForValidation() Then GoTo InvalidProjection
 
     ' Calculate and read each whole column once. The comparisons below stay in
     ' VBA memory and prove that the literal snapshot name/link for every row
     ' survived ListObject calculated-column behavior without per-row COM.
     target.Calculate
-    actualFormulas = ReadWooLinkFormulaArray(target)
+    actualFormulas = ReadWooLinkFormulaArray( _
+        target, mWooLinkFormula2Applied)
     actualValues = target.Value2
     Set expectedNames = CreateObject("Scripting.Dictionary")
     Set actualNames = CreateObject("Scripting.Dictionary")
@@ -9718,20 +9786,20 @@ InvalidProjection:
               T("sync_retry")
 End Sub
 
-Private Function ReadWooLinkFormulaArray(ByVal target As Range) As Variant
-    On Error GoTo LegacyFormula
-    ReadWooLinkFormulaArray = target.Formula2
-    Exit Function
-
-LegacyFormula:
-    Err.Clear
-    ReadWooLinkFormulaArray = target.Formula
+Private Function ReadWooLinkFormulaArray(ByVal target As Range, _
+                                         ByVal useFormula2 As Boolean) As Variant
+    If useFormula2 Then
+        ReadWooLinkFormulaArray = target.Formula2
+    Else
+        ReadWooLinkFormulaArray = target.Formula
+    End If
 End Function
 
 Public Function ValidateWooLinkProjectionForValidation() As Boolean
     ValidateWooLinkProjectionForValidation = _
         mWooLinkProjectionValidated And mWooLinkProjectionRows > 0 And _
-        mWooLinkExpectedDistinctNames = mWooLinkActualDistinctNames
+        mWooLinkExpectedDistinctNames = mWooLinkActualDistinctNames And _
+        WooLinkStagingEmptyForValidation()
 End Function
 
 Public Function WooLinkProjectionRowsForValidation() As Long
