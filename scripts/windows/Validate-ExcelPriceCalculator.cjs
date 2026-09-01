@@ -559,6 +559,21 @@ function buildFailures(report, options) {
       && wooLinkReadback.firstTwoDiffer === true,
     `WooCommerce name/link formula readback diverged from the snapshot projection: ${JSON.stringify(wooLinkReadback)}`,
   );
+  failUnless(
+    report.wooLinkProjection.stagingEmptyAtRest === true,
+    'WooCommerce formula staging range is not empty at rest',
+  );
+  const wooLinkSortFilter = report.wooLinkProjection.sortFilter;
+  failUnless(
+    wooLinkSortFilter.required === true
+      && wooLinkSortFilter.initialAscending === true
+      && wooLinkSortFilter.filterVisibleRows > 0
+      && wooLinkSortFilter.filterMismatches === 0
+      && wooLinkSortFilter.descendingMismatches === 0
+      && wooLinkSortFilter.restoredMismatches === 0
+      && wooLinkSortFilter.firstCodeChanged === true,
+    `WooCommerce name/link projection was not stable through filter/sort/restore: ${JSON.stringify(wooLinkSortFilter)}`,
+  );
   if (options.sync && report.sync.performance?.changedSnapshot === true) {
     const runtime = report.wooLinkProjection.runtime;
     failUnless(
@@ -567,7 +582,8 @@ function buildFailures(report, options) {
         && runtime.rows === report.candidate.rowsWithCode
         && runtime.expectedDistinctNames === runtime.actualDistinctNames
         && runtime.actualDistinctNames === wooLinkReadback.distinctNames
-        && runtime.actualDistinctNames > 1,
+        && runtime.actualDistinctNames > 1
+        && runtime.stagingEmpty === true,
       `changed-snapshot WooCommerce projection telemetry failed: ${JSON.stringify(runtime)}`,
     );
   }
@@ -2965,6 +2981,149 @@ function Measure-WooLinkProjection(
     }
 }
 
+function Compare-WooLinkRows(
+    [object[]]$expectedRows,
+    [object[]]$actualRows
+) {
+    $expected = [Collections.Generic.Dictionary[string, object]]::new(
+        [StringComparer]::Ordinal
+    )
+    foreach ($row in $expectedRows) {
+        $expected[[string]$row.Code] = $row
+    }
+    $mismatches = 0
+    foreach ($row in $actualRows) {
+        $code = [string]$row.Code
+        if (-not $expected.ContainsKey($code)) {
+            $mismatches += 1
+            continue
+        }
+        $wanted = $expected[$code]
+        if (-not [string]::Equals(
+                [string]$row.ProductName,
+                [string]$wanted.ProductName,
+                [StringComparison]::Ordinal
+            ) -or
+            -not [string]::Equals(
+                [string]$row.NameFormula,
+                [string]$wanted.NameFormula,
+                [StringComparison]::Ordinal
+            ) -or
+            -not [string]::Equals(
+                [string]$row.NameFormulaText,
+                [string]$wanted.NameFormulaText,
+                [StringComparison]::Ordinal
+            ) -or
+            -not [string]::Equals(
+                [string]$row.NameFormulaAddress,
+                [string]$wanted.NameFormulaAddress,
+                [StringComparison]::Ordinal
+            )) {
+            $mismatches += 1
+        }
+    }
+    $mismatches += [Math]::Abs(@($expectedRows).Count - @($actualRows).Count)
+    return $mismatches
+}
+
+function Set-WooLinkValidationSort(
+    [object]$table,
+    [int]$order
+) {
+    $sort = $null
+    $sortField = $null
+    $codeRange = $null
+    try {
+        $sort = $table.Sort
+        $sort.SortFields.Clear()
+        $codeRange = $table.ListColumns.Item(7).DataBodyRange
+        $sortField = $sort.SortFields.Add($codeRange, 0, $order)
+        $sort.Header = 1
+        $sort.MatchCase = $false
+        $sort.Orientation = 1
+        $sort.Apply()
+    } finally {
+        Release-ComObject $sortField
+        Release-ComObject $codeRange
+        Release-ComObject $sort
+    }
+}
+
+function Test-WooLinkSortFilterStability(
+    [object]$excel,
+    [object]$book,
+    [object[]]$expectedRows
+) {
+    $table = $null
+    $sheet = $null
+    $codeRange = $null
+    $visible = $null
+    $eventsWereEnabled = [bool]$excel.EnableEvents
+    $codes = @($expectedRows | ForEach-Object { [string]$_.Code })
+    $sortedCodes = @($codes | Sort-Object)
+    $initialAscending = $codes.Count -gt 1
+    for ($index = 0; $index -lt $codes.Count; $index++) {
+        if (-not [string]::Equals(
+                $codes[$index],
+                $sortedCodes[$index],
+                [StringComparison]::Ordinal
+            )) {
+            $initialAscending = $false
+            break
+        }
+    }
+    $result = [ordered]@{
+        required = $true
+        initialAscending = $initialAscending
+        filterVisibleRows = 0
+        filterMismatches = -1
+        descendingMismatches = -1
+        restoredMismatches = -1
+        firstCodeChanged = $false
+    }
+    try {
+        $excel.EnableEvents = $false
+        $table = Find-Table $book 'Products'
+        $sheet = $table.Parent
+        $codeRange = $table.ListColumns.Item(7).DataBodyRange
+        $filterCode = $codes[[Math]::Floor($codes.Count / 2)]
+        [void]$table.Range.AutoFilter(7, $filterCode)
+        $visible = $codeRange.SpecialCells(12)
+        $result.filterVisibleRows = [int]$visible.Cells.Count
+        $filteredRows = (Read-Products $book).Rows
+        $result.filterMismatches = Compare-WooLinkRows $expectedRows $filteredRows
+        if ([bool]$sheet.FilterMode) { $sheet.ShowAllData() }
+
+        Set-WooLinkValidationSort $table 2
+        $descendingRows = (Read-Products $book).Rows
+        $result.descendingMismatches = Compare-WooLinkRows $expectedRows $descendingRows
+        if ($descendingRows.Count -gt 0 -and $codes.Count -gt 0) {
+            $result.firstCodeChanged = -not [string]::Equals(
+                [string]$descendingRows[0].Code,
+                [string]$codes[0],
+                [StringComparison]::Ordinal
+            )
+        }
+
+        Set-WooLinkValidationSort $table 1
+        $restoredRows = (Read-Products $book).Rows
+        $result.restoredMismatches = Compare-WooLinkRows $expectedRows $restoredRows
+        return [pscustomobject]$result
+    } finally {
+        if ($null -ne $sheet -and [bool]$sheet.FilterMode) {
+            try { $sheet.ShowAllData() } catch {}
+        }
+        if ($null -ne $table -and $initialAscending) {
+            try { Set-WooLinkValidationSort $table 1 } catch {}
+        }
+        try { $excel.EnableEvents = $eventsWereEnabled } catch {}
+        Release-ComObject $visible
+        Release-ComObject $codeRange
+        Release-ComObject $sheet
+        Release-ComObject $table
+    }
+}
+
 function ProductCode-Dictionary([object[]]$rows) {
     $dictionary = [System.Collections.Generic.Dictionary[string, object]]::new(
         [System.StringComparer]::Ordinal
@@ -3008,6 +3167,17 @@ $wooLinkRuntimeValidation = [pscustomobject]@{
     rows = 0
     expectedDistinctNames = 0
     actualDistinctNames = 0
+    stagingEmpty = $false
+}
+$wooLinkStagingEmptyAtRest = $false
+$wooLinkSortFilterValidation = [pscustomobject]@{
+    required = $false
+    initialAscending = $false
+    filterVisibleRows = 0
+    filterMismatches = -1
+    descendingMismatches = -1
+    restoredMismatches = -1
+    firstCodeChanged = $false
 }
 try {
     Set-ValidatorStage 'creating_excel'
@@ -3042,6 +3212,7 @@ try {
         $candidateBook = $workbooks.Open($candidatePath, 0, $true)
     }
     Set-ValidatorStage 'candidate_opened' ([string]$candidateBook.Name)
+    $macroBookName = ([string]$candidateBook.Name).Replace("'", "''")
     $initialWorkbookLifecycle = Read-WorkbookLifecycle $excel $candidateBook
     if ([string]::IsNullOrWhiteSpace([string]$initialWorkbookLifecycle.token) -or
         [int]$initialWorkbookLifecycle.openCount -ne 1) {
@@ -3050,7 +3221,6 @@ try {
 
     if ($runSync) {
         Set-ValidatorStage 'starting_live_sync'
-        $macroBookName = ([string]$candidateBook.Name).Replace("'", "''")
         [void]$excel.Run(
             "'$macroBookName'!ProductCatalogSync.RefreshAllDataForValidation"
         )
@@ -3146,6 +3316,9 @@ try {
                 actualDistinctNames = [int]$excel.Run(
                     "'$macroBookName'!ProductCatalogSync.WooLinkActualDistinctNamesForValidation"
                 )
+                stagingEmpty = [bool]$excel.Run(
+                    "'$macroBookName'!ProductCatalogSync.WooLinkStagingEmptyForValidation"
+                )
             }
         }
         if ($changedSnapshot -and $rowCount -eq 1131 -and
@@ -3156,6 +3329,9 @@ try {
     }
     Set-ValidatorStage 'calculating_candidate'
     $excel.CalculateFullRebuild()
+    $wooLinkStagingEmptyAtRest = [bool]$excel.Run(
+        "'$macroBookName'!ProductCatalogSync.WooLinkStagingEmptyForValidation"
+    )
     Reset-SelectedProductRow $excel $candidateBook
     $candidateSyncStatus = [Convert]::ToString(
         (Sheet-Scalar $candidateBook 3 'B6'),
@@ -3176,6 +3352,8 @@ try {
     $statusSummary = Test-StatusSummaryFormatter $excel $candidateBook
     Set-ValidatorStage 'reading_candidate_products'
     $candidateProducts = Read-Products $candidateBook
+    Set-ValidatorStage 'checking_woo_link_sort_filter_stability'
+    $wooLinkSortFilterValidation = Test-WooLinkSortFilterStability $excel $candidateBook $candidateProducts.Rows
     Set-ValidatorStage 'checking_title_direction'
     $titleDirection = Test-ProductTitleDirection $candidateBook
     Set-ValidatorStage 'checking_fonts'
@@ -3610,6 +3788,8 @@ try {
         wooLinkProjection = [pscustomobject]@{
             runtime = $wooLinkRuntimeValidation
             readback = $wooLinkReadback
+            stagingEmptyAtRest = $wooLinkStagingEmptyAtRest
+            sortFilter = $wooLinkSortFilterValidation
         }
         reference = [pscustomobject]@{
             path = $referencePath
@@ -4726,10 +4906,23 @@ function main() {
     if (!/autoFillWasEnabled\s*=\s*Application\.AutoCorrect\.AutoFillFormulasInLists/iu.test(wooLinksSource)
         || !/Application\.AutoCorrect\.AutoFillFormulasInLists\s*=\s*False/iu.test(wooLinksSource)
         || !/Application\.AutoCorrect\.AutoFillFormulasInLists\s*=\s*autoFillWasEnabled/iu.test(wooLinksSource)
-        || !/TryApplyWooLinkFormula2\(target,\s*formulas\)/iu.test(wooLinksSource)
-        || !/target\.Formula2\s*=\s*formulas/iu.test(wooLinksSource)
-        || !/target\.Formula\s*=\s*formulas/iu.test(wooLinksSource)
+        || !/eventsWereEnabled\s*=\s*Application\.EnableEvents/iu.test(wooLinksSource)
+        || !/Application\.EnableEvents\s*=\s*False/iu.test(wooLinksSource)
+        || !/Application\.EnableEvents\s*=\s*eventsWereEnabled/iu.test(wooLinksSource)
+        || !/Set\s+stagingReservation\s*=\s*WooLinkStagingRange\(\)/iu.test(wooLinksSource)
+        || !/stagingReservation\.ClearContents/iu.test(wooLinksSource)
+        || !/TryApplyWooLinkFormula2\(staging,\s*formulas\)/iu.test(wooLinksSource)
+        || !/staging\.Formula2\s*=\s*formulas/iu.test(wooLinksSource)
+        || !/staging\.Formula\s*=\s*formulas/iu.test(wooLinksSource)
+        || !/staging\.Copy[\s\S]*?target\.PasteSpecial\s+xlPasteFormulas/iu.test(wooLinksSource)
+        || !/Application\.CutCopyMode\s*=\s*False/iu.test(wooLinksSource)
+        || !/Private Function WooLinkStagingRange\(\) As Range/iu.test(wooLinksSource)
+        || !/WOO_LINK_STAGING_COLUMN\)\.Resize\(MAX_SNAPSHOT_ROWS,\s*1\)/iu.test(wooLinksSource)
+        || !/Public Function WooLinkStagingEmptyForValidation\(\) As Boolean/iu.test(wooLinksSource)
+        || !/Application\.WorksheetFunction\.CountA\(staging\)\s*=\s*0/iu.test(wooLinksSource)
+        || /TryApplyWooLinkFormula2\(target,\s*formulas\)|target\.Formula2?\s*=\s*formulas/iu.test(wooLinksSource)
         || !/Private Sub ValidateWooLinkProjection\b/iu.test(wooLinksSource)
+        || !/If\s+Not\s+WooLinkStagingEmptyForValidation\(\)\s+Then\s+GoTo\s+InvalidProjection/iu.test(wooLinksSource)
         || !/target\.Calculate/iu.test(wooLinksSource)
         || !/actualValues\s*=\s*target\.Value2/iu.test(wooLinksSource)
         || !/mWooLinkExpectedDistinctNames\s*=\s*expectedNames\.Count/iu.test(wooLinksSource)
@@ -4739,14 +4932,20 @@ function main() {
         || !/Public Function WooLinkActualDistinctNamesForValidation\(\) As Long/iu.test(wooLinksSource)
         || !/function Parse-WooLinkFormula\(/u.test(powershell)
         || !/function Measure-WooLinkProjection\(/u.test(powershell)
+        || !/function Test-WooLinkSortFilterStability\(/u.test(powershell)
+        || !/Compare-WooLinkRows\s+\$expectedRows\s+\$descendingRows/u.test(powershell)
+        || !/Set-WooLinkValidationSort\s+\$table\s+1/u.test(powershell)
         || !/NameFormula\s*=\s*\$nameFormula/u.test(powershell)
         || !/Permalink\s*=\s*\[Convert\]::ToString/u.test(powershell)
         || !/WooLinkProjectionRowsForValidation/u.test(powershell)
+        || !/WooLinkStagingEmptyForValidation/u.test(powershell)
+        || !/stagingEmptyAtRest\s*=\s*\$wooLinkStagingEmptyAtRest/u.test(powershell)
+        || !/sortFilter\s*=\s*\$wooLinkSortFilterValidation/u.test(powershell)
         || !/displayTextMismatches\s*=\s*\$displayTextMismatches/u.test(powershell)
         || !/linkAddressMismatches\s*=\s*\$linkAddressMismatches/u.test(powershell)
         || !/firstTwoDiffer\s*=\s*\$firstTwoDiffer/u.test(powershell)
-        || /\.Cells\s*\(|Hyperlinks\.(?:Add|Delete)/iu.test(wooLinksSource)) {
-      throw new Error('WooCommerce names and links must be assigned as one per-row bulk array with calculated-column auto-fill restored');
+        || /Hyperlinks\.(?:Add|Delete)/iu.test(wooLinksSource)) {
+      throw new Error('WooCommerce names and links must use bounded hidden staging, one formula-only paste, full parity, and restored Excel state');
     }
     if (!/\bRunBackgroundWritebackStep\b/iu.test(scheduledWritebackSource)
         || /\bRunSynchronousWritebackStep\b|\bBeginWritebackPoll\b|\bStartWritebackRequest\b/iu.test(moduleSource)
