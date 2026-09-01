@@ -93,6 +93,7 @@ function usage() {
     '  --no-sync              Validate without running the live synchronization macro',
     '  --strict-reference     Fail on every comparable weight/rate difference from the archive',
     '  --save-synced-to PATH  Save the validated runtime workbook as .xlsm (never .xltm)',
+    '  --source-only          Run static source/build gates without starting Excel',
     '  --json                 Print the complete machine-readable report',
     '  --timeout-ms NUMBER    Excel validation timeout in milliseconds (default: 240000)',
     '  --self-test-native-excel-timeout  Force a hidden native Excel timeout safety test',
@@ -114,6 +115,7 @@ function parseArgs(argv) {
     timeoutMs: 240000,
     selfTestProcessSafety: false,
     selfTestNativeExcelTimeout: false,
+    sourceOnly: false,
     saveSyncedTo: '',
   };
 
@@ -146,6 +148,10 @@ function parseArgs(argv) {
         break;
       case '--json':
         options.json = true;
+        break;
+      case '--source-only':
+        options.sourceOnly = true;
+        options.sync = false;
         break;
       case '--timeout-ms':
         index += 1;
@@ -343,8 +349,20 @@ function buildFailures(report, options) {
     'the native pricing-writeback cell color/comment and routing fixture failed',
   );
   failUnless(
+    report.pricingGenerationFences === true,
+    'the per-setting immutable writeback-generation fence fixture failed',
+  );
+  failUnless(
     report.pricingProgressUI === true,
     'the visible Persian progress surface lifecycle fixture failed',
+  );
+  failUnless(
+    report.currencyFreshnessUI === true,
+    'the currency freshness icon/color/comment lifecycle fixture failed',
+  );
+  failUnless(
+    report.workbookLifecycle.stable === true,
+    `the workbook instance closed or restarted during native validation: ${JSON.stringify(report.workbookLifecycle)}`,
   );
   if (options.sync) {
     failUnless(
@@ -1597,6 +1615,13 @@ function Test-PricingWritebackUI([object]$excel, [object]$book) {
     )
 }
 
+function Test-PricingGenerationFences([object]$excel, [object]$book) {
+    $bookName = ([string]$book.Name).Replace("'", "''")
+    return [bool]$excel.Run(
+        "'$bookName'!ProductCatalogSync.ValidatePricingGenerationFencesForValidation"
+    )
+}
+
 function Test-PricingProgressUI([object]$excel, [object]$book) {
     $bookName = ([string]$book.Name).Replace("'", "''")
     return [bool]$excel.Run(
@@ -1609,6 +1634,23 @@ function Test-ProductImagePreviewUI([object]$excel, [object]$book) {
     return [bool]$excel.Run(
         "'$bookName'!ProductCatalogSync.ValidateProductImagePreviewUIForValidation"
     )
+}
+
+function Test-CurrencyFreshnessUI([object]$excel, [object]$book) {
+    $bookName = ([string]$book.Name).Replace("'", "''")
+    return [bool]$excel.Run(
+        "'$bookName'!ProductCatalogSync.ValidateCurrencyFreshnessUIForValidation"
+    )
+}
+
+function Read-WorkbookLifecycle([object]$excel, [object]$book) {
+    $bookName = ([string]$book.Name).Replace("'", "''")
+    return [pscustomobject]@{
+        token = [string]$excel.Run("'$bookName'!ProductCatalogSync.WorkbookInstanceTokenForValidation")
+        openCount = [int]$excel.Run("'$bookName'!ProductCatalogSync.WorkbookOpenCountForValidation")
+        closeRequested = [bool]$excel.Run("'$bookName'!ProductCatalogSync.WorkbookCloseRequestedForValidation")
+        telemetry = [string]$excel.Run("'$bookName'!ProductCatalogSync.WorkbookLifecycleTelemetryForValidation")
+    }
 }
 
 function Test-StatusSummaryFormatter([object]$excel, [object]$book) {
@@ -2681,6 +2723,7 @@ $syncSucceeded = $false
 $syncOperation = ''
 $syncError = ''
 $syncDiagnostic = ''
+$syncPerformance = $null
 try {
     Set-ValidatorStage 'creating_excel'
     $validatorJobHandle = New-ValidatorKillOnCloseJob
@@ -2696,7 +2739,9 @@ try {
     $excel.Visible = $false
     $excel.DisplayAlerts = $false
     $excel.AskToUpdateLinks = $false
-    $excel.EnableEvents = $false
+    # Cold-open acceptance requires the real Workbook_Open path. It owns the
+    # duplicate-startup fence and must not be replaced by a direct macro call.
+    $excel.EnableEvents = $true
 
     # The validator always runs local audit/fixture macros embedded in the
     # candidate. --no-sync suppresses only RefreshAllData; disabling every
@@ -2714,6 +2759,11 @@ try {
     Release-ComObject $workbooks
     $workbooks = $null
     Set-ValidatorStage 'candidate_opened' ([string]$candidateBook.Name)
+    $initialWorkbookLifecycle = Read-WorkbookLifecycle $excel $candidateBook
+    if ([string]::IsNullOrWhiteSpace([string]$initialWorkbookLifecycle.token) -or
+        [int]$initialWorkbookLifecycle.openCount -ne 1) {
+        throw "Workbook_Open did not run exactly once: $($initialWorkbookLifecycle.telemetry)"
+    }
 
     if ($runSync) {
         Set-ValidatorStage 'starting_live_sync'
@@ -2770,6 +2820,38 @@ try {
             )
             throw "Live synchronization '$syncOperation' failed before validation: $syncFailureStatus $syncError; diagnostic=$syncDiagnostic"
         }
+        $reconcileSeconds = [Convert]::ToDouble(
+            (Sheet-Scalar $candidateBook 3 'B50'), $invariant
+        )
+        $formulaSeconds = [Convert]::ToDouble(
+            (Sheet-Scalar $candidateBook 3 'B51'), $invariant
+        )
+        $tableWriteSeconds = [Convert]::ToDouble(
+            (Sheet-Scalar $candidateBook 3 'B52'), $invariant
+        )
+        $formatSeconds = [Convert]::ToDouble(
+            (Sheet-Scalar $candidateBook 3 'B53'), $invariant
+        )
+        $bulkApplySeconds = $reconcileSeconds + $formulaSeconds +
+            $tableWriteSeconds + $formatSeconds
+        $changedSnapshot = $bulkApplySeconds -gt 0
+        $rowCount = [Convert]::ToInt32(
+            (Sheet-Scalar $candidateBook 3 'G38'), $invariant
+        )
+        $syncPerformance = [pscustomobject]@{
+            changedSnapshot = $changedSnapshot
+            rows = $rowCount
+            reconcileSeconds = $reconcileSeconds
+            formulaSeconds = $formulaSeconds
+            tableWriteSeconds = $tableWriteSeconds
+            formatSeconds = $formatSeconds
+            bulkApplySeconds = $bulkApplySeconds
+            nativeAcceptanceLimitExclusiveSeconds = 10.0
+        }
+        if ($changedSnapshot -and $rowCount -eq 1131 -and
+            $bulkApplySeconds -ge 10.0) {
+            throw "Native 1,131-row bulk apply took $bulkApplySeconds seconds; required single-digit seconds."
+        }
         Set-ValidatorStage 'live_sync_completed' $syncOperation
     }
     Set-ValidatorStage 'calculating_candidate'
@@ -2800,8 +2882,12 @@ try {
     $fontAudit = Test-FontAudit $excel $candidateBook
     Set-ValidatorStage 'checking_writeback_ui'
     $pricingWritebackUI = Test-PricingWritebackUI $excel $candidateBook
+    Set-ValidatorStage 'checking_writeback_generation_fences'
+    $pricingGenerationFences = Test-PricingGenerationFences $excel $candidateBook
     Set-ValidatorStage 'checking_progress_ui'
     $pricingProgressUI = Test-PricingProgressUI $excel $candidateBook
+    Set-ValidatorStage 'checking_currency_freshness_ui'
+    $currencyFreshnessUI = Test-CurrencyFreshnessUI $excel $candidateBook
     Set-ValidatorStage 'checking_pricing_event_listener'
     $eventMacroBookName = ([string]$candidateBook.Name).Replace("'", "''")
     $pricingEventListenerActive = [bool]$excel.Run(
@@ -2817,6 +2903,19 @@ try {
     $candidateSearch = Test-ProductSearch $excel $candidateBook $candidateProducts.Rows
     Set-ValidatorStage 'checking_search_crash_regression'
     $searchRegression = Test-SearchCrashRegression $excel $candidateBook
+    $finalWorkbookLifecycle = Read-WorkbookLifecycle $excel $candidateBook
+    $workbookLifecycle = [pscustomobject]@{
+        stable = (
+            -not [string]::IsNullOrWhiteSpace([string]$initialWorkbookLifecycle.token) -and
+            [string]$initialWorkbookLifecycle.token -eq [string]$finalWorkbookLifecycle.token -and
+            [int]$initialWorkbookLifecycle.openCount -eq 1 -and
+            [int]$finalWorkbookLifecycle.openCount -eq 1 -and
+            -not [bool]$finalWorkbookLifecycle.closeRequested
+        )
+        initialToken = [string]$initialWorkbookLifecycle.token
+        finalToken = [string]$finalWorkbookLifecycle.token
+        telemetry = [string]$finalWorkbookLifecycle.telemetry
+    }
     Reset-SelectedProductRow $excel $candidateBook
     Set-ValidatorStage 'reading_candidate_sync_data'
     $candidateSyncData = Read-SyncData $candidateBook
@@ -3148,6 +3247,7 @@ try {
             operation = $syncOperation
             error = $syncError
             diagnostic = $syncDiagnostic
+            performance = $syncPerformance
         }
         candidate = [pscustomobject]@{
             path = $candidatePath
@@ -3226,7 +3326,10 @@ try {
         titleDirection = $titleDirection
         fontAudit = $fontAudit
         pricingWritebackUI = $pricingWritebackUI
+        pricingGenerationFences = $pricingGenerationFences
         pricingProgressUI = $pricingProgressUI
+        currencyFreshnessUI = $currencyFreshnessUI
+        workbookLifecycle = $workbookLifecycle
         pricingEventListenerActive = $pricingEventListenerActive
         pricingEventAutoPull = $pricingEventAutoPull
         productImagePreviewUI = $productImagePreviewUI
@@ -4075,7 +4178,7 @@ function main() {
     console.log(usage());
     return;
   }
-  if (process.platform !== 'win32') {
+  if (process.platform !== 'win32' && !options.sourceOnly) {
     console.error('This validator requires Windows, Microsoft Excel, and powershell.exe.');
     process.exitCode = 2;
     return;
@@ -4103,25 +4206,41 @@ function main() {
     };
     const searchEntrySource = procedure(moduleSource, 'SearchProducts');
     const searchSource = procedure(moduleSource, 'SearchProductsForQuery');
-    const synchronousWritebackSource = procedure(moduleSource, 'RunSynchronousWritebackStep');
+    const backgroundWritebackSource = procedure(moduleSource, 'RunBackgroundWritebackStep');
     const searchBusySource = /Private Function SearchOperationBusy\b[\s\S]*?\r?\nEnd Function/iu.exec(moduleSource)?.[0] || '';
     const enterSource = procedure(moduleSource, 'HandleProductSearchEnter');
+    const updateSearchEnterSource = /Public Function UpdateSearchEnterHotkey\b[\s\S]*?\r?\nEnd Function/iu.exec(moduleSource)?.[0] || '';
+    const deferredInteractiveSource = procedure(moduleSource, 'RunDeferredInteractiveWork');
+    const scheduleDeferredInteractiveSource = procedure(moduleSource, 'ScheduleDeferredInteractiveWork');
     const pasteSource = procedure(moduleSource, 'PasteProductSearchText');
     const highlightSource = procedure(moduleSource, 'HighlightSelectedProductRow');
+    const rememberSelectionSource = procedure(moduleSource, 'RememberSelectedProductRow');
     const progressShapesSource = procedure(moduleSource, 'UpdateOperationProgressShapes');
+    const refreshProgressSource = procedure(moduleSource, 'SetRefreshProgress');
+    const imageSettingSource = procedure(moduleSource, 'HandleProductImageSettingChanged');
+    const imageSelectionSource = procedure(moduleSource, 'QueueProductImagePreviewForSelection');
+    const importPayloadSource = /Private Function ImportPricingSnapshotPayload\b[\s\S]*?\r?\nEnd Function/iu.exec(moduleSource)?.[0] || '';
+    const importCatalogSource = /Private Function ImportReconciledCatalog\b[\s\S]*?\r?\nEnd Function/iu.exec(moduleSource)?.[0] || '';
+    const paritySource = /Private Function PriceParitySummary\b[\s\S]*?Private Function BuildPricingRequest/iu.exec(moduleSource)?.[0] || '';
     const sheetChangeSource = procedure(workbookSource, 'Workbook_SheetChange');
     const selectionSource = procedure(workbookSource, 'Workbook_SheetSelectionChange');
     const scheduledWritebackSource = procedure(moduleSource, 'RunScheduledPricingWriteback');
     const completeWritebackSource = procedure(moduleSource, 'CompletePricingWriteback');
     const queueWritebackSource = procedure(moduleSource, 'QueuePricingInputWriteback');
+    const visibleCnySource = procedure(moduleSource, 'QueueVisibleCNYProposal');
     const syncSettingsSource = procedure(moduleSource, 'SyncPricingSettingsNow');
+    const autoSyncSource = procedure(moduleSource, 'KickQueuedPricingAutoSync');
+    const enqueueSettingsSource = procedure(moduleSource, 'EnqueueDirtyPricingBatch');
     const buildWritebackSource = /Private Function BuildPricingWritebackRequest\b[\s\S]*?\r?\nEnd Function/iu.exec(moduleSource)?.[0] || '';
     const buildBatchWritebackSource = /Private Function BuildPricingBatchWritebackRequest\b[\s\S]*?\r?\nEnd Function/iu.exec(moduleSource)?.[0] || '';
     const applyCommittedSource = procedure(moduleSource, 'ApplyWebsiteCommittedWriteback');
     const applyBatchSource = procedure(moduleSource, 'ApplyConfirmedSettingsForActiveBatch');
+    const applyConfirmedWritebackSource = procedure(moduleSource, 'ApplyConfirmedWritebackValue');
     const restoreTerminalSource = procedure(moduleSource, 'RestoreWritebackValueFromTerminal');
     const confirmWritebackSource = procedure(moduleSource, 'ConfirmPricingWriteback');
     const confirmBatchSource = procedure(moduleSource, 'ConfirmPricingBatchWriteback');
+    const pricingNewerProposalSource = /Private Function PricingKeyHasNewerProposal\b[\s\S]*?\r?\nEnd Function/iu.exec(moduleSource)?.[0] || '';
+    const writebackNewerProposalSource = /Private Function WritebackHasNewerProposal\b[\s\S]*?\r?\nEnd Function/iu.exec(moduleSource)?.[0] || '';
     const restoreSnapshotSource = procedure(moduleSource, 'RestorePricingStateSnapshot');
     const globalStateSource = procedure(moduleSource, 'ApplyGlobalState');
     const forbiddenSearchTokens = [
@@ -4137,9 +4256,8 @@ function main() {
     if (!/SearchProductsForQuery\s+ReadSearchLiteral\(\),\s*0/iu.test(searchEntrySource)) {
       throw new Error('SearchProducts must enter the guarded query-bound implementation');
     }
-    const searchDelayMatch = /SEARCH_DELAY_SECONDS\s+As Double\s*=\s*([0-9.]+)/iu.exec(moduleSource);
-    if (!searchDelayMatch || Number(searchDelayMatch[1]) <= 0 || Number(searchDelayMatch[1]) > 0.75) {
-      throw new Error('Local search must use a reliable sub-second top-level callback');
+    if (/SEARCH_DELAY_SECONDS|mScheduledSearchTime|SchedulePendingProductSearch/iu.test(moduleSource)) {
+      throw new Error('Local search staging must not own an OnTime callback');
     }
     const backgroundSearchBlockers = [
       'mRefreshInProgress',
@@ -4167,7 +4285,7 @@ function main() {
     if (!/If\s+matchCount\s*=\s*0\s+Then[\s\S]*?HighlightSelectedProductRow\s+PriceSheet\(\)\.Range\("A1"\)/iu.test(searchSource)) {
       throw new Error('A no-match search must clear the previous result highlight and image preview');
     }
-    if (!/\(mWritebackStage\s*=\s*"poll"\s+Or\s+mWritebackStage\s*=\s*"ack"\)[\s\S]*?mWritebackPollCount\s*<\s*12[\s\S]*?mWritebackStage\s*=\s*"poll_wait"[\s\S]*?SchedulePricingWriteback\s+1/iu.test(synchronousWritebackSource)) {
+    if (!/\(mWritebackStage\s*=\s*"poll"\s+Or\s+mWritebackStage\s*=\s*"ack"\)[\s\S]*?mWritebackPollCount\s*<\s*12[\s\S]*?mWritebackStage\s*=\s*"poll_wait"[\s\S]*?SchedulePricingWriteback\s+1/iu.test(backgroundWritebackSource)) {
       throw new Error('Transient poll/ACK failures must use bounded idempotent state readback before terminal failure');
     }
     if (/Application\.OnKey\s+"~"\s*,/iu.test(moduleSource)) {
@@ -4195,6 +4313,36 @@ function main() {
     if (foundSelectionToken) {
       throw new Error(`Row selection contains non-local work: ${foundSelectionToken}`);
     }
+    if (/Application\.OnTime|ServerXMLHTTP|OpenAsync|\.Calculate/iu.test(sheetChangeSource)
+        || /Application\.OnTime|\.Calculate/iu.test(selectionSource)) {
+      throw new Error('SheetChange and SelectionChange must remain free of HTTP, recalculation, and OnTime work');
+    }
+    if (!/ScheduleDeferredInteractiveWork/iu.test(sheetChangeSource)
+        || !/ScheduleDeferredInteractiveWork/iu.test(selectionSource)
+        || !/mDeferredInteractiveWorkScheduled/iu.test(scheduleDeferredInteractiveSource)
+        || !/QualifiedWorkbookMacro\("RunDeferredInteractiveWork"\)/iu.test(scheduleDeferredInteractiveSource)
+        || !/If\s+mSearchNativeEnterPending\s+Then\s+RunQueuedProductSearchNow/iu.test(deferredInteractiveSource)
+        || !/KickQueuedPricingAutoSync/iu.test(deferredInteractiveSource)
+        || !/RunScheduledProductImagePreview/iu.test(deferredInteractiveSource)
+        || /ServerXMLHTTP|OpenAsync|\.Calculate|FormatConditions|For\s+rowIndex/iu.test(deferredInteractiveSource)) {
+      throw new Error('Interactive edits must have one coalesced post-event dispatcher with no event-path heavy work');
+    }
+    for (const [eventName, eventTarget] of [
+      ['image setting edit', imageSettingSource],
+      ['image row selection', imageSelectionSource],
+    ]) {
+      if (/RefreshProductImagePreview|OpenAsync|\.Send\b|Application\.OnTime|\.Calculate|PumpExcelMessages|FormatConditions|For\s+rowIndex/iu.test(eventTarget)) {
+        throw new Error(`${eventName} must only stage memory; network and table work are deferred`);
+      }
+    }
+    if (/ThisWorkbook\.Close|Application\.Quit|\bShell\s*\(/iu.test(moduleSource + workbookSource)
+        || !/If\s+Not\s+ProductCatalogSync\.RecordWorkbookOpened\(\)\s+Then\s+Exit Sub/iu.test(workbookSource)
+        || !/CompleteWorkbookOpenLifecycle/iu.test(workbookSource)
+        || !/WorkbookOpenCountForValidation/iu.test(moduleSource)
+        || !/RecordWorkbookBeforeClose/iu.test(workbookSource)
+        || !/WorkbookInstanceTokenForValidation/iu.test(moduleSource)) {
+      throw new Error('Workbook lifecycle must expose restart telemetry and contain no self-close/relaunch path');
+    }
     const forbiddenHighlightTokens = [
       '.Calculate',
       'RefreshProductImagePreview',
@@ -4210,6 +4358,11 @@ function main() {
         || !/Range\("G48"\)\.Value2\s*=\s*previewRow/iu.test(highlightSource)) {
       throw new Error(`Selected-row highlight is not a bounded local marker update: ${foundHighlightToken || 'missing marker'}`);
     }
+    if (!/mSelectedProductRelativeRow\s*=\s*relativeRow/iu.test(rememberSelectionSource)
+        || /Range\("G30"\)|Range\("G48"\)|\.Calculate|Application\.OnTime/iu.test(rememberSelectionSource)
+        || !/RememberSelectedProductRow\s+Target/iu.test(selectionSource)) {
+      throw new Error('Ordinary row selection must be memory-only and must not recalculate hidden marker cells');
+    }
     if (!/Application\.OnKey\s+"\^v",\s*pasteMacro/iu.test(moduleSource)
         || !/Application\.OnKey\s+"\+\{INSERT\}",\s*pasteMacro/iu.test(moduleSource)
         || !/TryReadUnicodeClipboardText\(clipboardText\)/iu.test(pasteSource)
@@ -4217,16 +4370,45 @@ function main() {
         || !/searchAnchor\.Value2\s*=\s*NormalizeProductSearchPasteText\(plainText\)/iu.test(moduleSource)) {
       throw new Error('Merged search paste must intercept plain text and write only through the C3 anchor');
     }
-    if (!/If\s+visualState\s*=\s*"neutral"\s+Then[\s\S]*?track\.Visible\s*=\s*msoFalse[\s\S]*?fill\.Visible\s*=\s*msoFalse[\s\S]*?label\.Visible\s*=\s*msoFalse/iu.test(progressShapesSource)
+    if (!/If\s+hideSurface\s+Then[\s\S]*?track\.Visible\s*=\s*msoFalse[\s\S]*?fill\.Visible\s*=\s*msoFalse[\s\S]*?label\.Visible\s*=\s*msoFalse/iu.test(progressShapesSource)
         || !/Else[\s\S]*?track\.Visible\s*=\s*msoTrue[\s\S]*?fill\.Visible\s*=\s*msoTrue[\s\S]*?label\.Visible\s*=\s*msoTrue/iu.test(progressShapesSource)
+        || !/OperationProgressIsTerminal\(percentValue,\s*visualState\)/iu.test(progressShapesSource)
         || !/\$track\.Visible\s*=\s*\$false/u.test(buildSource)
         || !/\$text\.Visible\s*=\s*\$false/u.test(buildSource)) {
       throw new Error('Ready must hide the complete progress surface and active states must show it');
     }
-    if (!/\bRunSynchronousWritebackStep\b/iu.test(scheduledWritebackSource)
-        || /\bBeginWritebackPoll\b/iu.test(scheduledWritebackSource)
-        || /\bStartWritebackRequest\b/iu.test(scheduledWritebackSource)) {
-      throw new Error('Scheduled writeback must use the bounded loopback-only step and avoid the stale asynchronous event path');
+    if (/"refresh_request"\s*,\s*10|"refresh_validate"\s*,\s*70|"refresh_apply"\s*,\s*90/iu.test(moduleSource)
+        || !/SetRefreshProgressPhase\s+stageName,\s*-1,\s*messageText/iu.test(refreshProgressSource)
+        || !/PhaseElapsed\(mRefreshProgressStartedAt\)/iu.test(moduleSource)
+        || !/RefreshProgressHeartbeat/iu.test(moduleSource)) {
+      throw new Error('Refresh progress must use real page counts or phase-plus-elapsed indeterminate activity, never fake milestones');
+    }
+    if ((importPayloadSource.match(/JsonRuntime\.ParseJson\(responseText\)/giu) || []).length !== 1) {
+      throw new Error('Snapshot receive must parse the downloaded payload exactly once');
+    }
+    for (const required of [
+      'ReplaceTableData table, mainOutput',
+      'ReplaceTableData syncTable, syncOutput',
+      'ApplyWooLinkFormulas table, wooLinkOutput',
+      'ApplyProductTableFormulas table',
+      'ApplyProductTableFormatting table',
+    ]) {
+      if (!importCatalogSource.includes(required)) {
+        throw new Error(`Snapshot apply is missing bulk boundary: ${required}`);
+      }
+    }
+    if (/\.Cells\s*\(\s*(?:outputRow|rowIndex)|Hyperlinks\.(?:Add|Delete)|PumpExcelMessages|Application\.Goto/iu.test(importCatalogSource)
+        || !/ListColumns\(1\)\.DataBodyRange\.Value2/iu.test(paritySource)
+        || !/ListColumns\(10\)\.DataBodyRange\.Value2/iu.test(paritySource)
+        || /DataBodyRange\.Cells|Hyperlinks\.|PumpExcelMessages/iu.test(paritySource)) {
+      throw new Error('Snapshot table/link/parity work must cross Excel COM only in bulk ranges');
+    }
+    if (!/\bRunBackgroundWritebackStep\b/iu.test(scheduledWritebackSource)
+        || /\bRunSynchronousWritebackStep\b|\bBeginWritebackPoll\b|\bStartWritebackRequest\b/iu.test(moduleSource)
+        || !/requestValue\.Open\s+methodName,\s*endpoint,\s*True/iu.test(backgroundWritebackSource)
+        || !/mWritebackHTTPWaitCount\s*>\s*30/iu.test(backgroundWritebackSource)
+        || /requestValue\.Open\s+methodName,\s*endpoint,\s*False|New\s+AsyncWinHttpRequest|OpenAsync/iu.test(backgroundWritebackSource)) {
+      throw new Error('Scheduled writeback must use eventless asynchronous loopback polling without a blocking or WinHTTP event path');
     }
     const postDequeueBoundary = scheduledWritebackSource.indexOf(
       'mWritebackRequestID = NewRequestID("writeback")',
@@ -4247,28 +4429,51 @@ function main() {
         || !/mActiveWritebackRequestBody\s*=\s*vbNullString/iu.test(completeWritebackSource)) {
       throw new Error('Immutable pricing intent must clear only at terminal completion');
     }
-    if (!/IsNativeSearchEnterTransition\(target\)/iu.test(moduleSource)
-        || !/If\s+Not\s+mSearchNativeEnterPending\s+Then\s+Exit Function/iu.test(moduleSource)
+    if (!/If\s+mSearchNativeEnterPending\s+Then/iu.test(updateSearchEnterSource)
+        || !/RememberSearchSelection\s+target/iu.test(updateSearchEnterSource)
         || !/mSearchNativeEnterPending\s*=\s*True/iu.test(moduleSource)
-        || !/If\s+queueNativeEnter\s+Then\s+RunNativeEnterProductSearch/iu.test(moduleSource)
-        || !/Private Sub RunNativeEnterProductSearch\(\)[\s\S]*?CancelScheduledProductSearch[\s\S]*?SearchProductsForQuery\s+query,\s*generation/iu.test(moduleSource)
+        || /SearchProductsForQuery|RunQueuedProductSearchNow|\.Calculate|Application\.OnTime/iu.test(updateSearchEnterSource)
         || !/RememberSearchSelection\s+anchor/iu.test(searchSource)
         || !/mPendingSearchGeneration\s*=\s*mSearchRequestGeneration/iu.test(moduleSource)) {
-      throw new Error('Physical Enter must run one generation-bound, event-safe search after native selection movement');
+      throw new Error('Physical Enter must only stage one generation-bound search until the post-event dispatcher runs');
+    }
+    if (/Application\.MoveAfterReturn(?:Direction)?/iu.test(moduleSource)
+        || !/If\s+mSearchNativeEnterPending\s+Then\s+RunQueuedProductSearchNow/iu.test(deferredInteractiveSource)
+        || !/CleanExit:[\s\S]*?If\s+deferredInteractiveWork\s+Then\s+_[\s\S]*?ScheduleDeferredInteractiveWork/iu.test(selectionSource)) {
+      throw new Error('Physical Enter fallback must be independent of Excel selection-move direction');
     }
     if (!/mPricingDirty\(CStr\(keyValue\)\)/iu.test(queueWritebackSource)
         || !/mPricingDirtyGenerations\(CStr\(keyValue\)\)/iu.test(queueWritebackSource)
         || !/MarkWritebackState\s+CStr\(keyValue\),\s*"pending"/iu.test(queueWritebackSource)
-        || /SchedulePricingWriteback|StartWritebackRequest|RunSynchronousWritebackStep|PreviewPricingChangesCore|ApplyPricingChangesCore/iu.test(queueWritebackSource)) {
-      throw new Error('A settings edit must only record an amber local proposal until Sync Now');
+        || !/mPricingAutoSyncPending\s*=\s*True/iu.test(queueWritebackSource)
+        || !/Not\s+ActiveWritebackContainsKey\(CStr\(keyValue\)\)/iu.test(queueWritebackSource)
+        || !/ClearQueuedPricingIntentMemoryOnly\s+"yuan_price"/iu.test(queueWritebackSource)
+        || /SchedulePricingWriteback|StartWritebackRequest|RunSynchronousWritebackStep|PreviewPricingChangesCore|ApplyPricingChangesCore|SetOperationProgressSurface|Application\.OnTime|\.Calculate|ConfigSheet\(\)\.Range\("B23"\)\.Value2/iu.test(queueWritebackSource)) {
+      throw new Error('A settings edit must only record an amber local proposal for the safe debounce kicker');
     }
-    if (!/BuildPricingBatchWritebackRequest\(requestID,\s*keysCSV\)/iu.test(syncSettingsSource)
-        || !/mWritebackPending\("settings_batch"\)\s*=\s*keysCSV/iu.test(syncSettingsSource)
-        || !/mWritebackPendingValues\("settings_batch"\)\s*=\s*requestBody/iu.test(syncSettingsSource)
-        || !/mWritebackPendingGenerations\("settings_batch"\)\s*=\s*mPricingEditGeneration/iu.test(syncSettingsSource)
-        || !/SchedulePricingWriteback\s+1/iu.test(syncSettingsSource)
+    if (!/mWritebackPending\("yuan_price"\)\s*=\s*"B18"/iu.test(visibleCnySource)
+        || !/mWritebackPendingValues\("yuan_price"\)\s*=\s*desiredValue/iu.test(visibleCnySource)
+        || !/mWritebackPendingGenerations\("yuan_price"\)/iu.test(visibleCnySource)
+        || !/ClearQueuedPricingIntentMemoryOnly\s+"yuan_price"/iu.test(visibleCnySource)
+        || /settings\.Range\("B18"\)\.Value|Target\.Formula|QueuePricingInputWriteback|SetOperationProgressSurface|SchedulePricingWriteback|Application\.OnTime|\.Calculate|OpenAsync|ServerXMLHTTP/iu.test(visibleCnySource)) {
+      throw new Error('A visible CNY edit must stage an immutable memory-only proposal without recalculation or scheduling');
+    }
+    if (!/EnqueueDirtyPricingBatch\s+1/iu.test(syncSettingsSource)
+        || !/visibleCNYPending\s*=\s*mWritebackPending\.Exists\("yuan_price"\)/iu.test(syncSettingsSource)
+        || !/settings\.Range\("B19:B22"\)/iu.test(syncSettingsSource)
+        || !/RunScheduledPricingWriteback/iu.test(syncSettingsSource)
         || /ConfirmUnicodeMessage/iu.test(syncSettingsSource)) {
       throw new Error('Settings Sync Now must enqueue one immutable batch without a second confirmation dialog');
+    }
+    if (!/BuildPricingBatchWritebackRequest\(requestID,\s*keysCSV\)/iu.test(enqueueSettingsSource)
+        || !/mWritebackPending\("settings_batch"\)\s*=\s*keysCSV/iu.test(enqueueSettingsSource)
+        || !/mWritebackPendingValues\("settings_batch"\)\s*=\s*requestBody/iu.test(enqueueSettingsSource)
+        || !/mWritebackPendingGenerations\("settings_batch"\)\s*=\s*mPricingEditGeneration/iu.test(enqueueSettingsSource)
+        || !/SchedulePricingWriteback\s+delaySeconds/iu.test(enqueueSettingsSource)
+        || !/EnqueueDirtyPricingBatch\s+PRICING_WRITEBACK_DEBOUNCE_SECONDS/iu.test(autoSyncSource)
+        || !/ClearQueuedSettingsBatchMemoryOnly/iu.test(autoSyncSource)
+        || !/Private Sub Workbook_SheetCalculate\(ByVal Sh As Object\)[\s\S]*?KickQueuedPricingAutoSync/iu.test(workbookSource)) {
+      throw new Error('Automatic settings debounce and Sync Now must share one immutable batch queue outside SheetChange');
     }
     if (!/patris\.pricing-settings-writeback-request\/v2/iu.test(moduleSource)
         || !/"""setting_keys""/iu.test(buildBatchWritebackSource)
@@ -4276,17 +4481,26 @@ function main() {
         || !/mActiveWritebackRequestBody/iu.test(scheduledWritebackSource)
         || !/JsonRuntime\.JsonMember\(root,\s*"confirmed_settings"\)/iu.test(applyBatchSource)
         || !/PricingKeyHasNewerProposal/iu.test(applyBatchSource)
+        || !/mWritebackPendingGenerations\.Exists\(settingKey\)/iu.test(pricingNewerProposalSource)
         || !/ClearPricingDirtyKey/iu.test(confirmBatchSource)) {
       throw new Error('Settings batch must preserve exact fences and apply full confirmed readback generation-safely');
     }
     if (!/mActiveWritebackDesiredValue/iu.test(buildWritebackSource)) {
       throw new Error('Legacy single-setting writeback must retain immutable intent fencing');
     }
+    if (!/PricingKeyHasNewerProposal\(settingKey\)/iu.test(writebackNewerProposalSource)
+        || !/If\s+settingKey\s*=\s*"site_confirmation"\s+Then\s+settingKey\s*=\s*"yuan_price"/iu.test(writebackNewerProposalSource)
+        || !/mPricingLatestEditGenerations\.Exists\(settingKey\)/iu.test(pricingNewerProposalSource)
+        || /mPricingEditGeneration\s*>\s*mActiveWritebackGeneration/iu.test(writebackNewerProposalSource)
+        || !/ValidatePricingGenerationFencesForValidation/iu.test(moduleSource)) {
+      throw new Error('Single-setting writeback terminals must use a per-key generation fence');
+    }
     if (!/WritebackHasNewerProposal/iu.test(applyCommittedSource)
         || !/WritebackHasNewerProposal/iu.test(restoreTerminalSource)) {
       throw new Error('Old terminal results must not overwrite a newer pricing proposal');
     }
-    if (!/Range\("G18"\)\.Value\s*=\s*CDbl\(confirmedValue\)/iu.test(confirmWritebackSource)
+    if (!/ApplyConfirmedWritebackValue\s+settings,\s*normalizedSettingKey,[\s\S]*?confirmedValue,\s*Not\s+newerProposalQueued/iu.test(confirmWritebackSource)
+        || !/Range\("G18"\)\.Value\s*=\s*CDbl\(confirmedValue\)/iu.test(applyConfirmedWritebackSource)
         || /Range\("G18"\)\.Value\s*=\s*inputCell\.Value/iu.test(confirmWritebackSource)) {
       throw new Error('Confirmed CNY baseline must come from terminal readback, never the mutable proposal cell');
     }
@@ -4296,12 +4510,27 @@ function main() {
     }
     if (!/QueueVisibleCNYProposal\s+Target/iu.test(sheetChangeSource)
         || !/QueuePricingInputWriteback\s+Target/iu.test(sheetChangeSource)
+        || /ResumeAfterCancelledClose/iu.test(sheetChangeSource)
         || !/RecoverPendingPricingIntentOnOpen/iu.test(workbookSource)) {
       throw new Error('Every website-backed settings edit must route into the local pending-state inventory');
     }
     if (!/JsonRuntime\.JsonText\(state,\s*"pricing_state_revision"\)/iu.test(globalStateSource)
         || !/settings\.Range\("G14"\)\.Value2\s*=\s*pricingStateRevision/iu.test(globalStateSource)) {
       throw new Error('Inbound snapshot must preserve the pricing-state revision as the writeback guard');
+    }
+    if (!/UpdateCurrencyFreshnessUI\s+settings/iu.test(globalStateSource)
+        || !/ValidateCurrencyFreshnessUIForValidation/iu.test(moduleSource)
+        || !/Case\s+"sending":\s*fillColor\s*=\s*RGB\(219,\s*234,\s*254\)/iu.test(moduleSource)
+        || !/SafeOperationStatusError\(errorSource,\s*errorDescription\)/iu.test(moduleSource)
+        || !/OperationProgressTerminalHiddenForValidation/iu.test(moduleSource)) {
+      throw new Error('Freshness, sent-state color, terminal hiding, or service-error classification gate is missing');
+    }
+    if (!/sourceStale/iu.test(globalStateSource)
+        || !/cnyStale\s*=\s*CurrencyValueIsStale/iu.test(globalStateSource)
+        || !/usdStale\s*=\s*CurrencyValueIsStale/iu.test(globalStateSource)
+        || !/Range\("G15"\)\.Value\s*=\s*\(cnyStale\s+Or\s+usdStale\)/iu.test(globalStateSource)
+        || !/UpdateCurrencyFreshnessUI\s+settings,\s*remoteUSDDate,\s*remoteCNYDate,\s*_?\s*sourceStale/iu.test(globalStateSource)) {
+      throw new Error('CNY and USD freshness must be evaluated independently before the aggregate stale flag');
     }
     if (/MarkSseRefreshRequired/iu.test(completeWritebackSource)
         || !/mRefreshAfterSiteConfirmation\s*=\s*False/iu.test(completeWritebackSource)) {
@@ -4328,6 +4557,32 @@ function main() {
   } catch (error) {
     console.error(`Search re-entrancy source gate failed: ${error.message}`);
     process.exitCode = 1;
+    return;
+  }
+  if (options.sourceOnly) {
+    const report = {
+      passed: true,
+      mode: 'source-only',
+      staticSourceGates: true,
+      excelStarted: false,
+      nativeAcceptanceRequired: true,
+      nativeAcceptanceScope: [
+        'compile changed VBA source into vbaProject.bin',
+        'resolve VBA references and compile errors',
+        'cold open and duplicate-startup behavior',
+        'physical Enter and merged-search paste',
+        'live event, pricing writeback, image, and progress behavior',
+        'save/reopen, lifecycle, responsiveness, and crash evidence',
+      ],
+    };
+    if (options.json) {
+      console.log(JSON.stringify(report, null, 2));
+    } else {
+      console.log(
+        'Excel source/build gates passed without starting Excel; '
+          + 'native Excel acceptance is still required.',
+      );
+    }
     return;
   }
   if (options.selfTestProcessSafety) {

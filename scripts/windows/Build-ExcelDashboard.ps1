@@ -1282,7 +1282,7 @@ try {
     $settings.Range('A9:F9').Merge()
     $settings.Range('A9').Value2 = 'مقادیر زنده سایت'
     Set-SectionStyle $settings.Range('A9:F9') 'DDE8FC' '242424' 12
-    $liveLabels = @('بهای یوآن سایت', 'بهای دلار سایت', 'تاریخ مؤثر یوآن', 'حاشیه سود سایت', 'نرخ حمل هوایی سایت (یوآن/کیلوگرم)', 'تعداد رقم گردکردن قیمت')
+    $liveLabels = @('? بهای یوآن سایت', '? بهای دلار سایت', 'تاریخ مؤثر یوآن', 'حاشیه سود سایت', 'نرخ حمل هوایی سایت (یوآن/کیلوگرم)', 'تعداد رقم گردکردن قیمت')
     for ($rowOffset = 0; $rowOffset -lt $liveLabels.Count; $rowOffset++) {
         $row = 10 + $rowOffset
         $settings.Cells.Item($row, 1).Value2 = $liveLabels[$rowOffset]
@@ -1297,6 +1297,7 @@ try {
     $settings.Range('A10:A15').Font.Bold = $true
     $settings.Range('A10:F15').Borders.Color = ConvertTo-OleColor 'B9CCF4'
     $settings.Range('B10:F15').Interior.Color = ConvertTo-OleColor 'F6F6F6'
+    $settings.Range('B10:F11').Interior.Color = ConvertTo-OleColor 'FFF2CC'
     $settings.Range('B10:F15').HorizontalAlignment = -4108
 
     $settings.Rows.Item(16).RowHeight = 24

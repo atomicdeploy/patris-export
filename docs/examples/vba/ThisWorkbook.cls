@@ -2,6 +2,7 @@ Option Explicit
 
 Private Sub Workbook_Open()
     On Error Resume Next
+    If Not ProductCatalogSync.RecordWorkbookOpened() Then Exit Sub
     ProductCatalogSync.InitializeOperationProgress
     ProductCatalogSync.PreserveSearchLiteral
     ProductCatalogSync.RegisterSearchHotkey
@@ -10,21 +11,29 @@ Private Sub Workbook_Open()
     ProductCatalogSync.PrepareLocalSearchOnOpen
     ProductCatalogSync.StartPricingEventListenerOnOpen
     ProductCatalogSync.RecoverPendingPricingIntentOnOpen
+    ProductCatalogSync.KickQueuedPricingAutoSync
+    ProductCatalogSync.KickQueuedProductImagePreview
     ProductCatalogSync.ScheduleRefreshOnOpen
     Call ProductCatalogSync.AuditFontsOnOpen
+    ProductCatalogSync.CompleteWorkbookOpenLifecycle
     On Error GoTo 0
 End Sub
 
 Private Sub Workbook_Activate()
     On Error Resume Next
+    ProductCatalogSync.RecordWorkbookActivated
     ProductCatalogSync.ResumeAfterCancelledClose
+    ProductCatalogSync.KickQueuedPricingAutoSync
+    ProductCatalogSync.KickQueuedProductImagePreview
     ProductCatalogSync.RegisterSearchHotkey
     On Error GoTo 0
 End Sub
 
 Private Sub Workbook_WindowActivate(ByVal Wn As Window)
     On Error Resume Next
+    ProductCatalogSync.RecordWorkbookActivated
     ProductCatalogSync.ResumeAfterCancelledClose
+    ProductCatalogSync.KickQueuedPricingAutoSync
     ProductCatalogSync.RegisterSearchHotkey
     On Error GoTo 0
 End Sub
@@ -37,11 +46,14 @@ End Sub
 
 Private Sub Workbook_BeforeClose(Cancel As Boolean)
     On Error Resume Next
+    ProductCatalogSync.RecordWorkbookBeforeClose
     If Not ProductCatalogSync.PrepareCanonicalTemplateForClose() Then
         Cancel = True
+        ProductCatalogSync.RecordWorkbookCloseCancelled
         Exit Sub
     End If
     ProductCatalogSync.CancelActivePricingOperations True
+    ProductCatalogSync.CancelDeferredInteractiveWork
     ProductCatalogSync.CancelScheduledRefresh
     ProductCatalogSync.CancelScheduledProductSearch
     ProductCatalogSync.CancelOperationProgressReset
@@ -68,16 +80,24 @@ Private Sub Workbook_AfterSave(ByVal Success As Boolean)
     On Error GoTo 0
 End Sub
 
+Private Sub Workbook_SheetCalculate(ByVal Sh As Object)
+    On Error Resume Next
+    ProductCatalogSync.KickQueuedPricingAutoSync
+    ProductCatalogSync.KickQueuedProductImagePreview
+    On Error GoTo 0
+End Sub
+
 Private Sub Workbook_SheetChange(ByVal Sh As Object, ByVal Target As Range)
     Dim previousEvents As Boolean
+    Dim deferredInteractiveWork As Boolean
 
     previousEvents = Application.EnableEvents
     On Error GoTo CleanExit
-    ProductCatalogSync.ResumeAfterCancelledClose
     If Sh Is ThisWorkbook.Worksheets(1) Then
         If Not Intersect(Target, Sh.Range("M7")) Is Nothing Then
             Application.EnableEvents = False
             ProductCatalogSync.QueueVisibleCNYProposal Target
+            deferredInteractiveWork = True
             GoTo CleanExit
         End If
         If Not Intersect( _
@@ -85,6 +105,7 @@ Private Sub Workbook_SheetChange(ByVal Sh As Object, ByVal Target As Range)
             ThisWorkbook.Names("ProductSearchQuery").RefersToRange _
         ) Is Nothing Then
             ProductCatalogSync.QueueProductSearch
+            deferredInteractiveWork = True
         End If
         GoTo CleanExit
     End If
@@ -92,6 +113,7 @@ Private Sub Workbook_SheetChange(ByVal Sh As Object, ByVal Target As Range)
     If Not Intersect(Target, Sh.Range("B31")) Is Nothing Then
         Application.EnableEvents = False
         ProductCatalogSync.HandleProductImageSettingChanged
+        deferredInteractiveWork = True
         GoTo CleanExit
     End If
     If Not Intersect(Target, Sh.Range("B44")) Is Nothing Then
@@ -105,32 +127,45 @@ Private Sub Workbook_SheetChange(ByVal Sh As Object, ByVal Target As Range)
 
     Application.EnableEvents = False
     ProductCatalogSync.QueuePricingInputWriteback Target
+    deferredInteractiveWork = True
 
 CleanExit:
     Application.EnableEvents = previousEvents
+    If deferredInteractiveWork Then _
+        ProductCatalogSync.ScheduleDeferredInteractiveWork
 End Sub
 
 Private Sub Workbook_SheetSelectionChange(ByVal Sh As Object, _
                                            ByVal Target As Range)
+    Dim deferredInteractiveWork As Boolean
+
     On Error GoTo CleanExit
     If Sh Is ThisWorkbook.Worksheets(1) Then
-        If ProductCatalogSync.NormalizeProductSearchSelection(Target) Then _
+        If ProductCatalogSync.NormalizeProductSearchSelection(Target) Then
+            deferredInteractiveWork = True
             GoTo CleanExit
-        If ProductCatalogSync.UpdateSearchEnterHotkey(Target) Then _
+        End If
+        If ProductCatalogSync.UpdateSearchEnterHotkey(Target) Then
+            deferredInteractiveWork = True
             GoTo CleanExit
+        End If
     Else
         ProductCatalogSync.ReleaseSearchPasteHotkey
         ProductCatalogSync.ReleaseSearchEnterHotkey
         Exit Sub
     End If
-    ProductCatalogSync.HighlightSelectedProductRow Target
+    ProductCatalogSync.RememberSelectedProductRow Target
     ProductCatalogSync.QueueProductImagePreviewForSelection Target
+    deferredInteractiveWork = True
 CleanExit:
+    If deferredInteractiveWork Then _
+        ProductCatalogSync.ScheduleDeferredInteractiveWork
 End Sub
 
 Private Sub Workbook_SheetActivate(ByVal Sh As Object)
     On Error GoTo CleanExit
     ProductCatalogSync.ResumeAfterCancelledClose
+    ProductCatalogSync.KickQueuedProductImagePreview
     If Sh Is ThisWorkbook.Worksheets(1) Then
         ProductCatalogSync.RefreshSearchEnterHotkey
     Else
