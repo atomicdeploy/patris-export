@@ -548,6 +548,29 @@ function buildFailures(report, options) {
     report.syncData.extraCodes === 0,
     `${report.syncData.extraCodes} SyncData rows have no matching Products row`,
   );
+  const wooLinkReadback = report.wooLinkProjection.readback;
+  failUnless(
+    wooLinkReadback.rows === report.candidate.rowsWithCode
+      && wooLinkReadback.distinctNames > 1
+      && wooLinkReadback.distinctFormulas > 1
+      && wooLinkReadback.parseFailures === 0
+      && wooLinkReadback.displayTextMismatches === 0
+      && wooLinkReadback.linkAddressMismatches === 0
+      && wooLinkReadback.firstTwoDiffer === true,
+    `WooCommerce name/link formula readback diverged from the snapshot projection: ${JSON.stringify(wooLinkReadback)}`,
+  );
+  if (options.sync && report.sync.performance?.changedSnapshot === true) {
+    const runtime = report.wooLinkProjection.runtime;
+    failUnless(
+      runtime.required === true
+        && runtime.validated === true
+        && runtime.rows === report.candidate.rowsWithCode
+        && runtime.expectedDistinctNames === runtime.actualDistinctNames
+        && runtime.actualDistinctNames === wooLinkReadback.distinctNames
+        && runtime.actualDistinctNames > 1,
+      `changed-snapshot WooCommerce projection telemetry failed: ${JSON.stringify(runtime)}`,
+    );
+  }
 
   failUnless(report.candidate.numericWeightRows > 0, 'no numeric weight values were loaded in column C');
   failUnless(report.candidate.numericRateRows > 0, 'no numeric foreign-price values were loaded in column F');
@@ -1842,6 +1865,13 @@ function Read-Products([object]$book) {
                     (Matrix-Value $formulas $rowCount $columnCount $row 1),
                     $invariant
                 )
+                $nameFormula = if ($columnCount -ge 8) {
+                    [Convert]::ToString(
+                        (Matrix-Value $formulas $rowCount $columnCount $row 8),
+                        $invariant
+                    )
+                } else { '' }
+                $parsedNameFormula = Parse-WooLinkFormula $nameFormula
                 if ($identityKey.Length -gt 0) {
                     $searchValues = @()
                     for ($searchColumn = 1; $searchColumn -le $columnCount; $searchColumn++) {
@@ -1869,6 +1899,11 @@ function Read-Products([object]$book) {
                         Rate = $rate
                         Stock = $stock
                         Formula = $formula
+                        NameFormula = $nameFormula
+                        NameFormulaParsed = [bool]$parsedNameFormula.Parsed
+                        NameFormulaIsHyperlink = [bool]$parsedNameFormula.IsHyperlink
+                        NameFormulaAddress = [string]$parsedNameFormula.Address
+                        NameFormulaText = [string]$parsedNameFormula.Text
                     }
                 }
             }
@@ -1896,6 +1931,42 @@ function Read-Products([object]$book) {
         Release-ComObject $headerRange
         Release-ComObject $tableRange
         Release-ComObject $table
+    }
+}
+
+function Parse-WooLinkFormula([string]$formula) {
+    $hyperlink = [regex]::Match(
+        $formula,
+        '^\s*=\s*IFERROR\s*\(\s*HYPERLINK\s*\(\s*"(?<address>(?:""|[^"])*)"\s*,\s*"(?<text>(?:""|[^"])*)"\s*\)\s*,\s*"(?<fallback>(?:""|[^"])*)"\s*\)\s*$',
+        [Text.RegularExpressions.RegexOptions]::IgnoreCase
+    )
+    if ($hyperlink.Success) {
+        $text = $hyperlink.Groups['text'].Value.Replace('""', '"')
+        $fallback = $hyperlink.Groups['fallback'].Value.Replace('""', '"')
+        return [pscustomobject]@{
+            Parsed = $text -ceq $fallback
+            IsHyperlink = $true
+            Address = $hyperlink.Groups['address'].Value.Replace('""', '"')
+            Text = $text
+        }
+    }
+    $literal = [regex]::Match(
+        $formula,
+        '^\s*=\s*"(?<text>(?:""|[^"])*)"\s*$'
+    )
+    if ($literal.Success) {
+        return [pscustomobject]@{
+            Parsed = $true
+            IsHyperlink = $false
+            Address = ''
+            Text = $literal.Groups['text'].Value.Replace('""', '"')
+        }
+    }
+    return [pscustomobject]@{
+        Parsed = $false
+        IsHyperlink = $false
+        Address = ''
+        Text = ''
     }
 }
 
@@ -2319,6 +2390,10 @@ function Read-SyncData([object]$book) {
                         USDRate = Matrix-Value $values $rowCount $columnCount $row 7
                         WooID = Matrix-Value $values $rowCount $columnCount $row 9
                         WooEffectivePrice = Matrix-Value $values $rowCount $columnCount $row 10
+                        Permalink = [Convert]::ToString(
+                            (Matrix-Value $values $rowCount $columnCount $row 13),
+                            $invariant
+                        ).Trim()
                         Categories = [Convert]::ToString(
                             (Matrix-Value $values $rowCount $columnCount $row 17),
                             $invariant
@@ -2793,6 +2868,103 @@ function Row-Dictionary([object[]]$rows) {
     return [pscustomobject]@{ Values = $dictionary; Duplicates = $duplicates }
 }
 
+function Measure-WooLinkProjection(
+    [object[]]$productRows,
+    [object]$syncDictionary
+) {
+    $distinctNames = [Collections.Generic.HashSet[string]]::new(
+        [StringComparer]::Ordinal
+    )
+    $distinctFormulas = [Collections.Generic.HashSet[string]]::new(
+        [StringComparer]::Ordinal
+    )
+    $parseFailures = 0
+    $displayTextMismatches = 0
+    $linkAddressMismatches = 0
+    $samples = @()
+    foreach ($row in $productRows) {
+        [void]$distinctNames.Add([string]$row.ProductName)
+        [void]$distinctFormulas.Add([string]$row.NameFormula)
+        $issue = ''
+        if (-not [bool]$row.NameFormulaParsed) {
+            $parseFailures += 1
+            $issue = 'formula_parse'
+        } elseif (-not [string]::Equals(
+            [string]$row.NameFormulaText,
+            [string]$row.ProductName,
+            [StringComparison]::Ordinal
+        )) {
+            $displayTextMismatches += 1
+            $issue = 'display_text'
+        }
+
+        if ($syncDictionary.Values.ContainsKey([string]$row.Code)) {
+            $syncRow = $syncDictionary.Values[[string]$row.Code]
+            $permalink = [string]$syncRow.Permalink
+            $expectsHyperlink = (
+                -not [string]::IsNullOrWhiteSpace([string]$row.WooID) -and
+                $permalink.ToLowerInvariant().StartsWith(
+                    'https://digitalogic.ir/',
+                    [StringComparison]::Ordinal
+                )
+            )
+            $linkMatches = if ($expectsHyperlink) {
+                [bool]$row.NameFormulaIsHyperlink -and [string]::Equals(
+                    [string]$row.NameFormulaAddress,
+                    $permalink,
+                    [StringComparison]::Ordinal
+                )
+            } else {
+                -not [bool]$row.NameFormulaIsHyperlink
+            }
+            if (-not $linkMatches) {
+                $linkAddressMismatches += 1
+                if ($issue.Length -eq 0) { $issue = 'link_address' }
+            }
+        }
+        if ($issue.Length -gt 0 -and $samples.Count -lt 20) {
+            $samples += [pscustomobject]@{
+                code = [string]$row.Code
+                issue = $issue
+                displayedName = [string]$row.ProductName
+                formulaText = [string]$row.NameFormulaText
+                formulaAddress = [string]$row.NameFormulaAddress
+            }
+        }
+    }
+    $firstRows = @($productRows | Select-Object -First 2)
+    $firstTwoDiffer = $firstRows.Count -eq 2 -and
+        -not [string]::Equals(
+            [string]$firstRows[0].ProductName,
+            [string]$firstRows[1].ProductName,
+            [StringComparison]::Ordinal
+        ) -and
+        -not [string]::Equals(
+            [string]$firstRows[0].NameFormula,
+            [string]$firstRows[1].NameFormula,
+            [StringComparison]::Ordinal
+        )
+    return [pscustomobject]@{
+        rows = @($productRows).Count
+        distinctNames = $distinctNames.Count
+        distinctFormulas = $distinctFormulas.Count
+        parseFailures = $parseFailures
+        displayTextMismatches = $displayTextMismatches
+        linkAddressMismatches = $linkAddressMismatches
+        firstTwoDiffer = $firstTwoDiffer
+        firstTwo = @($firstRows | ForEach-Object {
+            [pscustomobject]@{
+                code = [string]$_.Code
+                displayedName = [string]$_.ProductName
+                formula = [string]$_.NameFormula
+                formulaText = [string]$_.NameFormulaText
+                formulaAddress = [string]$_.NameFormulaAddress
+            }
+        })
+        mismatchSamples = $samples
+    }
+}
+
 function ProductCode-Dictionary([object[]]$rows) {
     $dictionary = [System.Collections.Generic.Dictionary[string, object]]::new(
         [System.StringComparer]::Ordinal
@@ -2830,6 +3002,13 @@ $syncOperation = ''
 $syncError = ''
 $syncDiagnostic = ''
 $syncPerformance = $null
+$wooLinkRuntimeValidation = [pscustomobject]@{
+    required = $false
+    validated = $false
+    rows = 0
+    expectedDistinctNames = 0
+    actualDistinctNames = 0
+}
 try {
     Set-ValidatorStage 'creating_excel'
     $validatorJobHandle = New-ValidatorKillOnCloseJob
@@ -2952,6 +3131,23 @@ try {
             bulkApplySeconds = $bulkApplySeconds
             nativeAcceptanceLimitExclusiveSeconds = 10.0
         }
+        if ($changedSnapshot) {
+            $wooLinkRuntimeValidation = [pscustomobject]@{
+                required = $true
+                validated = [bool]$excel.Run(
+                    "'$macroBookName'!ProductCatalogSync.ValidateWooLinkProjectionForValidation"
+                )
+                rows = [int]$excel.Run(
+                    "'$macroBookName'!ProductCatalogSync.WooLinkProjectionRowsForValidation"
+                )
+                expectedDistinctNames = [int]$excel.Run(
+                    "'$macroBookName'!ProductCatalogSync.WooLinkExpectedDistinctNamesForValidation"
+                )
+                actualDistinctNames = [int]$excel.Run(
+                    "'$macroBookName'!ProductCatalogSync.WooLinkActualDistinctNamesForValidation"
+                )
+            }
+        }
         if ($changedSnapshot -and $rowCount -eq 1131 -and
             $bulkApplySeconds -ge 10.0) {
             throw "Native 1,131-row bulk apply took $bulkApplySeconds seconds; required single-digit seconds."
@@ -3061,6 +3257,7 @@ try {
     $candidateDictionary = Row-Dictionary $candidateProducts.Rows
     $candidateProductDictionary = ProductCode-Dictionary $candidateProducts.Rows
     $syncDictionary = Row-Dictionary $candidateSyncData.Rows
+    $wooLinkReadback = Measure-WooLinkProjection $candidateProducts.Rows $syncDictionary
     $transientPricePreview = Test-TransientPricePreview $excel $candidateBook $candidateProducts $syncDictionary ([int]$candidateConfig.roundingDigits)
     Reset-SelectedProductRow $excel $candidateBook
     $referenceDictionary = ProductCode-Dictionary $referenceProducts.Rows
@@ -3409,6 +3606,10 @@ try {
             imageURLRows = $imageRows.Count
             firstImageRow = if ($imageRows.Count -gt 0) { $imageRows[0] } else { $null }
             firstMissingImageRow = if ($missingImageRows.Count -gt 0) { $missingImageRows[0] } else { $null }
+        }
+        wooLinkProjection = [pscustomobject]@{
+            runtime = $wooLinkRuntimeValidation
+            readback = $wooLinkReadback
         }
         reference = [pscustomobject]@{
             path = $referencePath
@@ -4328,6 +4529,7 @@ function main() {
     const imageSelectionSource = procedure(moduleSource, 'QueueProductImagePreviewForSelection');
     const importPayloadSource = /Private Function ImportPricingSnapshotPayload\b[\s\S]*?\r?\nEnd Function/iu.exec(moduleSource)?.[0] || '';
     const importCatalogSource = /Private Function ImportReconciledCatalog\b[\s\S]*?\r?\nEnd Function/iu.exec(moduleSource)?.[0] || '';
+    const wooLinksSource = /Private Sub ApplyWooLinkFormulas\b[\s\S]*?Private Function PriceParitySummary/iu.exec(moduleSource)?.[0] || '';
     const paritySource = /Private Function PriceParitySummary\b[\s\S]*?Private Function BuildPricingRequest/iu.exec(moduleSource)?.[0] || '';
     const sheetChangeSource = procedure(workbookSource, 'Workbook_SheetChange');
     const selectionSource = procedure(workbookSource, 'Workbook_SheetSelectionChange');
@@ -4484,6 +4686,17 @@ function main() {
         || !/\$text\.Visible\s*=\s*\$false/u.test(buildSource)) {
       throw new Error('Ready must hide the complete progress surface and active states must show it');
     }
+    if (!/Private Const SNAPSHOT_WAIT_TIMEOUT_MS As Long = 120000/iu.test(moduleSource)
+        || !/SnapshotWaitRequestTimedOut\([\s\S]*?errorNumber\s*=\s*12002/iu.test(moduleSource)
+        || !/FailActiveOperation\s+errorNumber,\s*"snapshot_wait_timeout"/iu.test(moduleSource)
+        || !/"failed",\s*Not\s+keepTerminalFailure/iu.test(moduleSource)
+        || !/If\s+keepTerminalFailure\s+Then\s+CancelOperationProgressReset/iu.test(moduleSource)
+        || !/Not\s+wasCancelled\s+And\s+Not\s+keepTerminalFailure\s+And/iu.test(moduleSource)
+        || !/SetOperationProgressSurface\s+"snapshot_wait_timeout",\s*0,[\s\S]*?OperationProgressTerminalHiddenForValidation\([\s\S]*?If\s+mProgressResetScheduled\s+Then\s+GoTo\s+Failed/iu.test(moduleSource)
+        || !/InStr\(1,\s*CStr\(Application\.StatusBar\),\s*"0%"/iu.test(moduleSource)
+        || !/InStr\(1,\s*label\.TextFrame2\.TextRange\.Text,\s*"0%"/iu.test(moduleSource)) {
+      throw new Error('Snapshot timeout must remain a red hidden terminal with useful Persian text, no static 0%, and no Ready reset');
+    }
     if (/"refresh_request"\s*,\s*10|"refresh_validate"\s*,\s*70|"refresh_apply"\s*,\s*90/iu.test(moduleSource)
         || !/SetRefreshProgressPhase\s+stageName,\s*-1,\s*messageText/iu.test(refreshProgressSource)
         || !/PhaseElapsed\(mRefreshProgressStartedAt\)/iu.test(moduleSource)
@@ -4509,6 +4722,31 @@ function main() {
         || !/ListColumns\(10\)\.DataBodyRange\.Value2/iu.test(paritySource)
         || /DataBodyRange\.Cells|Hyperlinks\.|PumpExcelMessages/iu.test(paritySource)) {
       throw new Error('Snapshot table/link/parity work must cross Excel COM only in bulk ranges');
+    }
+    if (!/autoFillWasEnabled\s*=\s*Application\.AutoCorrect\.AutoFillFormulasInLists/iu.test(wooLinksSource)
+        || !/Application\.AutoCorrect\.AutoFillFormulasInLists\s*=\s*False/iu.test(wooLinksSource)
+        || !/Application\.AutoCorrect\.AutoFillFormulasInLists\s*=\s*autoFillWasEnabled/iu.test(wooLinksSource)
+        || !/TryApplyWooLinkFormula2\(target,\s*formulas\)/iu.test(wooLinksSource)
+        || !/target\.Formula2\s*=\s*formulas/iu.test(wooLinksSource)
+        || !/target\.Formula\s*=\s*formulas/iu.test(wooLinksSource)
+        || !/Private Sub ValidateWooLinkProjection\b/iu.test(wooLinksSource)
+        || !/target\.Calculate/iu.test(wooLinksSource)
+        || !/actualValues\s*=\s*target\.Value2/iu.test(wooLinksSource)
+        || !/mWooLinkExpectedDistinctNames\s*=\s*expectedNames\.Count/iu.test(wooLinksSource)
+        || !/mWooLinkActualDistinctNames\s*=\s*actualNames\.Count/iu.test(wooLinksSource)
+        || !/Public Function ValidateWooLinkProjectionForValidation\(\) As Boolean/iu.test(wooLinksSource)
+        || !/Public Function WooLinkExpectedDistinctNamesForValidation\(\) As Long/iu.test(wooLinksSource)
+        || !/Public Function WooLinkActualDistinctNamesForValidation\(\) As Long/iu.test(wooLinksSource)
+        || !/function Parse-WooLinkFormula\(/u.test(powershell)
+        || !/function Measure-WooLinkProjection\(/u.test(powershell)
+        || !/NameFormula\s*=\s*\$nameFormula/u.test(powershell)
+        || !/Permalink\s*=\s*\[Convert\]::ToString/u.test(powershell)
+        || !/WooLinkProjectionRowsForValidation/u.test(powershell)
+        || !/displayTextMismatches\s*=\s*\$displayTextMismatches/u.test(powershell)
+        || !/linkAddressMismatches\s*=\s*\$linkAddressMismatches/u.test(powershell)
+        || !/firstTwoDiffer\s*=\s*\$firstTwoDiffer/u.test(powershell)
+        || /\.Cells\s*\(|Hyperlinks\.(?:Add|Delete)/iu.test(wooLinksSource)) {
+      throw new Error('WooCommerce names and links must be assigned as one per-row bulk array with calculated-column auto-fill restored');
     }
     if (!/\bRunBackgroundWritebackStep\b/iu.test(scheduledWritebackSource)
         || /\bRunSynchronousWritebackStep\b|\bBeginWritebackPoll\b|\bStartWritebackRequest\b/iu.test(moduleSource)

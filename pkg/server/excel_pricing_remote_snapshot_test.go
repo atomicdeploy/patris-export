@@ -394,11 +394,21 @@ func TestExcelPricingSnapshotProductionCollectorUsesBulkAndPreservesCompositeIde
 		"snapshot-production-bulk-0004",
 		fixture.revision.StateRevision,
 	)
-	if fourthResponse.Code != http.StatusAccepted {
-		t.Fatalf("stale exact cache start=%d: %s", fourthResponse.Code, fourthResponse.Body.String())
+	if fourthResponse.Code != http.StatusOK || fourthJobID == thirdJobID {
+		t.Fatalf("rechecked exact cache start=%d third=%q fourth=%q: %s",
+			fourthResponse.Code, thirdJobID, fourthJobID, fourthResponse.Body.String())
 	}
-	waitForExcelPricingSnapshotStatus(t, server, token, fourthJobID, "ready")
-	fixture.assertCalls(t, 3, 3, 3, 0, 0)
+	var fourthStatus map[string]interface{}
+	if err := json.Unmarshal(fourthResponse.Body.Bytes(), &fourthStatus); err != nil {
+		t.Fatal(err)
+	}
+	if fourthStatus["cached"] != true {
+		t.Fatalf("rechecked exact cache status=%#v", fourthStatus)
+	}
+	// The deliberately stale bridge tuple causes one authenticated revision
+	// fetch. Since WordPress proves the cached state/catalog pair is exact, no
+	// snapshot build or payload download is repeated.
+	fixture.assertCalls(t, 3, 2, 2, 0, 0)
 	fixture.assertNoLegacyStateCalls(t)
 }
 

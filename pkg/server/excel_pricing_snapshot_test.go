@@ -10,12 +10,14 @@ import (
 	"net/http/httptest"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/atomicdeploy/patris-export/pkg/canonical"
 	"github.com/atomicdeploy/patris-export/pkg/recordpipe"
+	"github.com/atomicdeploy/patris-export/pkg/updateout"
 )
 
 func TestWriteExcelPricingSnapshotSSEPadsFrameForWinHTTPDelivery(t *testing.T) {
@@ -317,11 +319,36 @@ func TestExcelPricingSnapshotAggregatesCachesAndServesETag(t *testing.T) {
 		t.Fatalf("revision cache=%#v remote calls=%d", revisionStatus, remoteCalls.Load())
 	}
 
-	// Age alone is never sufficient for a local replay. If the authenticated
-	// revision bridge cannot verify the exact source/state/catalog tuple, the
-	// request must take the full collector path even while the cache is young.
+	// A transient event-stream gap must not discard an exact in-memory snapshot.
+	// If the bridge cannot attest the tuple, one bounded authenticated revision
+	// probe can prove the same state/catalog pair without collecting every page.
 	server.excelPricing.snapshotRevisionCurrent = func(canonical.Source, string, string) bool {
 		return false
+	}
+	var cachedStateRevision, cachedCatalogRevision string
+	store.mu.Lock()
+	for _, snapshot := range store.cache {
+		snapshot.createdAt = store.now().UTC()
+		// The production remote-snapshot collector always carries this
+		// authenticated composite member. This legacy page fixture predates it.
+		snapshot.upstreamCatalogRevision = datasetRevision
+		cachedStateRevision = snapshot.stateRevision
+		cachedCatalogRevision = snapshot.upstreamCatalogRevision
+	}
+	store.mu.Unlock()
+	var revisionProbeCalls atomic.Int32
+	server.excelPricing.snapshotRevisionProbe = func(
+		context.Context,
+		canonical.Source,
+	) (excelPricingRemoteSnapshotRevision, error) {
+		revisionProbeCalls.Add(1)
+		return excelPricingRemoteSnapshotRevision{
+			StateRevision:         cachedStateRevision,
+			CatalogRevision:       cachedCatalogRevision,
+			PricingStateRevision:  excelPricingRevisionForTest("snapshot-pricing-state"),
+			PricingPolicyRevision: excelPricingRevisionForTest("snapshot-pricing-policy"),
+			ETag:                  excelPricingSnapshotETag(stateRevision),
+		}, nil
 	}
 	unverifiedRequestID := "snapshot-start-test-unverified-0001"
 	unverified := authenticatedExcelPricingRequest(
@@ -333,15 +360,840 @@ func TestExcelPricingSnapshotAggregatesCachesAndServesETag(t *testing.T) {
 	unverified.Header.Set("Idempotency-Key", unverifiedRequestID)
 	unverifiedResponse := httptest.NewRecorder()
 	server.router.ServeHTTP(unverifiedResponse, unverified)
-	if unverifiedResponse.Code != http.StatusAccepted {
-		t.Fatalf("unverified start status=%d, want 202: %s",
-			unverifiedResponse.Code, unverifiedResponse.Body.String())
+	if unverifiedResponse.Code != http.StatusOK {
+		store.mu.Lock()
+		currentGeneration := store.generation
+		currentCache := len(store.cache)
+		store.mu.Unlock()
+		t.Fatalf("authenticated recheck status=%d, want 200 (probe=%d state=%q catalog=%q generation=%d cache=%d): %s",
+			unverifiedResponse.Code, revisionProbeCalls.Load(), cachedStateRevision,
+			cachedCatalogRevision, currentGeneration, currentCache,
+			unverifiedResponse.Body.String())
 	}
-	unverifiedJobID := excelPricingSnapshotJobIDForTest(t, unverifiedResponse.Body.Bytes())
-	waitForExcelPricingSnapshotStatus(t, server, token, unverifiedJobID, "ready")
-	if remoteCalls.Load() != int32(pages*2) {
-		t.Fatalf("unverified cache reached remote %d times, want %d",
-			remoteCalls.Load(), pages*2)
+	var recheckedStatus map[string]interface{}
+	if err := json.Unmarshal(unverifiedResponse.Body.Bytes(), &recheckedStatus); err != nil {
+		t.Fatal(err)
+	}
+	if recheckedStatus["cached"] != true || remoteCalls.Load() != int32(pages) ||
+		revisionProbeCalls.Load() != 1 {
+		t.Fatalf("authenticated recheck=%#v remote_calls=%d probe_calls=%d",
+			recheckedStatus, remoteCalls.Load(), revisionProbeCalls.Load())
+	}
+
+	// Probe errors remain fail-closed: a young cache cannot be reused and the
+	// request takes the full collector path.
+	server.excelPricing.snapshotRevisionProbe = func(
+		context.Context,
+		canonical.Source,
+	) (excelPricingRemoteSnapshotRevision, error) {
+		revisionProbeCalls.Add(1)
+		return excelPricingRemoteSnapshotRevision{}, errExcelPricingRemoteSnapshotUnavailable
+	}
+	probeFailedRequestID := "snapshot-start-test-probe-failed-0001"
+	probeFailed := authenticatedExcelPricingRequest(
+		http.MethodPost,
+		"/api/pricing-sync/snapshots",
+		validExcelPricingSnapshotStartBody(source, probeFailedRequestID, "fa", 60),
+		token,
+	)
+	probeFailed.Header.Set("Idempotency-Key", probeFailedRequestID)
+	probeFailedResponse := httptest.NewRecorder()
+	server.router.ServeHTTP(probeFailedResponse, probeFailed)
+	if probeFailedResponse.Code != http.StatusAccepted {
+		t.Fatalf("failed probe start status=%d, want 202: %s",
+			probeFailedResponse.Code, probeFailedResponse.Body.String())
+	}
+	probeFailedJobID := excelPricingSnapshotJobIDForTest(t, probeFailedResponse.Body.Bytes())
+	waitForExcelPricingSnapshotStatus(t, server, token, probeFailedJobID, "ready")
+	if remoteCalls.Load() != int32(pages*2) || revisionProbeCalls.Load() != 2 {
+		t.Fatalf("failed probe remote_calls=%d probe_calls=%d, want %d/2",
+			remoteCalls.Load(), revisionProbeCalls.Load(), pages*2)
+	}
+}
+
+func TestExcelPricingSnapshotConcurrentDriftProbeFencesOnce(t *testing.T) {
+	source := excelPricingStateSourceForTest()
+	server := newExcelPricingTestServer(
+		t,
+		"http://127.0.0.1:1/wp-json/digitalogic/patris/product-sync",
+	)
+	token := openExcelPricingSession(t, server)
+	_, _, initialGeneration := seedExcelPricingSnapshotCacheForTest(t, server, source)
+
+	bothAttesting := make(chan struct{})
+	var attesters atomic.Int32
+	var attestersOnce sync.Once
+	server.excelPricing.snapshotRevisionCurrent = func(canonical.Source, string, string) bool {
+		if attesters.Add(1) == 2 {
+			attestersOnce.Do(func() { close(bothAttesting) })
+		}
+		select {
+		case <-bothAttesting:
+		case <-time.After(2 * time.Second):
+		}
+		return false
+	}
+
+	probeStarted := make(chan struct{})
+	releaseProbe := make(chan struct{})
+	var probeStartedOnce sync.Once
+	var probeCalls atomic.Int32
+	server.excelPricing.snapshotRevisionProbe = func(
+		ctx context.Context,
+		_ canonical.Source,
+	) (excelPricingRemoteSnapshotRevision, error) {
+		probeCalls.Add(1)
+		probeStartedOnce.Do(func() { close(probeStarted) })
+		select {
+		case <-releaseProbe:
+			return excelPricingRemoteSnapshotRevisionForTest("concurrent-drift"), nil
+		case <-ctx.Done():
+			return excelPricingRemoteSnapshotRevision{}, ctx.Err()
+		}
+	}
+
+	collectorStarted := make(chan struct{})
+	releaseCollector := make(chan struct{})
+	var collectorStartedOnce sync.Once
+	var collectorCalls atomic.Int32
+	server.excelPricing.snapshotCollector = func(
+		ctx context.Context,
+		_ string,
+		_ excelPricingSnapshotStartRequest,
+		_ updateout.Config,
+	) (*excelPricingSnapshot, string) {
+		collectorCalls.Add(1)
+		collectorStartedOnce.Do(func() { close(collectorStarted) })
+		select {
+		case <-releaseCollector:
+			return nil, "snapshot_unavailable"
+		case <-ctx.Done():
+			return nil, excelPricingSnapshotContextCode(ctx)
+		}
+	}
+
+	type postResult struct {
+		response *httptest.ResponseRecorder
+		jobID    string
+	}
+	startTogether := make(chan struct{})
+	results := make(chan postResult, 2)
+	for index := 1; index <= 2; index++ {
+		requestID := "snapshot-concurrent-drift-000" + strconv.Itoa(index)
+		go func() {
+			<-startTogether
+			request := authenticatedExcelPricingRequest(
+				http.MethodPost,
+				"/api/pricing-sync/snapshots",
+				validExcelPricingSnapshotStartBody(source, requestID, "fa", 60),
+				token,
+			)
+			request.Header.Set("Idempotency-Key", requestID)
+			response := httptest.NewRecorder()
+			server.router.ServeHTTP(response, request)
+			result := postResult{response: response}
+			if response.Code == http.StatusAccepted || response.Code == http.StatusOK {
+				result.jobID = excelPricingSnapshotJobIDForTest(t, response.Body.Bytes())
+			}
+			results <- result
+		}()
+	}
+	close(startTogether)
+	select {
+	case <-probeStarted:
+	case <-time.After(3 * time.Second):
+		t.Fatal("coalesced revision probe did not start")
+	}
+	joinedDeadline := time.Now().Add(3 * time.Second)
+	for {
+		server.excelPricing.snapshotRevisionProbeMu.Lock()
+		joined := false
+		for _, flight := range server.excelPricing.snapshotRevisionProbes {
+			joined = flight != nil && flight.waiters == 1
+			if joined {
+				break
+			}
+		}
+		server.excelPricing.snapshotRevisionProbeMu.Unlock()
+		if joined {
+			break
+		}
+		if time.Now().After(joinedDeadline) {
+			t.Fatal("second caller did not join the authenticated revision probe")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	close(releaseProbe)
+
+	posted := make([]postResult, 0, 2)
+	for len(posted) < 2 {
+		select {
+		case result := <-results:
+			posted = append(posted, result)
+		case <-time.After(3 * time.Second):
+			t.Fatal("concurrent snapshot request did not return")
+		}
+	}
+	for _, result := range posted {
+		if result.response.Code != http.StatusAccepted {
+			t.Fatalf("concurrent drift status=%d, want 202: %s",
+				result.response.Code, result.response.Body.String())
+		}
+	}
+	select {
+	case <-collectorStarted:
+	case <-time.After(3 * time.Second):
+		t.Fatal("fresh collector did not start after drift")
+	}
+
+	store := server.excelPricing.snapshots
+	store.mu.Lock()
+	generation := store.generation
+	cacheEntries := len(store.cache)
+	running, cancelling := 0, 0
+	for _, job := range store.jobs {
+		switch job.status {
+		case "running":
+			running++
+		case "cancelling", "cancelled":
+			cancelling++
+		}
+	}
+	store.mu.Unlock()
+	if generation != initialGeneration+1 || cacheEntries != 0 ||
+		probeCalls.Load() != 1 || collectorCalls.Load() != 1 ||
+		running != 2 || cancelling != 0 {
+		t.Fatalf("drift race generation=%d/%d cache=%d probes=%d collectors=%d running=%d cancelling=%d",
+			generation, initialGeneration+1, cacheEntries, probeCalls.Load(),
+			collectorCalls.Load(), running, cancelling)
+	}
+	close(releaseCollector)
+	for _, result := range posted {
+		waitForExcelPricingSnapshotStatus(t, server, token, result.jobID, "failed")
+	}
+}
+
+func TestExcelPricingSnapshotSharedProbeSurvivesLeaderCancellation(t *testing.T) {
+	source := excelPricingStateSourceForTest()
+	server := newExcelPricingTestServer(
+		t,
+		"http://127.0.0.1:1/wp-json/digitalogic/patris/product-sync",
+	)
+	token := openExcelPricingSession(t, server)
+	_, cached, _ := seedExcelPricingSnapshotCacheForTest(t, server, source)
+	server.excelPricing.snapshotRevisionCurrent = func(canonical.Source, string, string) bool {
+		return false
+	}
+
+	probeStarted := make(chan struct{})
+	releaseProbe := make(chan struct{})
+	probeContextCancelled := make(chan struct{})
+	var probeCalls atomic.Int32
+	server.excelPricing.snapshotRevisionProbe = func(
+		ctx context.Context,
+		_ canonical.Source,
+	) (excelPricingRemoteSnapshotRevision, error) {
+		probeCalls.Add(1)
+		close(probeStarted)
+		select {
+		case <-releaseProbe:
+			return excelPricingRemoteSnapshotRevision{
+				StateRevision:         cached.stateRevision,
+				CatalogRevision:       cached.upstreamCatalogRevision,
+				PricingStateRevision:  excelPricingRevisionForTest("cancel-shared-pricing"),
+				PricingPolicyRevision: excelPricingRevisionForTest("cancel-shared-policy"),
+				ETag:                  excelPricingSnapshotETag(cached.stateRevision),
+			}, nil
+		case <-ctx.Done():
+			close(probeContextCancelled)
+			return excelPricingRemoteSnapshotRevision{}, ctx.Err()
+		}
+	}
+	var collectorCalls atomic.Int32
+	server.excelPricing.snapshotCollector = func(
+		context.Context,
+		string,
+		excelPricingSnapshotStartRequest,
+		updateout.Config,
+	) (*excelPricingSnapshot, string) {
+		collectorCalls.Add(1)
+		return nil, "snapshot_unavailable"
+	}
+
+	leaderContext, cancelLeader := context.WithCancel(context.Background())
+	defer cancelLeader()
+	leaderDone := make(chan struct{})
+	go func() {
+		defer close(leaderDone)
+		requestID := "snapshot-cancelled-probe-leader-0001"
+		request := authenticatedExcelPricingRequest(
+			http.MethodPost,
+			"/api/pricing-sync/snapshots",
+			validExcelPricingSnapshotStartBody(source, requestID, "fa", 60),
+			token,
+		).WithContext(leaderContext)
+		request.Header.Set("Idempotency-Key", requestID)
+		server.router.ServeHTTP(httptest.NewRecorder(), request)
+	}()
+	select {
+	case <-probeStarted:
+	case <-time.After(3 * time.Second):
+		t.Fatal("leader did not start shared revision probe")
+	}
+
+	waiterResponse := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		requestID := "snapshot-healthy-probe-waiter-0001"
+		request := authenticatedExcelPricingRequest(
+			http.MethodPost,
+			"/api/pricing-sync/snapshots",
+			validExcelPricingSnapshotStartBody(source, requestID, "fa", 60),
+			token,
+		)
+		request.Header.Set("Idempotency-Key", requestID)
+		response := httptest.NewRecorder()
+		server.router.ServeHTTP(response, request)
+		waiterResponse <- response
+	}()
+	joinedDeadline := time.Now().Add(3 * time.Second)
+	for {
+		server.excelPricing.snapshotRevisionProbeMu.Lock()
+		joined := false
+		for _, flight := range server.excelPricing.snapshotRevisionProbes {
+			joined = flight != nil && flight.waiters == 1
+			if joined {
+				break
+			}
+		}
+		server.excelPricing.snapshotRevisionProbeMu.Unlock()
+		if joined {
+			break
+		}
+		if time.Now().After(joinedDeadline) {
+			t.Fatal("healthy request did not join the leader's probe")
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	cancelLeader()
+	select {
+	case <-leaderDone:
+	case <-time.After(3 * time.Second):
+		t.Fatal("cancelled leader did not return")
+	}
+	select {
+	case <-probeContextCancelled:
+		t.Fatal("leader cancellation propagated into the shared server probe")
+	default:
+	}
+	close(releaseProbe)
+	var response *httptest.ResponseRecorder
+	select {
+	case response = <-waiterResponse:
+	case <-time.After(3 * time.Second):
+		t.Fatal("healthy waiter did not receive shared probe result")
+	}
+	if response.Code != http.StatusOK {
+		t.Fatalf("healthy waiter=%d, want cached 200: %s", response.Code, response.Body.String())
+	}
+	var status map[string]interface{}
+	if err := json.Unmarshal(response.Body.Bytes(), &status); err != nil {
+		t.Fatal(err)
+	}
+	if status["cached"] != true || probeCalls.Load() != 1 || collectorCalls.Load() != 0 {
+		t.Fatalf("shared probe status=%#v probes=%d collectors=%d",
+			status, probeCalls.Load(), collectorCalls.Load())
+	}
+}
+
+func TestExcelPricingSnapshotReadyReplayRevalidatesRevision(t *testing.T) {
+	t.Run("drift invalidates the replayed job", func(t *testing.T) {
+		source := excelPricingStateSourceForTest()
+		server := newExcelPricingTestServer(
+			t,
+			"http://127.0.0.1:1/wp-json/digitalogic/patris/product-sync",
+		)
+		token := openExcelPricingSession(t, server)
+		_, cached, initialGeneration := seedExcelPricingSnapshotCacheForTest(t, server, source)
+		server.excelPricing.snapshotRevisionCurrent = func(canonical.Source, string, string) bool {
+			return false
+		}
+		var probeCalls atomic.Int32
+		server.excelPricing.snapshotRevisionProbe = func(
+			context.Context,
+			canonical.Source,
+		) (excelPricingRemoteSnapshotRevision, error) {
+			probeCalls.Add(1)
+			return excelPricingRemoteSnapshotRevision{
+				StateRevision:         cached.stateRevision,
+				CatalogRevision:       cached.upstreamCatalogRevision,
+				PricingStateRevision:  excelPricingRevisionForTest("replay-current-pricing"),
+				PricingPolicyRevision: excelPricingRevisionForTest("replay-current-policy"),
+				ETag:                  excelPricingSnapshotETag(cached.stateRevision),
+			}, nil
+		}
+
+		requestID := "snapshot-ready-replay-drift-0001"
+		post := func() *httptest.ResponseRecorder {
+			request := authenticatedExcelPricingRequest(
+				http.MethodPost,
+				"/api/pricing-sync/snapshots",
+				validExcelPricingSnapshotStartBody(source, requestID, "fa", 60),
+				token,
+			)
+			request.Header.Set("Idempotency-Key", requestID)
+			response := httptest.NewRecorder()
+			server.router.ServeHTTP(response, request)
+			return response
+		}
+		first := post()
+		if first.Code != http.StatusOK {
+			t.Fatalf("initial cached request=%d: %s", first.Code, first.Body.String())
+		}
+		jobID := excelPricingSnapshotJobIDForTest(t, first.Body.Bytes())
+		server.excelPricing.snapshotRevisionProbe = func(
+			context.Context,
+			canonical.Source,
+		) (excelPricingRemoteSnapshotRevision, error) {
+			probeCalls.Add(1)
+			return excelPricingRemoteSnapshotRevisionForTest("replay-drift"), nil
+		}
+		replay := post()
+		if replay.Code != http.StatusOK {
+			t.Fatalf("drift replay=%d: %s", replay.Code, replay.Body.String())
+		}
+		var replayStatus map[string]interface{}
+		if err := json.Unmarshal(replay.Body.Bytes(), &replayStatus); err != nil {
+			t.Fatal(err)
+		}
+		if replayStatus["job_id"] != jobID || replayStatus["status"] != "invalidated" ||
+			replayStatus["code"] != "snapshot_pricing_state_changed" {
+			t.Fatalf("drift replay was not invalidated: %#v", replayStatus)
+		}
+		store := server.excelPricing.snapshots
+		store.mu.Lock()
+		generation, cacheEntries := store.generation, len(store.cache)
+		store.mu.Unlock()
+		if generation != initialGeneration+1 || cacheEntries != 0 || probeCalls.Load() != 2 {
+			t.Fatalf("replay drift generation=%d/%d cache=%d probes=%d",
+				generation, initialGeneration+1, cacheEntries, probeCalls.Load())
+		}
+	})
+
+	t.Run("unverifiable replay fails closed", func(t *testing.T) {
+		source := excelPricingStateSourceForTest()
+		server := newExcelPricingTestServer(
+			t,
+			"http://127.0.0.1:1/wp-json/digitalogic/patris/product-sync",
+		)
+		token := openExcelPricingSession(t, server)
+		_, cached, initialGeneration := seedExcelPricingSnapshotCacheForTest(t, server, source)
+		server.excelPricing.snapshotRevisionCurrent = func(canonical.Source, string, string) bool {
+			return false
+		}
+		var failProbe atomic.Bool
+		server.excelPricing.snapshotRevisionProbe = func(
+			context.Context,
+			canonical.Source,
+		) (excelPricingRemoteSnapshotRevision, error) {
+			if failProbe.Load() {
+				return excelPricingRemoteSnapshotRevision{}, errExcelPricingRemoteSnapshotUnavailable
+			}
+			return excelPricingRemoteSnapshotRevision{
+				StateRevision:         cached.stateRevision,
+				CatalogRevision:       cached.upstreamCatalogRevision,
+				PricingStateRevision:  excelPricingRevisionForTest("replay-error-pricing"),
+				PricingPolicyRevision: excelPricingRevisionForTest("replay-error-policy"),
+				ETag:                  excelPricingSnapshotETag(cached.stateRevision),
+			}, nil
+		}
+
+		requestID := "snapshot-ready-replay-error-0001"
+		post := func() *httptest.ResponseRecorder {
+			request := authenticatedExcelPricingRequest(
+				http.MethodPost,
+				"/api/pricing-sync/snapshots",
+				validExcelPricingSnapshotStartBody(source, requestID, "fa", 60),
+				token,
+			)
+			request.Header.Set("Idempotency-Key", requestID)
+			response := httptest.NewRecorder()
+			server.router.ServeHTTP(response, request)
+			return response
+		}
+		first := post()
+		if first.Code != http.StatusOK {
+			t.Fatalf("initial cached request=%d: %s", first.Code, first.Body.String())
+		}
+		jobID := excelPricingSnapshotJobIDForTest(t, first.Body.Bytes())
+		failProbe.Store(true)
+		replay := post()
+		if replay.Code != http.StatusServiceUnavailable ||
+			!strings.Contains(replay.Body.String(), "snapshot_revision_unavailable") {
+			t.Fatalf("unverifiable replay=%d, want 503: %s", replay.Code, replay.Body.String())
+		}
+		store := server.excelPricing.snapshots
+		store.mu.Lock()
+		job := store.jobs[jobID]
+		generation, cacheEntries := store.generation, len(store.cache)
+		store.mu.Unlock()
+		if job == nil || job.status != "ready" || generation != initialGeneration || cacheEntries != 1 {
+			t.Fatalf("failed-closed replay mutated state: job=%+v generation=%d/%d cache=%d",
+				job, generation, initialGeneration, cacheEntries)
+		}
+	})
+}
+
+func TestExcelPricingSnapshotSkipsProbeForIneligibleCacheAndRejectsInvalidAttestation(t *testing.T) {
+	source := excelPricingStateSourceForTest()
+	server := newExcelPricingTestServer(
+		t,
+		"http://127.0.0.1:1/wp-json/digitalogic/patris/product-sync",
+	)
+	token := openExcelPricingSession(t, server)
+	seedExcelPricingSnapshotCacheForTest(t, server, source)
+	server.excelPricing.snapshotRevisionCurrent = func(canonical.Source, string, string) bool {
+		return false
+	}
+	var probeCalls atomic.Int32
+	server.excelPricing.snapshotRevisionProbe = func(
+		context.Context,
+		canonical.Source,
+	) (excelPricingRemoteSnapshotRevision, error) {
+		probeCalls.Add(1)
+		return excelPricingRemoteSnapshotRevision{}, nil
+	}
+	var collectorCalls atomic.Int32
+	server.excelPricing.snapshotCollector = func(
+		context.Context,
+		string,
+		excelPricingSnapshotStartRequest,
+		updateout.Config,
+	) (*excelPricingSnapshot, string) {
+		collectorCalls.Add(1)
+		return nil, "snapshot_unavailable"
+	}
+	postAndWait := func(requestID string, maxAge int, expected string) {
+		t.Helper()
+		request := authenticatedExcelPricingRequest(
+			http.MethodPost,
+			"/api/pricing-sync/snapshots",
+			validExcelPricingSnapshotStartBodyWithExpected(
+				source, requestID, "fa", maxAge, expected,
+			),
+			token,
+		)
+		request.Header.Set("Idempotency-Key", requestID)
+		response := httptest.NewRecorder()
+		server.router.ServeHTTP(response, request)
+		if response.Code != http.StatusAccepted {
+			t.Fatalf("fresh start %q=%d: %s", requestID, response.Code, response.Body.String())
+		}
+		waitForExcelPricingSnapshotStatus(
+			t, server, token, excelPricingSnapshotJobIDForTest(t, response.Body.Bytes()), "failed",
+		)
+	}
+
+	postAndWait("snapshot-forced-probe-skip-0001", 0, "")
+	postAndWait(
+		"snapshot-expected-probe-skip-0001",
+		60,
+		excelPricingRevisionForTest("mismatched-expected-revision"),
+	)
+	if probeCalls.Load() != 0 {
+		t.Fatalf("ineligible cache triggered %d revision probe(s), want 0", probeCalls.Load())
+	}
+	postAndWait("snapshot-invalid-attestation-0001", 60, "")
+	if probeCalls.Load() != 1 || collectorCalls.Load() != 3 {
+		t.Fatalf("probe/collector calls=%d/%d, want 1/3",
+			probeCalls.Load(), collectorCalls.Load())
+	}
+}
+
+func TestExcelPricingSnapshotRechecksMaxAgeAfterRevisionProbe(t *testing.T) {
+	source := excelPricingStateSourceForTest()
+	server := newExcelPricingTestServer(
+		t,
+		"http://127.0.0.1:1/wp-json/digitalogic/patris/product-sync",
+	)
+	token := openExcelPricingSession(t, server)
+	baseTime := time.Date(2026, 9, 1, 7, 0, 0, 0, time.UTC)
+	var clockNanos atomic.Int64
+	clockNanos.Store(baseTime.UnixNano())
+	server.excelPricing.snapshots.now = func() time.Time {
+		return time.Unix(0, clockNanos.Load()).UTC()
+	}
+	_, cached, _ := seedExcelPricingSnapshotCacheForTest(t, server, source)
+	server.excelPricing.snapshotRevisionCurrent = func(canonical.Source, string, string) bool {
+		return false
+	}
+	var probeCalls atomic.Int32
+	server.excelPricing.snapshotRevisionProbe = func(
+		context.Context,
+		canonical.Source,
+	) (excelPricingRemoteSnapshotRevision, error) {
+		probeCalls.Add(1)
+		clockNanos.Add(int64(2 * time.Second))
+		return excelPricingRemoteSnapshotRevision{
+			StateRevision:         cached.stateRevision,
+			CatalogRevision:       cached.upstreamCatalogRevision,
+			PricingStateRevision:  excelPricingRevisionForTest("age-recheck-pricing"),
+			PricingPolicyRevision: excelPricingRevisionForTest("age-recheck-policy"),
+			ETag:                  excelPricingSnapshotETag(cached.stateRevision),
+		}, nil
+	}
+	var collectorCalls atomic.Int32
+	server.excelPricing.snapshotCollector = func(
+		context.Context,
+		string,
+		excelPricingSnapshotStartRequest,
+		updateout.Config,
+	) (*excelPricingSnapshot, string) {
+		collectorCalls.Add(1)
+		return nil, "snapshot_unavailable"
+	}
+
+	requestID := "snapshot-cache-age-recheck-0001"
+	request := authenticatedExcelPricingRequest(
+		http.MethodPost,
+		"/api/pricing-sync/snapshots",
+		validExcelPricingSnapshotStartBody(source, requestID, "fa", 1),
+		token,
+	)
+	request.Header.Set("Idempotency-Key", requestID)
+	response := httptest.NewRecorder()
+	server.router.ServeHTTP(response, request)
+	if response.Code != http.StatusAccepted {
+		t.Fatalf("aged cache status=%d, want fresh 202: %s", response.Code, response.Body.String())
+	}
+	waitForExcelPricingSnapshotStatus(
+		t,
+		server,
+		token,
+		excelPricingSnapshotJobIDForTest(t, response.Body.Bytes()),
+		"failed",
+	)
+	if probeCalls.Load() != 1 || collectorCalls.Load() != 1 {
+		t.Fatalf("aged cache probes/collectors=%d/%d, want 1/1",
+			probeCalls.Load(), collectorCalls.Load())
+	}
+}
+
+func TestExcelPricingSnapshotReplayExpiryDuringProbeRetriesFreshIdentity(t *testing.T) {
+	source := excelPricingStateSourceForTest()
+	server := newExcelPricingTestServer(
+		t,
+		"http://127.0.0.1:1/wp-json/digitalogic/patris/product-sync",
+	)
+	token := openExcelPricingSession(t, server)
+	baseTime := time.Date(2026, 9, 1, 7, 0, 0, 0, time.UTC)
+	var clockNanos atomic.Int64
+	clockNanos.Store(baseTime.UnixNano())
+	server.excelPricing.snapshots.now = func() time.Time {
+		return time.Unix(0, clockNanos.Load()).UTC()
+	}
+	_, cached, initialGeneration := seedExcelPricingSnapshotCacheForTest(t, server, source)
+	server.excelPricing.snapshotRevisionCurrent = func(canonical.Source, string, string) bool {
+		return false
+	}
+	var expireOnProbe atomic.Bool
+	var expired atomic.Bool
+	var probeCalls atomic.Int32
+	server.excelPricing.snapshotRevisionProbe = func(
+		context.Context,
+		canonical.Source,
+	) (excelPricingRemoteSnapshotRevision, error) {
+		probeCalls.Add(1)
+		if expireOnProbe.Load() && expired.CompareAndSwap(false, true) {
+			clockNanos.Add(int64(excelPricingSnapshotRetention + time.Second))
+		}
+		return excelPricingRemoteSnapshotRevision{
+			StateRevision:         cached.stateRevision,
+			CatalogRevision:       cached.upstreamCatalogRevision,
+			PricingStateRevision:  excelPricingRevisionForTest("retention-replay-pricing"),
+			PricingPolicyRevision: excelPricingRevisionForTest("retention-replay-policy"),
+			ETag:                  excelPricingSnapshotETag(cached.stateRevision),
+		}, nil
+	}
+
+	requestID := "snapshot-retention-replay-0001"
+	post := func() *httptest.ResponseRecorder {
+		request := authenticatedExcelPricingRequest(
+			http.MethodPost,
+			"/api/pricing-sync/snapshots",
+			validExcelPricingSnapshotStartBodyWithExpected(
+				source, requestID, "fa", 0, cached.stateRevision,
+			),
+			token,
+		)
+		request.Header.Set("Idempotency-Key", requestID)
+		response := httptest.NewRecorder()
+		server.router.ServeHTTP(response, request)
+		return response
+	}
+	first := post()
+	if first.Code != http.StatusOK {
+		t.Fatalf("initial replay identity=%d: %s", first.Code, first.Body.String())
+	}
+	firstJobID := excelPricingSnapshotJobIDForTest(t, first.Body.Bytes())
+	expireOnProbe.Store(true)
+	replayed := post()
+	if replayed.Code != http.StatusOK {
+		t.Fatalf("expired replay=%d, want fresh cached identity: %s",
+			replayed.Code, replayed.Body.String())
+	}
+	secondJobID := excelPricingSnapshotJobIDForTest(t, replayed.Body.Bytes())
+	if secondJobID == firstJobID {
+		t.Fatalf("expired replay retained old job id %q", firstJobID)
+	}
+	store := server.excelPricing.snapshots
+	store.mu.Lock()
+	generation := store.generation
+	_, oldJobStillPresent := store.jobs[firstJobID]
+	store.mu.Unlock()
+	if generation != initialGeneration || oldJobStillPresent || probeCalls.Load() != 3 {
+		t.Fatalf("replay expiry generation=%d/%d old_present=%v probes=%d",
+			generation, initialGeneration, oldJobStillPresent, probeCalls.Load())
+	}
+}
+
+func TestExcelPricingSnapshotObsoleteDriftProbeCannotOverrideLocalInvalidation(t *testing.T) {
+	source := excelPricingStateSourceForTest()
+	server := newExcelPricingTestServer(
+		t,
+		"http://127.0.0.1:1/wp-json/digitalogic/patris/product-sync",
+	)
+	token := openExcelPricingSession(t, server)
+	_, _, initialGeneration := seedExcelPricingSnapshotCacheForTest(t, server, source)
+	server.excelPricing.snapshotRevisionCurrent = func(canonical.Source, string, string) bool {
+		return false
+	}
+	probeStarted := make(chan struct{})
+	releaseProbe := make(chan struct{})
+	server.excelPricing.snapshotRevisionProbe = func(
+		ctx context.Context,
+		_ canonical.Source,
+	) (excelPricingRemoteSnapshotRevision, error) {
+		close(probeStarted)
+		select {
+		case <-releaseProbe:
+			return excelPricingRemoteSnapshotRevisionForTest("obsolete-drift"), nil
+		case <-ctx.Done():
+			return excelPricingRemoteSnapshotRevision{}, ctx.Err()
+		}
+	}
+	server.excelPricing.snapshotCollector = func(
+		context.Context,
+		string,
+		excelPricingSnapshotStartRequest,
+		updateout.Config,
+	) (*excelPricingSnapshot, string) {
+		return nil, "snapshot_unavailable"
+	}
+
+	requestID := "snapshot-obsolete-drift-0001"
+	responseReady := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		request := authenticatedExcelPricingRequest(
+			http.MethodPost,
+			"/api/pricing-sync/snapshots",
+			validExcelPricingSnapshotStartBody(source, requestID, "fa", 60),
+			token,
+		)
+		request.Header.Set("Idempotency-Key", requestID)
+		response := httptest.NewRecorder()
+		server.router.ServeHTTP(response, request)
+		responseReady <- response
+	}()
+	select {
+	case <-probeStarted:
+	case <-time.After(3 * time.Second):
+		t.Fatal("revision probe did not start")
+	}
+	server.notifyExcelPricingSourceChanged("local-change-won")
+	close(releaseProbe)
+	var response *httptest.ResponseRecorder
+	select {
+	case response = <-responseReady:
+	case <-time.After(3 * time.Second):
+		t.Fatal("snapshot request did not return after local invalidation")
+	}
+	if response.Code != http.StatusAccepted {
+		t.Fatalf("post-invalidation start=%d: %s", response.Code, response.Body.String())
+	}
+	waitForExcelPricingSnapshotStatus(
+		t,
+		server,
+		token,
+		excelPricingSnapshotJobIDForTest(t, response.Body.Bytes()),
+		"failed",
+	)
+
+	store := server.excelPricing.snapshots
+	store.mu.Lock()
+	generation := store.generation
+	localEvents, obsoleteRemoteEvents := 0, 0
+	for _, envelope := range store.events {
+		if envelope.Change == nil {
+			continue
+		}
+		switch envelope.Change.Reason {
+		case "local_source_changed":
+			localEvents++
+		case "upstream_composite_revision_changed":
+			obsoleteRemoteEvents++
+		}
+	}
+	store.mu.Unlock()
+	if generation != initialGeneration+1 || localEvents != 1 || obsoleteRemoteEvents != 0 {
+		t.Fatalf("obsolete drift committed: generation=%d/%d local_events=%d remote_events=%d",
+			generation, initialGeneration+1, localEvents, obsoleteRemoteEvents)
+	}
+}
+
+func seedExcelPricingSnapshotCacheForTest(
+	t *testing.T,
+	server *Server,
+	source canonical.Source,
+) (string, *excelPricingSnapshot, uint64) {
+	t.Helper()
+	store := server.excelPricing.snapshots
+	now := store.now().UTC()
+	stateRevision := excelPricingRevisionForTest("seeded-cache-state")
+	catalogRevision := excelPricingRevisionForTest("seeded-cache-catalog")
+	snapshot := &excelPricingSnapshot{
+		revision:                excelPricingRevisionForTest("seeded-cache-snapshot"),
+		etagRevision:            excelPricingRevisionForTest("seeded-cache-payload"),
+		stateRevision:           stateRevision,
+		pricingStateRevision:    excelPricingRevisionForTest("seeded-cache-pricing"),
+		upstreamCatalogRevision: catalogRevision,
+		createdAt:               now,
+		expiresAt:               now.Add(excelPricingSnapshotMaxCacheAge),
+		integrity: excelPricingSnapshotIntegrity{
+			DatasetRevision:  catalogRevision,
+			RemoteTotal:      1,
+			RowCount:         1,
+			DistinctSyncKeys: 1,
+			PageCount:        1,
+		},
+		body: []byte(`{"schema":"seeded-cache"}`),
+	}
+	cacheKey := excelPricingSnapshotCacheKey(source, "fa", excelPricingSnapshotProjectionFull)
+	store.mu.Lock()
+	store.cache[cacheKey] = snapshot
+	generation := store.generation
+	store.mu.Unlock()
+	return cacheKey, snapshot, generation
+}
+
+func excelPricingRemoteSnapshotRevisionForTest(seed string) excelPricingRemoteSnapshotRevision {
+	stateRevision := excelPricingRevisionForTest(seed + "-state")
+	return excelPricingRemoteSnapshotRevision{
+		StateRevision:         stateRevision,
+		CatalogRevision:       excelPricingRevisionForTest(seed + "-catalog"),
+		PricingStateRevision:  excelPricingRevisionForTest(seed + "-pricing"),
+		PricingPolicyRevision: excelPricingRevisionForTest(seed + "-policy"),
+		ETag:                  excelPricingSnapshotETag(stateRevision),
 	}
 }
 
