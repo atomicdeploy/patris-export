@@ -28,6 +28,15 @@ Web UI highlights every affected row.
 - ⚡ **Fast and lightweight** - Written in Go with native performance
 - 🐧🪟 **Cross-platform** - Supports both Linux and Windows
 
+## Bulk pricing refresh
+
+With the Go service running locally, run `scripts\pricing\pricing-sync.cmd bulk`
+on Windows, or `node scripts/pricing/pricing-sync.cjs bulk` elsewhere (Node.js 18+).
+This uses the existing authenticated refresh endpoint and waits for its terminal
+delivery receipt within a default overall budget of 60 seconds. It never retries
+an uncertain mutation automatically. Only bulk refresh is supported.
+See [pricing command usage, exit codes and receipt limits](scripts/pricing/README.md).
+
 ## 🚀 Installation
 
 ### From Release
