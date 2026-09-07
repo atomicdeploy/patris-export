@@ -294,7 +294,8 @@ try {
         try {
             $currentState = Get-Content -LiteralPath $ProcessStatePath -Raw | ConvertFrom-Json
             if ([int]$currentState.launcher_pid -eq $PID -and
-                [string]$currentState.launcher_start_time_utc -eq $launcherStartedUtc) {
+                (ConvertTo-PatrisUtcInstant -Value $currentState.launcher_start_time_utc).UtcTicks -eq
+                (ConvertTo-PatrisUtcInstant -Value $launcherStartedUtc).UtcTicks) {
                 Remove-Item -LiteralPath $ProcessStatePath -Force
             }
         } catch {
