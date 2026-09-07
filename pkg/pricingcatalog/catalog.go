@@ -15,6 +15,8 @@ const (
 	ModeNone            = "none"
 	ModeStatic          = "static"
 	ModeDigitalogic     = "digitalogic"
+	AuthorityPHP        = "php"
+	AuthorityGo         = "go"
 	CurrencyCNY         = "CNY"
 	CurrencyIRR         = "IRR"
 	MethodDomestic      = "domestic"
@@ -46,6 +48,7 @@ type Config struct {
 }
 
 type StaticConfig struct {
+	Authority             string                `json:"authority,omitempty" yaml:"authority,omitempty" toml:"authority,omitempty"`
 	Revision              string                `json:"revision,omitempty" yaml:"revision,omitempty" toml:"revision,omitempty"`
 	CNYToIRT              *Decimal              `json:"cny_to_irt,omitempty" yaml:"cny_to_irt,omitempty" toml:"cny_to_irt,omitempty"`
 	RoundingDigits        *int                  `json:"rounding_digits,omitempty" yaml:"rounding_digits,omitempty" toml:"rounding_digits,omitempty"`
@@ -98,6 +101,10 @@ type Assignment struct {
 // Resolution is the complete set of external inputs needed by
 // landed_price for one immutable product Code.
 type Resolution struct {
+	// Authority is the owner's validated selection. Empty means unavailable;
+	// callers must never interpret it as a default engine.
+	Authority                  string
+	AuthorityError             string
 	CatalogRevision            string
 	CatalogStatus              string
 	CatalogFetchedAt           time.Time
@@ -279,6 +286,7 @@ func (p *staticProvider) Resolve(_ context.Context, code string) Resolution {
 		SelectedWarehouses:    append([]string(nil), p.config.SelectedWarehouses...),
 		IRTPerCNY:             cloneDecimal(p.config.CNYToIRT),
 	}
+	resolution.Authority, resolution.AuthorityError = validatedAuthority(p.config.Authority)
 	if p.config.roundingDigitsNull {
 		if resolution.ExplicitNulls == nil {
 			resolution.ExplicitNulls = make(map[string]bool)
@@ -334,6 +342,17 @@ func (p *staticProvider) Resolve(_ context.Context, code string) Resolution {
 		}
 	}
 	return finishResolution(resolution)
+}
+
+func validatedAuthority(value string) (string, string) {
+	switch value {
+	case AuthorityPHP, AuthorityGo:
+		return value, ""
+	case "":
+		return "", "pricing_authority_missing"
+	default:
+		return "", "pricing_authority_invalid"
+	}
 }
 
 func finishResolution(value Resolution) Resolution {

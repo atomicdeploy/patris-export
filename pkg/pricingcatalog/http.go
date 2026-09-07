@@ -19,6 +19,8 @@ import (
 )
 
 type catalogSnapshot struct {
+	authority             string
+	authorityError        string
 	revision              string
 	currencyEffectiveDate string
 	selectedWarehouses    []string
@@ -518,6 +520,8 @@ func (p *httpProvider) resolve(ctx context.Context, code string, run *prefetchRu
 		return finishResolution(resolution)
 	}
 	resolution.CatalogRevision = catalog.revision
+	resolution.Authority = catalog.authority
+	resolution.AuthorityError = catalog.authorityError
 	resolution.CatalogFetchedAt = catalog.fetchedAt
 	resolution.CurrencyEffectiveDate = catalog.currencyEffectiveDate
 	resolution.SelectedWarehouses = append([]string(nil), catalog.selectedWarehouses...)
@@ -908,6 +912,7 @@ func (p *httpProvider) fetchCatalog(ctx context.Context) (*catalogSnapshot, erro
 			Warnings      []string `json:"warnings"`
 		} `json:"currency"`
 		Pricing struct {
+			Authority      string `json:"authority"`
 			FormulaID      string `json:"formula_id"`
 			RoundingDigits *int   `json:"rounding_digits"`
 			RoundingMode   string `json:"rounding_mode"`
@@ -944,6 +949,7 @@ func (p *httpProvider) fetchCatalog(ctx context.Context) (*catalogSnapshot, erro
 		explicitNulls["price_rounding_digits"] = true
 	}
 	warnings := append([]string(nil), wire.Currency.Warnings...)
+	authority, authorityError := validatedAuthority(wire.Pricing.Authority)
 	schemaCompatible := wire.Schema == "digitalogic.integration-catalog"
 	if !schemaCompatible {
 		warnings = append(warnings, "pricing_catalog_schema_incompatible")
@@ -1018,6 +1024,8 @@ func (p *httpProvider) fetchCatalog(ctx context.Context) (*catalogSnapshot, erro
 		}
 	}
 	return &catalogSnapshot{
+		authority:             authority,
+		authorityError:        authorityError,
 		revision:              strings.TrimSpace(wire.Revision),
 		currencyEffectiveDate: strings.TrimSpace(wire.Currency.EffectiveDate),
 		selectedWarehouses:    normalizedStrings(wire.SelectedWarehouses),
