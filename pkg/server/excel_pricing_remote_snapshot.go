@@ -241,20 +241,25 @@ type excelPricingRemoteSnapshotEndpoints struct {
 }
 
 type excelPricingRemoteSnapshotClient struct {
-	cfg       updateout.Config
-	source    canonical.Source
-	secret    string
-	endpoints excelPricingRemoteSnapshotEndpoints
-	client    *http.Client
-	terminals excelPricingRemoteSnapshotTerminalSource
+	inputCatalogRevision string
+	cfg                  updateout.Config
+	source               canonical.Source
+	secret               string
+	endpoints            excelPricingRemoteSnapshotEndpoints
+	client               *http.Client
+	terminals            excelPricingRemoteSnapshotTerminalSource
 }
 
 type excelPricingRemoteSnapshotClientOptions struct {
-	HTTPClient *http.Client
-	Terminals  excelPricingRemoteSnapshotTerminalSource
+	// Nonempty selects final projection discovery for an accepted input source.
+	// The existing owner catalog revision fences authority/settings selection.
+	InputCatalogRevision string
+	HTTPClient           *http.Client
+	Terminals            excelPricingRemoteSnapshotTerminalSource
 }
 
 type excelPricingRemoteSnapshotRevision struct {
+	Source                canonical.Source
 	StateRevision         string
 	CatalogRevision       string
 	PricingStateRevision  string
@@ -456,7 +461,8 @@ func newExcelPricingRemoteSnapshotClient(
 	options excelPricingRemoteSnapshotClientOptions,
 ) (*excelPricingRemoteSnapshotClient, error) {
 	cfg, secret, _, err := resolveExcelPricingRemote(cfg, "state")
-	if err != nil || !validExcelPricingRemoteSource(source) || options.Terminals == nil {
+	if err != nil || !validExcelPricingRemoteSource(source) || options.Terminals == nil ||
+		(options.InputCatalogRevision != "" && !isSHA256Revision(options.InputCatalogRevision)) {
 		return nil, errExcelPricingRemoteSnapshotConfiguration
 	}
 	endpoints, err := deriveExcelPricingRemoteSnapshotEndpoints(cfg.URL)
@@ -476,12 +482,13 @@ func newExcelPricingRemoteSnapshotClient(
 		copyClient.Timeout = excelPricingRemoteTimeout(cfg.Timeout)
 	}
 	return &excelPricingRemoteSnapshotClient{
-		cfg:       cfg,
-		source:    source,
-		secret:    secret,
-		endpoints: endpoints,
-		client:    &copyClient,
-		terminals: options.Terminals,
+		inputCatalogRevision: options.InputCatalogRevision,
+		cfg:                  cfg,
+		source:               source,
+		secret:               secret,
+		endpoints:            endpoints,
+		client:               &copyClient,
+		terminals:            options.Terminals,
 	}, nil
 }
 
@@ -641,6 +648,13 @@ func (client *excelPricingRemoteSnapshotClient) Collect(
 			excelPricingRemoteSnapshotStageRevisionFetch,
 			err,
 		)
+	}
+	if client.inputCatalogRevision != "" {
+		// Keep the input-scoped client reusable; this run pins the discovered
+		// final source for all existing build, page and terminal identity checks.
+		pinned := *client
+		pinned.source = revision.Source
+		client = &pinned
 	}
 	// Register before POST. A terminal event emitted by an unusually fast build
 	// can therefore be queued while the POST response is still in flight.
@@ -946,10 +960,19 @@ func (client *excelPricingRemoteSnapshotClient) fetchRevision(
 	var payload excelPricingRemoteRevisionResponse
 	if json.Unmarshal(body, &payload) != nil || payload.Schema != excelPricingRemoteRevisionSchema ||
 		payload.SchemaVersion != 1 || payload.Projection != excelPricingRemoteProjection ||
-		payload.ProjectionSchema != excelPricingRemoteProjectionSchema || !payload.Source.SameIdentity(client.source) ||
+		payload.ProjectionSchema != excelPricingRemoteProjectionSchema ||
 		payload.Locale != "fa" || payload.PageSize != excelPricingSnapshotPageSize ||
 		!validExcelPricingRemoteRevisionParts(payload.StateRevision, payload.CatalogRevision,
 			payload.PricingStateRevision, payload.PricingPolicyRevision) {
+		return excelPricingRemoteSnapshotRevision{}, errExcelPricingRemoteSnapshotProtocol
+	}
+	if client.inputCatalogRevision == "" {
+		if !payload.Source.SameIdentity(client.source) {
+			return excelPricingRemoteSnapshotRevision{}, errExcelPricingRemoteSnapshotProtocol
+		}
+	} else if payload.InputSource == nil || !payload.InputSource.SameIdentity(client.source) ||
+		!validExcelPricingRemoteSource(payload.Source) || payload.Source.ID != client.source.ID ||
+		payload.Source.Dataset != client.source.Dataset || payload.OwnerCatalogRevision != client.inputCatalogRevision {
 		return excelPricingRemoteSnapshotRevision{}, errExcelPricingRemoteSnapshotProtocol
 	}
 	etag := strings.TrimSpace(response.Header.Get("ETag"))
@@ -957,6 +980,7 @@ func (client *excelPricingRemoteSnapshotClient) fetchRevision(
 		return excelPricingRemoteSnapshotRevision{}, errExcelPricingRemoteSnapshotProtocol
 	}
 	return excelPricingRemoteSnapshotRevision{
+		Source:                payload.Source,
 		StateRevision:         payload.StateRevision,
 		CatalogRevision:       payload.CatalogRevision,
 		PricingStateRevision:  payload.PricingStateRevision,

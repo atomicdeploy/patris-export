@@ -145,17 +145,19 @@ type excelPricingRemoteStateEventData struct {
 }
 
 type excelPricingRemoteRevisionResponse struct {
-	Schema                string           `json:"schema"`
-	SchemaVersion         int              `json:"schema_version"`
-	Projection            string           `json:"projection"`
-	ProjectionSchema      string           `json:"projection_schema"`
-	StateRevision         string           `json:"state_revision"`
-	Source                canonical.Source `json:"source"`
-	CatalogRevision       string           `json:"catalog_revision"`
-	PricingStateRevision  string           `json:"pricing_state_revision"`
-	PricingPolicyRevision string           `json:"pricing_policy_revision"`
-	Locale                string           `json:"locale"`
-	PageSize              int              `json:"page_size"`
+	OwnerCatalogRevision  string            `json:"owner_catalog_revision,omitempty"`
+	InputSource           *canonical.Source `json:"input_source,omitempty"`
+	Schema                string            `json:"schema"`
+	SchemaVersion         int               `json:"schema_version"`
+	Projection            string            `json:"projection"`
+	ProjectionSchema      string            `json:"projection_schema"`
+	StateRevision         string            `json:"state_revision"`
+	Source                canonical.Source  `json:"source"`
+	CatalogRevision       string            `json:"catalog_revision"`
+	PricingStateRevision  string            `json:"pricing_state_revision"`
+	PricingPolicyRevision string            `json:"pricing_policy_revision"`
+	Locale                string            `json:"locale"`
+	PageSize              int               `json:"page_size"`
 }
 
 // excelPricingRemoteDirectTransport keeps validator-bearing pricing traffic

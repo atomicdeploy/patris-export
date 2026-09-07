@@ -1589,7 +1589,11 @@ func (fixture *excelPricingRemoteSnapshotFixture) handle(w http.ResponseWriter, 
 		fixture.mu.Lock()
 		fixture.revisionCalls++
 		fixture.mu.Unlock()
-		if !fixture.validSourceQuery(r.URL.Query()) {
+		query := r.URL.Query()
+		if fixture.revision.InputSource != nil && query.Get("source_revision") == fixture.revision.InputSource.Revision {
+			query.Set("source_revision", fixture.source.Revision)
+		}
+		if !fixture.validSourceQuery(query) {
 			http.Error(w, "bad query", http.StatusBadRequest)
 			return
 		}
