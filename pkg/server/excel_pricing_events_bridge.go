@@ -5,12 +5,10 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"log"
-	"os"
-	"path/filepath"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/atomicdeploy/patris-export/pkg/appconfig"
 	"github.com/atomicdeploy/patris-export/pkg/canonical"
@@ -69,6 +67,14 @@ type excelPricingRemoteEventsBridge struct {
 	// website-first confirmation can finish. WordPress revalidates id/dataset
 	// and treats a moved source revision as non-blocking metadata.
 	lastAuthenticatedSource atomic.Pointer[canonical.Source]
+	diagnostic              atomic.Pointer[excelPricingEventDiagnostic]
+}
+
+type excelPricingEventDiagnostic struct {
+	Phase      string    `json:"phase"`
+	Code       string    `json:"code,omitempty"`
+	HTTPStatus int       `json:"http_status"`
+	UpdatedAt  time.Time `json:"updated_at"`
 }
 
 func newExcelPricingRemoteEventsBridge(server *Server) *excelPricingRemoteEventsBridge {
@@ -98,6 +104,11 @@ func newExcelPricingRemoteEventsBridge(server *Server) *excelPricingRemoteEvents
 				onCursor,
 				onRevision,
 				onTerminal,
+				func(phase, code string, status int) {
+					if server.excelPricingRemote != nil && ctx.Err() == nil {
+						server.excelPricingRemote.diagnostic.Store(&excelPricingEventDiagnostic{Phase: phase, Code: code, HTTPStatus: status, UpdatedAt: time.Now().UTC()})
+					}
+				},
 			)
 		},
 		apply: server.notifyExcelPricingRemoteRevisionChanged,
@@ -109,8 +120,8 @@ func newExcelPricingRemoteEventsBridge(server *Server) *excelPricingRemoteEvents
 // needed to subscribe. Starting the live event lane must never wait for a full
 // 1,000-row catalog projection: Patris is expected to keep changing while Excel
 // is open, and the first remote revision frame immediately supplies the current
-// semantic revision. The metadata digest is therefore an ephemeral handshake
-// envelope, not a persisted or authoritative catalog snapshot.
+// semantic revision. Subscription discovery carries identity only; file metadata
+// cannot stand in for an accepted immutable source revision.
 func (s *Server) excelPricingEventBridgeSource(ctx context.Context, cfg appconfig.Config) (canonical.Source, error) {
 	if s == nil || ctx == nil {
 		return canonical.Source{}, errExcelPricingRemoteConfiguration
@@ -120,22 +131,8 @@ func (s *Server) excelPricingEventBridgeSource(ctx context.Context, cfg appconfi
 		return canonical.Source{}, ctx.Err()
 	default:
 	}
-	s.lastRecordsMu.RLock()
-	ready := s.lastRecordsReady
-	revision := s.lastContractRevision
-	s.lastRecordsMu.RUnlock()
-	path := s.currentDBPath()
-	if !ready || !isSHA256Revision(revision) {
-		info, err := os.Stat(path)
-		if err != nil || !info.Mode().IsRegular() {
-			return canonical.Source{}, errExcelPricingRemoteConfiguration
-		}
-		material := fmt.Sprintf("%s\x00%d\x00%d", filepath.Clean(path), info.Size(), info.ModTime().UnixNano())
-		digest := sha256.Sum256([]byte(material))
-		revision = fmt.Sprintf("sha256:%x", digest[:])
-	}
-	source := canonical.SourceIdentity(path, cfg.Canonical.SourceID, revision)
-	if !validExcelPricingRemoteSource(source) {
+	source := canonical.SourceIdentity(s.currentDBPath(), cfg.Canonical.SourceID, "")
+	if !validExcelPricingRemoteDiscoverySource(source) {
 		return canonical.Source{}, errExcelPricingRemoteConfiguration
 	}
 	return source, nil
@@ -369,7 +366,7 @@ func (bridge *excelPricingRemoteEventsBridge) runGeneration(
 		return
 	}
 	source, err := bridge.dependencies.materialize(ctx)
-	if err != nil || !validExcelPricingRemoteSource(source) ||
+	if err != nil || !validExcelPricingRemoteDiscoverySource(source) ||
 		!bridge.generationCurrent(epoch) {
 		if ctx.Err() == nil && bridge.generationCurrent(epoch) {
 			bridge.dependencies.logf("Pricing event subscriber is inactive: canonical source is unavailable")

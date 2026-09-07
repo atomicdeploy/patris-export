@@ -720,6 +720,9 @@ func (s *Server) Status() map[string]interface{} {
 	// The permit covers startup/source delivery, synchronous refresh and owner
 	// actuation. The owner worker's phase alone does not describe this shared work.
 	status["pricing_operation"] = s.refreshDiagnosticStatus(s.excelPricing != nil && len(s.excelPricing.permit) != 0)
+	if s.excelPricingRemote != nil {
+		status["pricing_events"] = s.excelPricingRemote.diagnostic.Load()
+	}
 	if s.pricingActuation != nil {
 		status["pricing"] = s.pricingActuation.status()
 	}
