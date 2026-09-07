@@ -17,49 +17,38 @@ import (
 
 // This is a bounded operation checkpoint, not a second product outbox. An
 // uncertain delivery can only advance through the receiver's existing ledger.
-type pricingDeliveryReceipt struct {
-	EventID              string           `json:"event_id"`
-	Status               string           `json:"status"`
-	Source               canonical.Source `json:"source"`
-	InputSource          canonical.Source `json:"input_source"`
-	OwnerCatalogRevision string           `json:"owner_catalog_revision"`
-	PendingProducts      int              `json:"pending_products"`
-	DeferredProducts     int              `json:"deferred_products"`
-	DeferredMissing      int              `json:"deferred_missing"`
-	DeferredAmbiguous    int              `json:"deferred_ambiguous"`
-}
-
-func (r *pricingDeliveryReceipt) UnmarshalJSON(data []byte) error {
-	type wireReceipt pricingDeliveryReceipt
-	var wire wireReceipt
-	var fields map[string]json.RawMessage
-	if json.Unmarshal(data, &wire) != nil || json.Unmarshal(data, &fields) != nil {
-		return errExcelPricingRemoteSnapshotProtocol
-	}
-	for _, key := range []string{"event_id", "status", "source", "input_source", "pending_products", "deferred_products", "deferred_missing", "deferred_ambiguous"} {
-		value, ok := fields[key]
-		if !ok || string(value) == "null" {
-			return errExcelPricingRemoteSnapshotProtocol
-		}
-	}
-	if !isSHA256Revision(wire.EventID) || !validExcelPricingRemoteSource(wire.Source) || !validExcelPricingRemoteSource(wire.InputSource) || wire.PendingProducts < 0 || wire.DeferredProducts < 0 || wire.DeferredMissing < 0 || wire.DeferredAmbiguous < 0 {
-		return errExcelPricingRemoteSnapshotProtocol
-	}
-	*r = pricingDeliveryReceipt(wire)
-	return nil
-}
+type pricingDeliveryReceipt = updateout.DeliveryReceipt
 
 type pricingActuationStatus struct {
+	Previous      *pricingPreviousOperation `json:"previous_operation,omitempty"`
+	Phase         string                    `json:"phase"`
+	Authority     string                    `json:"authority,omitempty"`
+	OwnerRevision string                    `json:"owner_catalog_revision,omitempty"`
+	Source        canonical.Source          `json:"source"`
+	EventID       string                    `json:"event_id,omitempty"`
+	Error         string                    `json:"error,omitempty"`
+	Pending       bool                      `json:"pending"`
+	LatestSource  canonical.Source          `json:"latest_source"`
+	UpdatedAt     time.Time                 `json:"updated_at"`
+	Delivery      *pricingDeliveryReceipt   `json:"delivery,omitempty"`
+}
+
+// Retain one displaced operation's outcome, never an accumulating outbox.
+type pricingPreviousOperation struct {
 	Phase         string                  `json:"phase"`
-	Authority     string                  `json:"authority,omitempty"`
-	OwnerRevision string                  `json:"owner_catalog_revision,omitempty"`
+	Outcome       string                  `json:"outcome"`
+	OwnerRevision string                  `json:"owner_catalog_revision"`
 	Source        canonical.Source        `json:"source"`
-	EventID       string                  `json:"event_id,omitempty"`
+	EventID       string                  `json:"event_id"`
 	Error         string                  `json:"error,omitempty"`
-	Pending       bool                    `json:"pending"`
-	LatestSource  canonical.Source        `json:"latest_source"`
-	UpdatedAt     time.Time               `json:"updated_at"`
 	Delivery      *pricingDeliveryReceipt `json:"delivery,omitempty"`
+}
+
+func supersededPricingOperation(st pricingActuationStatus) *pricingPreviousOperation {
+	if st.EventID == "" {
+		return st.Previous
+	}
+	return &pricingPreviousOperation{Phase: "superseded", Outcome: st.Phase, OwnerRevision: st.OwnerRevision, Source: st.Source, EventID: st.EventID, Error: st.Error, Delivery: st.Delivery}
 }
 
 type pricingActuator struct {
@@ -271,6 +260,17 @@ func receiptComplete(r *pricingDeliveryReceipt, st pricingActuationStatus) bool 
 		r.PendingProducts == 0 && r.DeferredProducts == 0 && r.DeferredMissing == 0 && r.DeferredAmbiguous == 0
 }
 
+func pricingWaitReceiptComplete(receipt *pricingDeliveryReceipt, input *canonical.Envelope, owner pricingcatalog.Resolution) bool {
+	if receipt == nil || receipt.Status != "complete" || receipt.EventID != input.EventID || !receipt.InputSource.SameIdentity(input.Source) || receipt.Source.ID != input.Source.ID || receipt.Source.Dataset != input.Source.Dataset || receipt.PendingProducts != 0 || receipt.DeferredProducts != 0 || receipt.DeferredMissing != 0 || receipt.DeferredAmbiguous != 0 {
+		return false
+	}
+	if owner.Authority == pricingcatalog.AuthorityGo {
+		return receipt.Source.SameIdentity(input.Source) && receipt.OwnerCatalogRevision == owner.CatalogRevision
+	}
+	// PHP final collection separately proves the current owner catalog revision.
+	return owner.Authority == pricingcatalog.AuthorityPHP
+}
+
 func (a *pricingActuator) run(ctx context.Context, source canonical.Source) {
 	initial := a.status()
 	if initial.Error == "checkpoint_invalid" || initial.Error == "checkpoint_unreadable" {
@@ -294,6 +294,7 @@ func (a *pricingActuator) run(ctx context.Context, source canonical.Source) {
 			return
 		}
 		if !a.transition(func(st *pricingActuationStatus) {
+			st.Previous = supersededPricingOperation(previous)
 			st.Phase = "projecting"
 			st.Authority = owner.Authority
 			st.OwnerRevision = owner.CatalogRevision
@@ -316,24 +317,47 @@ func (a *pricingActuator) run(ctx context.Context, source canonical.Source) {
 			return
 		}
 		if previous.EventID != "" {
-			receipt, err := a.receipt(ctx, previous)
-			if err != nil || !receiptComplete(receipt, previous) {
+			// A legitimate synchronous refresh can advance the receiver ledger.
+			// Probe the authenticated current source, then bind its receipt to
+			// freshly built desired input before adopting that existing operation.
+			probe := previous
+			probe.Source = source
+			receipt, err := a.receipt(ctx, probe)
+			if err != nil || receipt == nil {
 				a.fail("delivery_receipt_unresolved")
 				return
 			}
-			a.transition(func(st *pricingActuationStatus) { st.Phase = "complete"; st.Error = ""; st.Delivery = receipt })
+			desired, err := a.input(ctx)
+			if err != nil || desired == nil || !receipt.InputSource.SameIdentity(desired.Source) || !receipt.Source.SameIdentity(desired.Source) || receipt.OwnerCatalogRevision != owner.CatalogRevision || !isSHA256Revision(receipt.EventID) {
+				a.fail("delivery_receipt_unresolved")
+				return
+			}
+			for _, p := range desired.Products {
+				if p.PricingCatalogRevision != owner.CatalogRevision {
+					a.fail("owner_changed")
+					return
+				}
+			}
+			a.transition(func(st *pricingActuationStatus) {
+				if receipt.EventID != previous.EventID {
+					st.Previous = supersededPricingOperation(previous)
+				}
+				st.EventID = receipt.EventID
+				st.Source = receipt.InputSource
+				st.Delivery = receipt
+				st.Error = ""
+				if receiptComplete(receipt, *st) {
+					st.Phase = "complete"
+				} else {
+					st.Phase = "delivery_pending"
+				}
+			})
 			return
 		}
 	}
-	// Do not supersede an uncertain mutation with a new owner write. Reconcile
-	// the previous receipt first; an absent receipt is never permission to resend.
-	if previous.EventID != "" && previous.Phase != "complete" {
-		receipt, err := a.receipt(ctx, previous)
-		if err != nil || !receiptComplete(receipt, previous) {
-			a.fail("delivery_receipt_unresolved")
-			return
-		}
-	}
+	// A committed new owner revision is a new operation. The receiver fences
+	// old-owner deliveries before writes, so an old deferred/unknown receipt
+	// must not prevent the new desired prices from reaching known products.
 	input, err := a.input(ctx)
 	if err != nil || input == nil || input.Source.ID != source.ID || input.Source.Dataset != source.Dataset {
 		a.fail("input_unavailable")
@@ -345,7 +369,12 @@ func (a *pricingActuator) run(ctx context.Context, source canonical.Source) {
 			return
 		}
 	}
+	if previous.EventID != "" && previous.OwnerRevision != owner.CatalogRevision && input.EventID == previous.EventID {
+		a.fail("owner_changed")
+		return
+	}
 	if !a.transition(func(st *pricingActuationStatus) {
+		st.Previous = supersededPricingOperation(previous)
 		st.Phase = "dispatching"
 		st.Authority = owner.Authority
 		st.OwnerRevision = owner.CatalogRevision
@@ -361,16 +390,16 @@ func (a *pricingActuator) run(ctx context.Context, source canonical.Source) {
 		a.fail("delivery_uncertain")
 		return
 	}
-	receipt := &pricingDeliveryReceipt{EventID: result.EventID, Status: result.Status, Source: input.Source, InputSource: input.Source, OwnerCatalogRevision: owner.CatalogRevision, PendingProducts: result.PendingProducts, DeferredProducts: result.DeferredProducts, DeferredMissing: result.DeferredMissing, DeferredAmbiguous: result.DeferredAmbiguous}
-	if excelPricingDeliveryComplete(result, input.EventID) && result.DeferredProducts == 0 && result.DeferredMissing == 0 {
-		receipt.Status = "complete"
-	}
+	receipt := result.Delivery
 	a.transition(func(st *pricingActuationStatus) {
 		st.Delivery = receipt
 		if result.HTTPStatus >= 200 && result.HTTPStatus < 300 && receiptComplete(receipt, *st) {
 			st.Phase = "complete"
-		} else {
+		} else if receipt != nil && receipt.EventID == st.EventID && receipt.InputSource.SameIdentity(st.Source) && receipt.Source.SameIdentity(st.Source) && receipt.OwnerCatalogRevision == st.OwnerRevision {
 			st.Phase = "delivery_pending"
+		} else {
+			st.Phase = "recovery_required"
+			st.Error = "delivery_receipt_unresolved"
 		}
 	})
 }

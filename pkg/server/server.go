@@ -1683,6 +1683,10 @@ func (s *Server) handlePostRefreshWait(w http.ResponseWriter, r *http.Request) {
 		writeRefreshWaitError(w, http.StatusBadGateway, true, contract.Source.Revision, "delivery_failed")
 		return
 	}
+	if pricingcatalog.Configured(cfg.Canonical.Pricing) && !pricingWaitReceiptComplete(result.Delivery, contract, owner) {
+		writeRefreshWaitError(w, http.StatusBadGateway, true, contract.Source.Revision, "delivery_receipt_unresolved")
+		return
+	}
 	completedSource := contract.Source
 	if owner.Authority == pricingcatalog.AuthorityPHP {
 		build := func(ctx context.Context) (recordpipe.Result, error) {

@@ -13,6 +13,7 @@ import (
 	"github.com/atomicdeploy/patris-export/pkg/appconfig"
 	"github.com/atomicdeploy/patris-export/pkg/canonical"
 	"github.com/atomicdeploy/patris-export/pkg/pricingcatalog"
+	"github.com/atomicdeploy/patris-export/pkg/updateout"
 )
 
 func TestPostRefreshWaitReadsFreshSourceAndOwnerOncePerSnapshot(t *testing.T) {
@@ -69,7 +70,8 @@ func TestPostRefreshWaitReadsFreshSourceAndOwnerOncePerSnapshot(t *testing.T) {
 		}
 		delivered <- envelope
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprintf(w, `{"success":true,"data":{"status":"accepted","event_id":%q,"retryable":false,"pending_products":0,"deferred_products":0}}`, envelope.EventID)
+		receipt := &updateout.DeliveryReceipt{Status: "complete", EventID: envelope.EventID, Source: envelope.Source, InputSource: envelope.Source, OwnerCatalogRevision: envelope.Products[0].PricingCatalogRevision}
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "data": map[string]interface{}{"status": "accepted", "event_id": envelope.EventID, "retryable": false, "pending_products": 0, "deferred_products": 0, "delivery": receipt}})
 	}))
 	defer receiver.Close()
 	srv, _ := newRefreshWaitTestServer(t, receiver.URL, func(cfg *appconfig.Config) {

@@ -17,12 +17,15 @@ import (
 )
 
 func TestAuthorityWaitPublishesOnlySelectedFinalProjection(t *testing.T) {
-	for _, mode := range []string{"go", "php", "bad-binding", "missing-authority"} {
+	for _, mode := range []string{"go", "php", "bad-binding", "missing-authority", "replayed-new-owner"} {
 		t.Run(mode, func(t *testing.T) {
 			fixture := newExcelPricingRemoteSnapshotFixture(t, "ready")
 			fixture.acceptAnyID = true
 			defer fixture.Close()
 			authority := mode
+			if mode == "replayed-new-owner" {
+				authority = "go"
+			}
 			if mode == "bad-binding" {
 				authority = "php"
 			}
@@ -46,7 +49,7 @@ func TestAuthorityWaitPublishesOnlySelectedFinalProjection(t *testing.T) {
 			}
 			srv.excelPricing.canonical = srv.canonicalRecordResultContext
 			srv.excelPricingRemote.terminals = fixture.hub
-			body := []byte(`{"1":{"Code":"P-1","foreign_price":"10.1234567890123456789","weight_grams":1000,"ALLANBAR":1}}`)
+			body := []byte(`{"1":{"Code":"P-1","foreign_price":"10.123456789012","weight_grams":1000,"ALLANBAR":1}}`)
 			if err := os.WriteFile(srv.currentDBPath(), body, 0600); err != nil {
 				t.Fatal(err)
 			}
@@ -116,12 +119,28 @@ func TestAuthorityWaitPublishesOnlySelectedFinalProjection(t *testing.T) {
 				if authority == "php" && event.Contract.Products[0].FinalPrice != nil {
 					t.Error("dispatch leaked Go price")
 				}
-				return updateout.DeliveryResult{HTTPStatus: 200, Status: "accepted", EventID: event.Contract.EventID, Attempts: 1}, nil
+				reply := pricingFixtureDelivery(event.Contract, updateout.DeliveryResult{HTTPStatus: 200, Status: "accepted", EventID: event.Contract.EventID, Attempts: 1})
+				if authority == "php" {
+					reply.Delivery.Source = fixture.source
+					reply.Delivery.OwnerCatalogRevision = ""
+				}
+				if mode == "replayed-new-owner" {
+					reply.Status = "replayed"
+					reply.Delivery.EventID = excelPricingRevisionForTest("new-event")
+					reply.Delivery.OwnerCatalogRevision = excelPricingRevisionForTest("new-owner")
+				}
+				return reply, nil
 			}
 			response := httptest.NewRecorder()
 			srv.router.ServeHTTP(response, newAuthenticatedRefreshWaitRequest(t, srv, `{"delivery":"wait"}`))
 			if dispatches != 1 {
 				t.Fatalf("dispatches=%d", dispatches)
+			}
+			if mode == "replayed-new-owner" {
+				if response.Code != 502 {
+					t.Fatalf("new owner receipt falsely completed old wait: %d %s", response.Code, response.Body.String())
+				}
+				return
 			}
 			products := httptest.NewRecorder()
 			srv.router.ServeHTTP(products, httptest.NewRequest(http.MethodGet, "/api/products", nil))

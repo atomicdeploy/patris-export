@@ -67,6 +67,7 @@ var (
 // its response body or any credential material. Generic webhooks leave Status
 // and EventID empty.
 type DeliveryResult struct {
+	Delivery          *DeliveryReceipt
 	HTTPStatus        int
 	Status            string
 	EventID           string
@@ -429,12 +430,13 @@ func ResolveProductSyncSecret(cfg Config) (string, error) {
 }
 
 type receiverResponseData struct {
-	Status                 json.RawMessage `json:"status"`
-	EventID                json.RawMessage `json:"event_id"`
-	Retryable              json.RawMessage `json:"retryable"`
-	PendingProducts        json.RawMessage `json:"pending_products"`
-	DeferredProducts       json.RawMessage `json:"deferred_products"`
-	DeferredReconciliation json.RawMessage `json:"deferred_reconciliation"`
+	Delivery               *DeliveryReceipt `json:"delivery"`
+	Status                 json.RawMessage  `json:"status"`
+	EventID                json.RawMessage  `json:"event_id"`
+	Retryable              json.RawMessage  `json:"retryable"`
+	PendingProducts        json.RawMessage  `json:"pending_products"`
+	DeferredProducts       json.RawMessage  `json:"deferred_products"`
+	DeferredReconciliation json.RawMessage  `json:"deferred_reconciliation"`
 }
 
 type receiverResponse struct {
@@ -526,6 +528,7 @@ func applySuccessfulReceiverState(result *DeliveryResult, data receiverResponseD
 	}
 
 	result.Status = status
+	result.Delivery = data.Delivery
 	result.EventID = eventID
 	result.Retryable = retryable
 	result.PendingProducts = pendingProducts

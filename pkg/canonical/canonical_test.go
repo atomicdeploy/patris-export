@@ -91,7 +91,7 @@ func TestLandedPriceTreatsEquivalentCNYAndIRRFreightEqually(t *testing.T) {
 	}
 }
 
-func TestTransformKeepsExactDecimalInputsThroughFinalRounding(t *testing.T) {
+func TestTransformPreservesRawDecimalsOutsideCalculationDomainWithoutFinalPrice(t *testing.T) {
 	fx := pricingcatalog.Decimal("1000000000000000000")
 	freight := pricingcatalog.Decimal("0.000000000000000001")
 	markup := pricingcatalog.Decimal("0")
@@ -105,8 +105,14 @@ func TestTransformKeepsExactDecimalInputsThroughFinalRounding(t *testing.T) {
 	rows, envelope := Transform(context.Background(), []map[string]interface{}{{
 		"Code": "A", "foreign_price": "0.1000000000000000006", "weight_grams": "1", "ALLANBAR": 1,
 	}}, "kala.db", cfg, pricingcatalog.NewProvider(cfg.Pricing), time.Unix(1, 0))
-	if len(rows) != 1 || rows[0]["final_price"] != int64(100000000000000001) {
-		t.Fatalf("exact decimal inputs were rounded before the final stage: %#v", rows)
+	if len(rows) != 1 {
+		t.Fatalf("raw decimal product was lost: %#v", rows)
+	}
+	if _, exists := rows[0]["final_price"]; exists {
+		t.Fatalf("out-of-domain calculation produced a final price: %#v", rows)
+	}
+	if !hasAny(rows[0]["warnings"].([]string), "landed_price_calculation_failed") {
+		t.Fatalf("out-of-domain calculation lacked an explicit diagnostic: %#v", rows)
 	}
 	encoded, err := json.Marshal(envelope)
 	if err != nil {
@@ -114,6 +120,9 @@ func TestTransformKeepsExactDecimalInputsThroughFinalRounding(t *testing.T) {
 	}
 	if !strings.Contains(string(encoded), `"foreign_price":0.1000000000000000006`) {
 		t.Fatalf("typed contract did not preserve exact decimal token: %s", encoded)
+	}
+	if _, _, err := VerifySnapshotJSON(encoded); err != nil {
+		t.Fatalf("unavailable raw-decimal product must retain a valid contract: %v", err)
 	}
 }
 

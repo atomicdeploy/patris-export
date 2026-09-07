@@ -16,6 +16,15 @@ import (
 	"github.com/atomicdeploy/patris-export/pkg/updateout"
 )
 
+func pricingFixtureDelivery(input *canonical.Envelope, result updateout.DeliveryResult) updateout.DeliveryResult {
+	status := "complete"
+	if result.PendingProducts > 0 || result.DeferredProducts > 0 {
+		status = "pending"
+	}
+	result.Delivery = &updateout.DeliveryReceipt{Status: status, EventID: result.EventID, Source: input.Source, InputSource: input.Source, OwnerCatalogRevision: input.Products[0].PricingCatalogRevision, PendingProducts: result.PendingProducts, DeferredProducts: result.DeferredProducts, DeferredMissing: result.DeferredMissing, DeferredAmbiguous: result.DeferredAmbiguous}
+	return result
+}
+
 func pricingActuatorFixture(t *testing.T) (*pricingActuator, *atomic.Value, *atomic.Int32) {
 	t.Helper()
 	s := &Server{excelPricing: newExcelPricingState(), canonicalProjection: newCanonicalProjectionCache(), pricingPublication: newCanonicalProjectionCache()}
@@ -33,7 +42,7 @@ func pricingActuatorFixture(t *testing.T) (*pricingActuator, *atomic.Value, *ato
 	}
 	a.dispatch = func(_ context.Context, e *canonical.Envelope) (updateout.DeliveryResult, error) {
 		calls.Add(1)
-		return updateout.DeliveryResult{HTTPStatus: 200, Status: "accepted", EventID: e.EventID, Attempts: 1}, nil
+		return pricingFixtureDelivery(e, updateout.DeliveryResult{HTTPStatus: 200, Status: "accepted", EventID: e.EventID, Attempts: 1}), nil
 	}
 	a.receipt = func(context.Context, pricingActuationStatus) (*pricingDeliveryReceipt, error) { return nil, nil }
 	a.project = func(context.Context, canonical.Source, pricingcatalog.Resolution) error {
@@ -110,7 +119,7 @@ func TestPricingNewOwnerWhileBusyReceivesFinalPass(t *testing.T) {
 			close(entered)
 			<-release
 		}
-		return updateout.DeliveryResult{HTTPStatus: 200, Status: "accepted", EventID: e.EventID, Attempts: 1}, nil
+		return pricingFixtureDelivery(e, updateout.DeliveryResult{HTTPStatus: 200, Status: "accepted", EventID: e.EventID, Attempts: 1}), nil
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	var wg sync.WaitGroup
@@ -147,7 +156,7 @@ func TestPricingNewOwnerWhileBusyReceivesFinalPass(t *testing.T) {
 }
 
 func TestPricingUncertainDeliveryRecoversWithoutResending(t *testing.T) {
-	for _, mode := range []string{"unknown", "pending", "complete", "wrong-event", "wrong-owner", "wrong-source"} {
+	for _, mode := range []string{"unknown", "pending", "complete", "advanced-event", "wrong-owner", "wrong-source"} {
 		t.Run(mode, func(t *testing.T) {
 			a, _, calls := pricingActuatorFixture(t)
 			a.dispatch = func(context.Context, *canonical.Envelope) (updateout.DeliveryResult, error) {
@@ -171,7 +180,7 @@ func TestPricingUncertainDeliveryRecoversWithoutResending(t *testing.T) {
 				switch mode {
 				case "pending":
 					r.PendingProducts = 1
-				case "wrong-event":
+				case "advanced-event":
 					r.EventID = excelPricingRevisionForTest("wrong")
 				case "wrong-owner":
 					r.OwnerCatalogRevision = excelPricingRevisionForTest("wrong")
@@ -185,13 +194,126 @@ func TestPricingUncertainDeliveryRecoversWithoutResending(t *testing.T) {
 				t.Fatalf("uncertain mutation resent %d times", calls.Load())
 			}
 			want := "recovery_required"
-			if mode == "complete" {
+			if mode == "complete" || mode == "advanced-event" {
 				want = "complete"
+			}
+			if mode == "pending" {
+				want = "delivery_pending"
 			}
 			if restarted.status().Phase != want {
 				t.Fatal(restarted.status())
 			}
+			if mode == "advanced-event" && (restarted.status().Previous == nil || restarted.status().Previous.EventID != a.status().EventID) {
+				t.Fatal("manual receipt lost displaced operation")
+			}
 		})
+	}
+}
+
+func TestPricingNewOwnerSupersedesOldPendingOrUncertainOperation(t *testing.T) {
+	for _, outcome := range []string{"deferred_missing", "uncertain"} {
+		t.Run(outcome, func(t *testing.T) {
+			a, owner, calls := pricingActuatorFixture(t)
+			oldOwner := owner.Load().(pricingcatalog.Resolution).CatalogRevision
+			var firstEvent string
+			a.dispatch = func(_ context.Context, input *canonical.Envelope) (updateout.DeliveryResult, error) {
+				attempt := calls.Add(1)
+				if attempt == 1 {
+					firstEvent = input.EventID
+					if outcome == "uncertain" {
+						return updateout.DeliveryResult{}, errors.New("lost receipt")
+					}
+					return pricingFixtureDelivery(input, updateout.DeliveryResult{HTTPStatus: 200, Status: "accepted", EventID: input.EventID, Attempts: 1, DeferredProducts: 1, DeferredMissing: 1}), nil
+				}
+				if input.EventID == firstEvent || input.Products[0].PricingCatalogRevision == oldOwner {
+					t.Fatal("new owner retried old mutation")
+				}
+				return pricingFixtureDelivery(input, updateout.DeliveryResult{HTTPStatus: 200, Status: "accepted", EventID: input.EventID, Attempts: 1, DeferredProducts: 1, DeferredMissing: 1}), nil
+			}
+			a.receipt = func(context.Context, pricingActuationStatus) (*pricingDeliveryReceipt, error) {
+				t.Fatal("new owner blocked on impossible old receipt")
+				return nil, nil
+			}
+			source := excelPricingRemoteTestSource()
+			a.run(context.Background(), source)
+			previous := a.status()
+			owner.Store(pricingcatalog.Resolution{Authority: "go", CatalogRevision: excelPricingRevisionForTest("new-owner")})
+			a.run(context.Background(), source)
+			st := a.status()
+			if calls.Load() != 2 || st.Phase != "delivery_pending" || st.EventID == firstEvent || st.Previous == nil || st.Previous.Phase != "superseded" || st.Previous.EventID != firstEvent || st.Previous.Outcome != previous.Phase {
+				t.Fatalf("supersession failed calls=%d status=%+v previous=%+v", calls.Load(), st, st.Previous)
+			}
+		})
+	}
+}
+
+func TestPricingNewOwnerRejectsStaleDesiredInput(t *testing.T) {
+	a, owner, calls := pricingActuatorFixture(t)
+	oldInput, _ := a.input(context.Background())
+	a.dispatch = func(context.Context, *canonical.Envelope) (updateout.DeliveryResult, error) {
+		calls.Add(1)
+		return updateout.DeliveryResult{}, errors.New("uncertain")
+	}
+	a.run(context.Background(), excelPricingRemoteTestSource())
+	owner.Store(pricingcatalog.Resolution{Authority: "go", CatalogRevision: excelPricingRevisionForTest("new-owner")})
+	a.input = func(context.Context) (*canonical.Envelope, error) { return oldInput, nil }
+	a.run(context.Background(), excelPricingRemoteTestSource())
+	if calls.Load() != 1 || a.status().Error != "owner_changed" {
+		t.Fatalf("stale input sent calls=%d status=%+v", calls.Load(), a.status())
+	}
+}
+
+func TestPricingManualRefreshAdvancesSourceWithoutResend(t *testing.T) {
+	a, _, calls := pricingActuatorFixture(t)
+	a.dispatch = func(context.Context, *canonical.Envelope) (updateout.DeliveryResult, error) {
+		calls.Add(1)
+		return updateout.DeliveryResult{}, errors.New("lost receipt")
+	}
+	source := excelPricingRemoteTestSource()
+	a.run(context.Background(), source)
+	old := a.status()
+	desired, _ := a.input(context.Background())
+	desired.Source.Revision = excelPricingRevisionForTest("manual-fresh-input")
+	a.input = func(context.Context) (*canonical.Envelope, error) { return desired, nil }
+	manualEvent := excelPricingRevisionForTest("manual-refresh-event")
+	a.receipt = func(_ context.Context, probe pricingActuationStatus) (*pricingDeliveryReceipt, error) {
+		if !probe.Source.SameIdentity(desired.Source) {
+			t.Fatal("probe pinned obsolete source")
+		}
+		return &pricingDeliveryReceipt{Status: "complete", EventID: manualEvent, Source: desired.Source, InputSource: desired.Source, OwnerCatalogRevision: old.OwnerRevision}, nil
+	}
+	a.run(context.Background(), desired.Source)
+	st := a.status()
+	if calls.Load() != 1 || st.Phase != "complete" || st.EventID != manualEvent || !st.Source.SameIdentity(desired.Source) || st.Previous == nil || st.Previous.EventID != old.EventID {
+		t.Fatalf("manual advancement failed calls=%d status=%+v", calls.Load(), st)
+	}
+}
+
+func TestPricingReplayCurrentOwnerReceiptCannotCompleteOldOperation(t *testing.T) {
+	a, _, _ := pricingActuatorFixture(t)
+	a.dispatch = func(_ context.Context, input *canonical.Envelope) (updateout.DeliveryResult, error) {
+		result := pricingFixtureDelivery(input, updateout.DeliveryResult{HTTPStatus: 200, Status: "replayed", EventID: input.EventID, Attempts: 1})
+		result.Delivery.EventID = excelPricingRevisionForTest("current-receiver-event")
+		result.Delivery.OwnerCatalogRevision = excelPricingRevisionForTest("current-receiver-owner")
+		result.Delivery.Source.Revision = excelPricingRevisionForTest("current-receiver-source")
+		result.Delivery.InputSource = result.Delivery.Source
+		return result, nil
+	}
+	a.run(context.Background(), excelPricingRemoteTestSource())
+	st := a.status()
+	if st.Phase != "recovery_required" || st.Error != "delivery_receipt_unresolved" || st.Delivery == nil || st.Delivery.EventID == st.EventID {
+		t.Fatalf("old operation falsely complete: %+v", st)
+	}
+}
+
+func TestPricingAcknowledgmentWithoutActualReceiptCannotComplete(t *testing.T) {
+	a, _, _ := pricingActuatorFixture(t)
+	a.dispatch = func(_ context.Context, input *canonical.Envelope) (updateout.DeliveryResult, error) {
+		return updateout.DeliveryResult{HTTPStatus: 200, Status: "accepted", EventID: input.EventID, Attempts: 1}, nil
+	}
+	a.run(context.Background(), excelPricingRemoteTestSource())
+	if a.status().Phase != "recovery_required" {
+		t.Fatal(a.status())
 	}
 }
 
@@ -211,7 +333,7 @@ func TestPricingPendingAndDeferredAreNotComplete(t *testing.T) {
 					r.DeferredProducts = 1
 					r.DeferredAmbiguous = 1
 				}
-				return r, nil
+				return pricingFixtureDelivery(e, r), nil
 			}
 			a.run(context.Background(), excelPricingRemoteTestSource())
 			if a.status().Phase != "delivery_pending" {

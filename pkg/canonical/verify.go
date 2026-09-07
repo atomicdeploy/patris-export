@@ -476,6 +476,9 @@ func validateProductIdentity(product Product, index int) error {
 		default:
 			return fmt.Errorf("%s.price_source_kind must be foreign_price, partner_price, or sale_price_direct", path)
 		}
+		if err := validateSelectedCalculationInputs(product, path); err != nil {
+			return err
+		}
 	}
 
 	roundingDigitsPresent := product.PriceRoundingDigits != nil || product.presence("price_rounding_digits") != fieldAbsent
@@ -524,6 +527,31 @@ func validateProductIdentity(product Product, index int) error {
 	expected := recordHash(product)
 	if product.RecordHash != expected {
 		return fmt.Errorf("%s.record_hash mismatch: expected %s", path, expected)
+	}
+	return nil
+}
+
+// Restrict consumed formula inputs without narrowing raw source/report decimals.
+func validateSelectedCalculationInputs(product Product, path string) error {
+	type calculationField struct {
+		name  string
+		value *pricingcatalog.Decimal
+	}
+	fields := []calculationField{{"price_source_amount", product.PriceSourceAmount}}
+	if product.PriceSourceKind == PriceSourceKindForeign {
+		fields = append(fields, calculationField{"weight_grams", product.WeightGrams},
+			calculationField{"shipping_price_per_kg", product.ShippingPricePerKg},
+			calculationField{"irt_per_cny", product.IRTPerCNY})
+	}
+	if product.PriceSourceKind == PriceSourceKindForeign || product.PriceSourceKind == PriceSourceKindPartner {
+		fields = append(fields, calculationField{"markup_percent", product.MarkupPercent})
+	}
+	for _, field := range fields {
+		if field.value != nil {
+			if err := validateCalculationDecimal(string(*field.value)); err != nil {
+				return fmt.Errorf("%s.%s: %w", path, field.name, err)
+			}
+		}
 	}
 	return nil
 }
