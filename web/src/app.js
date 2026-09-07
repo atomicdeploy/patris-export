@@ -6088,6 +6088,13 @@ async function fetchInitialDataOnce() {
         setLoadingState(false);
     } catch (error) {
         console.error('❌ Failed to fetch initial data:', error);
+        // A failed authority projection must not leave an older price array
+        // available for the next stream message to render again.
+        state.catalogProducts = [];
+        state.catalogCategories = [];
+        state.records = [];
+        state.filteredRecords = [];
+        state.fields = [];
         setLoadingState(false);
         const detail = error instanceof Error ? error.message : String(error);
         showTableErrorState(t('recordsLoadFailed'), detail, {

@@ -1,21 +1,19 @@
-# Authority integration status
+# Selected pricing authority
 
-This branch stages provider parsing and strict PHP final-snapshot discovery. It does not activate engine selection or claim that final publication follows the selected authority yet.
+The existing authenticated `POST /api/refresh` with `{"delivery":"wait"}` selects the owner authority before dispatch. `go` publishes the existing calculated envelope. `php` sends normalized input facts without a Go final price, waits for the exact input delivery receipt, then collects the verified PHP final projection. It sends one input event; snapshot discovery never redelivers it.
 
-The remote owner's existing `/integration/catalog` document supplies `pricing.authority` as exactly `php` or `go`. The provider carries its validated value in `Resolution.Authority`, alongside the unchanged owner catalog revision. Missing/null or invalid values produce an empty authority and a bounded `AuthorityError`; there is no implicit engine. Local static inputs use `StaticConfig.Authority`, which participates in the existing derived catalog revision. These internal diagnostics do not alter product warnings or hashes before final projection routing is wired.
+`GET /api/products` and its downloads consume the selected final projection. PHP rows come from the existing pricing snapshot response's `canonical_product`, not from a lossy report-price overlay. Shared WebSocket input events trigger an HTTP reload for PHP authority; failed final reads clear old viewer prices. `/api/records` remains the raw source adapter. Product-sync remains the input replication boundary.
 
-## Existing consumer to reuse
+## Owner and identity checks
 
-`pkg/server/excel_pricing_remote_snapshot.go` already implements an authenticated, bounded, integrity-checked PHP final snapshot client. `excelPricingRemoteSnapshotClient.Collect` uses the existing `/wp-json/digitalogic/pricing/sync/revision`, `/snapshots`, and `/builds/` routes. It checks source identity, owner/catalog/state revisions, pagination, page digests, and terminal receipts. Its `Rows` are canonical snapshot rows; `ProjectedRows` is the Excel-specific presentation.
+- The remote `/integration/catalog` supplies exact `pricing.authority` values `php` or `go`, bound to its existing owner catalog revision. Missing, invalid or stale selection fails closed for configured server pricing. Static standalone inputs explicitly use `StaticConfig.Authority`; standalone source conversion with no pricing inputs has no price publisher.
+- PHP discovery queries the existing authenticated `/wp-json/digitalogic/pricing/sync/revision` using the delivered input source. The response must contain matching `input_source`, a valid final `source` in the same owner/dataset, and matching `owner_catalog_revision`. The report projection's existing `catalog_revision` retains its separate meaning.
+- Collection pins the discovered final source for all existing build, snapshot, page, reconciliation, terminal and URL checks. It retains owner snapshot digests and normalizes known canonical numeric strings lexically before product decoding, without a float conversion step.
+- Each canonical product must match its report `patris_code`, owner catalog revision, existing record hash, and complete expected source product set. The final source hash is recomputed only for verification against the owner value. Incoming source/event identities remain the delivery acknowledgment; completion `source_revision` identifies the final PHP projection.
+- Source, configuration and owner invalidations clear both input and final-projection caches. Wait uses its pinned input for final collection; it does not reread source rows during delivery.
 
-`collectExcelPricingSnapshot` in `excel_pricing_snapshot.go` wraps that client but automatically redelivers source data on a source conflict. Final authority projection should reuse the client directly, not that conflict-repair wrapper, to avoid recursive publication.
+## Scope and validation
 
-## Remaining boundary
+This is a draft integration, not a deployed release. Owner-setting actuation in Go-authority deployments remains fail-closed on the PHP side until its dispatcher is wired. Static/offline catalog support does not authorize a separate local catalog to overwrite WordPress owner prices. No production acceptance has been performed.
 
-PHP retains `input_source`/`input_products` as the accepted upstream baseline, and derives `source`/`products` for the final projection. Delivery receipts still acknowledge the original input event and source revision. The PHP final revision can therefore differ from the delivered input revision without any conflict.
-
-The client now supports internal `InputCatalogRevision` selection for PHP final-projection discovery. Its authenticated revision request uses the delivered input source. The response must carry `input_source` matching that complete identity, `source` with the same owner/dataset and a valid final revision, and the expected `owner_catalog_revision` (distinct from the report projection's existing `catalog_revision`). Missing binding fails even when the final and input revisions happen to match. Collection then pins the returned final source in a per-run client copy and retains all existing exact build, snapshot, reconciliation, terminal and URL checks. No auto-delivery occurs. Do not treat the input delivery receipt as proof of final snapshot identity, replace hashes, relax all identity checks, or add a second refresh endpoint.
-
-The remaining selector must publish Go calculation only in Go mode; PHP mode supplies normalized input facts and consumes the PHP final projection through this client. Missing/invalid authority must block selected-engine publication. These internal components alone do not enforce that actuation boundary.
-
-Validation: provider authority cases and static JSON/revision round-trip; pricingcatalog, canonical, recordpipe and appconfig suites; PHP snapshot binding and existing remote snapshot tests, including ready and async terminal delivery; missing binding and wrong input/final/catalog identity rejection. No production operations.
+Tests cover both authorities through the refresh and product-read path, one dispatch, missing authority/binding, stale viewer clearing, exact high-precision numeric-string transport, forged hashes, cache bindings, and existing snapshot ready/async terminal behavior. Existing full server/canonical/recordpipe/provider suites, vet, and web tests/build are required before review.

@@ -185,11 +185,15 @@ func canonicalProjectionWithinAge(now, createdAt time.Time, maximum time.Duratio
 func cloneCanonicalProjection(result recordpipe.Result) recordpipe.Result {
 	contract := result.SyncEnvelope(nil)
 	return recordpipe.Result{
-		Rows:     recordmap.CopyRows(result.Rows),
-		Payload:  contract,
-		KeyField: result.KeyField,
-		Raw:      result.Raw,
-		Contract: contract,
+		PricingAuthority:     result.PricingAuthority,
+		PricingInputSource:   result.PricingInputSource,
+		OwnerCatalogRevision: result.OwnerCatalogRevision,
+		DisableSyncContract:  result.DisableSyncContract,
+		Rows:                 recordmap.CopyRows(result.Rows),
+		Payload:              contract,
+		KeyField:             result.KeyField,
+		Raw:                  result.Raw,
+		Contract:             contract,
 	}
 }
 
@@ -209,6 +213,9 @@ func (s *Server) invalidateCanonicalProjection(resetPricingProvider bool) {
 		return
 	}
 	reset := func() {
+		if s.pricingPublication != nil {
+			s.pricingPublication.invalidate()
+		}
 		if !resetPricingProvider {
 			return
 		}

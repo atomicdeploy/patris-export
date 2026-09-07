@@ -29,7 +29,7 @@ func TestPostRefreshWaitReadsFreshSourceAndOwnerOncePerSnapshot(t *testing.T) {
 		switch r.URL.Path {
 		case "/integration/catalog":
 			catalogCalls.Add(1)
-			fmt.Fprintf(w, `{"data":{"schema":"digitalogic.integration-catalog","revision":"r%d","currency":{"local":"IRT","cny_to_local":%s,"cny_to_irt":%s},"pricing":{"formula_id":"landed_price"},"shipping_methods":[{"id":"air","price_per_kg":120,"currency":"CNY"}]}}`, revision, rate, rate)
+			fmt.Fprintf(w, `{"data":{"schema":"digitalogic.integration-catalog","revision":"r%d","currency":{"local":"IRT","cny_to_local":%s,"cny_to_irt":%s},"pricing":{"formula_id":"landed_price","authority":"go"},"shipping_methods":[{"id":"air","price_per_kg":120,"currency":"CNY"}]}}`, revision, rate, rate)
 		case "/integration/pricing-assignments/batch":
 			batchCalls.Add(1)
 			var request struct {

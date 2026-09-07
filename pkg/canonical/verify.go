@@ -40,6 +40,19 @@ type VerificationSummary struct {
 	Warnings         int
 }
 
+// VerifyProductJSON validates a transported owner product without replacing its
+// record hash. It uses the same checks as a complete replication snapshot.
+func VerifyProductJSON(data []byte) (Product, error) {
+	var product Product
+	if err := rejectDuplicateJSONFields(data); err != nil {
+		return product, err
+	}
+	if err := json.Unmarshal(data, &product); err != nil {
+		return product, err
+	}
+	return product, validateProductIdentity(product, 0)
+}
+
 // VerifySnapshotJSON decodes a product-sync snapshot and verifies every known
 // identity that can be derived without receiver state. Unknown extension fields
 // are preserved, while malformed sparse records, duplicate Codes, and any

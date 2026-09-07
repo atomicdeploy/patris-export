@@ -36,6 +36,14 @@ type catalogSnapshot struct {
 	warnings              []string
 }
 
+func (p *httpProvider) Owner(ctx context.Context) Resolution {
+	catalog, status, _ := p.resolveCatalog(ctx)
+	if catalog == nil {
+		return Resolution{AuthorityError: "pricing_authority_unavailable", CatalogStatus: status}
+	}
+	return Resolution{Authority: catalog.authority, AuthorityError: catalog.authorityError, CatalogRevision: catalog.revision, CatalogStatus: status}
+}
+
 type assignmentSnapshot struct {
 	assignment    Assignment
 	profitSource  string

@@ -76,6 +76,7 @@ type Server struct {
 	catalogProviderKey   string
 	catalogProviderMu    sync.Mutex
 	canonicalProjection  *canonicalProjectionCache
+	pricingPublication   *canonicalProjectionCache
 	sqlOperations        *sqlOperationsState
 	excelPricing         *excelPricingState
 	excelPricingRemote   *excelPricingRemoteEventsBridge
@@ -190,6 +191,7 @@ func NewServerWithOptions(dbPath string, charMap converter.CharMapping, options 
 		wsClients:           make(map[*websocket.Conn]*sync.Mutex),
 		eventSubscribers:    make(map[chan map[string]interface{}]struct{}),
 		canonicalProjection: newCanonicalProjectionCache(),
+		pricingPublication:  newCanonicalProjectionCache(),
 		sqlOperations:       newSQLOperationsState(),
 		excelPricing:        newExcelPricingState(),
 		backgroundCtx:       backgroundCtx,
@@ -427,6 +429,16 @@ func (s *Server) recordResultContext(ctx context.Context, options recordpipe.Opt
 		return recordpipe.Result{}, err
 	}
 	result := recordpipe.BuildContext(ctx, records, dbPath, options)
+	if !options.Raw && result.Contract != nil {
+		if owner, ok := options.CatalogProvider.(pricingcatalog.OwnerProvider); ok {
+			selection := owner.Owner(ctx)
+			result.PricingAuthority = selection.Authority
+			if pricingcatalog.Configured(options.Canonical.Pricing) && (selection.AuthorityError != "" ||
+				(selection.CatalogStatus != "fresh" && selection.CatalogStatus != "static")) {
+				return recordpipe.Result{}, errPricingAuthorityUnavailable
+			}
+		}
+	}
 	if err := ctx.Err(); err != nil {
 		return recordpipe.Result{}, err
 	}
@@ -953,7 +965,13 @@ func (s *Server) canonicalResultForRequest(w http.ResponseWriter, r *http.Reques
 	timeout := canonicalRequestTimeout(s.Config())
 	ctx, cancel := context.WithTimeout(r.Context(), timeout)
 	defer cancel()
-	result, err := s.canonicalRecordResultContext(ctx)
+	var result recordpipe.Result
+	var err error
+	if resource == "products" {
+		result, err = s.canonicalPublicationResultContext(ctx)
+	} else {
+		result, err = s.canonicalRecordResultContext(ctx)
+	}
 	if err != nil {
 		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
 			http.Error(w, fmt.Sprintf("Canonical %s timed out after %s", resource, timeout), http.StatusServiceUnavailable)
@@ -1619,6 +1637,11 @@ func (s *Server) handlePostRefreshWait(w http.ResponseWriter, r *http.Request) {
 	// Fence old in-flight builds and replace the provider's catalog/assignment
 	// caches before pinning the single envelope used by every delivery attempt.
 	s.invalidateCanonicalProjection(true)
+	owner, ownerErr := s.selectedPricingOwner(ctx, cfg)
+	if ownerErr != nil {
+		writeRefreshWaitError(w, http.StatusServiceUnavailable, false, "", "pricing_authority_unavailable")
+		return
+	}
 	contract, err := s.excelPricingCanonical(ctx, cfg)
 	if err != nil {
 		status := http.StatusServiceUnavailable
@@ -1651,11 +1674,24 @@ func (s *Server) handlePostRefreshWait(w http.ResponseWriter, r *http.Request) {
 		writeRefreshWaitError(w, http.StatusBadGateway, true, contract.Source.Revision, "delivery_failed")
 		return
 	}
+	completedSource := contract.Source
+	if owner.Authority == pricingcatalog.AuthorityPHP {
+		build := func(ctx context.Context) (recordpipe.Result, error) {
+			return s.projectPricingInput(ctx, recordpipe.Result{Contract: contract, PricingAuthority: owner.Authority}, cfg, owner)
+		}
+		projection, projectionErr := s.pricingPublication.get(ctx, func() time.Duration { return canonicalProjectionMaxAge(cfg) }, build)
+		if projectionErr != nil || projection.Contract == nil || projection.PricingAuthority != pricingcatalog.AuthorityPHP ||
+			!projection.PricingInputSource.SameIdentity(contract.Source) || projection.OwnerCatalogRevision != owner.CatalogRevision {
+			writeRefreshWaitError(w, http.StatusBadGateway, true, contract.Source.Revision, "owner_projection_unavailable")
+			return
+		}
+		completedSource = projection.Contract.Source
+	}
 
 	writeJSON(w, refreshWaitResponse{
 		Refreshed:      true,
 		Delivered:      true,
-		SourceRevision: contract.Source.Revision,
+		SourceRevision: completedSource.Revision,
 		Delivery: &refreshDeliveryResponse{
 			Status:            result.Status,
 			EventID:           result.EventID,
@@ -2050,16 +2086,17 @@ func (s *Server) sendRecordsToClient(conn *websocket.Conn, connMu *sync.Mutex) {
 
 func (s *Server) initialSnapshotMessage(result recordpipe.Result, dbPath, reason string) map[string]interface{} {
 	message := map[string]interface{}{
-		"type":        "initial",
-		"timestamp":   time.Now().Format(time.RFC3339),
-		"added":       result.Rows,
-		"total_count": len(result.Rows),
-		"file_name":   sourceBaseName(dbPath),
-		"file_path":   browserSafeURL(dbPath),
-		"version":     s.version,
-		"resources":   web.Resources(),
-		"raw":         result.Raw,
-		"key_field":   result.KeyField,
+		"type":              "initial",
+		"timestamp":         time.Now().Format(time.RFC3339),
+		"added":             result.Rows,
+		"total_count":       len(result.Rows),
+		"file_name":         sourceBaseName(dbPath),
+		"file_path":         browserSafeURL(dbPath),
+		"version":           s.version,
+		"resources":         web.Resources(),
+		"raw":               result.Raw,
+		"key_field":         result.KeyField,
+		"pricing_authority": result.PricingAuthority,
 	}
 	if reason != "" {
 		message["reason"] = reason
@@ -2146,6 +2183,7 @@ func (s *Server) broadcastUpdate() {
 	changeSet, contractChanged := s.updateRecordBaseline(result)
 	changeSet.Raw = result.Raw
 	changes := changeSet.Map()
+	changes["pricing_authority"] = result.PricingAuthority
 	if contract := result.SyncEnvelope(&changeSet); contract != nil {
 		changes["contract"] = contract
 	}

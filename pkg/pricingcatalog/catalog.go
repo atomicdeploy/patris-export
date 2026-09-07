@@ -126,6 +126,11 @@ type Provider interface {
 	Resolve(context.Context, string) Resolution
 }
 
+// OwnerProvider exposes one catalog selection without a product assignment read.
+type OwnerProvider interface {
+	Owner(context.Context) Resolution
+}
+
 // Prefetcher is an optional provider capability used by canonical transforms.
 // It returns a transform-scoped Provider whose bounded result barrier protects
 // the current run from persistent-LRU eviction. Providers that do not implement
@@ -254,6 +259,11 @@ type staticProvider struct {
 	config   StaticConfig
 	methods  map[string]Method
 	revision string
+}
+
+func (p *staticProvider) Owner(context.Context) Resolution {
+	authority, diagnostic := validatedAuthority(p.config.Authority)
+	return Resolution{Authority: authority, AuthorityError: diagnostic, CatalogRevision: p.revision, CatalogStatus: "static"}
 }
 
 func newStaticProvider(cfg StaticConfig) Provider {

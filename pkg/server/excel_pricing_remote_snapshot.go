@@ -1528,10 +1528,20 @@ func validateExcelPricingRemoteSnapshotRows(
 	}
 	for _, raw := range rows {
 		var row map[string]json.RawMessage
-		if json.Unmarshal(raw, &row) != nil || len(row) != len(expectedFields) {
+		if json.Unmarshal(raw, &row) != nil {
+			return reconciliation, errExcelPricingRemoteSnapshotIntegrity
+		}
+		fieldCount := len(row)
+		if _, present := row["canonical_product"]; present {
+			fieldCount--
+		}
+		if fieldCount != len(expectedFields) {
 			return reconciliation, errExcelPricingRemoteSnapshotIntegrity
 		}
 		for field := range row {
+			if field == "canonical_product" {
+				continue
+			}
 			if _, ok := expectedFields[field]; !ok {
 				return reconciliation, errExcelPricingRemoteSnapshotIntegrity
 			}
