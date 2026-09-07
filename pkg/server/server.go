@@ -156,13 +156,15 @@ type refreshDeliveryResponse struct {
 }
 
 type refreshWaitResponse struct {
-	Refreshed      bool                     `json:"refreshed"`
-	Delivered      bool                     `json:"delivered"`
-	SourceRevision string                   `json:"source_revision,omitempty"`
-	Delivery       *refreshDeliveryResponse `json:"delivery,omitempty"`
-	Code           string                   `json:"code,omitempty"`
-	ErrorStage     string                   `json:"error_stage,omitempty"`
-	ErrorDetail    string                   `json:"error_detail,omitempty"`
+	DispatchDiagnostic *refreshDispatchDiagnostic   `json:"dispatch_diagnostic,omitempty"`
+	SnapshotTiming     *pricingSnapshotTimingReport `json:"snapshot_timing,omitempty"`
+	Refreshed          bool                         `json:"refreshed"`
+	Delivered          bool                         `json:"delivered"`
+	SourceRevision     string                       `json:"source_revision,omitempty"`
+	Delivery           *refreshDeliveryResponse     `json:"delivery,omitempty"`
+	Code               string                       `json:"code,omitempty"`
+	ErrorStage         string                       `json:"error_stage,omitempty"`
+	ErrorDetail        string                       `json:"error_detail,omitempty"`
 }
 
 // NewServer creates a new server instance
@@ -1685,21 +1687,28 @@ func (s *Server) handlePostRefreshWait(w http.ResponseWriter, r *http.Request) {
 	if dispatch == nil {
 		dispatch = updateout.DispatchWithResult
 	}
+	dispatchStarted := time.Now()
 	result, err := dispatch(ctx, deliveryConfig, event)
+	dispatchDiagnostic := refreshDispatchDetails(result, err, dispatchStarted)
 	if err != nil || !excelPricingDeliveryComplete(result, contract.EventID) {
-		writeRefreshWaitError(w, http.StatusBadGateway, true, contract.Source.Revision, "delivery_failed")
+		writeJSONStatus(w, http.StatusBadGateway, refreshWaitResponse{Refreshed: true, Delivered: false, SourceRevision: contract.Source.Revision, Code: "delivery_failed", DispatchDiagnostic: dispatchDiagnostic})
 		return
 	}
 	if pricingcatalog.Configured(cfg.Canonical.Pricing) && !pricingWaitReceiptComplete(result.Delivery, contract, owner) {
-		writeRefreshWaitError(w, http.StatusBadGateway, true, contract.Source.Revision, "delivery_receipt_unresolved")
+		writeJSONStatus(w, http.StatusBadGateway, refreshWaitResponse{Refreshed: true, Delivered: false, SourceRevision: contract.Source.Revision, Code: "delivery_receipt_unresolved", DispatchDiagnostic: dispatchDiagnostic})
 		return
 	}
 	completedSource := contract.Source
+	var snapshotReport *pricingSnapshotTimingReport
 	if owner.Authority == pricingcatalog.AuthorityPHP {
+		timing := &pricingSnapshotTiming{}
+		projectionStarted := time.Now()
+		ctx = context.WithValue(ctx, pricingSnapshotTimingKey{}, timing)
 		build := func(ctx context.Context) (recordpipe.Result, error) {
 			return s.projectPricingInput(ctx, recordpipe.Result{Contract: contract, PricingAuthority: owner.Authority}, cfg, owner)
 		}
 		projection, projectionErr := s.pricingPublication.get(ctx, func() time.Duration { return canonicalProjectionMaxAge(cfg) }, build)
+		snapshotReport = timing.snapshot(projectionStarted)
 		if projectionErr != nil || projection.Contract == nil || projection.PricingAuthority != pricingcatalog.AuthorityPHP ||
 			!projection.PricingInputSource.SameIdentity(contract.Source) || projection.OwnerCatalogRevision != owner.CatalogRevision {
 			stage, detail, staged := excelPricingRemoteSnapshotFailureDetails(projectionErr)
@@ -1708,7 +1717,7 @@ func (s *Server) handlePostRefreshWait(w http.ResponseWriter, r *http.Request) {
 			}
 			writeJSONStatus(w, http.StatusBadGateway, refreshWaitResponse{
 				Refreshed: true, Delivered: false, SourceRevision: contract.Source.Revision,
-				Code: "owner_projection_unavailable", ErrorStage: stage, ErrorDetail: detail,
+				Code: "owner_projection_unavailable", ErrorStage: stage, ErrorDetail: detail, SnapshotTiming: snapshotReport, DispatchDiagnostic: dispatchDiagnostic,
 			})
 			return
 		}
@@ -1716,9 +1725,11 @@ func (s *Server) handlePostRefreshWait(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, refreshWaitResponse{
-		Refreshed:      true,
-		Delivered:      true,
-		SourceRevision: completedSource.Revision,
+		Refreshed:          true,
+		Delivered:          true,
+		SourceRevision:     completedSource.Revision,
+		DispatchDiagnostic: dispatchDiagnostic,
+		SnapshotTiming:     snapshotReport,
 		Delivery: &refreshDeliveryResponse{
 			Status:            result.Status,
 			EventID:           result.EventID,
