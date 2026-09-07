@@ -371,8 +371,32 @@ func TestPostRefreshWaitReturnsBusyWithoutQueueing(t *testing.T) {
 	defer receiver.Close()
 
 	srv, _ := newRefreshWaitTestServer(t, receiver.URL)
+	assertBusy := func(want bool) {
+		t.Helper()
+		statusRecorder := httptest.NewRecorder()
+		srv.router.ServeHTTP(statusRecorder, httptest.NewRequest(http.MethodGet, "/api/status", nil))
+		var status struct {
+			PricingOperation struct {
+				Busy *bool `json:"busy"`
+			} `json:"pricing_operation"`
+			Pricing struct {
+				Phase string `json:"phase"`
+			} `json:"pricing"`
+		}
+		if err := json.NewDecoder(statusRecorder.Body).Decode(&status); err != nil {
+			t.Fatal(err)
+		}
+		if statusRecorder.Code != http.StatusOK || status.PricingOperation.Busy == nil || *status.PricingOperation.Busy != want {
+			t.Fatalf("shared operation busy status = %+v, want %v", status, want)
+		}
+		if status.Pricing.Phase != "idle" {
+			t.Fatalf("owner worker phase = %q, want idle", status.Pricing.Phase)
+		}
+	}
+	assertBusy(false)
 	srv.excelPricing.permit <- struct{}{}
-	defer func() { <-srv.excelPricing.permit }()
+	defer func() { <-srv.excelPricing.permit; assertBusy(false) }()
+	assertBusy(true)
 
 	request := newAuthenticatedRefreshWaitRequest(t, srv, `{"delivery":"wait"}`)
 	recorder := httptest.NewRecorder()

@@ -711,6 +711,11 @@ func (s *Server) ReplaceConfig(cfg appconfig.Config) (appconfig.Config, error) {
 // by GET /api/status.
 func (s *Server) Status() map[string]interface{} {
 	status := s.processStatus()
+	// The permit covers startup/source delivery, synchronous refresh and owner
+	// actuation. The owner worker's phase alone does not describe this shared work.
+	status["pricing_operation"] = map[string]interface{}{
+		"busy": s.excelPricing != nil && len(s.excelPricing.permit) != 0,
+	}
 	if s.pricingActuation != nil {
 		status["pricing"] = s.pricingActuation.status()
 	}
