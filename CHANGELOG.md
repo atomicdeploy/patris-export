@@ -7,6 +7,15 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [2.0.2] - 2026-09-07
+
+### Fixed
+
+- Compare scheduled-task launch reservation timestamps by exact UTC ticks so
+  Windows PowerShell 5.1 recognizes a successfully started managed child.
+- Preserve launcher cleanup ownership checks across equivalent timestamp
+  representations, including PowerShell 7 JSON dates.
+
 ## [2.0.1] - 2026-09-07
 
 ### Fixed
