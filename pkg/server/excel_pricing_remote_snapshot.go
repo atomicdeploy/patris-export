@@ -645,7 +645,12 @@ func (client *excelPricingRemoteSnapshotClient) Collect(
 	started := time.Now()
 	timing := snapshotTimingFromContext(ctx)
 	stage, stageStarted := "configuration", started
-	advance := func(next string) { timing.stage(stage, stageStarted); stage, stageStarted = next, time.Now() }
+	timing.active(stage)
+	advance := func(next string) {
+		timing.stage(stage, stageStarted)
+		stage, stageStarted = next, time.Now()
+		timing.active(next)
+	}
 	defer func() { timing.stage(stage, stageStarted); timing.finish(started, collectErr != nil) }()
 	if client != nil {
 		copy := *client

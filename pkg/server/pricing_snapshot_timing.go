@@ -56,19 +56,32 @@ func refreshDispatchDetails(result updateout.DeliveryResult, err error, started 
 }
 
 type pricingSnapshotTimingReport struct {
-	ProjectionMS int64            `json:"projection_ms"`
-	CollectMS    int64            `json:"collect_ms"`
-	CollectRuns  int              `json:"collect_runs"`
-	Failures     int              `json:"failures"`
-	HTTPRequests int              `json:"http_requests"`
-	StageMS      map[string]int64 `json:"stage_ms"`
+	ActiveStage   string           `json:"active_stage,omitempty"`
+	ActiveStageMS int64            `json:"active_stage_ms,omitempty"`
+	ProjectionMS  int64            `json:"projection_ms"`
+	CollectMS     int64            `json:"collect_ms"`
+	CollectRuns   int              `json:"collect_runs"`
+	Failures      int              `json:"failures"`
+	HTTPRequests  int              `json:"http_requests"`
+	StageMS       map[string]int64 `json:"stage_ms"`
 }
 
 // Request-local counters contain only fixed stage names and elapsed durations.
 // Zero collection runs means a cached/shared build supplied this request.
 type pricingSnapshotTiming struct {
-	mu     sync.Mutex
-	report pricingSnapshotTimingReport
+	mu            sync.Mutex
+	report        pricingSnapshotTimingReport
+	activeStage   string
+	activeStarted time.Time
+}
+
+func (t *pricingSnapshotTiming) active(stage string) {
+	if t == nil {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.activeStage, t.activeStarted = stage, time.Now()
 }
 
 func (t *pricingSnapshotTiming) stage(name string, started time.Time) {
@@ -90,6 +103,7 @@ func (t *pricingSnapshotTiming) finish(started time.Time, failed bool) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.report.CollectRuns++
+	t.activeStage = ""
 	t.report.CollectMS += time.Since(started).Milliseconds()
 	if failed {
 		t.report.Failures++
@@ -100,12 +114,91 @@ func (t *pricingSnapshotTiming) snapshot(started time.Time) *pricingSnapshotTimi
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	r := t.report
+	if t.activeStage != "" {
+		r.ActiveStage = t.activeStage
+		r.ActiveStageMS = time.Since(t.activeStarted).Milliseconds()
+	}
 	r.ProjectionMS = time.Since(started).Milliseconds()
 	r.StageMS = make(map[string]int64, len(t.report.StageMS))
 	for stage, ms := range t.report.StageMS {
 		r.StageMS[stage] = ms
 	}
 	return &r
+}
+
+// One bounded in-memory record survives a disconnected refresh caller. It is
+// diagnostic state only; it never substitutes for a receiver delivery receipt.
+type refreshOperationDiagnostic struct {
+	mu                sync.Mutex
+	started           time.Time
+	phaseStarted      time.Time
+	ended             time.Time
+	phase             string
+	code              string
+	errorStage        string
+	errorDetail       string
+	dispatch          *refreshDispatchDiagnostic
+	timing            *pricingSnapshotTiming
+	projectionStarted time.Time
+	snapshot          *pricingSnapshotTimingReport
+}
+
+type refreshOperationStatus struct {
+	Busy           bool                         `json:"busy"`
+	Phase          string                       `json:"phase,omitempty"`
+	Active         bool                         `json:"active"`
+	StartedAt      time.Time                    `json:"started_at,omitempty"`
+	ElapsedMS      int64                        `json:"elapsed_ms"`
+	PhaseElapsedMS int64                        `json:"phase_elapsed_ms"`
+	Code           string                       `json:"code,omitempty"`
+	ErrorStage     string                       `json:"error_stage,omitempty"`
+	ErrorDetail    string                       `json:"error_detail,omitempty"`
+	Dispatch       *refreshDispatchDiagnostic   `json:"dispatch_diagnostic,omitempty"`
+	Snapshot       *pricingSnapshotTimingReport `json:"snapshot_timing,omitempty"`
+}
+
+func (s *Server) beginRefreshDiagnostic() *refreshOperationDiagnostic {
+	now := time.Now()
+	d := &refreshOperationDiagnostic{started: now, phaseStarted: now, phase: "owner_inputs"}
+	s.refreshDiagnosticMu.Lock()
+	s.refreshDiagnostic = d
+	s.refreshDiagnosticMu.Unlock()
+	return d
+}
+
+func (d *refreshOperationDiagnostic) phaseChanged(phase string) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.phase, d.phaseStarted = phase, time.Now()
+}
+
+func (d *refreshOperationDiagnostic) finish(code, stage, detail string) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.ended, d.code, d.errorStage, d.errorDetail = time.Now(), code, stage, detail
+}
+
+func (s *Server) refreshDiagnosticStatus(busy bool) refreshOperationStatus {
+	s.refreshDiagnosticMu.Lock()
+	d := s.refreshDiagnostic
+	s.refreshDiagnosticMu.Unlock()
+	r := refreshOperationStatus{Busy: busy}
+	if d == nil {
+		return r
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	end := d.ended
+	if end.IsZero() {
+		end = time.Now()
+		r.Active = true
+	}
+	r.Phase, r.StartedAt, r.ElapsedMS, r.PhaseElapsedMS = d.phase, d.started, end.Sub(d.started).Milliseconds(), end.Sub(d.phaseStarted).Milliseconds()
+	r.Code, r.ErrorStage, r.ErrorDetail, r.Dispatch, r.Snapshot = d.code, d.errorStage, d.errorDetail, d.dispatch, d.snapshot
+	if r.Active && d.timing != nil {
+		r.Snapshot = d.timing.snapshot(d.projectionStarted)
+	}
+	return r
 }
 
 func (client *excelPricingRemoteSnapshotClient) timedRequest(request *http.Request) (*http.Response, error) {

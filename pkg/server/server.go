@@ -78,6 +78,8 @@ type Server struct {
 	canonicalProjection  *canonicalProjectionCache
 	pricingPublication   *canonicalProjectionCache
 	pricingActuation     *pricingActuator
+	refreshDiagnosticMu  sync.Mutex
+	refreshDiagnostic    *refreshOperationDiagnostic
 	sqlOperations        *sqlOperationsState
 	excelPricing         *excelPricingState
 	excelPricingRemote   *excelPricingRemoteEventsBridge
@@ -717,9 +719,7 @@ func (s *Server) Status() map[string]interface{} {
 	status := s.processStatus()
 	// The permit covers startup/source delivery, synchronous refresh and owner
 	// actuation. The owner worker's phase alone does not describe this shared work.
-	status["pricing_operation"] = map[string]interface{}{
-		"busy": s.excelPricing != nil && len(s.excelPricing.permit) != 0,
-	}
+	status["pricing_operation"] = s.refreshDiagnosticStatus(s.excelPricing != nil && len(s.excelPricing.permit) != 0)
 	if s.pricingActuation != nil {
 		status["pricing"] = s.pricingActuation.status()
 	}
@@ -1652,14 +1652,19 @@ func (s *Server) handlePostRefreshWait(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// A fresh sync observes both the source and its owner's pricing inputs once.
+	diagnostic := s.beginRefreshDiagnostic()
+	terminalCode, terminalStage, terminalDetail := "request_aborted", "", ""
+	defer func() { diagnostic.finish(terminalCode, terminalStage, terminalDetail) }()
 	// Fence old in-flight builds and replace the provider's catalog/assignment
 	// caches before pinning the single envelope used by every delivery attempt.
 	s.invalidateCanonicalProjection(true)
 	owner, ownerErr := s.selectedPricingOwner(ctx, cfg)
 	if ownerErr != nil {
+		terminalCode = "pricing_authority_unavailable"
 		writeRefreshWaitError(w, http.StatusServiceUnavailable, false, "", "pricing_authority_unavailable")
 		return
 	}
+	diagnostic.phaseChanged("canonical_input")
 	contract, err := s.excelPricingCanonical(ctx, cfg)
 	if err != nil {
 		status := http.StatusServiceUnavailable
@@ -1668,6 +1673,7 @@ func (s *Server) handlePostRefreshWait(w http.ResponseWriter, r *http.Request) {
 			status = http.StatusRequestTimeout
 			code = "request_cancelled"
 		}
+		terminalCode = code
 		writeRefreshWaitError(w, status, false, "", code)
 		return
 	}
@@ -1688,33 +1694,47 @@ func (s *Server) handlePostRefreshWait(w http.ResponseWriter, r *http.Request) {
 		dispatch = updateout.DispatchWithResult
 	}
 	dispatchStarted := time.Now()
+	diagnostic.phaseChanged("dispatch")
 	result, err := dispatch(ctx, deliveryConfig, event)
 	dispatchDiagnostic := refreshDispatchDetails(result, err, dispatchStarted)
+	diagnostic.mu.Lock()
+	diagnostic.dispatch = dispatchDiagnostic
+	diagnostic.mu.Unlock()
 	if err != nil || !excelPricingDeliveryComplete(result, contract.EventID) {
+		terminalCode = "delivery_failed"
 		writeJSONStatus(w, http.StatusBadGateway, refreshWaitResponse{Refreshed: true, Delivered: false, SourceRevision: contract.Source.Revision, Code: "delivery_failed", DispatchDiagnostic: dispatchDiagnostic})
 		return
 	}
 	if pricingcatalog.Configured(cfg.Canonical.Pricing) && !pricingWaitReceiptComplete(result.Delivery, contract, owner) {
+		terminalCode = "delivery_receipt_unresolved"
 		writeJSONStatus(w, http.StatusBadGateway, refreshWaitResponse{Refreshed: true, Delivered: false, SourceRevision: contract.Source.Revision, Code: "delivery_receipt_unresolved", DispatchDiagnostic: dispatchDiagnostic})
 		return
 	}
 	completedSource := contract.Source
 	var snapshotReport *pricingSnapshotTimingReport
 	if owner.Authority == pricingcatalog.AuthorityPHP {
+		diagnostic.phaseChanged("owner_projection")
 		timing := &pricingSnapshotTiming{}
 		projectionStarted := time.Now()
+		diagnostic.mu.Lock()
+		diagnostic.timing, diagnostic.projectionStarted = timing, projectionStarted
+		diagnostic.mu.Unlock()
 		ctx = context.WithValue(ctx, pricingSnapshotTimingKey{}, timing)
 		build := func(ctx context.Context) (recordpipe.Result, error) {
 			return s.projectPricingInput(ctx, recordpipe.Result{Contract: contract, PricingAuthority: owner.Authority}, cfg, owner)
 		}
 		projection, projectionErr := s.pricingPublication.get(ctx, func() time.Duration { return canonicalProjectionMaxAge(cfg) }, build)
 		snapshotReport = timing.snapshot(projectionStarted)
+		diagnostic.mu.Lock()
+		diagnostic.snapshot = snapshotReport
+		diagnostic.mu.Unlock()
 		if projectionErr != nil || projection.Contract == nil || projection.PricingAuthority != pricingcatalog.AuthorityPHP ||
 			!projection.PricingInputSource.SameIdentity(contract.Source) || projection.OwnerCatalogRevision != owner.CatalogRevision {
 			stage, detail, staged := excelPricingRemoteSnapshotFailureDetails(projectionErr)
 			if !staged {
 				stage, detail = "owner_projection", "publication_identity_mismatch"
 			}
+			terminalCode, terminalStage, terminalDetail = "owner_projection_unavailable", stage, detail
 			writeJSONStatus(w, http.StatusBadGateway, refreshWaitResponse{
 				Refreshed: true, Delivered: false, SourceRevision: contract.Source.Revision,
 				Code: "owner_projection_unavailable", ErrorStage: stage, ErrorDetail: detail, SnapshotTiming: snapshotReport, DispatchDiagnostic: dispatchDiagnostic,
@@ -1724,6 +1744,7 @@ func (s *Server) handlePostRefreshWait(w http.ResponseWriter, r *http.Request) {
 		completedSource = projection.Contract.Source
 	}
 
+	terminalCode = "complete"
 	writeJSON(w, refreshWaitResponse{
 		Refreshed:          true,
 		Delivered:          true,
