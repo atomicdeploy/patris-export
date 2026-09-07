@@ -340,11 +340,11 @@ function Get-PatrisTrackedDeploymentProcess {
                 $identity = Get-PatrisProcessIdentityById `
                     -ProcessId ([int]$candidate.ProcessId) `
                     -AllowTransientObservation:$AllowTransientObservation
-                if (-not $identity -or $identity.StartTimeUtc -lt $launcherStart) {
+                if (-not $identity -or $identity.StartTimeUtc.Ticks -lt $launcherStart.UtcTicks) {
                     continue
                 }
                 if (-not $launcherMatches -and $launcherIdentity -and
-                    $identity.StartTimeUtc -ge $launcherIdentity.StartTimeUtc) {
+                    $identity.StartTimeUtc.Ticks -ge $launcherIdentity.StartTimeUtc.Ticks) {
                     continue
                 }
                 $reservedChildren += $identity

@@ -65,4 +65,33 @@ foreach ($helperPath in $helperPaths) {
     }
 }
 
-Write-Host "Scheduled-task UTC identity preserved exact ticks across UTC and Tehran-offset inputs."
+# Execute only the real cleanup ownership condition, never the launcher or its
+# process/file operations. PS7 JSON may materialize the stored string as DateTime.
+$launcherPath = Join-Path $PSScriptRoot "Run-PatrisExportScheduledTask.ps1"
+$tokens = $null
+$parseErrors = $null
+$launcherAst = [Management.Automation.Language.Parser]::ParseFile($launcherPath, [ref]$tokens, [ref]$parseErrors)
+$cleanupIf = $launcherAst.Find({
+    param($node)
+    $node -is [Management.Automation.Language.IfStatementAst] -and
+        $node.Clauses[0].Item1.Extent.Text.Contains('[int]$currentState.launcher_pid -eq $PID')
+}, $true)
+if (-not $cleanupIf) { throw "Missing launcher cleanup ownership condition." }
+$cleanupCondition = [scriptblock]::Create($cleanupIf.Clauses[0].Item1.Extent.Text)
+$convertBody = Get-UtcInstantFunctionBody -ScriptPath $launcherPath
+function ConvertTo-PatrisUtcInstant {
+    param($Value)
+    & $convertBody -Value $Value
+}
+$launcherStartedUtc = $utcText
+foreach ($fixture in @($utcText, $tehranOffsetText, $typedUtc, $typedUtc.ToLocalTime())) {
+    $currentState = [pscustomobject]@{ launcher_pid = $PID; launcher_start_time_utc = $fixture }
+    if (-not (& $cleanupCondition)) { throw "Cleanup rejected the exact owning launcher instant." }
+}
+$currentState.launcher_start_time_utc = $typedUtc.AddTicks(1)
+if (& $cleanupCondition) { throw "Cleanup accepted another launcher instant." }
+$currentState.launcher_start_time_utc = $utcText
+$currentState.launcher_pid = $PID + 1
+if (& $cleanupCondition) { throw "Cleanup accepted another launcher PID." }
+
+Write-Host "Scheduled-task UTC identity and cleanup ownership preserved exact ticks across UTC and Tehran-offset inputs."

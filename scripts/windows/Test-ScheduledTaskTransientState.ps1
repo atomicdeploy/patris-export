@@ -203,4 +203,57 @@ if ($staleIdentityResult.Tagged -or
     throw "A stale or reused process identity was not kept terminal and fail-closed."
 }
 
-Write-Host "Scheduled-task transient state tests passed read, identity, retry, and stale-identity boundaries."
+$convertBody = Get-InstallerFunctionBody -Name "ConvertTo-PatrisUtcInstant"
+# Exercise the actual reservation path without enumerating, starting or stopping
+# any real process. DateTime versus DateTimeOffset ordering throws in Windows PS5.1.
+foreach ($childTickDelta in @(-1, 0, 1)) {
+    foreach ($recordedLauncher in @(
+        "2026-08-30T12:00:00.1234567Z",
+        "2026-08-30T15:30:00.1234567+03:30",
+        [DateTime]::Parse("2026-08-30T12:00:00.1234567Z").ToUniversalTime()
+    )) {
+        $children = @(& {
+            param($TrackedBody, $ConvertBody, $TestTransientBody, $RecordedLauncher, $ChildTickDelta)
+            $processStatePath = "C:\synthetic\process-state.json"
+            $exe = "C:\synthetic\patris-export.exe"
+            $DbPath = "C:\synthetic\kala.db"
+            $Address = "127.0.0.1:18080"
+            $start = [DateTimeOffset]::Parse("2026-08-30T12:00:00.1234567Z").UtcDateTime
+            function Test-Path { return $true }
+            function Read-PatrisProcessState {
+                [pscustomobject]@{
+                    schema = "patris.scheduled-task-process"
+                    schema_version = 2
+                    status = "launching"
+                    launcher_pid = 4321
+                    launcher_start_time_utc = $RecordedLauncher
+                    executable = $exe
+                }
+            }
+            function ConvertTo-PatrisUtcInstant {
+                param($Value)
+                & $ConvertBody -Value $Value
+            }
+            function Get-PatrisProcessIdentityById {
+                param($ProcessId)
+                $ticks = if ($ProcessId -eq 4321) { 0 } else { $ChildTickDelta }
+                [pscustomobject]@{ Pid = $ProcessId; StartTimeUtc = $start.AddTicks($ticks); Executable = $exe }
+            }
+            function Get-CimInstance {
+                [pscustomobject]@{ ProcessId = 4322; ExecutablePath = $exe; CommandLine = "$exe serve $DbPath --addr $Address" }
+            }
+            function Test-PatrisTransientProcessStateError {
+                param($ErrorRecord)
+                & $TestTransientBody -ErrorRecord $ErrorRecord
+            }
+            function Remove-Item { throw "A live launcher reservation must not be removed." }
+            & $TrackedBody -AllowTransientObservation
+        } $trackedBody $convertBody $testTransientBody $recordedLauncher $childTickDelta)
+        $expectedCount = if ($childTickDelta -lt 0) { 0 } else { 1 }
+        if ($children.Count -ne $expectedCount -or ($expectedCount -eq 1 -and $children[0].Pid -ne 4322)) {
+            throw "Launch reservation accepted an older child or rejected an equal/newer exact UTC instant."
+        }
+    }
+}
+
+Write-Host "Scheduled-task transient state tests passed read, identity, retry, stale-identity and launch-reservation ordering boundaries."
