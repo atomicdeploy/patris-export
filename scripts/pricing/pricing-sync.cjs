@@ -45,7 +45,8 @@ async function requestJSON(base, path, { body, token, timeoutMs = 5000 } = {}) {
     });
     // Never print a raw response, URL error, header or session token.
     const inspectBusy = path === '/api/refresh' && body !== undefined && response.status === 429;
-    if (!response.ok && !inspectBusy) {
+    const inspectRefreshFailure = path === '/api/refresh' && body !== undefined && response.status === 502;
+    if (!response.ok && !inspectBusy && !inspectRefreshFailure) {
       await response.body?.cancel();
       throw new Error('http_' + response.status);
     }
@@ -58,15 +59,19 @@ async function requestJSON(base, path, { body, token, timeoutMs = 5000 } = {}) {
     }
     let data;
     try { data = JSON.parse(Buffer.concat(chunks).toString('utf8')); }
-    catch { throw new Error(inspectBusy ? 'http_429' : 'invalid_json'); }
+    catch { throw new Error(inspectBusy ? 'http_429' : inspectRefreshFailure ? 'http_502' : 'invalid_json'); }
     if (inspectBusy) {
       // This exact refresh rejection precedes source reads and delivery dispatch.
       throw new Error(data?.success === false && data.code === 'pricing_busy' ? 'pricing_busy' : 'http_429');
     }
+    if (inspectRefreshFailure) {
+      const allowed = ['delivery_failed', 'delivery_receipt_unresolved', 'owner_projection_unavailable'];
+      throw new Error(data?.refreshed === true && data?.delivered === false && allowed.includes(data.code) ? data.code : 'http_502');
+    }
     return data;
   } catch (error) {
     if (controller.signal.aborted && error.message !== 'response_too_large') throw new Error('request_timeout');
-    if (/^(http_[0-9]{3}|pricing_busy|response_too_large|invalid_json)$/.test(error.message)) throw error;
+    if (/^(http_[0-9]{3}|pricing_busy|delivery_failed|delivery_receipt_unresolved|owner_projection_unavailable|response_too_large|invalid_json)$/.test(error.message)) throw error;
     throw new Error('transport_failed');
   } finally { clearTimeout(timer); }
 }

@@ -22,7 +22,7 @@ import (
 )
 
 const (
-	excelPricingRemoteSnapshotRequestSchema = "digitalogic.pricing-snapshot-request/v1"
+	excelPricingRemoteSnapshotRequestSchema = "digitalogic.pricing-snapshot-request"
 	excelPricingRemoteSnapshotBuildSchema   = "digitalogic.pricing-snapshot-build/v1"
 	excelPricingRemoteSnapshotPayloadSchema = "digitalogic.pricing-snapshot/v1"
 	excelPricingRemoteSnapshotEventSchema   = "digitalogic.pricing-snapshot-build-event/v1"

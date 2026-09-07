@@ -161,6 +161,8 @@ type refreshWaitResponse struct {
 	SourceRevision string                   `json:"source_revision,omitempty"`
 	Delivery       *refreshDeliveryResponse `json:"delivery,omitempty"`
 	Code           string                   `json:"code,omitempty"`
+	ErrorStage     string                   `json:"error_stage,omitempty"`
+	ErrorDetail    string                   `json:"error_detail,omitempty"`
 }
 
 // NewServer creates a new server instance
@@ -1700,7 +1702,14 @@ func (s *Server) handlePostRefreshWait(w http.ResponseWriter, r *http.Request) {
 		projection, projectionErr := s.pricingPublication.get(ctx, func() time.Duration { return canonicalProjectionMaxAge(cfg) }, build)
 		if projectionErr != nil || projection.Contract == nil || projection.PricingAuthority != pricingcatalog.AuthorityPHP ||
 			!projection.PricingInputSource.SameIdentity(contract.Source) || projection.OwnerCatalogRevision != owner.CatalogRevision {
-			writeRefreshWaitError(w, http.StatusBadGateway, true, contract.Source.Revision, "owner_projection_unavailable")
+			stage, detail, staged := excelPricingRemoteSnapshotFailureDetails(projectionErr)
+			if !staged {
+				stage, detail = "owner_projection", "publication_identity_mismatch"
+			}
+			writeJSONStatus(w, http.StatusBadGateway, refreshWaitResponse{
+				Refreshed: true, Delivered: false, SourceRevision: contract.Source.Revision,
+				Code: "owner_projection_unavailable", ErrorStage: stage, ErrorDetail: detail,
+			})
 			return
 		}
 		completedSource = projection.Contract.Source
