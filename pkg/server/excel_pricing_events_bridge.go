@@ -448,7 +448,7 @@ func sameExcelPricingRemoteCompositeRevision(
 	current excelPricingRemoteRevision,
 ) bool {
 	return previous != nil &&
-		previous.Source == current.Source &&
+		previous.Source.SameIdentity(current.Source) &&
 		previous.StateRevision == current.StateRevision &&
 		previous.CatalogRevision == current.CatalogRevision &&
 		previous.PricingStateRevision == current.PricingStateRevision &&
@@ -520,7 +520,7 @@ func (bridge *excelPricingRemoteEventsBridge) revisionCurrent(
 		return false
 	}
 	verified := bridge.verifiedRevision.Load()
-	return verified != nil && verified.Source == source &&
+	return verified != nil && verified.Source.SameIdentity(source) &&
 		verified.StateRevision == stateRevision &&
 		verified.CatalogRevision == catalogRevision
 }

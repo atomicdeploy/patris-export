@@ -10,7 +10,7 @@ test('workbook URL carries the active UI language and configured presentation mo
         mode: 'formula',
         zebra: false
     }), 'http://localhost');
-    assert.equal(url.pathname, '/api/records.xlsx');
+    assert.equal(url.pathname, '/api/products.xlsx');
     assert.deepEqual(Object.fromEntries(url.searchParams), {
         download: '1',
         language: 'fa',
@@ -21,17 +21,23 @@ test('workbook URL carries the active UI language and configured presentation mo
 });
 
 test('workbook URL rejects unknown enum values and keeps safe defaults', () => {
-    const url = new URL(canonicalWorkbookPath({ language: 'de', mode: 'raw' }), 'http://localhost');
+    const url = new URL(canonicalWorkbookPath({ collection: 'unknown', language: 'de', mode: 'raw' }), 'http://localhost');
+    assert.equal(url.pathname, '/api/products.xlsx');
     assert.equal(url.searchParams.get('language'), 'en');
     assert.equal(url.searchParams.get('mode'), 'precalculated');
     assert.equal(url.searchParams.get('zebra'), '1');
 });
 
+test('workbook URL follows the declared raw records collection selected by the viewer', () => {
+    const url = new URL(canonicalWorkbookPath({ collection: 'records' }), 'http://localhost');
+    assert.equal(url.pathname, '/api/records.xlsx');
+});
+
 test('workbook URL supports normal and macro-enabled download routes', () => {
     for (const format of ['xlsx', 'xlsm', 'xltm']) {
         const url = new URL(canonicalWorkbookPath({ format }), 'http://localhost');
-        assert.equal(url.pathname, `/api/records.${format}`);
+        assert.equal(url.pathname, `/api/products.${format}`);
     }
     const fallback = new URL(canonicalWorkbookPath({ format: 'xlsb' }), 'http://localhost');
-    assert.equal(fallback.pathname, '/api/records.xlsx');
+    assert.equal(fallback.pathname, '/api/products.xlsx');
 });

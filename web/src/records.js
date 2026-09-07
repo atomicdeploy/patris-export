@@ -1,6 +1,6 @@
-// Convert every supported records response into the row array consumed by the
-// viewer. /api/records is Code-keyed; the product-sync envelope fallback keeps
-// the UI safe if an older/mismatched server accidentally returns `products`.
+// Convert every supported catalog response into the row array consumed by the
+// viewer. Canonical KALA data comes from /api/products; /api/records may be an
+// array or Code-keyed compatibility payload for generic datasets.
 export function normalizeRecordsPayload(data) {
     if (Array.isArray(data)) {
         return data.map(recordWithCode);

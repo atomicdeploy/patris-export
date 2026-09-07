@@ -1,4 +1,5 @@
 import { normalizeCategoriesPayload, normalizeRecordsPayload } from './records.js';
+import { coalesceCatalogReload, fetchCatalogProducts, websocketMatchesCollection } from './catalog-api.mjs';
 import { createExportMenuController } from './export-menu.js';
 import { canonicalWorkbookPath } from './xlsx-export.mjs';
 import { createSQLTargetController } from './sql-target.js';
@@ -66,6 +67,7 @@ import {
 const state = {
     records: [],
     catalogProducts: [],
+    catalogProductsEndpoint: null,
     catalogCategories: [],
     catalogCategoriesAvailable: false,
     catalogView: 'products',
@@ -2962,6 +2964,31 @@ function initWebSocket() {
 // Handle WebSocket messages
 function handleWebSocketMessage(data) {
     const changedIndices = new Set();
+
+    // The shared stream follows configured export projection. Only reuse rows
+    // when it matches the HTTP collection selected by this viewer.
+    if ((data.type === 'initial' || data.type === 'update')
+        && (fetchInitialData.isLoading() || !websocketMatchesCollection(data, state.catalogProductsEndpoint))) {
+        if (data.version || data.resources) {
+            const metadata = {};
+            if (data.version) metadata.version = data.version;
+            if (data.resources) metadata.resources = data.resources;
+            if (!applyAppInfo(metadata, 'websocket') && state.isReloadingForUpdate) return;
+        }
+        if (data.config) applyConfig(data.config, 'websocket');
+        if (data.status) applyProcessStatus(data.status);
+        if (data.file_path || data.file_name) {
+            state.fileName = data.file_path || data.file_name;
+            updateFooterFileName();
+        }
+        if (data.source_changed) {
+            state.columnFilters = {};
+            localStorage.removeItem('patris-column-filters');
+        }
+        updateFooterLastUpdate(data.timestamp);
+        fetchInitialData();
+        return;
+    }
     
     if (data.type === 'initial') {
         if (data.version || data.resources) {
@@ -5010,6 +5037,7 @@ function sortRecords() {
 function downloadCanonicalWorkbook(format = 'xlsx') {
 	const exportConfig = state.config?.export || {};
 	const workbookPath = canonicalWorkbookPath({
+		collection: state.catalogProductsEndpoint,
 		format,
 		language: state.settings.language,
 		rtl: state.settings.rtlTextDirection,
@@ -6011,12 +6039,15 @@ function showTableErrorState(title, detail, options = {}) {
 }
 
 // Fetch initial data
-async function fetchInitialData() {
+const fetchInitialData = coalesceCatalogReload(fetchInitialDataOnce);
+
+async function fetchInitialDataOnce() {
     try {
-        const [response, categoriesResponse] = await Promise.all([
-            fetch('/api/records'),
+        const [productsResult, categoriesResponse] = await Promise.all([
+            fetchCatalogProducts(fetch),
             fetch('/api/categories')
         ]);
+        const response = productsResult.response;
         
         if (!response.ok) {
             throw new Error(`HTTP error! status: ${response.status}`);
@@ -6024,6 +6055,7 @@ async function fetchInitialData() {
         
         const data = await response.json();
         
+        state.catalogProductsEndpoint = productsResult.collection;
         state.catalogProducts = normalizeRecordsPayload(data);
         if (categoriesResponse.ok) {
             state.catalogCategories = normalizeCategoriesPayload(await categoriesResponse.json());
@@ -6049,8 +6081,10 @@ async function fetchInitialData() {
         }
         
         filterRecords();
+        sortRecords();
         renderTable();
         updateCounts();
+        state.isInitialLoad = false;
         setLoadingState(false);
     } catch (error) {
         console.error('❌ Failed to fetch initial data:', error);
