@@ -12,4 +12,6 @@ This is the focused source successor to PR #239. The offline documentation porta
 
 The existing authenticated POST /api/refresh with delivery=wait remains the sync path. Its terminal receiver receipt is required before reporting delivered=true. This slice adds no refresh endpoint and does not choose a PHP/Go pricing authority.
 
+A JSON body with `{"delivery":"wait"}` explicitly requests synchronous delivery and requires the existing loopback companion client/session headers; missing headers return `403 local_session_required` instead of asynchronous success. Requests without a body retain ordinary refresh behavior. After authentication, delivery validation and admission, a wait request invalidates the cached projection and owner catalog/assignment provider once, reads a fresh source snapshot with batched owner inputs, then pins that envelope through delivery and its terminal receipt. This refreshes observed inputs; it does not make source and owner reads a cross-system transaction.
+
 Validation: canonical/appconfig/recordpipe/server tests, semantic identity/cache/idempotency regressions, viewer capability/export tests and web build. Tests use synthetic data and the repository's Paradox fixture. No production refresh, service restart, workbook promotion or price delivery is performed by these checks.

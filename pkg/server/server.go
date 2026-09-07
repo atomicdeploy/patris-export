@@ -1541,14 +1541,8 @@ func (s *Server) handleGetStatus(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handlePostRefresh(w http.ResponseWriter, r *http.Request) {
-	if refreshWaitOptedIn(r) {
+	if r.Body != nil && r.Body != http.NoBody && r.ContentLength != 0 {
 		setExcelPricingResponseHeaders(w)
-		if !excelPricingLocalRequestAllowed(r) ||
-			!singleHeaderEquals(r, excelPricingClientHeader, excelPricingClientID) ||
-			!s.excelPricing.authorizedSession(r) {
-			writeRefreshWaitError(w, http.StatusForbidden, false, "", "local_session_required")
-			return
-		}
 		if !singleJSONContentType(r) {
 			writeRefreshWaitError(w, http.StatusUnsupportedMediaType, false, "", "json_required")
 			return
@@ -1565,13 +1559,6 @@ func (s *Server) handlePostRefresh(w http.ResponseWriter, r *http.Request) {
 	}
 	s.Refresh()
 	writeJSON(w, map[string]interface{}{"refreshed": true})
-}
-
-func refreshWaitOptedIn(r *http.Request) bool {
-	return r.Body != nil &&
-		r.Body != http.NoBody &&
-		r.ContentLength != 0 &&
-		len(r.Header.Values(excelPricingClientHeader)) > 0
 }
 
 func refreshDeliveryMode(w http.ResponseWriter, r *http.Request) (string, error) {
@@ -1628,6 +1615,10 @@ func (s *Server) handlePostRefreshWait(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// A fresh sync observes both the source and its owner's pricing inputs once.
+	// Fence old in-flight builds and replace the provider's catalog/assignment
+	// caches before pinning the single envelope used by every delivery attempt.
+	s.invalidateCanonicalProjection(true)
 	contract, err := s.excelPricingCanonical(ctx, cfg)
 	if err != nil {
 		status := http.StatusServiceUnavailable
