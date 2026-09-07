@@ -46,12 +46,35 @@ func (s *Server) canonicalPublicationResultContext(ctx context.Context) (recordp
 		if err != nil {
 			return recordpipe.Result{}, err
 		}
+		if owner.Authority == pricingcatalog.AuthorityPHP && s.pricingActuation != nil {
+			latest := s.pricingActuation.status().LatestSource
+			if validExcelPricingRemoteSource(latest) {
+				return s.projectPricingFinal(ctx, input, latest, owner)
+			}
+		}
 		return s.projectPricingInput(ctx, input, cfg, owner)
 	}
 	if s.pricingPublication == nil {
 		return build(ctx)
 	}
 	return s.pricingPublication.get(ctx, func() time.Duration { return canonicalProjectionMaxAge(s.Config()) }, build)
+}
+
+// An authenticated owner event names the existing final source. Refresh that
+// projection directly: owner settings changes do not require input redelivery.
+func (s *Server) projectPricingFinal(ctx context.Context, input recordpipe.Result, source canonical.Source, owner pricingcatalog.Resolution) (recordpipe.Result, error) {
+	if input.Contract == nil || !validExcelPricingRemoteSource(source) || input.Contract.Source.ID != source.ID || input.Contract.Source.Dataset != source.Dataset || s.excelPricingRemote == nil {
+		return recordpipe.Result{}, errPricingProjectionUnavailable
+	}
+	client, err := newExcelPricingRemoteSnapshotClient(s.Config().SendUpdates, source, excelPricingRemoteSnapshotClientOptions{HTTPClient: s.excelPricing.client, Terminals: s.excelPricingRemote.snapshotTerminals()})
+	if err != nil {
+		return recordpipe.Result{}, errPricingProjectionUnavailable
+	}
+	remote, err := client.Collect(ctx, excelPricingRemoteSnapshotRequestID(source.Revision+owner.CatalogRevision), 0)
+	if err != nil || remote.OwnerCatalogRevision != owner.CatalogRevision {
+		return recordpipe.Result{}, errPricingProjectionUnavailable
+	}
+	return ownerProductProjection(input.Contract, remote, owner.CatalogRevision)
 }
 
 func (s *Server) projectPricingInput(ctx context.Context, input recordpipe.Result, cfg appconfig.Config, owner pricingcatalog.Resolution) (recordpipe.Result, error) {

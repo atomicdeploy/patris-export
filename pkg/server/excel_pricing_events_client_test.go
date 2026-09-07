@@ -72,8 +72,7 @@ func excelPricingRemoteTestStateFrame(source canonical.Source, eventID uint64, s
 		"time":    "2026-08-23T00:00:00Z",
 		"id":      eventID,
 		"data": map[string]interface{}{
-			"schema":                  excelPricingRemoteStateEventSchema,
-			"schema_version":          1,
+			"schema":                  "pricing-state-change",
 			"projection":              excelPricingRemoteProjection,
 			"source":                  source,
 			"state_revision":          stateRevision,

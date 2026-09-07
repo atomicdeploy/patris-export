@@ -145,19 +145,20 @@ type excelPricingRemoteStateEventData struct {
 }
 
 type excelPricingRemoteRevisionResponse struct {
-	OwnerCatalogRevision  string            `json:"owner_catalog_revision,omitempty"`
-	InputSource           *canonical.Source `json:"input_source,omitempty"`
-	Schema                string            `json:"schema"`
-	SchemaVersion         int               `json:"schema_version"`
-	Projection            string            `json:"projection"`
-	ProjectionSchema      string            `json:"projection_schema"`
-	StateRevision         string            `json:"state_revision"`
-	Source                canonical.Source  `json:"source"`
-	CatalogRevision       string            `json:"catalog_revision"`
-	PricingStateRevision  string            `json:"pricing_state_revision"`
-	PricingPolicyRevision string            `json:"pricing_policy_revision"`
-	Locale                string            `json:"locale"`
-	PageSize              int               `json:"page_size"`
+	Delivery              *pricingDeliveryReceipt `json:"delivery,omitempty"`
+	OwnerCatalogRevision  string                  `json:"owner_catalog_revision,omitempty"`
+	InputSource           *canonical.Source       `json:"input_source,omitempty"`
+	Schema                string                  `json:"schema"`
+	SchemaVersion         int                     `json:"schema_version"`
+	Projection            string                  `json:"projection"`
+	ProjectionSchema      string                  `json:"projection_schema"`
+	StateRevision         string                  `json:"state_revision"`
+	Source                canonical.Source        `json:"source"`
+	CatalogRevision       string                  `json:"catalog_revision"`
+	PricingStateRevision  string                  `json:"pricing_state_revision"`
+	PricingPolicyRevision string                  `json:"pricing_policy_revision"`
+	Locale                string                  `json:"locale"`
+	PageSize              int                     `json:"page_size"`
 }
 
 // excelPricingRemoteDirectTransport keeps validator-bearing pricing traffic
@@ -481,7 +482,6 @@ func (client *excelPricingRemoteEventsClient) handleExcelPricingRemoteFrame(
 	case "pricing.stream.reset":
 		var data excelPricingRemoteStreamResetData
 		if frame.ID != 0 || json.Unmarshal(frame.Data, &data) != nil ||
-			data.Schema != excelPricingRemoteStreamResetSchema || data.SchemaVersion != 1 ||
 			data.Reason != "cursor_gap" || !data.RevisionValidationRequired ||
 			data.RevisionPath != client.revisionPath ||
 			!validExcelPricingRemoteWindow(data.Cursor, data.OldestEventID, data.LatestEventID) {
@@ -501,7 +501,6 @@ func (client *excelPricingRemoteEventsClient) handleExcelPricingRemoteFrame(
 		}
 		var data excelPricingRemoteStateEventData
 		if json.Unmarshal(frame.Data, &data) != nil ||
-			data.Schema != excelPricingRemoteStateEventSchema || data.SchemaVersion != 1 ||
 			data.Projection != excelPricingRemoteProjection ||
 			!sameExcelPricingRemoteSourceIdentity(client.source, data.Source) ||
 			!validExcelPricingRemoteRevisionParts(data.StateRevision, data.CatalogRevision,
@@ -641,9 +640,7 @@ func (client *excelPricingRemoteEventsClient) validateExcelPricingRemoteRevision
 	}
 	var payload excelPricingRemoteRevisionResponse
 	if json.Unmarshal(body, &payload) != nil ||
-		payload.Schema != excelPricingRemoteRevisionSchema || payload.SchemaVersion != 1 ||
 		payload.Projection != excelPricingRemoteProjection ||
-		payload.ProjectionSchema != excelPricingRemoteProjectionSchema ||
 		!sameExcelPricingRemoteSourceIdentity(client.source, payload.Source) || payload.Locale != "fa" ||
 		payload.PageSize != excelPricingSnapshotPageSize ||
 		!validExcelPricingRemoteRevisionParts(payload.StateRevision, payload.CatalogRevision,

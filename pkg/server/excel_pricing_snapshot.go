@@ -1757,6 +1757,9 @@ func (s *Server) notifyExcelPricingRemoteRevisionChanged(
 	if cancel != nil {
 		cancel()
 	}
+	if s.pricingActuation != nil {
+		return s.pricingActuation.enqueue(revision.Source)
+	}
 	return nil
 }
 

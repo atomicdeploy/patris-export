@@ -2965,6 +2965,11 @@ function initWebSocket() {
 function handleWebSocketMessage(data) {
     const changedIndices = new Set();
 
+    if (data.type === 'pricing_progress') {
+        if (data.pricing?.phase === 'complete' && !data.pricing.pending) fetchInitialData();
+        return;
+    }
+
     // The shared stream follows configured export projection. Only reuse rows
     // when it matches the HTTP collection selected by this viewer.
     if ((data.type === 'initial' || data.type === 'update')

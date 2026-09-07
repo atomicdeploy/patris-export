@@ -562,7 +562,7 @@ func TestExcelPricingRemoteSnapshotCollectAnnotatesEveryRemoteStage(t *testing.T
 	t.Run("revision fetch protocol", func(t *testing.T) {
 		fixture := newExcelPricingRemoteSnapshotFixture(t, "ready")
 		defer fixture.Close()
-		fixture.revision.Schema = "invalid-revision-schema"
+		fixture.revision.Projection = "invalid-projection"
 		_, err := fixture.Client(t).Collect(context.Background(), fixture.requestID, 60)
 		assertStage(t, err, excelPricingRemoteSnapshotStageRevisionFetch,
 			"snapshot_revision_fetch_protocol_failed")
@@ -933,7 +933,7 @@ func TestExcelPricingSnapshotFailureEvidencePreservesPublicCodeAndPrivacy(t *tes
 	fixture := newExcelPricingRemoteSnapshotFixture(t, "ready")
 	defer fixture.Close()
 	fixture.acceptAnyID = true
-	fixture.revision.Schema = "invalid-revision-schema"
+	fixture.revision.Projection = "invalid-projection"
 	server, token := newExcelPricingRemoteSnapshotProductionServer(t, fixture)
 	requestID := "snapshot-stage-evidence-0001"
 	request := authenticatedExcelPricingRequest(

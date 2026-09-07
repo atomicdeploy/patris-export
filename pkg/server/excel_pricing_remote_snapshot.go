@@ -242,6 +242,7 @@ type excelPricingRemoteSnapshotEndpoints struct {
 
 type excelPricingRemoteSnapshotClient struct {
 	inputCatalogRevision string
+	receiptProbe         bool
 	cfg                  updateout.Config
 	source               canonical.Source
 	secret               string
@@ -259,6 +260,8 @@ type excelPricingRemoteSnapshotClientOptions struct {
 }
 
 type excelPricingRemoteSnapshotRevision struct {
+	Delivery              *pricingDeliveryReceipt
+	OwnerCatalogRevision  string
 	Source                canonical.Source
 	StateRevision         string
 	CatalogRevision       string
@@ -419,6 +422,7 @@ type excelPricingRemoteSnapshotPayload struct {
 }
 
 type excelPricingRemoteSnapshotResult struct {
+	OwnerCatalogRevision   string
 	Source                 canonical.Source
 	CompositeStateRevision string
 	PricingStateRevision   string
@@ -958,9 +962,7 @@ func (client *excelPricingRemoteSnapshotClient) fetchRevision(
 		return excelPricingRemoteSnapshotRevision{}, errExcelPricingRemoteSnapshotProtocol
 	}
 	var payload excelPricingRemoteRevisionResponse
-	if json.Unmarshal(body, &payload) != nil || payload.Schema != excelPricingRemoteRevisionSchema ||
-		payload.SchemaVersion != 1 || payload.Projection != excelPricingRemoteProjection ||
-		payload.ProjectionSchema != excelPricingRemoteProjectionSchema ||
+	if json.Unmarshal(body, &payload) != nil || payload.Projection != excelPricingRemoteProjection ||
 		payload.Locale != "fa" || payload.PageSize != excelPricingSnapshotPageSize ||
 		!validExcelPricingRemoteRevisionParts(payload.StateRevision, payload.CatalogRevision,
 			payload.PricingStateRevision, payload.PricingPolicyRevision) {
@@ -972,7 +974,7 @@ func (client *excelPricingRemoteSnapshotClient) fetchRevision(
 		}
 	} else if payload.InputSource == nil || !payload.InputSource.SameIdentity(client.source) ||
 		!validExcelPricingRemoteSource(payload.Source) || payload.Source.ID != client.source.ID ||
-		payload.Source.Dataset != client.source.Dataset || payload.OwnerCatalogRevision != client.inputCatalogRevision {
+		payload.Source.Dataset != client.source.Dataset || (!client.receiptProbe && payload.OwnerCatalogRevision != client.inputCatalogRevision) {
 		return excelPricingRemoteSnapshotRevision{}, errExcelPricingRemoteSnapshotProtocol
 	}
 	etag := strings.TrimSpace(response.Header.Get("ETag"))
@@ -980,6 +982,8 @@ func (client *excelPricingRemoteSnapshotClient) fetchRevision(
 		return excelPricingRemoteSnapshotRevision{}, errExcelPricingRemoteSnapshotProtocol
 	}
 	return excelPricingRemoteSnapshotRevision{
+		Delivery:              payload.Delivery,
+		OwnerCatalogRevision:  payload.OwnerCatalogRevision,
 		Source:                payload.Source,
 		StateRevision:         payload.StateRevision,
 		CatalogRevision:       payload.CatalogRevision,
@@ -1136,6 +1140,7 @@ func (client *excelPricingRemoteSnapshotClient) fetchSnapshot(
 		return nil, errExcelPricingRemoteSnapshotIntegrity
 	}
 	return &excelPricingRemoteSnapshotResult{
+		OwnerCatalogRevision:   revision.OwnerCatalogRevision,
 		Source:                 payload.Source,
 		CompositeStateRevision: payload.StateRevision,
 		PricingStateRevision:   payload.PricingStateRevision,
@@ -1319,8 +1324,7 @@ func validateExcelPricingRemoteSnapshotBuild(
 	source canonical.Source,
 	revision excelPricingRemoteSnapshotRevision,
 ) error {
-	if build.Schema != excelPricingRemoteSnapshotBuildSchema || build.SchemaVersion != 1 ||
-		!excelPricingRemoteSnapshotIdentifierPattern.MatchString(build.BuildID) ||
+	if !excelPricingRemoteSnapshotIdentifierPattern.MatchString(build.BuildID) ||
 		build.RequestID != requestID || !build.Source.SameIdentity(source) || build.Locale != "fa" ||
 		build.StateRevision != revision.StateRevision ||
 		build.PricingStateRevision != revision.PricingStateRevision ||
@@ -1345,8 +1349,7 @@ func validateExcelPricingRemoteSnapshotBuild(
 func validateExcelPricingRemoteSnapshotTerminalEvent(
 	event excelPricingRemoteSnapshotTerminalEvent,
 ) error {
-	if event.Schema != excelPricingRemoteSnapshotEventSchema || event.SchemaVersion != 1 ||
-		event.EventID == 0 || !excelPricingRemoteSnapshotIdentifierPattern.MatchString(event.BuildID) ||
+	if event.EventID == 0 || !excelPricingRemoteSnapshotIdentifierPattern.MatchString(event.BuildID) ||
 		!excelPricingRemoteSnapshotIdentifierPattern.MatchString(event.RequestID) ||
 		!validExcelPricingRemoteSource(event.Source) ||
 		!validExcelPricingRemoteRevisionParts(event.StateRevision, event.PricingStateRevision,
@@ -1394,9 +1397,7 @@ func validateExcelPricingRemoteSnapshotPayload(
 	source canonical.Source,
 	etag string,
 ) error {
-	if payload.Schema != excelPricingRemoteSnapshotPayloadSchema || payload.SchemaVersion != 1 ||
-		payload.Projection != excelPricingRemoteProjection ||
-		payload.ProjectionSchema != excelPricingRemoteProjectionSchema ||
+	if payload.Projection != excelPricingRemoteProjection ||
 		payload.SnapshotToken != build.SnapshotToken || !payload.Source.SameIdentity(source) ||
 		payload.StateRevision != revision.StateRevision ||
 		payload.PricingStateRevision != revision.PricingStateRevision ||

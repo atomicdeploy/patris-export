@@ -77,6 +77,7 @@ type Server struct {
 	catalogProviderMu    sync.Mutex
 	canonicalProjection  *canonicalProjectionCache
 	pricingPublication   *canonicalProjectionCache
+	pricingActuation     *pricingActuator
 	sqlOperations        *sqlOperationsState
 	excelPricing         *excelPricingState
 	excelPricingRemote   *excelPricingRemoteEventsBridge
@@ -227,6 +228,9 @@ func NewServerWithOptions(dbPath string, charMap converter.CharMapping, options 
 	s.excelPricingRemote = newExcelPricingRemoteEventsBridge(s)
 	s.excelPricing.snapshotRevisionCurrent = s.excelPricingRemote.revisionCurrent
 	s.excelPricingWrites = newExcelPricingWritebackQueue(s)
+	if s.config != nil {
+		s.pricingActuation = newPricingActuator(s, s.config.Path()+".pricing.json")
+	}
 
 	// Set up routes
 	s.setupRoutes()
@@ -247,6 +251,7 @@ func NewServerWithOptions(dbPath string, charMap converter.CharMapping, options 
 		}
 		s.configWatcher = w
 		s.excelPricingRemote.start(s.backgroundCtx, &s.backgroundWG)
+		s.pricingActuation.start(s.backgroundCtx, &s.serviceWG)
 		// The writeback queue is a process-lifetime worker. Keep it separate
 		// from backgroundWG, which is also used to await bounded startup work.
 		s.excelPricingWrites.start(s.backgroundCtx, &s.serviceWG)
@@ -705,7 +710,11 @@ func (s *Server) ReplaceConfig(cfg appconfig.Config) (appconfig.Config, error) {
 // Status returns process and database lock status using the same shape served
 // by GET /api/status.
 func (s *Server) Status() map[string]interface{} {
-	return s.processStatus()
+	status := s.processStatus()
+	if s.pricingActuation != nil {
+		status["pricing"] = s.pricingActuation.status()
+	}
+	return status
 }
 
 // ShowToast displays a native notification and/or broadcasts it to connected
@@ -2275,7 +2284,19 @@ func (s *Server) dispatchUpdateEvent(event updateout.Event) {
 		return
 	}
 	go func() {
-		result, err := updateout.DispatchWithResult(context.Background(), cfg, event)
+		ctx := s.backgroundCtx
+		if ctx == nil {
+			ctx = context.Background()
+		}
+		if s.excelPricing != nil {
+			select {
+			case s.excelPricing.permit <- struct{}{}:
+				defer func() { <-s.excelPricing.permit }()
+			case <-ctx.Done():
+				return
+			}
+		}
+		result, err := updateout.DispatchWithResult(ctx, cfg, event)
 		if err != nil {
 			log.Printf("Failed to send update event: %v", err)
 			return

@@ -14,6 +14,10 @@ The existing authenticated `POST /api/refresh` with `{"delivery":"wait"}` select
 
 ## Scope and validation
 
-This is a draft integration, not a deployed release. Owner-setting actuation in Go-authority deployments remains fail-closed on the PHP side until its dispatcher is wired. Static/offline catalog support does not authorize a separate local catalog to overwrite WordPress owner prices. No production acceptance has been performed.
+The existing authenticated owner event stream queues one pricing worker. It reads the actual owner catalog revision, coalesces concurrent changes, and shares the delivery permit with synchronous refresh and source delivery. Go authority calculates and dispatches one pinned input event; report revision feedback cannot trigger a second writer. PHP authority refreshes the exact final source named by the authenticated event without resending input.
+
+The config-adjacent `.pricing.json` checkpoint contains bounded operation status and source/event/revision identities, with no products or credentials. `/api/status` exposes this under `pricing`; WebSocket `pricing_progress` messages report transitions. `dispatching` is persisted before transmission. Only an exact successful receipt with every pending/deferred count zero becomes `complete`. Restart recovery reads the existing authenticated `/revision.delivery` ledger before any new mutation; absent or mismatched evidence remains `recovery_required` and never authorizes an automatic resend. Checkpoint write failure rejects event acknowledgement. Read-only deployments must provide a writable config directory to enable owner actuation.
+
+This remains a draft integration, not a deployed release. Static/offline catalog support does not authorize a separate local catalog to overwrite WordPress owner prices. Combined PHP/Go operational acceptance has not been performed.
 
 Tests cover both authorities through the refresh and product-read path, one dispatch, missing authority/binding, stale viewer clearing, exact high-precision numeric-string transport, forged hashes, cache bindings, and existing snapshot ready/async terminal behavior. Existing full server/canonical/recordpipe/provider suites, vet, and web tests/build are required before review.
