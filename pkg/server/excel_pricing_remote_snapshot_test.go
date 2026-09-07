@@ -562,7 +562,7 @@ func TestExcelPricingRemoteSnapshotCollectAnnotatesEveryRemoteStage(t *testing.T
 	t.Run("revision fetch protocol", func(t *testing.T) {
 		fixture := newExcelPricingRemoteSnapshotFixture(t, "ready")
 		defer fixture.Close()
-		fixture.revision.Schema = "invalid-revision-schema"
+		fixture.revision.Projection = "invalid-projection"
 		_, err := fixture.Client(t).Collect(context.Background(), fixture.requestID, 60)
 		assertStage(t, err, excelPricingRemoteSnapshotStageRevisionFetch,
 			"snapshot_revision_fetch_protocol_failed")
@@ -933,7 +933,7 @@ func TestExcelPricingSnapshotFailureEvidencePreservesPublicCodeAndPrivacy(t *tes
 	fixture := newExcelPricingRemoteSnapshotFixture(t, "ready")
 	defer fixture.Close()
 	fixture.acceptAnyID = true
-	fixture.revision.Schema = "invalid-revision-schema"
+	fixture.revision.Projection = "invalid-projection"
 	server, token := newExcelPricingRemoteSnapshotProductionServer(t, fixture)
 	requestID := "snapshot-stage-evidence-0001"
 	request := authenticatedExcelPricingRequest(
@@ -1589,7 +1589,11 @@ func (fixture *excelPricingRemoteSnapshotFixture) handle(w http.ResponseWriter, 
 		fixture.mu.Lock()
 		fixture.revisionCalls++
 		fixture.mu.Unlock()
-		if !fixture.validSourceQuery(r.URL.Query()) {
+		query := r.URL.Query()
+		if fixture.revision.InputSource != nil && query.Get("source_revision") == fixture.revision.InputSource.Revision {
+			query.Set("source_revision", fixture.source.Revision)
+		}
+		if !fixture.validSourceQuery(query) {
 			http.Error(w, "bad query", http.StatusBadRequest)
 			return
 		}

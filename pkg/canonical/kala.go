@@ -665,7 +665,7 @@ func parseKalaProduct(ctx context.Context, row map[string]interface{}, provider 
 	if roundingDigits != nil {
 		roundingMode = pricingcatalog.RoundingModeHalfUp
 	}
-	if integrationActive {
+	if integrationActive && resolution.Authority != pricingcatalog.AuthorityPHP {
 		foreignPositive := decimalStrictlyPositive(foreignPrice)
 		foreignReady := foreignPositive &&
 			decimalStrictlyPositive(weight) &&

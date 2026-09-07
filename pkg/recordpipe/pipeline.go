@@ -25,12 +25,15 @@ type Options struct {
 }
 
 type Result struct {
-	Rows                []map[string]interface{}
-	Payload             interface{}
-	KeyField            string
-	Raw                 bool
-	Contract            *canonical.Envelope
-	DisableSyncContract bool
+	PricingAuthority     string
+	PricingInputSource   canonical.Source
+	OwnerCatalogRevision string
+	Rows                 []map[string]interface{}
+	Payload              interface{}
+	KeyField             string
+	Raw                  bool
+	Contract             *canonical.Envelope
+	DisableSyncContract  bool
 }
 
 func Build(rawRows []map[string]interface{}, source string, options Options) Result {

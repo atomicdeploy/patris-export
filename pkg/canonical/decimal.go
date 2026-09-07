@@ -3,10 +3,35 @@ package canonical
 import (
 	"fmt"
 	"math/big"
+	"regexp"
 	"strings"
 
 	"github.com/atomicdeploy/patris-export/pkg/pricingcatalog"
 )
+
+const (
+	maximumCalculationIntegerDigits  = 15
+	maximumCalculationFractionDigits = 12
+)
+
+var calculationDecimalPattern = regexp.MustCompile(`^(0|[1-9][0-9]*)(?:\.([0-9]+))?$`)
+
+// validateCalculationDecimal matches the shared PHP formula input domain.
+// Check the original token before trimming zeros; raw/report Decimal values
+// retain their wider domain and are only restricted when selected for pricing.
+func validateCalculationDecimal(input string) error {
+	parts := calculationDecimalPattern.FindStringSubmatch(input)
+	if parts == nil {
+		return fmt.Errorf("calculation input must be a non-negative base-10 decimal without exponent notation")
+	}
+	if len(parts[1]) > maximumCalculationIntegerDigits {
+		return fmt.Errorf("calculation input exceeds %d integer digits", maximumCalculationIntegerDigits)
+	}
+	if len(parts[2]) > maximumCalculationFractionDigits {
+		return fmt.Errorf("calculation input exceeds %d fractional digits", maximumCalculationFractionDigits)
+	}
+	return nil
+}
 
 // LandedPrice evaluates the CNY pricing path with exact decimal rationals.
 // Freight may be quoted in CNY per kilogram or IRR per kilogram; IRR is
@@ -15,6 +40,9 @@ import (
 func LandedPrice(weightGrams, shippingPricePerKg, shippingCurrency, foreignCNY, markupPercent, irtPerCNY string, roundingDigits int) (int64, error) {
 	values := make([]*big.Rat, 0, 5)
 	for _, input := range []string{weightGrams, shippingPricePerKg, foreignCNY, markupPercent, irtPerCNY} {
+		if err := validateCalculationDecimal(input); err != nil {
+			return 0, err
+		}
 		value, ok := new(big.Rat).SetString(strings.TrimSpace(input))
 		if !ok || value.Sign() < 0 {
 			return 0, fmt.Errorf("landed_price inputs must be finite non-negative decimals")
@@ -48,6 +76,9 @@ func LandedPrice(weightGrams, shippingPricePerKg, shippingCurrency, foreignCNY, 
 func PartnerPrice(partnerIRR, markupPercent string, roundingDigits int) (int64, error) {
 	values := make([]*big.Rat, 0, 2)
 	for _, input := range []string{partnerIRR, markupPercent} {
+		if err := validateCalculationDecimal(input); err != nil {
+			return 0, err
+		}
 		value, ok := new(big.Rat).SetString(strings.TrimSpace(input))
 		if !ok || value.Sign() < 0 {
 			return 0, fmt.Errorf("partner_price inputs must be finite non-negative decimals")
@@ -66,6 +97,9 @@ func PartnerPrice(partnerIRR, markupPercent string, roundingDigits int) (int64, 
 // ten-to-one currency-unit conversion. Values that cannot be represented as a
 // whole IRT integer fail closed instead of being rounded.
 func DirectSalePrice(saleIRR string) (int64, error) {
+	if err := validateCalculationDecimal(saleIRR); err != nil {
+		return 0, err
+	}
 	value, ok := new(big.Rat).SetString(strings.TrimSpace(saleIRR))
 	if !ok || value.Sign() <= 0 {
 		return 0, fmt.Errorf("sale_price_direct input must be a finite positive decimal")

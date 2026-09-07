@@ -2965,6 +2965,11 @@ function initWebSocket() {
 function handleWebSocketMessage(data) {
     const changedIndices = new Set();
 
+    if (data.type === 'pricing_progress') {
+        if (data.pricing?.phase === 'complete' && !data.pricing.pending) fetchInitialData();
+        return;
+    }
+
     // The shared stream follows configured export projection. Only reuse rows
     // when it matches the HTTP collection selected by this viewer.
     if ((data.type === 'initial' || data.type === 'update')
@@ -6088,6 +6093,13 @@ async function fetchInitialDataOnce() {
         setLoadingState(false);
     } catch (error) {
         console.error('❌ Failed to fetch initial data:', error);
+        // A failed authority projection must not leave an older price array
+        // available for the next stream message to render again.
+        state.catalogProducts = [];
+        state.catalogCategories = [];
+        state.records = [];
+        state.filteredRecords = [];
+        state.fields = [];
         setLoadingState(false);
         const detail = error instanceof Error ? error.message : String(error);
         showTableErrorState(t('recordsLoadFailed'), detail, {

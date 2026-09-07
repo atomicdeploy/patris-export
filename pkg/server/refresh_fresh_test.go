@@ -13,6 +13,7 @@ import (
 	"github.com/atomicdeploy/patris-export/pkg/appconfig"
 	"github.com/atomicdeploy/patris-export/pkg/canonical"
 	"github.com/atomicdeploy/patris-export/pkg/pricingcatalog"
+	"github.com/atomicdeploy/patris-export/pkg/updateout"
 )
 
 func TestPostRefreshWaitReadsFreshSourceAndOwnerOncePerSnapshot(t *testing.T) {
@@ -29,7 +30,7 @@ func TestPostRefreshWaitReadsFreshSourceAndOwnerOncePerSnapshot(t *testing.T) {
 		switch r.URL.Path {
 		case "/integration/catalog":
 			catalogCalls.Add(1)
-			fmt.Fprintf(w, `{"data":{"schema":"digitalogic.integration-catalog","revision":"r%d","currency":{"local":"IRT","cny_to_local":%s,"cny_to_irt":%s},"pricing":{"formula_id":"landed_price"},"shipping_methods":[{"id":"air","price_per_kg":120,"currency":"CNY"}]}}`, revision, rate, rate)
+			fmt.Fprintf(w, `{"data":{"schema":"digitalogic.integration-catalog","revision":"r%d","currency":{"local":"IRT","cny_to_local":%s,"cny_to_irt":%s},"pricing":{"formula_id":"landed_price","authority":"go"},"shipping_methods":[{"id":"air","price_per_kg":120,"currency":"CNY"}]}}`, revision, rate, rate)
 		case "/integration/pricing-assignments/batch":
 			batchCalls.Add(1)
 			var request struct {
@@ -69,7 +70,8 @@ func TestPostRefreshWaitReadsFreshSourceAndOwnerOncePerSnapshot(t *testing.T) {
 		}
 		delivered <- envelope
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprintf(w, `{"success":true,"data":{"status":"accepted","event_id":%q,"retryable":false,"pending_products":0,"deferred_products":0}}`, envelope.EventID)
+		receipt := &updateout.DeliveryReceipt{Status: "complete", EventID: envelope.EventID, Source: envelope.Source, InputSource: envelope.Source, OwnerCatalogRevision: envelope.Products[0].PricingCatalogRevision}
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "data": map[string]interface{}{"status": "accepted", "event_id": envelope.EventID, "retryable": false, "pending_products": 0, "deferred_products": 0, "delivery": receipt}})
 	}))
 	defer receiver.Close()
 	srv, _ := newRefreshWaitTestServer(t, receiver.URL, func(cfg *appconfig.Config) {

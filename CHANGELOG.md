@@ -7,6 +7,20 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [2.0.0] - 2026-09-07
+
+### Breaking changes
+
+- Configured pricing requires an explicit owner-selected PHP or Go authority.
+  Deploy with Digitalogic WordPress 2.0.0 for shared owner fences, final
+  canonical projections, and actual delivery receipt verification.
+- Both engines admit calculation inputs with at most 15 integer and 12
+  fractional digits; unsupported selected inputs fail closed. Raw source
+  decimals retain their original domain.
+- Owner events now drive serialized pricing updates with durable progress,
+  safe new-owner supersession, and receipt-based recovery. Pending or unknown
+  delivery cannot be reported as complete.
+
 ### Added
 
 - Canonical pricing now exposes the first `Sharh1` slot independently as

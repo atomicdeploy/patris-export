@@ -7,6 +7,7 @@ export async function fetchCatalogProducts(fetchImpl = globalThis.fetch) {
 }
 
 export function websocketMatchesCollection(data, collection) {
+    if (data.pricing_authority && data.pricing_authority !== 'go') return false;
     if (data.source_changed) return false;
     return (collection === 'records' && data.raw === true)
         || (collection === 'products' && data.raw === false);
