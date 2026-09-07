@@ -68,6 +68,50 @@ test('pending receipt is unverified and never retried', async t => {
   assert.equal(f.calls.filter(path => path === '/api/refresh').length, 1);
 });
 
+test('exact refresh busy rejection is not started and never automatically retried', async t => {
+  const f = await fixture(t, (req, res) => {
+    res.writeHead(429, { 'Retry-After': '1' });
+    res.end(JSON.stringify({ success: false, code: 'pricing_busy', retry_after_ms: 1000, secret: token }));
+  });
+  const result = await runBulk(f);
+  assert.equal(result.outcome, 'not_started');
+  assert.equal(result.error, 'pricing_busy');
+  assert.equal(result.delivered, false);
+  assert.equal(result.exit_code, 1);
+  assert.equal(result.readiness_after, true);
+  assert.equal(result.receipt, undefined);
+  assert.match(result.next_action, /active pricing operation/);
+  assert.equal(JSON.stringify(result).includes(token), false);
+  assert.deepEqual(f.calls, ['/api/status', '/api/pricing-sync/session', '/api/refresh', '/api/status']);
+});
+
+test('other or malformed 429 refresh responses remain unknown and are never retried', async t => {
+  for (const body of [
+    '{}', '{', JSON.stringify({ success: false, code: 'too_many_sessions' }),
+    JSON.stringify({ success: true, code: 'pricing_busy' }),
+    JSON.stringify({ code: 'pricing_busy' }),
+  ]) {
+    await t.test(body, async t => {
+      const f = await fixture(t, (req, res) => { res.writeHead(429); res.end(body); });
+      const result = await runBulk(f);
+      assert.equal(result.outcome, 'unknown_delivery_outcome');
+      assert.equal(result.error, 'http_429');
+      assert.equal(f.calls.filter(path => path === '/api/refresh').length, 1);
+    });
+  }
+});
+
+test('oversized busy response cannot establish a not-started outcome', async t => {
+  const f = await fixture(t, (req, res) => {
+    res.writeHead(429);
+    res.end(JSON.stringify({ success: false, code: 'pricing_busy', padding: 'x'.repeat(65536) }));
+  });
+  const result = await runBulk(f);
+  assert.equal(result.outcome, 'unknown_delivery_outcome');
+  assert.equal(result.error, 'response_too_large');
+  assert.equal(f.calls.filter(path => path === '/api/refresh').length, 1);
+});
+
 test('overall timeout stays unknown, marks post-readiness unverified and never retries', async t => {
   const f = await fixture(t, () => {});
   const result = await runBulk({ ...f, timeoutMs: 30 });

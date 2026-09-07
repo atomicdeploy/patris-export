@@ -29,6 +29,12 @@ authenticated POST `/api/refresh` with `{"delivery":"wait"}`, then GET `/api/sta
 The session token stays in memory and is never included in output. Mutation requests
 are sent once. A timeout or malformed response is an unknown outcome, not proof that
 prices were unchanged; inspect the existing server receipt before retrying manually.
+The exact HTTP 429 `pricing_busy` refresh rejection is `not_started`: that request
+did not read source data or dispatch a delivery. It is never retried automatically.
+Wait for the active operation and inspect its receipt before an explicit retry.
+GET `/api/status` exposes `pricing_operation.busy` for the shared pricing permit;
+`pricing.phase` describes the owner worker and may remain `idle` during startup
+delivery. A free permit alone does not prove that downstream delivery completed.
 
 The JSON result includes elapsed wall time through the last HTTP readiness check,
 phase timestamps, source revision, event identity, delivery status and deferred counts.

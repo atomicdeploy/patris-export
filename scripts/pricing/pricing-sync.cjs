@@ -44,7 +44,8 @@ async function requestJSON(base, path, { body, token, timeoutMs = 5000 } = {}) {
       redirect: 'error', signal: controller.signal,
     });
     // Never print a raw response, URL error, header or session token.
-    if (!response.ok) {
+    const inspectBusy = path === '/api/refresh' && body !== undefined && response.status === 429;
+    if (!response.ok && !inspectBusy) {
       await response.body?.cancel();
       throw new Error('http_' + response.status);
     }
@@ -55,11 +56,17 @@ async function requestJSON(base, path, { body, token, timeoutMs = 5000 } = {}) {
       if (length > 65536) { controller.abort(); throw new Error('response_too_large'); }
       chunks.push(chunk);
     }
-    try { return JSON.parse(Buffer.concat(chunks).toString('utf8')); }
-    catch { throw new Error('invalid_json'); }
+    let data;
+    try { data = JSON.parse(Buffer.concat(chunks).toString('utf8')); }
+    catch { throw new Error(inspectBusy ? 'http_429' : 'invalid_json'); }
+    if (inspectBusy) {
+      // This exact refresh rejection precedes source reads and delivery dispatch.
+      throw new Error(data?.success === false && data.code === 'pricing_busy' ? 'pricing_busy' : 'http_429');
+    }
+    return data;
   } catch (error) {
     if (controller.signal.aborted && error.message !== 'response_too_large') throw new Error('request_timeout');
-    if (/^(http_[0-9]{3}|response_too_large|invalid_json)$/.test(error.message)) throw error;
+    if (/^(http_[0-9]{3}|pricing_busy|response_too_large|invalid_json)$/.test(error.message)) throw error;
     throw new Error('transport_failed');
   } finally { clearTimeout(timer); }
 }
@@ -130,8 +137,10 @@ async function runBulk({ baseUrl = 'http://127.0.0.1:18080', timeoutMs = LIMIT_M
     checkpoints.receipt_ms = Math.round(now() - start);
   } catch (error) {
     result.error = error.message;
-    result.outcome = refreshSent ? 'unknown_delivery_outcome' : 'not_started';
-    if (refreshSent) result.next_action = 'Inspect the existing server delivery receipt before any manual retry.';
+    const rejectedBusy = error.message === 'pricing_busy';
+    result.outcome = refreshSent && !rejectedBusy ? 'unknown_delivery_outcome' : 'not_started';
+    if (rejectedBusy) result.next_action = 'Wait for the active pricing operation and inspect its delivery receipt before an explicit retry.';
+    else if (refreshSent) result.next_action = 'Inspect the existing server delivery receipt before any manual retry.';
   } finally {
     log('Checking Go HTTP readiness after operation...');
     try { await ready(); result.readiness_after = true; }
