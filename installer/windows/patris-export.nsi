@@ -231,6 +231,12 @@ Section "!Patris Export application" SEC_CORE
   File /oname=INSTALLER.md "${INSTALLER_GUIDE}"
   File /oname=config.example.toml "${CONFIG_EXAMPLE}"
 
+  SetOutPath "$INSTDIR\scripts\pricing"
+  File /oname=pricing-sync.cjs "${PAYLOAD_DIR}\scripts\pricing\pricing-sync.cjs"
+  File /oname=pricing-sync.cmd "${PAYLOAD_DIR}\scripts\pricing\pricing-sync.cmd"
+  File /oname=README.md "${PAYLOAD_DIR}\scripts\pricing\README.md"
+  SetOutPath "$INSTDIR"
+
   WriteUninstaller "$INSTDIR\Uninstall.exe"
 
   ${If} $MultiUser.InstallMode == "AllUsers"
@@ -339,6 +345,11 @@ Section "Uninstall"
   Delete "$INSTDIR\INSTALLER.md"
   Delete "$INSTDIR\config.example.toml"
   Delete "$INSTDIR\Uninstall.exe"
+  Delete "$INSTDIR\scripts\pricing\pricing-sync.cjs"
+  Delete "$INSTDIR\scripts\pricing\pricing-sync.cmd"
+  Delete "$INSTDIR\scripts\pricing\README.md"
+  RMDir "$INSTDIR\scripts\pricing"
+  RMDir "$INSTDIR\scripts"
   RMDir "$INSTDIR"
 
   ${If} $RemoveUserData == "1"
