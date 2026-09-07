@@ -291,6 +291,10 @@ func (fw *FileWatcher) pollLoop(path string, registrationGeneration uint64, inte
 func (fw *FileWatcher) handleFileChange(path string, registrationGeneration uint64) {
 	newHash, err := fw.hashForPath(path)
 	if err != nil {
+		if filecopy.IsURL(path) {
+			log.Printf("⚠️  Failed to get remote source hash")
+			return
+		}
 		log.Printf("⚠️  Failed to get hash for %s: %v", path, err)
 		return
 	}

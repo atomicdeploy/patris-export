@@ -1,4 +1,5 @@
 import { normalizeCategoriesPayload, normalizeRecordsPayload } from './records.js';
+import { fetchCatalogProducts } from './catalog-api.mjs';
 import { createExportMenuController } from './export-menu.js';
 import { canonicalWorkbookPath } from './xlsx-export.mjs';
 import { createSQLTargetController } from './sql-target.js';
@@ -66,6 +67,7 @@ import {
 const state = {
     records: [],
     catalogProducts: [],
+    catalogProductsEndpoint: 'products',
     catalogCategories: [],
     catalogCategoriesAvailable: false,
     catalogView: 'products',
@@ -5010,6 +5012,7 @@ function sortRecords() {
 function downloadCanonicalWorkbook(format = 'xlsx') {
 	const exportConfig = state.config?.export || {};
 	const workbookPath = canonicalWorkbookPath({
+		collection: state.catalogProductsEndpoint,
 		format,
 		language: state.settings.language,
 		rtl: state.settings.rtlTextDirection,
@@ -6013,10 +6016,11 @@ function showTableErrorState(title, detail, options = {}) {
 // Fetch initial data
 async function fetchInitialData() {
     try {
-        const [response, categoriesResponse] = await Promise.all([
-            fetch('/api/records'),
+        const [productsResult, categoriesResponse] = await Promise.all([
+            fetchCatalogProducts(fetch),
             fetch('/api/categories')
         ]);
+        const response = productsResult.response;
         
         if (!response.ok) {
             throw new Error(`HTTP error! status: ${response.status}`);
@@ -6024,6 +6028,7 @@ async function fetchInitialData() {
         
         const data = await response.json();
         
+        state.catalogProductsEndpoint = productsResult.collection;
         state.catalogProducts = normalizeRecordsPayload(data);
         if (categoriesResponse.ok) {
             state.catalogCategories = normalizeCategoriesPayload(await categoriesResponse.json());

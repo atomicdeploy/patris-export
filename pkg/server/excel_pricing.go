@@ -626,7 +626,7 @@ func (s *Server) excelPricingStateSourceMatches(
 	if err != nil {
 		return false, err
 	}
-	return *source == contract.Source, nil
+	return source.SameIdentity(contract.Source), nil
 }
 
 func buildExcelPricingRemoteRequest(operation string, local excelPricingLocalRequest, source canonical.Source) excelPricingRemoteRequest {
@@ -750,7 +750,7 @@ func (s *Server) completeExcelPricingApply(
 	event := updateout.Event{
 		Type:             "update",
 		Timestamp:        time.Now().UTC().Format(time.RFC3339),
-		Source:           s.currentDBPath(),
+		Source:           browserSafeURL(s.currentDBPath()),
 		Raw:              false,
 		Contract:         contract,
 		SnapshotContract: contract,

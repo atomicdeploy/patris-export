@@ -1641,7 +1641,7 @@ func excelPricingSnapshotIdentityChange(
 	if previous == nil || previous.Source == nil {
 		return "", ""
 	}
-	if *previous.Source != current.Source {
+	if !previous.Source.SameIdentity(current.Source) {
 		return "source_changed", "snapshot_source_changed"
 	}
 	if previous.CatalogRevision != current.CatalogRevision {
@@ -2255,7 +2255,7 @@ func (s *Server) deliverExcelPricingSnapshotSource(
 		return errExcelPricingRemoteSnapshotSourceConflict
 	}
 	contract, err := s.excelPricingCanonical(ctx, s.Config())
-	if err != nil || contract == nil || contract.Source != expected {
+	if err != nil || contract == nil || !contract.Source.SameIdentity(expected) {
 		return errExcelPricingRemoteSnapshotSourceConflict
 	}
 	deliveryConfig := updateout.Normalize(cfg)
@@ -2288,7 +2288,7 @@ func (s *Server) deliverExcelPricingSnapshotSource(
 	// A newer source supersedes the just-delivered coherence envelope. Never
 	// reuse it as current; let the caller reacquire and retry the new revision.
 	current, err := s.excelPricingCanonical(ctx, s.Config())
-	if err != nil || current == nil || current.Source != expected {
+	if err != nil || current == nil || !current.Source.SameIdentity(expected) {
 		return errExcelPricingRemoteSnapshotSourceConflict
 	}
 	return nil
@@ -2827,7 +2827,7 @@ func buildExcelPricingSnapshotFromRemoteResult(
 	}
 	var remote excelPricingRemoteSnapshotPayload
 	if len(result.RawPayload) == 0 || json.Unmarshal(result.RawPayload, &remote) != nil ||
-		remote.Source != result.Source ||
+		!remote.Source.SameIdentity(result.Source) ||
 		remote.StateRevision != result.CompositeStateRevision ||
 		remote.PricingStateRevision != result.PricingStateRevision ||
 		remote.PricingPolicyRevision != result.PricingPolicyRevision ||
@@ -3297,11 +3297,13 @@ func writeExcelPricingBusy(w http.ResponseWriter, code string) {
 
 func excelPricingSnapshotRequestFingerprint(request excelPricingSnapshotStartRequest) string {
 	request.Projection = excelPricingSnapshotProjection(request.Projection)
+	request.Source.Extensions = nil
 	body, _ := json.Marshal(request)
 	return excelPricingSnapshotDigest(body)
 }
 
 func excelPricingSnapshotCacheKey(source canonical.Source, locale, projection string) string {
+	source.Extensions = nil
 	body, _ := json.Marshal(struct {
 		Source     canonical.Source `json:"source"`
 		Locale     string           `json:"locale"`

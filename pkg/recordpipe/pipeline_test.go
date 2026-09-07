@@ -146,6 +146,43 @@ func TestBuildCanonicalNamingWarningsRemainIdentityValid(t *testing.T) {
 	}
 }
 
+func TestBuildCanonicalHashVisibilityAndCompatibilitySurface(t *testing.T) {
+	sourceRows := []map[string]interface{}{{
+		"Code": "123456789", "Name": "Hash fixture",
+	}}
+	cfg := canonical.DefaultConfig()
+	expose := false
+	cfg.Hashes.Expose = &expose
+	result := Build(sourceRows, "kala.db", Options{
+		Canonical:       cfg,
+		CatalogProvider: pricingcatalog.NewProvider(pricingcatalog.Config{Mode: pricingcatalog.ModeNone}),
+	})
+	if _, exists := result.Rows[0]["record_hash"]; exists {
+		t.Fatalf("hidden record hash leaked into ordinary rows: %#v", result.Rows[0])
+	}
+	output, ok := result.Payload.(*canonical.Envelope)
+	if !ok || output.Products[0].RecordHash != "" || output.Source.Revision == "" || output.EventID == "" {
+		t.Fatalf("hidden output or internal identities are incorrect: %#v", result.Payload)
+	}
+	if sync := result.SyncEnvelope(nil); sync == nil || sync.Products[0].RecordHash == "" {
+		t.Fatalf("hide mode broke the compatibility envelope: %+v", sync)
+	}
+
+	enabled := false
+	cfg.Hashes.Enabled = &enabled
+	result = Build(sourceRows, "kala.db", Options{
+		Canonical:       cfg,
+		CatalogProvider: pricingcatalog.NewProvider(pricingcatalog.Config{Mode: pricingcatalog.ModeNone}),
+	})
+	if !result.DisableSyncContract || result.SyncEnvelope(nil) != nil {
+		t.Fatalf("disabled identities still published product-sync: %+v", result)
+	}
+	if result.Contract == nil || result.Contract.Source.Revision != "" || result.Contract.EventID != "" ||
+		result.Contract.Products[0].RecordHash != "" {
+		t.Fatalf("disabled identities were still materialized: %+v", result.Contract)
+	}
+}
+
 func TestBuildKalaProfileAgainstRealLegacyDatabaseFixture(t *testing.T) {
 	path := filepath.Join("..", "..", "testdata", "kala.db")
 	ds, err := datasource.NewDataSource(path, converter.DefaultCharMapping(), false)

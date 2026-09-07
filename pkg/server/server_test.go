@@ -12,12 +12,14 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/atomicdeploy/patris-export/pkg/appconfig"
 	"github.com/atomicdeploy/patris-export/pkg/canonical"
+	"github.com/atomicdeploy/patris-export/pkg/processmon"
 	"github.com/atomicdeploy/patris-export/pkg/recordpipe"
 	"github.com/gorilla/websocket"
 	"github.com/xuri/excelize/v2"
@@ -64,6 +66,18 @@ func TestServerJSON(t *testing.T) {
 	}
 	defer srv.Close()
 
+	t.Run("405 responses are bodyless", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodPost, "/api/records", nil)
+		w := httptest.NewRecorder()
+		srv.router.ServeHTTP(w, req)
+		if w.Code != http.StatusMethodNotAllowed {
+			t.Fatalf("status = %d, want 405", w.Code)
+		}
+		if w.Body.Len() != 0 || w.Header().Get("Content-Type") != "" || w.Header().Get("Allow") != "" {
+			t.Fatalf("405 response must be bodyless without Content-Type/Allow: headers=%v body=%q", w.Header(), w.Body.String())
+		}
+	})
+
 	t.Run("POST /api/refresh", func(t *testing.T) {
 		req := httptest.NewRequest(http.MethodPost, "/api/refresh", nil)
 		w := httptest.NewRecorder()
@@ -79,9 +93,6 @@ func TestServerJSON(t *testing.T) {
 		if response["refreshed"] != true {
 			t.Fatalf("expected refreshed=true, got %#v", response)
 		}
-		if len(response) != 1 {
-			t.Fatalf("default refresh response changed: %#v", response)
-		}
 	})
 
 	// Test GET /api/records
@@ -94,24 +105,19 @@ func TestServerJSON(t *testing.T) {
 			t.Errorf("Expected status 200, got %d", w.Code)
 		}
 
-		// The endpoint returns Code-keyed records (same format as convert command)
-		var response map[string]interface{}
+		// Generalized source access is an array so order, duplicate Codes, and
+		// rows without a Code remain representable.
+		var response []map[string]interface{}
 		if err := json.NewDecoder(w.Body).Decode(&response); err != nil {
 			t.Fatalf("Failed to decode response: %v", err)
 		}
 
-		// Check that we got 2 records (keyed by Code)
+		// Check that we got both source records.
 		if len(response) != 2 {
 			t.Errorf("Expected 2 records, got %d", len(response))
 		}
-
-		// Verify the records have the expected Codes
-		if _, ok := response["101"]; !ok {
-			t.Error("Expected record with Code=101")
-		}
-		if _, ok := response["102"]; !ok {
-			t.Error("Expected record with Code=102")
-		}
+		rawRowByCode(t, response, "101")
+		rawRowByCode(t, response, "102")
 	})
 
 	t.Run("GET /api/records.csv", func(t *testing.T) {
@@ -185,16 +191,6 @@ func TestServerJSON(t *testing.T) {
 	})
 
 	t.Run("GET /api/records invalid format", func(t *testing.T) {
-		srv.dataSourceMu.Lock()
-		originalDataSource := srv.dataSource
-		srv.dataSource = nil
-		srv.dataSourceMu.Unlock()
-		defer func() {
-			srv.dataSourceMu.Lock()
-			srv.dataSource = originalDataSource
-			srv.dataSourceMu.Unlock()
-		}()
-
 		req := httptest.NewRequest("GET", "/api/records?format=parquet", nil)
 		w := httptest.NewRecorder()
 		srv.router.ServeHTTP(w, req)
@@ -206,6 +202,15 @@ func TestServerJSON(t *testing.T) {
 
 	t.Run("GET /api/product-sync unavailable for generic dataset", func(t *testing.T) {
 		req := httptest.NewRequest(http.MethodGet, "/api/product-sync", nil)
+		w := httptest.NewRecorder()
+		srv.router.ServeHTTP(w, req)
+		if w.Code != http.StatusNotFound {
+			t.Fatalf("Expected status 404, got %d: %s", w.Code, w.Body.String())
+		}
+	})
+
+	t.Run("GET /api/products unavailable for generic dataset", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/api/products", nil)
 		w := httptest.NewRecorder()
 		srv.router.ServeHTTP(w, req)
 		if w.Code != http.StatusNotFound {
@@ -273,7 +278,7 @@ func TestServerJSON(t *testing.T) {
 			t.Errorf("Expected Cache-Control no-cache, got %s", cc)
 		}
 		body := w.Body.String()
-		for _, marker := range []string{`id="exportXLSX"`, `role="menuitem"`, `/api/records.xlsx`} {
+		for _, marker := range []string{`id="exportXLSX"`, `role="menuitem"`, `data-export-format="xlsx"`} {
 			if !strings.Contains(body, marker) {
 				t.Errorf("viewer is missing accessible XLSX export marker %q", marker)
 			}
@@ -549,288 +554,58 @@ func TestServerJSON(t *testing.T) {
 		if w.Code != http.StatusOK {
 			t.Fatalf("Expected records status 200, got %d", w.Code)
 		}
-		var records map[string]interface{}
+		var records []map[string]interface{}
 		if err := json.NewDecoder(w.Body).Decode(&records); err != nil {
 			t.Fatalf("decode records: %v", err)
 		}
-		if _, ok := records["777"]; !ok {
-			t.Fatalf("Expected uploaded record 777, got keys %+v", records)
-		}
+		rawRowByCode(t, records, "777")
 	})
 }
 
-func TestOfficeRecordDownloadsEnforceDistinctTrustedContracts(t *testing.T) {
-	tmpDir := t.TempDir()
-	datasetPath := filepath.Join(tmpDir, "records.json")
-	if err := os.WriteFile(datasetPath, []byte(`{"1":{"Code":"1","Name":"Fixture"}}`), 0600); err != nil {
-		t.Fatal(err)
+func TestGeneralizedRecordsPreserveOrderDuplicatesAndMissingCodes(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "other-schema.json")
+	rows := []map[string]interface{}{
+		{"Code": "DUP", "Value": "first"},
+		{"Code": "DUP", "Value": "second"},
+		{"Value": "without-code"},
 	}
-	xlsxPath := createServerXLSXPackage(t)
-	xlsmPath := createServerMacroPackage(t, ".xlsm", false)
-	xltmPath := createServerMacroPackage(t, ".xltm", false)
-	xltmBytes, err := os.ReadFile(xltmPath)
+	data, err := json.Marshal(rows)
 	if err != nil {
 		t.Fatal(err)
 	}
-	cfg := appconfig.Default()
-	cfg.Export.XLSXTemplate = xlsxPath
-	cfg.Export.XLSXTarget = "table:ExportProducts"
-	cfg.Export.XLSMTemplate = xlsmPath
-	cfg.Export.XLSMTarget = "table:ExportProducts"
-	cfg.Export.XLTMTemplate = xltmPath
-	cfg.Export.XLTMTarget = "table:ExportProducts"
-	configPath := filepath.Join(tmpDir, "config.json")
-	configBytes, err := json.Marshal(cfg)
-	if err != nil {
+	if err := os.WriteFile(path, data, 0600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(configPath, configBytes, 0600); err != nil {
-		t.Fatal(err)
-	}
-	manager, err := appconfig.Load(configPath)
+	srv, err := NewServer(path, nil)
 	if err != nil {
-		t.Fatal(err)
-	}
-	srv, err := NewServerWithOptions(datasetPath, nil, Options{Config: manager})
-	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("create generalized JSON server: %v", err)
 	}
 	defer srv.Close()
 
-	xlsxRequest := httptest.NewRequest(http.MethodGet, "/api/records.xlsx?download=1", nil)
-	xlsxResponse := httptest.NewRecorder()
-	srv.router.ServeHTTP(xlsxResponse, xlsxRequest)
-	if xlsxResponse.Code != http.StatusOK {
-		t.Fatalf("XLSX status = %d: %s", xlsxResponse.Code, xlsxResponse.Body.String())
-	}
-	if got := xlsxResponse.Header().Get("Content-Type"); got != "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" {
-		t.Fatalf("XLSX content type = %q", got)
-	}
-	if xlsxResponse.Header().Get("X-Patris-Office-Record-Count") != "1" ||
-		xlsxResponse.Header().Get("X-Patris-Office-Source-SHA256") == "" ||
-		xlsxResponse.Header().Get("X-Patris-Office-Source-SHA256") == xlsxResponse.Header().Get("X-Patris-Office-Output-SHA256") {
-		t.Fatalf("XLSX provenance headers = %+v", xlsxResponse.Header())
-	}
-	xlsxBook, err := excelize.OpenReader(bytes.NewReader(xlsxResponse.Body.Bytes()))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer xlsxBook.Close()
-	if code, _ := xlsxBook.GetCellValue("Records", "A2", excelize.Options{RawCellValue: true}); code != "1" {
-		t.Fatalf("populated XLSX code = %q, want 1", code)
-	}
-
-	xlsmRequest := httptest.NewRequest(http.MethodGet, "/api/records.xlsm?download=1", nil)
-	xlsmResponse := httptest.NewRecorder()
-	srv.router.ServeHTTP(xlsmResponse, xlsmRequest)
-	if xlsmResponse.Code != http.StatusOK {
-		t.Fatalf("XLSM status = %d: %s", xlsmResponse.Code, xlsmResponse.Body.String())
-	}
-	if got := xlsmResponse.Header().Get("Content-Type"); got != "application/vnd.ms-excel.sheet.macroEnabled.12" {
-		t.Fatalf("XLSM content type = %q", got)
-	}
-	if xlsmResponse.Header().Get("X-Patris-Office-Record-Count") != "1" ||
-		xlsmResponse.Header().Get("X-Patris-Office-Source-SHA256") == "" ||
-		xlsmResponse.Header().Get("X-Patris-Office-Source-SHA256") == xlsmResponse.Header().Get("X-Patris-Office-Output-SHA256") {
-		t.Fatalf("XLSM provenance headers = %+v", xlsmResponse.Header())
-	}
-	xlsmBook, err := excelize.OpenReader(bytes.NewReader(xlsmResponse.Body.Bytes()))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer xlsmBook.Close()
-	if code, _ := xlsmBook.GetCellValue("Records", "A2", excelize.Options{RawCellValue: true}); code != "1" {
-		t.Fatalf("populated XLSM code = %q, want 1", code)
-	}
-
-	xltmRequest := httptest.NewRequest(http.MethodGet, "/api/records.xltm?download=1", nil)
-	xltmResponse := httptest.NewRecorder()
-	srv.router.ServeHTTP(xltmResponse, xltmRequest)
-	if xltmResponse.Code != http.StatusOK {
-		t.Fatalf("XLTM status = %d: %s", xltmResponse.Code, xltmResponse.Body.String())
-	}
-	if got := xltmResponse.Header().Get("Content-Type"); got != "application/vnd.ms-excel.template.macroEnabled.12" {
-		t.Fatalf("XLTM content type = %q", got)
-	}
-	if xltmResponse.Header().Get("X-Patris-Template-Data-Empty") != "true" ||
-		xltmResponse.Header().Get("X-Patris-Office-Record-Count") != "0" ||
-		!bytes.Equal(xltmResponse.Body.Bytes(), xltmBytes) {
-		t.Fatal("XLTM was not served as the verified byte-identical blank template")
-	}
-
-	for _, requestPath := range []string{
-		"/api/records.xlsx?path=C%3A%5Cclient%5Csupplied.xlsx",
-		"/api/records.xlsm?template_path=C%3A%5Cclient%5Csupplied.xlsm",
-		"/api/records.xltm?source_url=https%3A%2F%2Fexample.invalid%2Ftemplate.xltm",
-	} {
-		response := httptest.NewRecorder()
-		srv.router.ServeHTTP(response, httptest.NewRequest(http.MethodGet, requestPath, nil))
-		if response.Code != http.StatusBadRequest {
-			t.Fatalf("client Office source %q status = %d, want 400", requestPath, response.Code)
-		}
-	}
-	bakeResponse := httptest.NewRecorder()
-	srv.router.ServeHTTP(bakeResponse, httptest.NewRequest(http.MethodGet, "/api/records.xltm?include_data=true", nil))
-	if bakeResponse.Code != http.StatusConflict || bakeResponse.Header().Get("X-Patris-Template-Data-Empty") != "required" {
-		t.Fatalf("XLTM bake attempt status=%d marker=%q", bakeResponse.Code, bakeResponse.Header().Get("X-Patris-Template-Data-Empty"))
-	}
-}
-
-func createServerXLSXPackage(t *testing.T) string {
-	t.Helper()
-	path := filepath.Join(t.TempDir(), "trusted.xlsx")
-	book := excelize.NewFile()
-	if err := book.SetSheetName("Sheet1", "Records"); err != nil {
-		t.Fatal(err)
-	}
-	if err := book.SetCellStr("Records", "A1", "Code"); err != nil {
-		t.Fatal(err)
-	}
-	if err := book.SetCellStr("Records", "B1", "Name"); err != nil {
-		t.Fatal(err)
-	}
-	if err := book.AddTable("Records", &excelize.Table{Range: "A1:B2", Name: "ExportProducts", StyleName: "TableStyleMedium2"}); err != nil {
-		t.Fatal(err)
-	}
-	if err := book.SaveAs(path); err != nil {
-		t.Fatal(err)
-	}
-	if err := book.Close(); err != nil {
-		t.Fatal(err)
-	}
-	return path
-}
-
-func TestXLTMDownloadRejectsConfiguredTemplateWithInitialData(t *testing.T) {
-	tmpDir := t.TempDir()
-	datasetPath := filepath.Join(tmpDir, "records.json")
-	if err := os.WriteFile(datasetPath, []byte(`{"1":{"Code":"1","Name":"Fixture"}}`), 0600); err != nil {
-		t.Fatal(err)
-	}
-	cfg := appconfig.Default()
-	cfg.Export.XLTMTemplate = createServerMacroPackage(t, ".xltm", true)
-	cfg.Export.XLTMTarget = "table:ExportProducts"
-	configPath := filepath.Join(tmpDir, "config.json")
-	data, err := json.Marshal(cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(configPath, data, 0600); err != nil {
-		t.Fatal(err)
-	}
-	manager, err := appconfig.Load(configPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	srv, err := NewServerWithOptions(datasetPath, nil, Options{Config: manager})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer srv.Close()
 	response := httptest.NewRecorder()
-	srv.router.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/records.xltm", nil))
-	if response.Code != http.StatusUnprocessableEntity || !strings.Contains(response.Body.String(), "must remain data-empty") {
-		t.Fatalf("populated XLTM status=%d body=%q, want fail-closed 422", response.Code, response.Body.String())
+	srv.router.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/records", nil))
+	if response.Code != http.StatusOK {
+		t.Fatalf("records status=%d: %s", response.Code, response.Body.String())
+	}
+	var decoded []map[string]interface{}
+	if err := json.NewDecoder(response.Body).Decode(&decoded); err != nil {
+		t.Fatalf("decode records: %v", err)
+	}
+	if len(decoded) != 3 ||
+		decoded[0]["Value"] != "first" ||
+		decoded[1]["Value"] != "second" ||
+		decoded[2]["Value"] != "without-code" {
+		t.Fatalf("generalized records were reordered or collapsed: %#v", decoded)
+	}
+	if decoded[0]["Code"] != "DUP" || decoded[1]["Code"] != "DUP" {
+		t.Fatalf("duplicate Codes were not preserved: %#v", decoded)
+	}
+	if _, exists := decoded[2]["Code"]; exists {
+		t.Fatalf("missing Code was synthesized: %#v", decoded[2])
 	}
 }
 
-func serverTestVBAProject(t *testing.T) []byte {
-	t.Helper()
-	candidates, err := filepath.Glob(filepath.Join("..", "..", "docs", "examples", "*.xltm"))
-	if err != nil || len(candidates) != 1 {
-		t.Fatalf("locate tracked macro fixture: candidates=%v error=%v", candidates, err)
-	}
-	archive, err := zip.OpenReader(candidates[0])
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer archive.Close()
-	for _, entry := range archive.File {
-		if entry.Name != "xl/vbaProject.bin" {
-			continue
-		}
-		reader, err := entry.Open()
-		if err != nil {
-			t.Fatal(err)
-		}
-		value, readErr := io.ReadAll(reader)
-		_ = reader.Close()
-		if readErr != nil || len(value) == 0 {
-			t.Fatalf("read vbaProject.bin: bytes=%d error=%v", len(value), readErr)
-		}
-		return value
-	}
-	t.Fatal("tracked macro fixture has no vbaProject.bin")
-	return nil
-}
-
-func createServerMacroPackage(t *testing.T, extension string, populated bool) string {
-	t.Helper()
-	path := filepath.Join(t.TempDir(), "trusted"+extension)
-	book := excelize.NewFile()
-	if err := book.SetSheetName("Sheet1", "Records"); err != nil {
-		t.Fatal(err)
-	}
-	if err := book.SetCellStr("Records", "A1", "Code"); err != nil {
-		t.Fatal(err)
-	}
-	if err := book.SetCellStr("Records", "B1", "Name"); err != nil {
-		t.Fatal(err)
-	}
-	if populated {
-		_ = book.SetCellStr("Records", "A2", "INITIAL")
-	}
-	if err := book.AddTable("Records", &excelize.Table{Range: "A1:B2", Name: "ExportProducts", StyleName: "TableStyleMedium2"}); err != nil {
-		t.Fatal(err)
-	}
-	if err := book.AddVBAProject(serverTestVBAProject(t)); err != nil {
-		t.Fatal(err)
-	}
-	if err := book.SaveAs(path); err != nil {
-		t.Fatal(err)
-	}
-	if err := book.Close(); err != nil {
-		t.Fatal(err)
-	}
-	return path
-}
-
-func TestMacroEnabledRecordDownloadRequiresConfiguredMatchingTemplate(t *testing.T) {
-	tmpDir := t.TempDir()
-	datasetPath := filepath.Join(tmpDir, "records.json")
-	if err := os.WriteFile(datasetPath, []byte(`{"1":{"Code":"1"}}`), 0600); err != nil {
-		t.Fatal(err)
-	}
-	srv, err := NewServer(datasetPath, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer srv.Close()
-	for _, format := range []string{"xlsm", "xltm"} {
-		request := httptest.NewRequest(http.MethodGet, "/api/records."+format, nil)
-		recorder := httptest.NewRecorder()
-		srv.router.ServeHTTP(recorder, request)
-		if recorder.Code != http.StatusNotFound {
-			t.Fatalf("%s status = %d, want 404", format, recorder.Code)
-		}
-	}
-}
-
-func TestBrowserConfigRedactsOfficeTemplatePaths(t *testing.T) {
-	cfg := appconfig.Default()
-	cfg.Export.XLSXTemplate = `C:\private\records.xlsx`
-	cfg.Export.XLSXTarget = `table:ExportProducts`
-	cfg.Export.XLSMTemplate = `C:\private\records.xlsm`
-	cfg.Export.XLSMTarget = `table:ExportProducts`
-	cfg.Export.XLTMTemplate = `C:\private\records.xltm`
-	cfg.Export.XLTMTarget = `name:ExportProducts`
-	got := browserConfig(cfg)
-	if got.Export.XLSXTemplate != "" || got.Export.XLSXTarget != "" || got.Export.XLSMTemplate != "" || got.Export.XLSMTarget != "" || got.Export.XLTMTemplate != "" || got.Export.XLTMTarget != "" {
-		t.Fatalf("browser config exposed Office template paths: %+v", got.Export)
-	}
-}
-
-func TestBrowserConfigRedactsAndPreservesProtectedMySQLConnectionConfig(t *testing.T) {
+func TestBrowserConfigRedactsAndPreservesProtectedServerConfig(t *testing.T) {
 	tmpDir := t.TempDir()
 	configPath := filepath.Join(tmpDir, "patris-export.json")
 	manager, err := appconfig.Load(configPath)
@@ -840,24 +615,43 @@ func TestBrowserConfigRedactsAndPreservesProtectedMySQLConnectionConfig(t *testi
 	const protectedDSN = "protected-dsn-test-value"
 	const protectedCAPath = "C:/protected/mysql/private-ca-path.pem"
 	const protectedServerName = "private-db.internal.example"
-	const protectedXLSXPath = "C:/protected/templates/records.xlsx"
-	const protectedXLSXTarget = "table:ExportProducts"
-	const protectedXLSMPath = "C:/protected/templates/records.xlsm"
-	const protectedXLSMTarget = "table:ExportProducts"
-	const protectedXLTMPath = "C:/protected/templates/records.xltm"
-	const protectedXLTMTarget = "name:ExportProducts"
+	const protectedEdgeToken = "protected-edge-token-test-value"
+	const protectedDatabaseURL = "https://source-user:source-password@source.example.test/catalog/kala.db?signature=protected-source-query#protected-source-fragment"
+	const protectedSendURL = "https://hook-user:hook-password@hooks.example.test/updates?credential=protected-hook-query#protected-hook-fragment"
+	const protectedEdgeURL = "https://edge-user:edge-password@edge.example.test/api/edge/upload?credential=protected-edge-query#protected-edge-fragment"
+	const protectedPricingURL = "https://pricing-user:pricing-password@pricing.example.test/wp-json/digitalogic?credential=protected-pricing-query#protected-pricing-fragment"
+	const protectedCommandSecret = "protected-command-argument-secret"
+	const sendSecretEnv = "PATRIS_BROWSER_CONFIG_SEND_SECRET"
+	const sendSecretValue = "runtime-send-secret-must-never-be-serialized"
+	const pricingTokenEnv = "PATRIS_BROWSER_CONFIG_PRICING_TOKEN"
+	const pricingTokenValue = "runtime-pricing-token-must-never-be-serialized"
+	t.Setenv(sendSecretEnv, sendSecretValue)
+	t.Setenv(pricingTokenEnv, pricingTokenValue)
+	protectedHeaders := map[string]string{
+		"Authorization": "Bearer protected-send-token-test-value",
+		"X-API-Key":     "protected-send-api-key-test-value",
+	}
+	protectedExtra := map[string]interface{}{
+		"future_integration": map[string]interface{}{
+			"credential": "protected-future-extension-secret",
+		},
+	}
 	if err := manager.Update(func(cfg *appconfig.Config) {
+		cfg.Database.Path = protectedDatabaseURL
 		cfg.Export.MySQLDSN = protectedDSN
 		cfg.Export.MySQLTLSCAFile = protectedCAPath
 		cfg.Export.MySQLTLSServerName = protectedServerName
-		cfg.Export.XLSXTemplate = protectedXLSXPath
-		cfg.Export.XLSXTarget = protectedXLSXTarget
-		cfg.Export.XLSMTemplate = protectedXLSMPath
-		cfg.Export.XLSMTarget = protectedXLSMTarget
-		cfg.Export.XLTMTemplate = protectedXLTMPath
-		cfg.Export.XLTMTarget = protectedXLTMTarget
+		cfg.Edge.Token = protectedEdgeToken
+		cfg.Edge.TargetURL = protectedEdgeURL
+		cfg.SendUpdates.URL = protectedSendURL
+		cfg.SendUpdates.Headers = protectedHeaders
+		cfg.SendUpdates.Command = []string{"delivery-helper", "--token", protectedCommandSecret}
+		cfg.SendUpdates.ProductSyncSecretEnv = sendSecretEnv
+		cfg.Canonical.Pricing.Digitalogic.BaseURL = protectedPricingURL
+		cfg.Canonical.Pricing.Digitalogic.BearerTokenEnv = pricingTokenEnv
+		cfg.Extra = protectedExtra
 	}); err != nil {
-		t.Fatalf("store protected MySQL config: %v", err)
+		t.Fatalf("store protected server config: %v", err)
 	}
 
 	jsonPath := filepath.Join(tmpDir, "records.json")
@@ -877,19 +671,72 @@ func TestBrowserConfigRedactsAndPreservesProtectedMySQLConnectionConfig(t *testi
 			t.Fatalf("marshal browser payload: %v", err)
 		}
 		body := string(data)
+		var decoded interface{}
+		if err := json.Unmarshal(data, &decoded); err != nil {
+			t.Fatalf("decode browser payload for shape validation: %v", err)
+		}
+		recentSalesProfiles := 0
+		var checkRecentSales func(interface{})
+		checkRecentSales = func(current interface{}) {
+			switch value := current.(type) {
+			case map[string]interface{}:
+				for key, nested := range value {
+					if key == "recent_sales" {
+						recentSalesProfiles++
+						profile, ok := nested.(map[string]interface{})
+						if !ok || len(profile) != 0 {
+							t.Fatalf("browser recent_sales must be an opaque empty object, got %#v", nested)
+						}
+					}
+					checkRecentSales(nested)
+				}
+			case []interface{}:
+				for _, nested := range value {
+					checkRecentSales(nested)
+				}
+			}
+		}
+		checkRecentSales(decoded)
+		if recentSalesProfiles == 0 {
+			t.Fatalf("browser payload omitted opaque recent_sales boundary: %s", body)
+		}
 		for _, forbidden := range []string{
 			protectedDSN,
 			protectedCAPath,
 			protectedServerName,
-			protectedXLSXPath,
-			protectedXLSMPath,
-			protectedXLTMPath,
+			protectedEdgeToken,
+			protectedHeaders["Authorization"],
+			protectedHeaders["X-API-Key"],
+			"protected-future-extension-secret",
+			"source-user",
+			"source-password",
+			"protected-source-query",
+			"protected-source-fragment",
+			"hook-user",
+			"hook-password",
+			"protected-hook-query",
+			"protected-hook-fragment",
+			"edge-user",
+			"edge-password",
+			"protected-edge-query",
+			"protected-edge-fragment",
+			"pricing-user",
+			"pricing-password",
+			"protected-pricing-query",
+			"protected-pricing-fragment",
+			protectedCommandSecret,
+			sendSecretValue,
+			pricingTokenValue,
 			`"mysql_dsn"`,
 			`"mysql_tls_ca_file"`,
 			`"mysql_tls_server_name"`,
+			`"headers"`,
+			`"command"`,
+			`"token"`,
+			`"extra"`,
 		} {
 			if strings.Contains(body, forbidden) {
-				t.Fatalf("browser payload exposed protected SQL configuration %q: %s", forbidden, body)
+				t.Fatalf("browser payload exposed protected server configuration %q: %s", forbidden, body)
 			}
 		}
 	}
@@ -900,8 +747,23 @@ func TestBrowserConfigRedactsAndPreservesProtectedMySQLConnectionConfig(t *testi
 		t.Fatalf("GET /api/config status = %d: %s", get.Code, get.Body.String())
 	}
 	assertRedacted(t, json.RawMessage(get.Body.Bytes()))
+	for _, safeURL := range []string{
+		"https://source.example.test/catalog/kala.db",
+		"https://hooks.example.test/updates",
+		"https://edge.example.test/api/edge/upload",
+		"https://pricing.example.test/wp-json/digitalogic",
+	} {
+		if !strings.Contains(get.Body.String(), safeURL) {
+			t.Fatalf("browser config omitted sanitized endpoint %q: %s", safeURL, get.Body.String())
+		}
+	}
+	for _, identifier := range []string{sendSecretEnv, pricingTokenEnv} {
+		if !strings.Contains(get.Body.String(), identifier) {
+			t.Fatalf("browser config omitted safe environment-variable identifier %q: %s", identifier, get.Body.String())
+		}
+	}
 
-	initial := srv.initialSnapshotMessage(recordpipe.Result{Rows: []map[string]interface{}{}, KeyField: "Code"}, jsonPath, "")
+	initial := srv.initialSnapshotMessage(recordpipe.Result{Rows: []map[string]interface{}{}, KeyField: "Code"}, protectedDatabaseURL, "")
 	assertRedacted(t, initial)
 
 	events, unsubscribe := srv.SubscribeEvents(1)
@@ -916,43 +778,119 @@ func TestBrowserConfigRedactsAndPreservesProtectedMySQLConnectionConfig(t *testi
 
 	clientConfig := browserConfig(manager.Get())
 	clientConfig.UI.Theme = "dark"
+	putConfig := func(cfg interface{}) {
+		t.Helper()
+		body, err := json.Marshal(cfg)
+		if err != nil {
+			t.Fatalf("marshal browser update: %v", err)
+		}
+		put := httptest.NewRecorder()
+		srv.router.ServeHTTP(put, httptest.NewRequest(http.MethodPut, "/api/config", bytes.NewReader(body)))
+		if put.Code != http.StatusOK {
+			t.Fatalf("PUT /api/config status = %d: %s", put.Code, put.Body.String())
+		}
+		assertRedacted(t, json.RawMessage(put.Body.Bytes()))
+	}
+	assertStoredProtected := func() {
+		t.Helper()
+		got := manager.Get()
+		headersPreserved := len(got.SendUpdates.Headers) == len(protectedHeaders)
+		for key, value := range protectedHeaders {
+			headersPreserved = headersPreserved && got.SendUpdates.Headers[key] == value
+		}
+		extraIntegration, extraOK := got.Extra["future_integration"].(map[string]interface{})
+		extraPreserved := extraOK && extraIntegration["credential"] == "protected-future-extension-secret"
+		if got.Export.MySQLDSN != protectedDSN || got.Export.MySQLTLSCAFile != protectedCAPath ||
+			got.Export.MySQLTLSServerName != protectedServerName || got.Edge.Token != protectedEdgeToken ||
+			got.Database.Path != protectedDatabaseURL || got.SendUpdates.URL != protectedSendURL ||
+			got.Edge.TargetURL != protectedEdgeURL || got.Canonical.Pricing.Digitalogic.BaseURL != protectedPricingURL ||
+			len(got.SendUpdates.Command) != 3 || got.SendUpdates.Command[2] != protectedCommandSecret ||
+			!headersPreserved || !extraPreserved || got.UI.Theme != "dark" {
+			t.Fatalf("browser update did not preserve protected server config and apply UI setting: DSN=%t CA=%t name=%t edge_token=%t database_url=%t send_url=%t edge_url=%t pricing_url=%t command=%t headers=%t extra=%t theme=%q",
+				got.Export.MySQLDSN == protectedDSN,
+				got.Export.MySQLTLSCAFile == protectedCAPath,
+				got.Export.MySQLTLSServerName == protectedServerName,
+				got.Edge.Token == protectedEdgeToken,
+				got.Database.Path == protectedDatabaseURL,
+				got.SendUpdates.URL == protectedSendURL,
+				got.Edge.TargetURL == protectedEdgeURL,
+				got.Canonical.Pricing.Digitalogic.BaseURL == protectedPricingURL,
+				len(got.SendUpdates.Command) == 3 && got.SendUpdates.Command[2] == protectedCommandSecret,
+				headersPreserved,
+				extraPreserved,
+				got.UI.Theme,
+			)
+		}
+	}
+
+	// A normal browser round trip omits all protected fields.
+	putConfig(clientConfig)
+	assertStoredProtected()
+
+	// Crafted replacement and redaction-placeholder values are ignored too.
 	clientConfig.Export.MySQLDSN = "browser-supplied-dsn-must-be-ignored"
 	clientConfig.Export.MySQLTLSCAFile = "browser-supplied-ca-must-be-ignored.pem"
 	clientConfig.Export.MySQLTLSServerName = "browser-supplied-name.invalid"
-	clientConfig.Export.XLSXTemplate = "C:/browser/replacement.xlsx"
-	clientConfig.Export.XLSXTarget = "table:BrowserReplacement"
-	clientConfig.Export.XLSMTemplate = "C:/browser/replacement.xlsm"
-	clientConfig.Export.XLSMTarget = "table:BrowserReplacement"
-	clientConfig.Export.XLTMTemplate = "C:/browser/replacement.xltm"
-	clientConfig.Export.XLTMTarget = "name:BrowserReplacement"
-	body, err := json.Marshal(clientConfig)
+	clientConfig.Database.Path = "https://replacement-user:replacement-password@replacement.example.test/catalog.db?token=browser-supplied-source-token"
+	clientConfig.Edge.Token = "[REDACTED]"
+	clientConfig.Edge.TargetURL = "https://replacement-user:replacement-password@replacement.example.test/api/edge/upload?token=browser-supplied-edge-token"
+	clientConfig.SendUpdates.URL = "https://replacement-user:replacement-password@replacement.example.test/updates?token=browser-supplied-hook-token"
+	clientConfig.Canonical.Pricing.Digitalogic.BaseURL = "https://replacement-user:replacement-password@replacement.example.test/pricing?token=browser-supplied-pricing-token"
+	clientConfig.SendUpdates.Headers = map[string]string{
+		"Authorization": "Bearer browser-supplied-token-must-be-ignored",
+		"X-API-Key":     "browser-supplied-key-must-be-ignored",
+	}
+	clientConfig.SendUpdates.Command = []string{"replacement-helper", "--token", "browser-supplied-command-token"}
+	clientConfig.Extra = map[string]interface{}{
+		"future_integration": map[string]interface{}{"credential": "[REDACTED]"},
+	}
+	putConfig(clientConfig)
+	assertStoredProtected()
+}
+
+func TestBrowserDiagnosticsRemoveURLCredentialsAndCommandLines(t *testing.T) {
+	const protectedURL = "https://source-user:source-password@source.example.test/catalog/kala.db?signature=protected-query#protected-fragment"
+	const protectedCommand = `patris81.exe --token protected-process-token --source "` + protectedURL + `"`
+
+	if got := browserSafeURL(protectedURL); got != "https://source.example.test/catalog/kala.db" {
+		t.Fatalf("browserSafeURL() = %q", got)
+	}
+	if got := browserSafeURL("https://?credential=malformed-secret"); got != "" {
+		t.Fatalf("browserSafeURL() malformed URL = %q, want fail-closed empty value", got)
+	}
+	err := fmt.Errorf("download failed: Get %q: unavailable", "https://source-user:xxxxx@source.example.test/catalog/kala.db?signature=protected-query#protected-fragment")
+	if got := browserSafeErrorMessage(err, protectedURL); strings.Contains(got, "protected-query") ||
+		strings.Contains(got, "source-user") || got != `download failed: Get "https://source.example.test/catalog/kala.db": unavailable` {
+		t.Fatalf("browserSafeErrorMessage() = %q", got)
+	}
+
+	processes := browserSafeProcesses([]processmon.ProcessInfo{{
+		PID:       42,
+		Name:      "patris81.exe",
+		Cmdline:   protectedCommand,
+		OpenFiles: []string{protectedURL},
+	}})
+	if len(processes) != 1 || processes[0].Cmdline != "" ||
+		len(processes[0].OpenFiles) != 1 || processes[0].OpenFiles[0] != "https://source.example.test/catalog/kala.db" {
+		t.Fatalf("browserSafeProcesses() = %#v", processes)
+	}
+	if empty := browserSafeProcesses(nil); empty == nil || len(empty) != 0 {
+		t.Fatalf("browserSafeProcesses(nil) = %#v, want a non-nil empty array", empty)
+	}
+
+	result := recordpipe.Result{Rows: []map[string]interface{}{}, KeyField: "Code"}
+	srv := &Server{}
+	message, err := json.Marshal(srv.initialSnapshotMessage(result, protectedURL, ""))
 	if err != nil {
-		t.Fatalf("marshal browser update: %v", err)
+		t.Fatalf("marshal initial snapshot: %v", err)
 	}
-	put := httptest.NewRecorder()
-	srv.router.ServeHTTP(put, httptest.NewRequest(http.MethodPut, "/api/config", bytes.NewReader(body)))
-	if put.Code != http.StatusOK {
-		t.Fatalf("PUT /api/config status = %d: %s", put.Code, put.Body.String())
+	for _, forbidden := range []string{"source-user", "source-password", "protected-query", "protected-fragment"} {
+		if strings.Contains(string(message), forbidden) {
+			t.Fatalf("initial snapshot exposed protected URL component %q: %s", forbidden, message)
+		}
 	}
-	assertRedacted(t, json.RawMessage(put.Body.Bytes()))
-	if got := manager.Get(); got.Export.MySQLDSN != protectedDSN || got.Export.MySQLTLSCAFile != protectedCAPath ||
-		got.Export.MySQLTLSServerName != protectedServerName ||
-		got.Export.XLSXTemplate != protectedXLSXPath || got.Export.XLSXTarget != protectedXLSXTarget ||
-		got.Export.XLSMTemplate != protectedXLSMPath || got.Export.XLSMTarget != protectedXLSMTarget ||
-		got.Export.XLTMTemplate != protectedXLTMPath || got.Export.XLTMTarget != protectedXLTMTarget ||
-		got.UI.Theme != "dark" {
-		t.Fatalf("browser update did not preserve protected server config and apply UI setting: DSN=%t CA=%t name=%t xlsx=%t xlsx_target=%t xlsm=%t xlsm_target=%t xltm=%t xltm_target=%t theme=%q",
-			got.Export.MySQLDSN == protectedDSN,
-			got.Export.MySQLTLSCAFile == protectedCAPath,
-			got.Export.MySQLTLSServerName == protectedServerName,
-			got.Export.XLSXTemplate == protectedXLSXPath,
-			got.Export.XLSXTarget == protectedXLSXTarget,
-			got.Export.XLSMTemplate == protectedXLSMPath,
-			got.Export.XLSMTarget == protectedXLSMTarget,
-			got.Export.XLTMTemplate == protectedXLTMPath,
-			got.Export.XLTMTarget == protectedXLTMTarget,
-			got.UI.Theme,
-		)
+	if !strings.Contains(string(message), "https://source.example.test/catalog/kala.db") {
+		t.Fatalf("initial snapshot omitted sanitized source URL: %s", message)
 	}
 }
 
@@ -962,25 +900,43 @@ func TestCanonicalKalaParityAcrossRESTCSVXLSXAndWebSocket(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load canonical fixture config: %v", err)
 	}
-	dbPath := filepath.Join("..", "..", "testdata", "kala.db")
+	dbPath := isolatedKalaFixture(t)
 	srv, err := NewServerWithOptions(dbPath, nil, Options{Config: manager}, false)
 	if err != nil {
 		t.Fatalf("create canonical server: %v", err)
 	}
 	defer srv.Close()
 
-	request := httptest.NewRequest(http.MethodGet, "/api/records", nil)
+	rawRequest := httptest.NewRequest(http.MethodGet, "/api/records", nil)
+	rawRecorder := httptest.NewRecorder()
+	srv.router.ServeHTTP(rawRecorder, rawRequest)
+	if rawRecorder.Code != http.StatusOK {
+		t.Fatalf("raw records status = %d: %s", rawRecorder.Code, rawRecorder.Body.String())
+	}
+	var rawRecords []map[string]interface{}
+	if err := json.NewDecoder(rawRecorder.Body).Decode(&rawRecords); err != nil {
+		t.Fatalf("decode generalized source records: %v", err)
+	}
+	rawProduct := rawRowByCode(t, rawRecords, "102001011")
+	if _, exists := rawProduct["Sharh1"]; !exists {
+		t.Fatalf("generalized /api/records lost source fields: %#v", rawProduct)
+	}
+	if _, exists := rawProduct["product_code"]; exists {
+		t.Fatalf("generalized /api/records unexpectedly applied the kala projection: %#v", rawProduct)
+	}
+
+	request := httptest.NewRequest(http.MethodGet, "/api/products", nil)
 	recorder := httptest.NewRecorder()
 	srv.router.ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusOK {
-		t.Fatalf("REST status = %d: %s", recorder.Code, recorder.Body.String())
+		t.Fatalf("products status = %d: %s", recorder.Code, recorder.Body.String())
 	}
 	var keyedProducts map[string]map[string]interface{}
 	if err := json.NewDecoder(recorder.Body).Decode(&keyedProducts); err != nil {
-		t.Fatalf("decode canonical REST product rows: %v", err)
+		t.Fatalf("decode canonical products: %v", err)
 	}
 	if len(keyedProducts) != 292 {
-		t.Fatalf("canonical /api/records returned %d top-level entries, want 292 leaf product rows", len(keyedProducts))
+		t.Fatalf("canonical /api/products returned %d top-level entries, want 292 leaf product rows", len(keyedProducts))
 	}
 	for _, metadata := range []string{"schema", "event_id", "products"} {
 		if _, leaked := keyedProducts[metadata]; leaked {
@@ -1027,7 +983,7 @@ func TestCanonicalKalaParityAcrossRESTCSVXLSXAndWebSocket(t *testing.T) {
 		t.Fatalf("canonical /api/categories returned %d entries, want 54", len(keyedCategories))
 	}
 	if _, leakedAsProduct := keyedProducts["101"]; leakedAsProduct {
-		t.Fatalf("root category Code 101 leaked into /api/records")
+		t.Fatalf("root category Code 101 leaked into /api/products")
 	}
 	if category, exists := keyedCategories["101"]; !exists || category["category_code"] != nil || category["depth"] != float64(1) {
 		// Keyed payloads carry the Code in the object key, not redundantly in
@@ -1035,7 +991,7 @@ func TestCanonicalKalaParityAcrossRESTCSVXLSXAndWebSocket(t *testing.T) {
 		t.Fatalf("root category Code 101 missing or malformed: %#v", category)
 	}
 
-	csvRequest := httptest.NewRequest(http.MethodGet, "/api/records.csv", nil)
+	csvRequest := httptest.NewRequest(http.MethodGet, "/api/products.csv", nil)
 	csvRecorder := httptest.NewRecorder()
 	srv.router.ServeHTTP(csvRecorder, csvRequest)
 	csvRows, err := csv.NewReader(strings.NewReader(csvRecorder.Body.String())).ReadAll()
@@ -1044,7 +1000,7 @@ func TestCanonicalKalaParityAcrossRESTCSVXLSXAndWebSocket(t *testing.T) {
 	}
 	assertTabularCanonicalFixture(t, "CSV", csvRows)
 
-	xlsxRequest := httptest.NewRequest(http.MethodGet, "/api/records.xlsx?download=1&rtl=1", nil)
+	xlsxRequest := httptest.NewRequest(http.MethodGet, "/api/products.xlsx?download=1&rtl=1", nil)
 	xlsxRecorder := httptest.NewRecorder()
 	srv.router.ServeHTTP(xlsxRecorder, xlsxRequest)
 	if contentDisposition := xlsxRecorder.Header().Get("Content-Disposition"); !strings.Contains(contentDisposition, "kala.xlsx") {
@@ -1100,7 +1056,7 @@ func TestCanonicalKalaParityAcrossRESTCSVXLSXAndWebSocket(t *testing.T) {
 	}
 	_ = book.Close()
 
-	formulaRequest := httptest.NewRequest(http.MethodGet, "/api/records.xlsx?language=fa&mode=formula&zebra=0", nil)
+	formulaRequest := httptest.NewRequest(http.MethodGet, "/api/products.xlsx?language=fa&mode=formula&zebra=0", nil)
 	formulaRecorder := httptest.NewRecorder()
 	srv.router.ServeHTTP(formulaRecorder, formulaRequest)
 	if formulaRecorder.Code != http.StatusOK {
@@ -1212,7 +1168,7 @@ func TestCanonicalProductSyncRemainsAvailableWithRawViewerMode(t *testing.T) {
 		t.Fatalf("enable raw viewer mode: %v", err)
 	}
 
-	dbPath := filepath.Join("..", "..", "testdata", "kala.db")
+	dbPath := isolatedKalaFixture(t)
 	srv, err := NewServerWithOptions(dbPath, nil, Options{Config: manager}, false)
 	if err != nil {
 		t.Fatalf("create raw canonical server: %v", err)
@@ -1224,14 +1180,11 @@ func TestCanonicalProductSyncRemainsAvailableWithRawViewerMode(t *testing.T) {
 	if recordsRecorder.Code != http.StatusOK {
 		t.Fatalf("raw records status = %d: %s", recordsRecorder.Code, recordsRecorder.Body.String())
 	}
-	var rawRecords map[string]map[string]interface{}
+	var rawRecords []map[string]interface{}
 	if err := json.NewDecoder(recordsRecorder.Body).Decode(&rawRecords); err != nil {
 		t.Fatalf("decode raw viewer rows: %v", err)
 	}
-	rawProduct, ok := rawRecords["102001011"]
-	if !ok {
-		t.Fatalf("raw viewer did not preserve Code-keyed KALA row")
-	}
+	rawProduct := rawRowByCode(t, rawRecords, "102001011")
 	if _, exists := rawProduct["Sharh1"]; !exists {
 		t.Fatalf("raw viewer row no longer exposes diagnostic source fields: %#v", rawProduct)
 	}
@@ -1256,6 +1209,152 @@ func TestCanonicalProductSyncRemainsAvailableWithRawViewerMode(t *testing.T) {
 	}
 	product := canonicalTypedProductByCode(t, envelope.Products, "102001011")
 	assertCanonicalFixtureValues(t, "raw-mode product-sync", product)
+}
+
+func TestCanonicalHashVisibilityIsBoundedByServerPolicy(t *testing.T) {
+	fixtureConfig := filepath.Join("..", "..", "testdata", "canonical-static-config.json")
+	configData, err := os.ReadFile(fixtureConfig)
+	if err != nil {
+		t.Fatalf("read canonical fixture config: %v", err)
+	}
+	configPath := filepath.Join(t.TempDir(), "hash-policy-config.json")
+	if err := os.WriteFile(configPath, configData, 0600); err != nil {
+		t.Fatalf("copy canonical fixture config: %v", err)
+	}
+	manager, err := appconfig.Load(configPath)
+	if err != nil {
+		t.Fatalf("load canonical fixture config: %v", err)
+	}
+	expose := false
+	if err := manager.Update(func(cfg *appconfig.Config) {
+		cfg.Canonical.Hashes.Expose = &expose
+	}); err != nil {
+		t.Fatalf("hide record hashes: %v", err)
+	}
+
+	dbPath := isolatedKalaFixture(t)
+	srv, err := NewServerWithOptions(dbPath, nil, Options{Config: manager}, false)
+	if err != nil {
+		t.Fatalf("create canonical server: %v", err)
+	}
+	defer srv.Close()
+
+	assertProductsWithoutHashes := func(path string) {
+		t.Helper()
+		response := httptest.NewRecorder()
+		srv.router.ServeHTTP(response, httptest.NewRequest(http.MethodGet, path, nil))
+		if response.Code != http.StatusOK {
+			t.Fatalf("%s status=%d: %s", path, response.Code, response.Body.String())
+		}
+		var products map[string]map[string]interface{}
+		if err := json.NewDecoder(response.Body).Decode(&products); err != nil {
+			t.Fatalf("decode %s: %v", path, err)
+		}
+		if _, exists := products["102001011"]["record_hash"]; exists {
+			t.Fatalf("%s exposed record_hash against policy", path)
+		}
+	}
+
+	// A request can hide data, but cannot reveal data hidden by configuration.
+	assertProductsWithoutHashes("/api/products?include_hashes=true")
+	assertCategoriesWithoutHashes := func(path string) {
+		t.Helper()
+		response := httptest.NewRecorder()
+		srv.router.ServeHTTP(response, httptest.NewRequest(http.MethodGet, path, nil))
+		if response.Code != http.StatusOK {
+			t.Fatalf("%s status=%d: %s", path, response.Code, response.Body.String())
+		}
+		var categories map[string]map[string]interface{}
+		if err := json.NewDecoder(response.Body).Decode(&categories); err != nil {
+			t.Fatalf("decode %s: %v", path, err)
+		}
+		if len(categories) == 0 {
+			t.Fatalf("%s returned no categories", path)
+		}
+		for _, category := range categories {
+			if _, exists := category["record_hash"]; exists {
+				t.Fatalf("%s exposed record_hash against policy", path)
+			}
+			break
+		}
+	}
+	assertCategoriesWithoutHashes("/api/categories?include_hashes=true")
+
+	contract := httptest.NewRecorder()
+	srv.router.ServeHTTP(contract, httptest.NewRequest(http.MethodGet, "/api/product-sync", nil))
+	if contract.Code != http.StatusOK {
+		t.Fatalf("hidden ordinary hashes broke product-sync: %d %s", contract.Code, contract.Body.String())
+	}
+	var envelope canonical.Envelope
+	if err := json.NewDecoder(contract.Body).Decode(&envelope); err != nil ||
+		len(envelope.Products) == 0 || envelope.Products[0].RecordHash == "" ||
+		envelope.Source.Revision == "" || envelope.EventID == "" {
+		t.Fatalf("compatibility identities missing: envelope=%+v err=%v", envelope, err)
+	}
+
+	expose = true
+	if err := manager.Update(func(cfg *appconfig.Config) {
+		cfg.Canonical.Hashes.Expose = &expose
+	}); err != nil {
+		t.Fatalf("enable record hash publication: %v", err)
+	}
+	assertProductsWithoutHashes("/api/products?include_hashes=false")
+
+	enabled := false
+	if err := manager.Update(func(cfg *appconfig.Config) {
+		cfg.Canonical.Hashes.Enabled = &enabled
+	}); err != nil {
+		t.Fatalf("disable record hashes: %v", err)
+	}
+	assertProductsWithoutHashes("/api/products?include_hashes=true")
+	assertCategoriesWithoutHashes("/api/categories?include_hashes=true")
+	disabledContract := httptest.NewRecorder()
+	srv.router.ServeHTTP(disabledContract, httptest.NewRequest(http.MethodGet, "/api/product-sync", nil))
+	if disabledContract.Code != http.StatusNotFound {
+		t.Fatalf("disabled product-sync status=%d, want 404: %s", disabledContract.Code, disabledContract.Body.String())
+	}
+	result, err := srv.RecordResult()
+	if err != nil {
+		t.Fatalf("build disabled-hash result: %v", err)
+	}
+	if _, exists := srv.initialSnapshotMessage(result, dbPath, "")["contract"]; exists {
+		t.Fatal("disabled compatibility contract leaked into WebSocket snapshot")
+	}
+}
+
+func rawRowByCode(t *testing.T, rows []map[string]interface{}, code string) map[string]interface{} {
+	t.Helper()
+	for _, row := range rows {
+		for _, field := range []string{"Code", "code"} {
+			value, exists := row[field]
+			if !exists {
+				continue
+			}
+			actual := fmt.Sprint(value)
+			if numeric, ok := value.(float64); ok {
+				actual = strconv.FormatFloat(numeric, 'f', -1, 64)
+			}
+			if actual == code {
+				return row
+			}
+		}
+	}
+	t.Fatalf("source row %s not found", code)
+	return nil
+}
+
+func isolatedKalaFixture(t *testing.T) string {
+	t.Helper()
+	source := filepath.Join("..", "..", "testdata", "kala.db")
+	data, err := os.ReadFile(source)
+	if err != nil {
+		t.Fatalf("read kala fixture: %v", err)
+	}
+	target := filepath.Join(t.TempDir(), "kala.db")
+	if err := os.WriteFile(target, data, 0600); err != nil {
+		t.Fatalf("copy kala fixture: %v", err)
+	}
+	return target
 }
 
 func TestCanonicalRequestTimeoutBoundsDigitalogicPricing(t *testing.T) {
@@ -1790,6 +1889,22 @@ func TestProcessEndpoints(t *testing.T) {
 		t.Fatalf("Failed to create server: %v", err)
 	}
 	defer srv.Close()
+	assertProcessArray := func(t *testing.T, value interface{}) {
+		t.Helper()
+		processes, ok := value.([]interface{})
+		if !ok {
+			t.Fatalf("Expected processes array, got %T", value)
+		}
+		for _, raw := range processes {
+			process, ok := raw.(map[string]interface{})
+			if !ok {
+				t.Fatalf("Expected process object, got %T", raw)
+			}
+			if process["cmdline"] != "" {
+				t.Fatalf("Process command line was not redacted: %#v", process["cmdline"])
+			}
+		}
+	}
 
 	t.Run("GET /api/processes/patris81", func(t *testing.T) {
 		req := httptest.NewRequest("GET", "/api/processes/patris81", nil)
@@ -1807,9 +1922,7 @@ func TestProcessEndpoints(t *testing.T) {
 		if response["success"] != true {
 			t.Errorf("Expected success=true, got %v", response["success"])
 		}
-		if _, ok := response["processes"].([]interface{}); !ok {
-			t.Errorf("Expected processes array, got %T", response["processes"])
-		}
+		assertProcessArray(t, response["processes"])
 	})
 
 	t.Run("GET /api/processes/file", func(t *testing.T) {
@@ -1831,8 +1944,26 @@ func TestProcessEndpoints(t *testing.T) {
 		if response["path"] == "" {
 			t.Error("Expected full path in response")
 		}
-		if _, ok := response["processes"].([]interface{}); !ok {
-			t.Errorf("Expected processes array, got %T", response["processes"])
+		assertProcessArray(t, response["processes"])
+	})
+
+	t.Run("GET /api/status", func(t *testing.T) {
+		req := httptest.NewRequest("GET", "/api/status", nil)
+		w := httptest.NewRecorder()
+		srv.router.ServeHTTP(w, req)
+		if w.Code != http.StatusOK {
+			t.Fatalf("Expected status 200, got %d: %s", w.Code, w.Body.String())
+		}
+		var response map[string]interface{}
+		if err := json.NewDecoder(w.Body).Decode(&response); err != nil {
+			t.Fatalf("Failed to decode response: %v", err)
+		}
+		for _, groupName := range []string{"patris81", "file_access"} {
+			group, ok := response[groupName].(map[string]interface{})
+			if !ok {
+				t.Fatalf("Expected %s object, got %T", groupName, response[groupName])
+			}
+			assertProcessArray(t, group["processes"])
 		}
 	})
 }
@@ -1869,9 +2000,416 @@ func TestBroadcastProcessInfo(t *testing.T) {
 		if msg["type"] != "process_info" {
 			continue
 		}
-		if _, ok := msg["status"].(map[string]interface{}); !ok {
+		status, ok := msg["status"].(map[string]interface{})
+		if !ok {
 			t.Fatalf("Expected status object in process_info message, got %T", msg["status"])
 		}
+		for _, groupName := range []string{"patris81", "file_access"} {
+			group, ok := status[groupName].(map[string]interface{})
+			if !ok {
+				t.Fatalf("Expected process_info status.%s object, got %T", groupName, status[groupName])
+			}
+			if _, ok := group["processes"].([]interface{}); !ok {
+				t.Fatalf("Expected process_info status.%s.processes array, got %T", groupName, group["processes"])
+			}
+		}
 		return
+	}
+}
+
+func TestOfficeRecordDownloadsEnforceDistinctTrustedContracts(t *testing.T) {
+	tmpDir := t.TempDir()
+	datasetPath := filepath.Join(tmpDir, "records.json")
+	if err := os.WriteFile(datasetPath, []byte(`{"1":{"Code":"1","Name":"Fixture"}}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	xlsxPath := createServerXLSXPackage(t)
+	xlsmPath := createServerMacroPackage(t, ".xlsm", false)
+	xltmPath := createServerMacroPackage(t, ".xltm", false)
+	xltmBytes, err := os.ReadFile(xltmPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := appconfig.Default()
+	cfg.Export.XLSXTemplate = xlsxPath
+	cfg.Export.XLSXTarget = "table:ExportProducts"
+	cfg.Export.XLSMTemplate = xlsmPath
+	cfg.Export.XLSMTarget = "table:ExportProducts"
+	cfg.Export.XLTMTemplate = xltmPath
+	cfg.Export.XLTMTarget = "table:ExportProducts"
+	configPath := filepath.Join(tmpDir, "config.json")
+	configBytes, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configPath, configBytes, 0600); err != nil {
+		t.Fatal(err)
+	}
+	manager, err := appconfig.Load(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv, err := NewServerWithOptions(datasetPath, nil, Options{Config: manager})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer srv.Close()
+
+	xlsxRequest := httptest.NewRequest(http.MethodGet, "/api/records.xlsx?download=1", nil)
+	xlsxResponse := httptest.NewRecorder()
+	srv.router.ServeHTTP(xlsxResponse, xlsxRequest)
+	if xlsxResponse.Code != http.StatusOK {
+		t.Fatalf("XLSX status = %d: %s", xlsxResponse.Code, xlsxResponse.Body.String())
+	}
+	if got := xlsxResponse.Header().Get("Content-Type"); got != "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" {
+		t.Fatalf("XLSX content type = %q", got)
+	}
+	if xlsxResponse.Header().Get("X-Patris-Office-Record-Count") != "1" ||
+		xlsxResponse.Header().Get("X-Patris-Office-Source-SHA256") == "" ||
+		xlsxResponse.Header().Get("X-Patris-Office-Source-SHA256") == xlsxResponse.Header().Get("X-Patris-Office-Output-SHA256") {
+		t.Fatalf("XLSX provenance headers = %+v", xlsxResponse.Header())
+	}
+	xlsxBook, err := excelize.OpenReader(bytes.NewReader(xlsxResponse.Body.Bytes()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer xlsxBook.Close()
+	if code, _ := xlsxBook.GetCellValue("Records", "A2", excelize.Options{RawCellValue: true}); code != "1" {
+		t.Fatalf("populated XLSX code = %q, want 1", code)
+	}
+
+	xlsmRequest := httptest.NewRequest(http.MethodGet, "/api/records.xlsm?download=1", nil)
+	xlsmResponse := httptest.NewRecorder()
+	srv.router.ServeHTTP(xlsmResponse, xlsmRequest)
+	if xlsmResponse.Code != http.StatusOK {
+		t.Fatalf("XLSM status = %d: %s", xlsmResponse.Code, xlsmResponse.Body.String())
+	}
+	if got := xlsmResponse.Header().Get("Content-Type"); got != "application/vnd.ms-excel.sheet.macroEnabled.12" {
+		t.Fatalf("XLSM content type = %q", got)
+	}
+	if xlsmResponse.Header().Get("X-Patris-Office-Record-Count") != "1" ||
+		xlsmResponse.Header().Get("X-Patris-Office-Source-SHA256") == "" ||
+		xlsmResponse.Header().Get("X-Patris-Office-Source-SHA256") == xlsmResponse.Header().Get("X-Patris-Office-Output-SHA256") {
+		t.Fatalf("XLSM provenance headers = %+v", xlsmResponse.Header())
+	}
+	xlsmBook, err := excelize.OpenReader(bytes.NewReader(xlsmResponse.Body.Bytes()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer xlsmBook.Close()
+	if code, _ := xlsmBook.GetCellValue("Records", "A2", excelize.Options{RawCellValue: true}); code != "1" {
+		t.Fatalf("populated XLSM code = %q, want 1", code)
+	}
+
+	xltmRequest := httptest.NewRequest(http.MethodGet, "/api/records.xltm?download=1", nil)
+	xltmResponse := httptest.NewRecorder()
+	srv.router.ServeHTTP(xltmResponse, xltmRequest)
+	if xltmResponse.Code != http.StatusOK {
+		t.Fatalf("XLTM status = %d: %s", xltmResponse.Code, xltmResponse.Body.String())
+	}
+	if got := xltmResponse.Header().Get("Content-Type"); got != "application/vnd.ms-excel.template.macroEnabled.12" {
+		t.Fatalf("XLTM content type = %q", got)
+	}
+	if xltmResponse.Header().Get("X-Patris-Template-Data-Empty") != "true" ||
+		xltmResponse.Header().Get("X-Patris-Office-Record-Count") != "0" ||
+		!bytes.Equal(xltmResponse.Body.Bytes(), xltmBytes) {
+		t.Fatal("XLTM was not served as the verified byte-identical blank template")
+	}
+
+	for _, requestPath := range []string{
+		"/api/records.xlsx?path=C%3A%5Cclient%5Csupplied.xlsx",
+		"/api/records.xlsm?template_path=C%3A%5Cclient%5Csupplied.xlsm",
+		"/api/records.xltm?source_url=https%3A%2F%2Fexample.invalid%2Ftemplate.xltm",
+	} {
+		response := httptest.NewRecorder()
+		srv.router.ServeHTTP(response, httptest.NewRequest(http.MethodGet, requestPath, nil))
+		if response.Code != http.StatusBadRequest {
+			t.Fatalf("client Office source %q status = %d, want 400", requestPath, response.Code)
+		}
+	}
+	bakeResponse := httptest.NewRecorder()
+	srv.router.ServeHTTP(bakeResponse, httptest.NewRequest(http.MethodGet, "/api/records.xltm?include_data=true", nil))
+	if bakeResponse.Code != http.StatusConflict || bakeResponse.Header().Get("X-Patris-Template-Data-Empty") != "required" {
+		t.Fatalf("XLTM bake attempt status=%d marker=%q", bakeResponse.Code, bakeResponse.Header().Get("X-Patris-Template-Data-Empty"))
+	}
+}
+
+func createServerXLSXPackage(t *testing.T) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "trusted.xlsx")
+	book := excelize.NewFile()
+	if err := book.SetSheetName("Sheet1", "Records"); err != nil {
+		t.Fatal(err)
+	}
+	if err := book.SetCellStr("Records", "A1", "Code"); err != nil {
+		t.Fatal(err)
+	}
+	if err := book.SetCellStr("Records", "B1", "Name"); err != nil {
+		t.Fatal(err)
+	}
+	if err := book.AddTable("Records", &excelize.Table{Range: "A1:B2", Name: "ExportProducts", StyleName: "TableStyleMedium2"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := book.SaveAs(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := book.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func TestXLTMDownloadRejectsConfiguredTemplateWithInitialData(t *testing.T) {
+	tmpDir := t.TempDir()
+	datasetPath := filepath.Join(tmpDir, "records.json")
+	if err := os.WriteFile(datasetPath, []byte(`{"1":{"Code":"1","Name":"Fixture"}}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := appconfig.Default()
+	cfg.Export.XLTMTemplate = createServerMacroPackage(t, ".xltm", true)
+	cfg.Export.XLTMTarget = "table:ExportProducts"
+	configPath := filepath.Join(tmpDir, "config.json")
+	data, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configPath, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	manager, err := appconfig.Load(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv, err := NewServerWithOptions(datasetPath, nil, Options{Config: manager})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer srv.Close()
+	response := httptest.NewRecorder()
+	srv.router.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/records.xltm", nil))
+	if response.Code != http.StatusUnprocessableEntity || !strings.Contains(response.Body.String(), "must remain data-empty") {
+		t.Fatalf("populated XLTM status=%d body=%q, want fail-closed 422", response.Code, response.Body.String())
+	}
+}
+
+func serverTestVBAProject(t *testing.T) []byte {
+	t.Helper()
+	candidates, err := filepath.Glob(filepath.Join("..", "..", "docs", "examples", "*.xltm"))
+	if err != nil || len(candidates) != 1 {
+		t.Fatalf("locate tracked macro fixture: candidates=%v error=%v", candidates, err)
+	}
+	archive, err := zip.OpenReader(candidates[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer archive.Close()
+	for _, entry := range archive.File {
+		if entry.Name != "xl/vbaProject.bin" {
+			continue
+		}
+		reader, err := entry.Open()
+		if err != nil {
+			t.Fatal(err)
+		}
+		value, readErr := io.ReadAll(reader)
+		_ = reader.Close()
+		if readErr != nil || len(value) == 0 {
+			t.Fatalf("read vbaProject.bin: bytes=%d error=%v", len(value), readErr)
+		}
+		return value
+	}
+	t.Fatal("tracked macro fixture has no vbaProject.bin")
+	return nil
+}
+
+func createServerMacroPackage(t *testing.T, extension string, populated bool) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "trusted"+extension)
+	book := excelize.NewFile()
+	if err := book.SetSheetName("Sheet1", "Records"); err != nil {
+		t.Fatal(err)
+	}
+	if err := book.SetCellStr("Records", "A1", "Code"); err != nil {
+		t.Fatal(err)
+	}
+	if err := book.SetCellStr("Records", "B1", "Name"); err != nil {
+		t.Fatal(err)
+	}
+	if populated {
+		_ = book.SetCellStr("Records", "A2", "INITIAL")
+	}
+	if err := book.AddTable("Records", &excelize.Table{Range: "A1:B2", Name: "ExportProducts", StyleName: "TableStyleMedium2"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := book.AddVBAProject(serverTestVBAProject(t)); err != nil {
+		t.Fatal(err)
+	}
+	if err := book.SaveAs(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := book.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func TestMacroEnabledRecordDownloadRequiresConfiguredMatchingTemplate(t *testing.T) {
+	tmpDir := t.TempDir()
+	datasetPath := filepath.Join(tmpDir, "records.json")
+	if err := os.WriteFile(datasetPath, []byte(`{"1":{"Code":"1"}}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	srv, err := NewServer(datasetPath, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer srv.Close()
+	for _, format := range []string{"xlsm", "xltm"} {
+		request := httptest.NewRequest(http.MethodGet, "/api/records."+format, nil)
+		recorder := httptest.NewRecorder()
+		srv.router.ServeHTTP(recorder, request)
+		if recorder.Code != http.StatusNotFound {
+			t.Fatalf("%s status = %d, want 404", format, recorder.Code)
+		}
+	}
+}
+
+func TestBrowserConfigRedactsOfficeTemplatePaths(t *testing.T) {
+	cfg := appconfig.Default()
+	cfg.Export.XLSXTemplate = `C:\private\records.xlsx`
+	cfg.Export.XLSXTarget = `table:ExportProducts`
+	cfg.Export.XLSMTemplate = `C:\private\records.xlsm`
+	cfg.Export.XLSMTarget = `table:ExportProducts`
+	cfg.Export.XLTMTemplate = `C:\private\records.xltm`
+	cfg.Export.XLTMTarget = `name:ExportProducts`
+	got := browserConfig(cfg)
+	if got.Export.XLSXTemplate != "" || got.Export.XLSXTarget != "" || got.Export.XLSMTemplate != "" || got.Export.XLSMTarget != "" || got.Export.XLTMTemplate != "" || got.Export.XLTMTarget != "" {
+		t.Fatalf("browser config exposed Office template paths: %+v", got.Export)
+	}
+}
+
+func TestBrowserConfigRedactsAndPreservesProtectedMySQLConnectionConfig(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "patris-export.json")
+	manager, err := appconfig.Load(configPath)
+	if err != nil {
+		t.Fatalf("load config manager: %v", err)
+	}
+	const protectedDSN = "protected-dsn-test-value"
+	const protectedCAPath = "C:/protected/mysql/private-ca-path.pem"
+	const protectedServerName = "private-db.internal.example"
+	const protectedXLSXPath = "C:/protected/templates/records.xlsx"
+	const protectedXLSXTarget = "table:ExportProducts"
+	const protectedXLSMPath = "C:/protected/templates/records.xlsm"
+	const protectedXLSMTarget = "table:ExportProducts"
+	const protectedXLTMPath = "C:/protected/templates/records.xltm"
+	const protectedXLTMTarget = "name:ExportProducts"
+	if err := manager.Update(func(cfg *appconfig.Config) {
+		cfg.Export.MySQLDSN = protectedDSN
+		cfg.Export.MySQLTLSCAFile = protectedCAPath
+		cfg.Export.MySQLTLSServerName = protectedServerName
+		cfg.Export.XLSXTemplate = protectedXLSXPath
+		cfg.Export.XLSXTarget = protectedXLSXTarget
+		cfg.Export.XLSMTemplate = protectedXLSMPath
+		cfg.Export.XLSMTarget = protectedXLSMTarget
+		cfg.Export.XLTMTemplate = protectedXLTMPath
+		cfg.Export.XLTMTarget = protectedXLTMTarget
+	}); err != nil {
+		t.Fatalf("store protected MySQL config: %v", err)
+	}
+
+	jsonPath := filepath.Join(tmpDir, "records.json")
+	if err := os.WriteFile(jsonPath, []byte(`{"001":{"Code":"001","Name":"Test"}}`), 0600); err != nil {
+		t.Fatalf("write test records: %v", err)
+	}
+	srv, err := NewServerWithOptions(jsonPath, nil, Options{Config: manager}, false)
+	if err != nil {
+		t.Fatalf("create server: %v", err)
+	}
+	defer srv.Close()
+
+	assertRedacted := func(t *testing.T, value interface{}) {
+		t.Helper()
+		data, err := json.Marshal(value)
+		if err != nil {
+			t.Fatalf("marshal browser payload: %v", err)
+		}
+		body := string(data)
+		for _, forbidden := range []string{
+			protectedDSN,
+			protectedCAPath,
+			protectedServerName,
+			protectedXLSXPath,
+			protectedXLSMPath,
+			protectedXLTMPath,
+			`"mysql_dsn"`,
+			`"mysql_tls_ca_file"`,
+			`"mysql_tls_server_name"`,
+		} {
+			if strings.Contains(body, forbidden) {
+				t.Fatalf("browser payload exposed protected SQL configuration %q: %s", forbidden, body)
+			}
+		}
+	}
+
+	get := httptest.NewRecorder()
+	srv.router.ServeHTTP(get, httptest.NewRequest(http.MethodGet, "/api/config", nil))
+	if get.Code != http.StatusOK {
+		t.Fatalf("GET /api/config status = %d: %s", get.Code, get.Body.String())
+	}
+	assertRedacted(t, json.RawMessage(get.Body.Bytes()))
+
+	initial := srv.initialSnapshotMessage(recordpipe.Result{Rows: []map[string]interface{}{}, KeyField: "Code"}, jsonPath, "")
+	assertRedacted(t, initial)
+
+	events, unsubscribe := srv.SubscribeEvents(1)
+	defer unsubscribe()
+	srv.broadcastConfig(manager.Get())
+	select {
+	case event := <-events:
+		assertRedacted(t, event)
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for config broadcast")
+	}
+
+	clientConfig := browserConfig(manager.Get())
+	clientConfig.UI.Theme = "dark"
+	clientConfig.Export.MySQLDSN = "browser-supplied-dsn-must-be-ignored"
+	clientConfig.Export.MySQLTLSCAFile = "browser-supplied-ca-must-be-ignored.pem"
+	clientConfig.Export.MySQLTLSServerName = "browser-supplied-name.invalid"
+	clientConfig.Export.XLSXTemplate = "C:/browser/replacement.xlsx"
+	clientConfig.Export.XLSXTarget = "table:BrowserReplacement"
+	clientConfig.Export.XLSMTemplate = "C:/browser/replacement.xlsm"
+	clientConfig.Export.XLSMTarget = "table:BrowserReplacement"
+	clientConfig.Export.XLTMTemplate = "C:/browser/replacement.xltm"
+	clientConfig.Export.XLTMTarget = "name:BrowserReplacement"
+	body, err := json.Marshal(clientConfig)
+	if err != nil {
+		t.Fatalf("marshal browser update: %v", err)
+	}
+	put := httptest.NewRecorder()
+	srv.router.ServeHTTP(put, httptest.NewRequest(http.MethodPut, "/api/config", bytes.NewReader(body)))
+	if put.Code != http.StatusOK {
+		t.Fatalf("PUT /api/config status = %d: %s", put.Code, put.Body.String())
+	}
+	assertRedacted(t, json.RawMessage(put.Body.Bytes()))
+	if got := manager.Get(); got.Export.MySQLDSN != protectedDSN || got.Export.MySQLTLSCAFile != protectedCAPath ||
+		got.Export.MySQLTLSServerName != protectedServerName ||
+		got.Export.XLSXTemplate != protectedXLSXPath || got.Export.XLSXTarget != protectedXLSXTarget ||
+		got.Export.XLSMTemplate != protectedXLSMPath || got.Export.XLSMTarget != protectedXLSMTarget ||
+		got.Export.XLTMTemplate != protectedXLTMPath || got.Export.XLTMTarget != protectedXLTMTarget ||
+		got.UI.Theme != "dark" {
+		t.Fatalf("browser update did not preserve protected server config and apply UI setting: DSN=%t CA=%t name=%t xlsx=%t xlsx_target=%t xlsm=%t xlsm_target=%t xltm=%t xltm_target=%t theme=%q",
+			got.Export.MySQLDSN == protectedDSN,
+			got.Export.MySQLTLSCAFile == protectedCAPath,
+			got.Export.MySQLTLSServerName == protectedServerName,
+			got.Export.XLSXTemplate == protectedXLSXPath,
+			got.Export.XLSXTarget == protectedXLSXTarget,
+			got.Export.XLSMTemplate == protectedXLSMPath,
+			got.Export.XLSMTarget == protectedXLSMTarget,
+			got.Export.XLTMTemplate == protectedXLTMPath,
+			got.Export.XLTMTarget == protectedXLTMTarget,
+			got.UI.Theme,
+		)
 	}
 }

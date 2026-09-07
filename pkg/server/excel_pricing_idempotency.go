@@ -143,6 +143,11 @@ func excelPricingMutationLedgerKey(operation, idempotencyKey string) string {
 }
 
 func excelPricingMutationFingerprint(request excelPricingLocalRequest) string {
+	if request.Source != nil {
+		source := *request.Source
+		source.Extensions = nil
+		request.Source = &source
+	}
 	body, _ := json.Marshal(request)
 	return excelPricingSnapshotDigest(body)
 }
