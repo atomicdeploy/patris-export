@@ -217,7 +217,7 @@ func TestPostRefreshWaitRequiresLoopbackCaller(t *testing.T) {
 	}
 }
 
-func TestPostRefreshWaitBodyWithoutCompanionHeadersPreservesLegacyResponse(t *testing.T) {
+func TestPostRefreshWaitBodyWithoutCompanionHeadersFailsClosed(t *testing.T) {
 	const secret = "refresh-wait-test-secret"
 	t.Setenv(refreshWaitTestSecretEnv, secret)
 
@@ -229,11 +229,23 @@ func TestPostRefreshWaitBodyWithoutCompanionHeadersPreservesLegacyResponse(t *te
 	defer receiver.Close()
 
 	srv, _ := newRefreshWaitTestServer(t, receiver.URL)
+	seedCanonicalProjectionCacheForTest(srv, "unauthorized")
+	generation := canonicalProjectionCacheGenerationForTest(srv)
 	recorder := httptest.NewRecorder()
 	srv.router.ServeHTTP(recorder, newLocalRefreshWaitRequest(`{"delivery":"wait"}`))
 
-	if recorder.Code != http.StatusOK || strings.TrimSpace(recorder.Body.String()) != `{"refreshed":true}` {
-		t.Fatalf("legacy body response changed: status=%d body=%s", recorder.Code, recorder.Body.String())
+	if recorder.Code != http.StatusForbidden {
+		t.Fatalf("unauthenticated wait status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	var response refreshWaitResponse
+	if err := json.NewDecoder(recorder.Body).Decode(&response); err != nil {
+		t.Fatal(err)
+	}
+	if response.Refreshed || response.Delivered || response.Code != "local_session_required" {
+		t.Fatalf("unauthenticated wait fell through to async success: %+v", response)
+	}
+	if canonicalProjectionCacheGenerationForTest(srv) != generation {
+		t.Fatal("unauthorized wait invalidated the source projection")
 	}
 	if calls.Load() != 0 {
 		t.Fatalf("unauthenticated legacy refresh reached receiver %d time(s)", calls.Load())
@@ -253,6 +265,11 @@ func TestPostRefreshWaitRequiresAuthorizedSession(t *testing.T) {
 
 	srv, _ := newRefreshWaitTestServer(t, receiver.URL)
 	tests := map[string]func() *http.Request{
+		"missing client with valid session": func() *http.Request {
+			request := newAuthenticatedRefreshWaitRequest(t, srv, `{"delivery":"wait"}`)
+			request.Header.Del(excelPricingClientHeader)
+			return request
+		},
 		"missing session": func() *http.Request {
 			request := newLocalRefreshWaitRequest(`{"delivery":"wait"}`)
 			request.Header.Set(excelPricingClientHeader, excelPricingClientID)
@@ -379,7 +396,7 @@ func TestPostRefreshWaitReturnsBusyWithoutQueueing(t *testing.T) {
 	}
 }
 
-func newRefreshWaitTestServer(t *testing.T, receiverURL string) (*Server, *canonical.Envelope) {
+func newRefreshWaitTestServer(t *testing.T, receiverURL string, configure ...func(*appconfig.Config)) (*Server, *canonical.Envelope) {
 	t.Helper()
 	tempDir := t.TempDir()
 	sourcePath := filepath.Join(tempDir, "source.json")
@@ -402,6 +419,9 @@ func newRefreshWaitTestServer(t *testing.T, receiverURL string) (*Server, *canon
 			Timeout:              "1s",
 			RetryAttempts:        1,
 			ProductSyncSecretEnv: refreshWaitTestSecretEnv,
+		}
+		for _, apply := range configure {
+			apply(cfg)
 		}
 	}); err != nil {
 		t.Fatalf("configure refresh delivery: %v", err)
