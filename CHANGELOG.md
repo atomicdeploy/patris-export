@@ -7,6 +7,17 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [2.0.1] - 2026-09-07
+
+### Fixed
+
+- Classify the exact `pricing_busy` bulk refresh rejection as `not_started`,
+  while preserving unknown outcomes for ambiguous responses and never retrying
+  automatically.
+- Expose the shared pricing permit as `pricing_operation.busy` in `/api/status`
+  so startup delivery remains visible when the owner worker is idle. A free
+  permit does not establish downstream delivery completion.
+
 ## [2.0.0] - 2026-09-07
 
 ### Breaking changes
