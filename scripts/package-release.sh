@@ -117,6 +117,10 @@ EOF
 chmod 0755 "$linux_stage/run-patris-export.sh"
 
 for stage in "$windows_stage" "$linux_stage"; do
+    mkdir -p -- "$stage/scripts/pricing"
+    for pricing_file in pricing-sync.cjs pricing-sync.cmd README.md; do
+        install -m 0644 "$root/scripts/pricing/$pricing_file" "$stage/scripts/pricing/$pricing_file"
+    done
     install -m 0644 "$root/docs/INSTALL-BINARIES.md" "$stage/INSTALL.md"
     install -m 0644 "$root/docs/LICENSING.md" "$stage/LICENSING.md"
     install -m 0644 "$root/README.md" "$stage/README.md"

@@ -119,7 +119,10 @@ $requiredPayload = @(
     "INSTALL.md",
     "Install-PatrisExportScheduledTask.ps1",
     "Run-PatrisExportScheduledTask.ps1",
-    "BUILD-MANIFEST.txt"
+    "BUILD-MANIFEST.txt",
+    "scripts\pricing\pricing-sync.cjs",
+    "scripts\pricing\pricing-sync.cmd",
+    "scripts\pricing\README.md"
 )
 foreach ($file in $requiredPayload) {
     if (-not (Test-Path -LiteralPath (Join-Path $PayloadDirectory $file) -PathType Leaf)) {

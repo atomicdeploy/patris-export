@@ -2,6 +2,16 @@
 
 Requires Node.js 18 or newer. Keep `pricing-sync.cmd` beside `pricing-sync.cjs`.
 
+The Windows ZIP and assisted installer include these files under `scripts/pricing`.
+For a default per-user installation, run:
+
+```powershell
+& "$env:LOCALAPPDATA\Programs\Patris Export\scripts\pricing\pricing-sync.cmd" bulk
+```
+
+For an all-users or custom installation, use `scripts\pricing\pricing-sync.cmd`
+under that installation directory. Node.js must be installed separately and on PATH.
+
 ```powershell
 .\pricing-sync.cmd --help
 .\pricing-sync.cmd bulk
