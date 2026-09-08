@@ -33,7 +33,7 @@ func TestStandaloneProductSyncGoldenFixture(t *testing.T) {
 
 func TestEventIdentityOmitsAbsentOptionalPricingFields(t *testing.T) {
 	envelope := emptyIdentityFixture(false)
-	const expected = "sha256:ab188e19ce426fdb627306f2a0d95dfb4049012a097cb0f303c578da089faa63"
+	const expected = "sha256:1fd3285c85f2e36936e81dfbe1caf339f6d4e052fedb37030a654b3742920a0f"
 	if envelope.EventID != expected {
 		t.Fatalf("standalone event_id = %q, want %q", envelope.EventID, expected)
 	}
@@ -51,7 +51,7 @@ func TestEventIdentityOmitsAbsentOptionalPricingFields(t *testing.T) {
 
 func TestIntegratedEventIdentityIncludesPresentPricingFields(t *testing.T) {
 	envelope := emptyIdentityFixture(true)
-	const expected = "sha256:fc48b56e2c9fa6edec5c9d2828389f492ea0464c9780a91e656c6df97839cb71"
+	const expected = "sha256:2d07cd9819bc9e04dc439e564cc58df0e49d9c4ba380b080c8b92656f5dcc7b7"
 	if envelope.EventID != expected {
 		t.Fatalf("integrated event_id = %q, want %q", envelope.EventID, expected)
 	}
@@ -122,6 +122,7 @@ func TestVerifySnapshotJSONRejectsExplicitEmptyOptionalIdentityFields(t *testing
 	payload := `{
   "schema":"patris.product-sync",
   "event_type":"snapshot",
+  "input_mode":"go_projection",
   "event_id":"sha256:ab188e19ce426fdb627306f2a0d95dfb4049012a097cb0f303c578da089faa63",
   "local_currency":"",
   "formula_id":"",
@@ -149,6 +150,7 @@ func emptyIdentityFixture(withPricing bool) *Envelope {
 	envelope := &Envelope{
 		Schema:           ContractName,
 		EventType:        "snapshot",
+		InputMode:        InputModeGoProjection,
 		Source:           Source{ID: "fixture", Dataset: "kala.json", Revision: emptySourceRevision},
 		GeneratedAt:      "2026-07-21T00:00:00Z",
 		Products:         []Product{},

@@ -98,9 +98,15 @@ func (tombstone Tombstone) MarshalJSON() ([]byte, error) {
 	return marshalJSONWithExtensions(tombstoneAlias(tombstone), tombstone.Extensions)
 }
 
+const (
+	InputModePatrisInputs = "patris_inputs"
+	InputModeGoProjection = "go_projection"
+)
+
 type Envelope struct {
 	Schema           string          `json:"schema"`
 	EventType        string          `json:"event_type"`
+	InputMode        string          `json:"input_mode"`
 	EventID          string          `json:"event_id,omitempty"`
 	LocalCurrency    string          `json:"local_currency,omitempty"`
 	FormulaID        string          `json:"formula_id,omitempty"`
@@ -128,7 +134,7 @@ func (envelope *Envelope) UnmarshalJSON(data []byte) error {
 	}
 	*envelope = Envelope(decoded)
 	envelope.Extensions = captureJSONExtensions(raw,
-		"schema", "event_type", "event_id", "local_currency", "formula_id", "source",
+		"schema", "event_type", "input_mode", "event_id", "local_currency", "formula_id", "source",
 		"generated_at", "products", "categories", "excluded_codes", "deleted_codes",
 		"quarantined_codes", "warnings",
 	)
@@ -324,6 +330,7 @@ func newEnvelopeBaseContext(ctx context.Context, rows []Product, categories []Ca
 	envelope := &Envelope{
 		Schema:           ContractName,
 		EventType:        "snapshot",
+		InputMode:        InputModeGoProjection,
 		LocalCurrency:    LocalCurrency,
 		FormulaID:        FormulaID,
 		Source:           SourceIdentity(source, sourceID, revision),
@@ -391,6 +398,7 @@ func ChangeEnvelope(snapshot *Envelope, changes *recorddiff.ChangeSet) *Envelope
 	envelope := &Envelope{
 		Schema:           snapshot.Schema,
 		EventType:        "update",
+		InputMode:        snapshot.InputMode,
 		LocalCurrency:    snapshot.LocalCurrency,
 		FormulaID:        snapshot.FormulaID,
 		Source:           snapshot.Source,
@@ -537,6 +545,9 @@ func eventIDContext(ctx context.Context, envelope *Envelope) (string, error) {
 		return "", err
 	}
 	if err := writeStringField(`,"event_type":`, envelope.EventType); err != nil {
+		return "", err
+	}
+	if err := writeStringField(`,"input_mode":`, envelope.InputMode); err != nil {
 		return "", err
 	}
 	if envelope.LocalCurrency != "" {

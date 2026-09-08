@@ -122,6 +122,14 @@ func Transform(ctx context.Context, rows []map[string]interface{}, source string
 // cancellation throughout classification, category construction, pricing
 // dispatch, hashing, and row materialization. Transform remains the compatible
 // wrapper for existing unbounded callers.
+// patrisInputProvider carries only the pinned calculator selection. It cannot
+// prefetch or resolve website-owned assignments into an upstream source hash.
+type patrisInputProvider struct{}
+
+func (patrisInputProvider) Resolve(context.Context, string) pricingcatalog.Resolution {
+	return pricingcatalog.Resolution{Authority: pricingcatalog.AuthorityPHP}
+}
+
 func TransformContext(ctx context.Context, rows []map[string]interface{}, source string, cfg Config, provider pricingcatalog.Provider, generatedAt time.Time) ([]map[string]interface{}, *Envelope, error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -134,6 +142,23 @@ func TransformContext(ctx context.Context, rows []map[string]interface{}, source
 	integrationActive := pricingcatalog.Configured(normalizedPricing)
 	if provider == nil {
 		provider = pricingcatalog.NewProvider(normalizedPricing)
+	}
+	inputMode := InputModeGoProjection
+	if integrationActive {
+		if ownerProvider, ok := provider.(pricingcatalog.OwnerProvider); ok {
+			owner := ownerProvider.Owner(ctx)
+			if owner.AuthorityError != "" || (owner.CatalogStatus != "fresh" && owner.CatalogStatus != "static") ||
+				(owner.Authority != pricingcatalog.AuthorityPHP && owner.Authority != pricingcatalog.AuthorityGo) {
+				return nil, nil, fmt.Errorf("pricing authority unavailable")
+			}
+			if owner.Authority == pricingcatalog.AuthorityPHP {
+				if normalizedPricing.UseSalePriceDirectFallback {
+					return nil, nil, fmt.Errorf("php_patris_inputs_direct_sale_policy_unsupported")
+				}
+				inputMode = InputModePatrisInputs
+				provider = patrisInputProvider{}
+			}
+		}
 	}
 	products := make([]Product, 0, len(rows))
 	codeCounts := make(map[string]int, len(rows))
@@ -287,6 +312,7 @@ func TransformContext(ctx context.Context, rows []map[string]interface{}, source
 	if err != nil {
 		return nil, nil, err
 	}
+	envelope.InputMode = inputMode
 	if !integrationActive {
 		envelope.LocalCurrency = ""
 		envelope.FormulaID = ""
