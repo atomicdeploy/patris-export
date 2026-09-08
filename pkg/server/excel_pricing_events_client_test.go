@@ -135,14 +135,14 @@ func TestExcelPricingRemoteEventsConnectValidateAndConsumePHPFrame(t *testing.T)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/wp-json/digitalogic/pricing/sync/revision":
-			revisionCalls.Add(1)
+			call := revisionCalls.Add(1)
 			valid := r.Header.Get(excelPricingRemoteSecretHeader) == excelPricingRemoteTestSecret &&
 				r.Header.Get("Accept-Encoding") == excelPricingRemoteIdentityEncoding &&
 				r.Header.Get(excelPricingRemoteSourceIDHeader) == source.ID &&
 				r.Header.Get(excelPricingRemoteDatasetHeader) == source.Dataset &&
 				r.URL.Query().Get("source_id") == source.ID &&
 				r.URL.Query().Get("source_dataset") == source.Dataset &&
-				r.URL.Query().Get("source_revision") == source.Revision &&
+				!r.URL.Query().Has("source_revision") &&
 				r.URL.Query().Get("locale") == "fa" &&
 				r.URL.Query().Get("page_size") == strconv.Itoa(excelPricingSnapshotPageSize) &&
 				r.URL.Query().Get("schema_version") == "1"
@@ -151,15 +151,22 @@ func TestExcelPricingRemoteEventsConnectValidateAndConsumePHPFrame(t *testing.T)
 				return
 			}
 			w.Header().Set("Content-Type", "application/json; charset=UTF-8")
-			w.Header().Set("ETag", `"`+firstState+`"`)
-			_ = json.NewEncoder(w).Encode(excelPricingRemoteTestRevisionPayload(source, firstState))
+			state := firstState
+			if call > 1 {
+				state = secondState
+			}
+			w.Header().Set("ETag", `"`+state+`"`)
+			_ = json.NewEncoder(w).Encode(excelPricingRemoteTestRevisionPayload(source, state))
 		case "/wordpress-ws":
 			valid := r.Header.Get(excelPricingRemoteSecretHeader) == excelPricingRemoteTestSecret &&
 				r.Header.Get(excelPricingRemoteSourceIDHeader) == source.ID &&
 				r.Header.Get(excelPricingRemoteDatasetHeader) == source.Dataset &&
 				r.Header.Get("Last-Event-ID") == "" &&
 				r.Header.Get("Sec-WebSocket-Protocol") == excelPricingRemoteWebSocketProtocol
-			handshakeOK <- valid
+			select {
+			case handshakeOK <- valid:
+			default:
+			}
 			connection, err := upgrader.Upgrade(w, r, nil)
 			if err != nil {
 				return
@@ -205,6 +212,7 @@ func TestExcelPricingRemoteEventsConnectValidateAndConsumePHPFrame(t *testing.T)
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
 	runResult := make(chan error, 1)
 	go func() { runResult <- client.Run(ctx) }()
 
@@ -212,7 +220,7 @@ func TestExcelPricingRemoteEventsConnectValidateAndConsumePHPFrame(t *testing.T)
 		origin string
 		state  string
 		id     uint64
-	}{{"connection_validation", firstState, 40}, {"stream_event", secondState, 41}} {
+	}{{"connection_validation", firstState, 40}, {"source_event", secondState, 41}} {
 		select {
 		case revision := <-revisions:
 			if revision.ValidationOrigin != want.origin || revision.StateRevision != want.state ||
@@ -226,8 +234,8 @@ func TestExcelPricingRemoteEventsConnectValidateAndConsumePHPFrame(t *testing.T)
 	if !<-handshakeOK {
 		t.Fatal("protected websocket handshake was incomplete")
 	}
-	if revisionCalls.Load() != 1 {
-		t.Fatalf("revision calls = %d, want exactly 1", revisionCalls.Load())
+	if revisionCalls.Load() != 2 {
+		t.Fatalf("revision calls = %d, want connection and current event discovery", revisionCalls.Load())
 	}
 	var lastCursor uint64
 	for index := 0; index < 2; index++ {
@@ -320,6 +328,7 @@ func TestExcelPricingRemoteEventsReconnectUsesCursorAndConditionalRevisionGETWit
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
 	result := make(chan error, 1)
 	go func() { result <- client.Run(ctx) }()
 	select {
@@ -443,6 +452,7 @@ func TestExcelPricingRemoteEventsStreamResetTriggersOneConditionalValidation(t *
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
 	result := make(chan error, 1)
 	go func() { result <- client.Run(ctx) }()
 	select {
@@ -509,10 +519,26 @@ func TestExcelPricingRemoteConnectedCursorResetMayClampAHighPersistedCursor(t *t
 func TestExcelPricingRemoteEventCursorAdvancesOnlyAfterAtomicAcceptance(t *testing.T) {
 	source := excelPricingRemoteTestSource()
 	state := excelPricingRemoteTestRevision("5")
-	cfg := excelPricingRemoteTestConfig(t, "http://127.0.0.1:18080")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/wp-json/digitalogic/pricing/sync/revision" ||
+			r.Header.Get(excelPricingRemoteSecretHeader) != excelPricingRemoteTestSecret ||
+			r.Header.Get(excelPricingRemoteSourceIDHeader) != source.ID || r.Header.Get(excelPricingRemoteDatasetHeader) != source.Dataset ||
+			r.URL.Query().Get("source_id") != source.ID || r.URL.Query().Get("source_dataset") != source.Dataset || r.URL.Query().Has("source_revision") {
+			t.Error("revision discovery must authenticate the source identity without pinning a revision")
+			http.Error(w, "invalid discovery", http.StatusForbidden)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("ETag", `"`+state+`"`)
+		_ = json.NewEncoder(w).Encode(excelPricingRemoteTestRevisionPayload(source, state))
+	}))
+	defer server.Close()
+	cfg := excelPricingRemoteTestConfig(t, server.URL)
+	callbackCalls := 0
 	client, err := newExcelPricingRemoteEventsClient(cfg, source, excelPricingRemoteEventsOptions{
 		InitialCursor: 5,
 		OnRevision: func(excelPricingRemoteRevision) error {
+			callbackCalls++
 			return errors.New("local generation was not invalidated")
 		},
 	})
@@ -529,12 +555,18 @@ func TestExcelPricingRemoteEventCursorAdvancesOnlyAfterAtomicAcceptance(t *testi
 	if client.currentCursor() != 5 {
 		t.Fatalf("failed acceptance advanced cursor to %d", client.currentCursor())
 	}
-	client.onRevision = func(excelPricingRemoteRevision) error { return nil }
+	if callbackCalls != 1 {
+		t.Fatalf("rejection callback calls = %d, want 1", callbackCalls)
+	}
+	client.onRevision = func(excelPricingRemoteRevision) error { callbackCalls++; return nil }
 	if _, err := client.handleExcelPricingRemoteFrame(t.Context(), body, true); err != nil {
 		t.Fatal(err)
 	}
 	if client.currentCursor() != 6 {
 		t.Fatalf("accepted event cursor = %d", client.currentCursor())
+	}
+	if callbackCalls != 2 {
+		t.Fatalf("acceptance callback calls = %d, want 2", callbackCalls)
 	}
 }
 
@@ -542,9 +574,24 @@ func TestExcelPricingRemoteStateEventAcceptsNewerRevisionForSameSourceIdentity(t
 	source := excelPricingRemoteTestSource()
 	newerSource := source
 	newerSource.Revision = excelPricingRemoteTestRevision("b")
+	state := excelPricingRemoteTestRevision("6")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/wp-json/digitalogic/pricing/sync/revision" ||
+			r.Header.Get(excelPricingRemoteSecretHeader) != excelPricingRemoteTestSecret ||
+			r.Header.Get(excelPricingRemoteSourceIDHeader) != source.ID || r.Header.Get(excelPricingRemoteDatasetHeader) != source.Dataset ||
+			r.URL.Query().Get("source_id") != source.ID || r.URL.Query().Get("source_dataset") != source.Dataset || r.URL.Query().Has("source_revision") {
+			t.Error("revision discovery must authenticate the source identity without pinning a revision")
+			http.Error(w, "invalid discovery", http.StatusForbidden)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("ETag", `"`+state+`"`)
+		_ = json.NewEncoder(w).Encode(excelPricingRemoteTestRevisionPayload(newerSource, state))
+	}))
+	defer server.Close()
 	var accepted excelPricingRemoteRevision
 	client, err := newExcelPricingRemoteEventsClient(
-		excelPricingRemoteTestConfig(t, "http://127.0.0.1:18080"), source,
+		excelPricingRemoteTestConfig(t, server.URL), source,
 		excelPricingRemoteEventsOptions{OnRevision: func(revision excelPricingRemoteRevision) error {
 			accepted = revision
 			return nil
@@ -554,7 +601,7 @@ func TestExcelPricingRemoteStateEventAcceptsNewerRevisionForSameSourceIdentity(t
 		t.Fatal(err)
 	}
 	body, err := json.Marshal(excelPricingRemoteTestStateFrame(
-		newerSource, 9, excelPricingRemoteTestRevision("6"),
+		newerSource, 9, state,
 	))
 	if err != nil {
 		t.Fatal(err)
@@ -777,7 +824,6 @@ func TestExcelPricingRemoteRevisionURLHasExactBoundedQuery(t *testing.T) {
 	query := parsed.Query()
 	query.Set("source_id", source.ID)
 	query.Set("source_dataset", source.Dataset)
-	query.Set("source_revision", source.Revision)
 	query.Set("locale", "fa")
 	query.Set("page_size", strconv.Itoa(excelPricingSnapshotPageSize))
 	query.Set("schema_version", "1")

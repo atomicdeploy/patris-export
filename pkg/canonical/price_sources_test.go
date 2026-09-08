@@ -48,6 +48,7 @@ func TestPartnerPriceFallbackUsesSharh1SlotOneAsIRRWithoutFreightOrFX(t *testing
 	digits := 2
 	markup := pricingcatalog.Decimal("30")
 	config := pricingcatalog.Config{Mode: pricingcatalog.ModeStatic, Static: pricingcatalog.StaticConfig{
+		Authority:         pricingcatalog.AuthorityGo,
 		RoundingDigits:    &digits,
 		DefaultAssignment: &pricingcatalog.Assignment{ProfitPercent: &markup},
 	}}
@@ -97,6 +98,7 @@ func TestPartnerPriceFallbackAcceptsLargeParadoxFloat32WithoutExponentAmbiguity(
 	digits := 2
 	markup := pricingcatalog.Decimal("30")
 	config := pricingcatalog.Config{Mode: pricingcatalog.ModeStatic, Static: pricingcatalog.StaticConfig{
+		Authority:         pricingcatalog.AuthorityGo,
 		RoundingDigits:    &digits,
 		DefaultAssignment: &pricingcatalog.Assignment{ProfitPercent: &markup},
 	}}
@@ -125,6 +127,7 @@ func TestCNYPriceRemainsPreferredOverPositivePartnerPrice(t *testing.T) {
 	markup := pricingcatalog.Decimal("30")
 	enabled := true
 	config := pricingcatalog.Config{Mode: pricingcatalog.ModeStatic, Static: pricingcatalog.StaticConfig{
+		Authority:      pricingcatalog.AuthorityGo,
 		CNYToIRT:       &fx,
 		RoundingDigits: &digits,
 		Methods: []pricingcatalog.Method{{
@@ -155,6 +158,7 @@ func TestPricingFallbackOrderRequiresCompleteForeignRouteThenPartnerThenOptInSal
 	markup := pricingcatalog.Decimal("30")
 	enabled := true
 	base := pricingcatalog.Config{Mode: pricingcatalog.ModeStatic, Static: pricingcatalog.StaticConfig{
+		Authority:      pricingcatalog.AuthorityGo,
 		CNYToIRT:       &fx,
 		RoundingDigits: &digits,
 		Methods: []pricingcatalog.Method{{
@@ -251,11 +255,15 @@ func TestTransformPassesConfiguredDirectSaleFallback(t *testing.T) {
 	config.SourceID = "direct-test"
 	config.Pricing = pricingcatalog.Config{
 		Mode:                       pricingcatalog.ModeStatic,
+		Static:                     pricingcatalog.StaticConfig{Authority: pricingcatalog.AuthorityGo},
 		UseSalePriceDirectFallback: true,
 	}
-	rows, envelope := Transform(context.Background(), []map[string]interface{}{{
+	rows, envelope, transformErr := TransformContext(context.Background(), []map[string]interface{}{{
 		"Code": "123456", "Name": "Direct product", "Serial": "DIRECT-1", "FOROSH": 12000,
 	}}, "kala.db", config, nil, time.Unix(1, 0).UTC())
+	if transformErr != nil {
+		t.Fatal(transformErr)
+	}
 	if len(rows) != 1 || len(envelope.Products) != 1 {
 		t.Fatalf("direct transform product count = %d/%d", len(rows), len(envelope.Products))
 	}
@@ -274,6 +282,7 @@ func TestTransformPassesConfiguredDirectSaleFallback(t *testing.T) {
 func TestZeroAndNullSourceFactsRemainDistinctButAreNotSelected(t *testing.T) {
 	markup := pricingcatalog.Decimal("30")
 	config := pricingcatalog.Config{Mode: pricingcatalog.ModeStatic, Static: pricingcatalog.StaticConfig{
+		Authority:         pricingcatalog.AuthorityGo,
 		DefaultAssignment: &pricingcatalog.Assignment{ProfitPercent: &markup},
 	}}
 	provider := pricingcatalog.NewProvider(config)
@@ -322,7 +331,7 @@ func TestZeroAndNullSourceFactsRemainDistinctButAreNotSelected(t *testing.T) {
 
 func TestExplicitNullRoundingReferenceIsPreservedWithoutGeneratedNulls(t *testing.T) {
 	var config pricingcatalog.Config
-	if err := json.Unmarshal([]byte(`{"mode":"static","static":{"rounding_digits":null,"default_assignment":{"profit_percent":30}}}`), &config); err != nil {
+	if err := json.Unmarshal([]byte(`{"mode":"static","static":{"authority":"go","rounding_digits":null,"default_assignment":{"profit_percent":30}}}`), &config); err != nil {
 		t.Fatal(err)
 	}
 	row := parseKalaProduct(context.Background(), map[string]interface{}{

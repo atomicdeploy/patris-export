@@ -115,17 +115,28 @@ func TestNormalizeUsesCurrentShippingKeys(t *testing.T) {
 	}
 }
 
-func TestStaticMethodJSONRejectsUnknownAndRetiredFreightFields(t *testing.T) {
+func TestStaticMethodJSONIgnoresExtrasWithoutRetiredFreightFallback(t *testing.T) {
 	retiredField := "price_per_kg_" + strings.ToLower(CurrencyCNY)
 	for name, field := range map[string]string{
 		"unknown": "unexpected_method_field",
 		"retired": retiredField,
 	} {
 		t.Run(name, func(t *testing.T) {
-			payload := fmt.Sprintf(`{"mode":"static","static":{"shipping_methods":[{"id":"air","price_per_kg":120,"currency":"CNY",%q:120}]}}`, field)
+			payload := fmt.Sprintf(`{"mode":"static","static":{"authority":"go","shipping_methods":[{"id":"air","price_per_kg":120,"currency":"CNY",%q:999}]}}`, field)
 			var cfg Config
-			if err := json.Unmarshal([]byte(payload), &cfg); err == nil {
-				t.Fatalf("nested method field %q was accepted", field)
+			if err := json.Unmarshal([]byte(payload), &cfg); err != nil {
+				t.Fatal(err)
+			}
+			method := cfg.Static.Methods[0]
+			if method.PricePerKg == nil || *method.PricePerKg != Decimal("120") || method.Currency != CurrencyCNY {
+				t.Fatalf("extra field replaced actual freight: %+v", method)
+			}
+			payload = strings.Replace(payload, `"price_per_kg":120,`, "", 1)
+			if err := json.Unmarshal([]byte(payload), &cfg); err != nil {
+				t.Fatal(err)
+			}
+			if cfg.Static.Methods[0].PricePerKg != nil {
+				t.Fatal("extra or retired field invented missing freight")
 			}
 		})
 	}
@@ -844,7 +855,7 @@ func TestHTTPProviderMissingBatchEndpointFailsClosed(t *testing.T) {
 	}
 }
 
-func TestHTTPProviderRejectsUnknownContractFields(t *testing.T) {
+func TestHTTPProviderIgnoresAdditiveFieldsWithoutReplacingRequiredInputs(t *testing.T) {
 	retiredField := "price_per_kg_" + strings.ToLower(CurrencyCNY)
 	for name, field := range map[string]string{
 		"catalog method unknown field":         "unexpected_method_field",
@@ -853,13 +864,17 @@ func TestHTTPProviderRejectsUnknownContractFields(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				w.Header().Set("Content-Type", "application/json")
-				fmt.Fprintf(w, `{"data":{"schema":"digitalogic.integration-catalog","revision":"r1","currency":{"local":"IRT","cny_to_local":1,"cny_to_irt":1},"pricing":{"formula_id":"landed_price"},"shipping_methods":[{"id":"air","price_per_kg":1,"currency":"CNY",%q:1}]}}`, field)
+				if r.URL.Path != "/integration/catalog" {
+					fmt.Fprint(w, `{"data":{"shipping_method_id":"air","profit_percent":"30","profit_percent_source":"global_default","pricing_warnings":[]}}`)
+					return
+				}
+				fmt.Fprintf(w, `{"data":{"schema":"digitalogic.integration-catalog","revision":"r1","currency":{"local":"IRT","cny_to_local":1,"cny_to_irt":1},"pricing":{"authority":"go","formula_id":"landed_price"},"shipping_methods":[{"id":"air","price_per_kg":1,"currency":"CNY",%q:999}]}}`, field)
 			}))
 			defer server.Close()
 
 			resolved := newHTTPProvider(DigitalogicConfig{BaseURL: server.URL}, server.Client(), time.Now).Resolve(context.Background(), "A")
-			if !contains(resolved.Warnings, "pricing_catalog_fetch_failed") || resolved.IRTPerCNY != nil {
-				t.Fatalf("nested method field %q was accepted: %+v", field, resolved)
+			if resolved.Authority != AuthorityGo || resolved.AuthorityError != "" || resolved.CatalogRevision != "r1" || resolved.IRTPerCNY == nil || *resolved.IRTPerCNY != Decimal("1") || resolved.ShippingPricePerKg == nil || *resolved.ShippingPricePerKg != Decimal("1") || resolved.ShippingPricePerKgCurrency != CurrencyCNY {
+				t.Fatalf("nested extra field changed required inputs: %+v", resolved)
 			}
 		})
 	}
@@ -867,13 +882,13 @@ func TestHTTPProviderRejectsUnknownContractFields(t *testing.T) {
 	t.Run("catalog field", func(t *testing.T) {
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
-			fmt.Fprint(w, `{"data":{"schema":"digitalogic.integration-catalog","unexpected":true,"revision":"r1","currency":{"local":"IRT","cny_to_local":1,"cny_to_irt":1},"pricing":{"formula_id":"landed_price"},"shipping_methods":[]}}`)
+			fmt.Fprint(w, `{"data":{"schema":"digitalogic.integration-catalog","unexpected":true,"revision":"r1","currency":{"local":"IRT","cny_to_local":1,"cny_to_irt":1},"pricing":{"authority":"go","formula_id":"landed_price"},"shipping_methods":[]}}`)
 		}))
 		defer server.Close()
 
 		resolved := newHTTPProvider(DigitalogicConfig{BaseURL: server.URL}, server.Client(), time.Now).Resolve(context.Background(), "A")
-		if !contains(resolved.Warnings, "pricing_catalog_fetch_failed") || resolved.IRTPerCNY != nil {
-			t.Fatalf("unknown catalog field was accepted: %+v", resolved)
+		if resolved.Authority != AuthorityGo || resolved.CatalogRevision != "r1" || resolved.IRTPerCNY == nil || *resolved.IRTPerCNY != Decimal("1") || contains(resolved.Warnings, "pricing_catalog_fetch_failed") {
+			t.Fatalf("catalog extra field changed required inputs: %+v", resolved)
 		}
 	})
 
@@ -885,8 +900,8 @@ func TestHTTPProviderRejectsUnknownContractFields(t *testing.T) {
 		defer server.Close()
 
 		resolved := newHTTPProvider(DigitalogicConfig{BaseURL: server.URL}, server.Client(), time.Now).Resolve(context.Background(), "A")
-		if !contains(resolved.Warnings, "pricing_catalog_fetch_failed") {
-			t.Fatalf("unknown wrapper field was accepted: %+v", resolved)
+		if contains(resolved.Warnings, "pricing_catalog_fetch_failed") || resolved.AuthorityError != "pricing_authority_missing" || resolved.IRTPerCNY != nil || !contains(resolved.Warnings, "pricing_catalog_revision_missing") {
+			t.Fatalf("wrapper extra concealed missing required inputs: %+v", resolved)
 		}
 	})
 
@@ -895,7 +910,7 @@ func TestHTTPProviderRejectsUnknownContractFields(t *testing.T) {
 			w.Header().Set("Content-Type", "application/json")
 			switch r.URL.Path {
 			case "/integration/catalog":
-				fmt.Fprint(w, `{"data":{"schema":"digitalogic.integration-catalog","revision":"r1","currency":{"local":"IRT","cny_to_local":1,"cny_to_irt":1},"pricing":{"formula_id":"landed_price"},"shipping_methods":[{"id":"air","price_per_kg":1,"currency":"CNY"}]}}`)
+				fmt.Fprint(w, `{"data":{"schema":"digitalogic.integration-catalog","revision":"r1","currency":{"local":"IRT","cny_to_local":1,"cny_to_irt":1},"pricing":{"authority":"go","formula_id":"landed_price"},"shipping_methods":[{"id":"air","price_per_kg":1,"currency":"CNY"}]}}`)
 			case "/integration/pricing-assignments/batch":
 				fmt.Fprint(w, `{"data":{"schema":"digitalogic.pricing-assignment-batch","requested_count":1,"resolved_count":1,"error_count":0,"maximum_codes":500,"default_percentage_markup":{"schema":"digitalogic.default-percentage-markup","configured":true,"type":"percentage","profit_percent":"30","source":"global_default","revision":"r1"},"results":[{"code":"A","status":"ok","assignment":{"code":"A","shipping_method_id":"air","profit_percent":"30","profit_percent_source":"global_default","pricing_warnings":[],"unexpected_assignment_field":"1"}}]}}`)
 			default:
@@ -907,8 +922,8 @@ func TestHTTPProviderRejectsUnknownContractFields(t *testing.T) {
 		provider := newHTTPProvider(DigitalogicConfig{BaseURL: server.URL}, server.Client(), time.Now)
 		scoped := provider.Prefetch(context.Background(), []string{"A"})
 		resolved := scoped.Resolve(context.Background(), "A")
-		if !contains(resolved.Warnings, "pricing_assignment_batch_contract_invalid") || resolved.MethodID != "" {
-			t.Fatalf("unknown batch assignment field was accepted: %+v", resolved)
+		if resolved.Authority != AuthorityGo || resolved.AuthorityError != "" || resolved.MethodID != "air" || resolved.MarkupPercent == nil || *resolved.MarkupPercent != Decimal("30") || contains(resolved.Warnings, "pricing_assignment_batch_contract_invalid") {
+			t.Fatalf("assignment extra field changed required inputs: %+v", resolved)
 		}
 	})
 }

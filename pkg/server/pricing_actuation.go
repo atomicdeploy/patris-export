@@ -267,7 +267,7 @@ func pricingWaitReceiptComplete(receipt *pricingDeliveryReceipt, input *canonica
 	if owner.Authority == pricingcatalog.AuthorityGo {
 		return receipt.Source.SameIdentity(input.Source) && receipt.OwnerCatalogRevision == owner.CatalogRevision
 	}
-	// PHP final collection separately proves the current owner catalog revision.
+	// PHP receipt proves accepted website writes; no optional snapshot is collected.
 	return owner.Authority == pricingcatalog.AuthorityPHP
 }
 
@@ -290,32 +290,20 @@ func (a *pricingActuator) run(ctx context.Context, source canonical.Source) {
 		return
 	}
 	if owner.Authority == pricingcatalog.AuthorityPHP {
-		if previous.Phase == "complete" && previous.Authority == owner.Authority && previous.OwnerRevision == owner.CatalogRevision && previous.Source.SameIdentity(source) {
-			return
-		}
-		if !a.transition(func(st *pricingActuationStatus) {
-			st.Previous = supersededPricingOperation(previous)
-			st.Phase = "projecting"
+		// Website pricing is owned and published by PHP. Its optional return
+		// snapshot must not start background work or hold the pricing permit.
+		a.transition(func(st *pricingActuationStatus) {
+			st.Phase = "idle"
 			st.Authority = owner.Authority
 			st.OwnerRevision = owner.CatalogRevision
 			st.Source = source
 			st.EventID = ""
-			st.Error = ""
+			st.Error = "snapshot_disabled"
 			st.Delivery = nil
-		}) {
-			return
-		}
-		if err := a.project(ctx, source, owner); err != nil {
-			if _, code, ok := excelPricingRemoteSnapshotFailureDetails(err); ok {
-				a.fail(code)
-			} else {
-				a.fail("owner_projection_unavailable")
-			}
-			return
-		}
-		a.transition(func(st *pricingActuationStatus) { st.Phase = "complete" })
+		})
 		return
 	}
+
 	if previous.OwnerRevision == owner.CatalogRevision && previous.Authority == owner.Authority && previous.Source.ID == source.ID && previous.Source.Dataset == source.Dataset {
 		if previous.Phase == "complete" {
 			return

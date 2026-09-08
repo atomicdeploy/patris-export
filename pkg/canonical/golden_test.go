@@ -47,6 +47,7 @@ func syntheticGoldenEnvelope() *Envelope {
 	cfg := DefaultConfig()
 	cfg.SourceID = "synthetic-fixture"
 	cfg.Pricing = pricingcatalog.Config{Mode: pricingcatalog.ModeStatic, Static: pricingcatalog.StaticConfig{
+		Authority:             pricingcatalog.AuthorityGo,
 		Revision:              "synthetic-catalog",
 		CNYToIRT:              &fx,
 		CurrencyEffectiveDate: "2026-01-01",

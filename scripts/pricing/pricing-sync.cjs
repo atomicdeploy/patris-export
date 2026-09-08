@@ -15,7 +15,13 @@ Default overall budget: 60000 ms, shared by readiness, session, refresh and read
 An explicit longer --timeout-ms emits a CRITICAL event at 60 seconds while waiting.
 Checks HTTP /api/status before and after; outputs a terminal JSON receipt.
 No automatic refresh retry. A timeout may have applied changes; inspect the server
-receipt before retrying. Only bulk is supported; the server has no single-product scope.
+receipt before retrying. This local Go command currently supports only bulk.
+For one product on the WordPress host with PHP authority, run:
+  wp digitalogic pricing recalculate --product-code=YOUR_PATRIS_CODE
+It recalculates the committed Patris input; it does not fetch a fresh Patris row.
+Authenticated WordPress clients can POST product_code to:
+  /wp-json/digitalogic/v1/pricing/products/recalculate
+The dedicated source-ingest secret is not a substitute for WordPress permissions.
 This endpoint does not expose an independent n8n notification receipt.
 Exit: 0 delivered, 1 failed/unknown, 2 over 60s, 3 delivered with missing-product deferrals.
 `;

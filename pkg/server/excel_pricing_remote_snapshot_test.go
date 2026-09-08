@@ -481,7 +481,7 @@ func newExcelPricingRemoteSnapshotProductionServer(
 	fixture *excelPricingRemoteSnapshotFixture,
 ) (*Server, string) {
 	t.Helper()
-	server := newExcelPricingTestServer(
+	server := newDormantSnapshotImplementationTestServer(
 		t,
 		fixture.server.URL+"/wp-json/digitalogic/product-sync",
 	)
@@ -1055,7 +1055,7 @@ func TestExcelPricingSnapshotProductionFailureStagesCoverConfigurationAndLocalPr
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			server := newExcelPricingTestServer(
+			server := newDormantSnapshotImplementationTestServer(
 				t,
 				"http://127.0.0.1:1/wp-json/digitalogic/patris/product-sync",
 			)
@@ -1089,7 +1089,7 @@ func TestExcelPricingSnapshotProductionFailureStagesCoverConfigurationAndLocalPr
 
 func TestExcelPricingSnapshotFailurePropagatesToTerminalWaitSSEAndFollower(t *testing.T) {
 	source := excelPricingStateSourceForTest()
-	server := newExcelPricingTestServer(
+	server := newDormantSnapshotImplementationTestServer(
 		t,
 		"http://127.0.0.1:1/wp-json/digitalogic/patris/product-sync",
 	)
@@ -1225,7 +1225,7 @@ func TestExcelPricingSnapshotFailurePropagatesToTerminalWaitSSEAndFollower(t *te
 
 func TestExcelPricingSnapshotCancellationNeverRetainsUnrelatedFailureEvidence(t *testing.T) {
 	source := excelPricingStateSourceForTest()
-	server := newExcelPricingTestServer(
+	server := newDormantSnapshotImplementationTestServer(
 		t,
 		"http://127.0.0.1:1/wp-json/digitalogic/patris/product-sync",
 	)

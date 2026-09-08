@@ -15,6 +15,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gorilla/mux"
+
 	"github.com/atomicdeploy/patris-export/pkg/canonical"
 	"github.com/atomicdeploy/patris-export/pkg/recordpipe"
 	"github.com/atomicdeploy/patris-export/pkg/updateout"
@@ -60,7 +62,7 @@ func TestExcelPricingSnapshotStartValidatesFreshCanonicalSourceRevision(t *testi
 	}))
 	defer remote.Close()
 
-	server := newExcelPricingTestServer(t, remote.URL+"/wp-json/digitalogic/patris/product-sync")
+	server := newDormantSnapshotImplementationTestServer(t, remote.URL+"/wp-json/digitalogic/patris/product-sync")
 	var canonicalCalls atomic.Int32
 	projection := canonicalProjectionSequence(current)
 	server.excelPricing.canonical = func(ctx context.Context) (recordpipe.Result, error) {
@@ -146,7 +148,7 @@ func TestExcelPricingSnapshotAggregatesCachesAndServesETag(t *testing.T) {
 	}))
 	defer remote.Close()
 
-	server := newExcelPricingTestServer(t, remote.URL+"/wp-json/digitalogic/patris/product-sync")
+	server := newDormantSnapshotImplementationTestServer(t, remote.URL+"/wp-json/digitalogic/patris/product-sync")
 	token := openExcelPricingSession(t, server)
 	requestID := "snapshot-start-test-0001"
 	start := authenticatedExcelPricingRequest(
@@ -413,7 +415,7 @@ func TestExcelPricingSnapshotAggregatesCachesAndServesETag(t *testing.T) {
 
 func TestExcelPricingSnapshotConcurrentDriftProbeFencesOnce(t *testing.T) {
 	source := excelPricingStateSourceForTest()
-	server := newExcelPricingTestServer(
+	server := newDormantSnapshotImplementationTestServer(
 		t,
 		"http://127.0.0.1:1/wp-json/digitalogic/patris/product-sync",
 	)
@@ -575,7 +577,7 @@ func TestExcelPricingSnapshotConcurrentDriftProbeFencesOnce(t *testing.T) {
 
 func TestExcelPricingSnapshotSharedProbeSurvivesLeaderCancellation(t *testing.T) {
 	source := excelPricingStateSourceForTest()
-	server := newExcelPricingTestServer(
+	server := newDormantSnapshotImplementationTestServer(
 		t,
 		"http://127.0.0.1:1/wp-json/digitalogic/patris/product-sync",
 	)
@@ -709,7 +711,7 @@ func TestExcelPricingSnapshotSharedProbeSurvivesLeaderCancellation(t *testing.T)
 func TestExcelPricingSnapshotReadyReplayRevalidatesRevision(t *testing.T) {
 	t.Run("drift invalidates the replayed job", func(t *testing.T) {
 		source := excelPricingStateSourceForTest()
-		server := newExcelPricingTestServer(
+		server := newDormantSnapshotImplementationTestServer(
 			t,
 			"http://127.0.0.1:1/wp-json/digitalogic/patris/product-sync",
 		)
@@ -782,7 +784,7 @@ func TestExcelPricingSnapshotReadyReplayRevalidatesRevision(t *testing.T) {
 
 	t.Run("unverifiable replay fails closed", func(t *testing.T) {
 		source := excelPricingStateSourceForTest()
-		server := newExcelPricingTestServer(
+		server := newDormantSnapshotImplementationTestServer(
 			t,
 			"http://127.0.0.1:1/wp-json/digitalogic/patris/product-sync",
 		)
@@ -846,7 +848,7 @@ func TestExcelPricingSnapshotReadyReplayRevalidatesRevision(t *testing.T) {
 
 func TestExcelPricingSnapshotSkipsProbeForIneligibleCacheAndRejectsInvalidAttestation(t *testing.T) {
 	source := excelPricingStateSourceForTest()
-	server := newExcelPricingTestServer(
+	server := newDormantSnapshotImplementationTestServer(
 		t,
 		"http://127.0.0.1:1/wp-json/digitalogic/patris/product-sync",
 	)
@@ -912,7 +914,7 @@ func TestExcelPricingSnapshotSkipsProbeForIneligibleCacheAndRejectsInvalidAttest
 
 func TestExcelPricingSnapshotRechecksMaxAgeAfterRevisionProbe(t *testing.T) {
 	source := excelPricingStateSourceForTest()
-	server := newExcelPricingTestServer(
+	server := newDormantSnapshotImplementationTestServer(
 		t,
 		"http://127.0.0.1:1/wp-json/digitalogic/patris/product-sync",
 	)
@@ -981,7 +983,7 @@ func TestExcelPricingSnapshotRechecksMaxAgeAfterRevisionProbe(t *testing.T) {
 
 func TestExcelPricingSnapshotReplayExpiryDuringProbeRetriesFreshIdentity(t *testing.T) {
 	source := excelPricingStateSourceForTest()
-	server := newExcelPricingTestServer(
+	server := newDormantSnapshotImplementationTestServer(
 		t,
 		"http://127.0.0.1:1/wp-json/digitalogic/patris/product-sync",
 	)
@@ -1059,7 +1061,7 @@ func TestExcelPricingSnapshotReplayExpiryDuringProbeRetriesFreshIdentity(t *test
 
 func TestExcelPricingSnapshotObsoleteDriftProbeCannotOverrideLocalInvalidation(t *testing.T) {
 	source := excelPricingStateSourceForTest()
-	server := newExcelPricingTestServer(
+	server := newDormantSnapshotImplementationTestServer(
 		t,
 		"http://127.0.0.1:1/wp-json/digitalogic/patris/product-sync",
 	)
@@ -1216,7 +1218,7 @@ func TestExcelPricingSnapshotReadyReplayPublishesReturnedCachedJob(t *testing.T)
 	}))
 	defer remote.Close()
 
-	server := newExcelPricingTestServer(t, remote.URL+"/wp-json/digitalogic/patris/product-sync")
+	server := newDormantSnapshotImplementationTestServer(t, remote.URL+"/wp-json/digitalogic/patris/product-sync")
 	token := openExcelPricingSession(t, server)
 	start := func(requestID string) (*httptest.ResponseRecorder, string) {
 		t.Helper()
@@ -1352,7 +1354,7 @@ func TestExcelPricingSnapshotExcelV1UsesPositionalRowsAndSeparateCache(t *testin
 		)
 	}))
 	defer remote.Close()
-	server := newExcelPricingTestServer(t, remote.URL+"/wp-json/digitalogic/patris/product-sync")
+	server := newDormantSnapshotImplementationTestServer(t, remote.URL+"/wp-json/digitalogic/patris/product-sync")
 	token := openExcelPricingSession(t, server)
 	requestID := "snapshot-excel-v1-test-0001"
 	start := authenticatedExcelPricingRequest(
@@ -1588,7 +1590,7 @@ func TestExcelPricingSnapshotReturnsBusyWithoutWaiting(t *testing.T) {
 	defer remote.Close()
 	defer close(release)
 
-	server := newExcelPricingTestServer(t, remote.URL+"/wp-json/digitalogic/patris/product-sync")
+	server := newDormantSnapshotImplementationTestServer(t, remote.URL+"/wp-json/digitalogic/patris/product-sync")
 	token := openExcelPricingSession(t, server)
 	firstID := "snapshot-busy-test-0001"
 	first := authenticatedExcelPricingRequest(
@@ -1669,7 +1671,7 @@ func TestExcelPricingSnapshotCoalescesSameSourceAndLocale(t *testing.T) {
 	}))
 	defer remote.Close()
 
-	server := newExcelPricingTestServer(t, remote.URL+"/wp-json/digitalogic/patris/product-sync")
+	server := newDormantSnapshotImplementationTestServer(t, remote.URL+"/wp-json/digitalogic/patris/product-sync")
 	token := openExcelPricingSession(t, server)
 	startJob := func(requestID string) *httptest.ResponseRecorder {
 		request := authenticatedExcelPricingRequest(
@@ -1727,7 +1729,7 @@ func TestExcelPricingSnapshotCancelsGroupWhenLastFollowerCancels(t *testing.T) {
 		close(remoteCancelled)
 	}))
 	defer remote.Close()
-	server := newExcelPricingTestServer(t, remote.URL+"/wp-json/digitalogic/patris/product-sync")
+	server := newDormantSnapshotImplementationTestServer(t, remote.URL+"/wp-json/digitalogic/patris/product-sync")
 	token := openExcelPricingSession(t, server)
 	startJob := func(requestID string) string {
 		request := authenticatedExcelPricingRequest(
@@ -1794,7 +1796,7 @@ func TestExcelPricingSnapshotReportsCapacityBeforePagingPastLimit(t *testing.T) 
 		)
 	}))
 	defer remote.Close()
-	server := newExcelPricingTestServer(t, remote.URL+"/wp-json/digitalogic/patris/product-sync")
+	server := newDormantSnapshotImplementationTestServer(t, remote.URL+"/wp-json/digitalogic/patris/product-sync")
 	token := openExcelPricingSession(t, server)
 	requestID := "snapshot-too-large-0001"
 	request := authenticatedExcelPricingRequest(
@@ -1904,7 +1906,7 @@ func TestExcelPricingSnapshotRejectsDuplicateMissingAndAmbiguousRowIdentity(t *t
 				)
 			}))
 			defer remote.Close()
-			server := newExcelPricingTestServer(t, remote.URL+"/wp-json/digitalogic/patris/product-sync")
+			server := newDormantSnapshotImplementationTestServer(t, remote.URL+"/wp-json/digitalogic/patris/product-sync")
 			token := openExcelPricingSession(t, server)
 			requestID := "snapshot-bad-row-" + strings.ReplaceAll(name, " ", "-")
 			request := authenticatedExcelPricingRequest(
@@ -1934,7 +1936,7 @@ func TestExcelPricingSnapshotIdempotencyConflictAndOwnerIsolation(t *testing.T) 
 		)
 	}))
 	defer remote.Close()
-	server := newExcelPricingTestServer(t, remote.URL+"/wp-json/digitalogic/patris/product-sync")
+	server := newDormantSnapshotImplementationTestServer(t, remote.URL+"/wp-json/digitalogic/patris/product-sync")
 	ownerToken := openExcelPricingSession(t, server)
 	requestID := "snapshot-isolation-test-0001"
 	start := authenticatedExcelPricingRequest(
@@ -1986,7 +1988,7 @@ func TestExcelPricingSnapshotEventStreamReplaysCreationAndStateChanges(t *testin
 		)
 	}))
 	defer remote.Close()
-	server := newExcelPricingTestServer(t, remote.URL+"/wp-json/digitalogic/patris/product-sync")
+	server := newDormantSnapshotImplementationTestServer(t, remote.URL+"/wp-json/digitalogic/patris/product-sync")
 	token := openExcelPricingSession(t, server)
 	requestID := "snapshot-events-test-0001"
 	start := authenticatedExcelPricingRequest(
@@ -2084,7 +2086,7 @@ func TestExcelPricingSnapshotEventStreamSurvivesExpiryWithAttachedWatcher(t *tes
 		)
 	}))
 	defer remote.Close()
-	server := newExcelPricingTestServer(t, remote.URL+"/wp-json/digitalogic/patris/product-sync")
+	server := newDormantSnapshotImplementationTestServer(t, remote.URL+"/wp-json/digitalogic/patris/product-sync")
 	token := openExcelPricingSession(t, server)
 	requestID := "snapshot-watcher-expiry-test-0001"
 	start := authenticatedExcelPricingRequest(
@@ -2182,7 +2184,7 @@ func TestExcelPricingSnapshotEventStreamSignalsRetainedHistoryGap(t *testing.T) 
 		)
 	}))
 	defer remote.Close()
-	server := newExcelPricingTestServer(t, remote.URL+"/wp-json/digitalogic/patris/product-sync")
+	server := newDormantSnapshotImplementationTestServer(t, remote.URL+"/wp-json/digitalogic/patris/product-sync")
 	token := openExcelPricingSession(t, server)
 	requestID := "snapshot-event-gap-test-0001"
 	start := authenticatedExcelPricingRequest(
@@ -2265,7 +2267,7 @@ func TestExcelPricingSnapshotStartAdvertisesDurableAndJobEventStreams(t *testing
 		)
 	}))
 	defer remote.Close()
-	server := newExcelPricingTestServer(t, remote.URL+"/wp-json/digitalogic/patris/product-sync")
+	server := newDormantSnapshotImplementationTestServer(t, remote.URL+"/wp-json/digitalogic/patris/product-sync")
 	token := openExcelPricingSession(t, server)
 	requestID := "snapshot-event-contract-test-0001"
 	request := authenticatedExcelPricingRequest(
@@ -2293,7 +2295,7 @@ func TestExcelPricingSnapshotStartAdvertisesDurableAndJobEventStreams(t *testing
 }
 
 func TestExcelPricingDurableEventsReplaysLatestAndSurvivesJobPrune(t *testing.T) {
-	server := newExcelPricingTestServer(t, "http://127.0.0.1:1/wp-json/digitalogic/patris/product-sync")
+	server := newDormantSnapshotImplementationTestServer(t, "http://127.0.0.1:1/wp-json/digitalogic/patris/product-sync")
 	registerExcelPricingDurableEventsRouteForTest(server)
 	token := openExcelPricingSession(t, server)
 	store := server.excelPricing.snapshots
@@ -2367,7 +2369,7 @@ func TestExcelPricingDurableEventsDisconnectNeverCancelsSnapshotJob(t *testing.T
 		close(remoteCancelled)
 	}))
 	defer remote.Close()
-	server := newExcelPricingTestServer(t, remote.URL+"/wp-json/digitalogic/patris/product-sync")
+	server := newDormantSnapshotImplementationTestServer(t, remote.URL+"/wp-json/digitalogic/patris/product-sync")
 	registerExcelPricingDurableEventsRouteForTest(server)
 	token := openExcelPricingSession(t, server)
 	requestID := "snapshot-durable-disconnect-test-0001"
@@ -2435,7 +2437,7 @@ func TestExcelPricingDurableEventsDisconnectNeverCancelsSnapshotJob(t *testing.T
 }
 
 func TestExcelPricingDurableEventsNoCursorReplayIsSessionIsolated(t *testing.T) {
-	server := newExcelPricingTestServer(t, "http://127.0.0.1:1/wp-json/digitalogic/patris/product-sync")
+	server := newDormantSnapshotImplementationTestServer(t, "http://127.0.0.1:1/wp-json/digitalogic/patris/product-sync")
 	registerExcelPricingDurableEventsRouteForTest(server)
 	loopback := httptest.NewServer(server.router)
 	defer loopback.Close()
@@ -2468,7 +2470,7 @@ func TestExcelPricingDurableEventsNoCursorReplayIsSessionIsolated(t *testing.T) 
 }
 
 func TestExcelPricingDurableEventsSignalsPastAndAheadCursors(t *testing.T) {
-	server := newExcelPricingTestServer(t, "http://127.0.0.1:1/wp-json/digitalogic/patris/product-sync")
+	server := newDormantSnapshotImplementationTestServer(t, "http://127.0.0.1:1/wp-json/digitalogic/patris/product-sync")
 	registerExcelPricingDurableEventsRouteForTest(server)
 	token := openExcelPricingSession(t, server)
 	store := server.excelPricing.snapshots
@@ -2567,7 +2569,7 @@ func TestExcelPricingSnapshotSourceChangeCancelsRunningBuildAndInvalidatesPayloa
 		close(secondCancelled)
 	}))
 	defer remote.Close()
-	server := newExcelPricingTestServer(t, remote.URL+"/wp-json/digitalogic/patris/product-sync")
+	server := newDormantSnapshotImplementationTestServer(t, remote.URL+"/wp-json/digitalogic/patris/product-sync")
 	token := openExcelPricingSession(t, server)
 	startJob := func(requestID string) string {
 		request := authenticatedExcelPricingRequest(
@@ -2680,7 +2682,7 @@ func TestExcelPricingSnapshotPricingInvalidationCancelsLeaderAndFollower(t *test
 		remoteCancelled <- struct{}{}
 	}))
 	defer remote.Close()
-	server := newExcelPricingTestServer(t, remote.URL+"/wp-json/digitalogic/patris/product-sync")
+	server := newDormantSnapshotImplementationTestServer(t, remote.URL+"/wp-json/digitalogic/patris/product-sync")
 	token := openExcelPricingSession(t, server)
 	startJob := func(requestID string) string {
 		request := authenticatedExcelPricingRequest(
@@ -2745,7 +2747,7 @@ func TestExcelPricingSnapshotGenerationFenceRejectsLateCompletion(t *testing.T) 
 		)
 	}))
 	defer remote.Close()
-	server := newExcelPricingTestServer(t, remote.URL+"/wp-json/digitalogic/patris/product-sync")
+	server := newDormantSnapshotImplementationTestServer(t, remote.URL+"/wp-json/digitalogic/patris/product-sync")
 	token := openExcelPricingSession(t, server)
 	requestID := "snapshot-generation-fence-test-0001"
 	request := authenticatedExcelPricingRequest(
@@ -2778,7 +2780,7 @@ func TestExcelPricingSnapshotGenerationFenceRejectsLateCompletion(t *testing.T) 
 }
 
 func TestExcelPricingSnapshotUpstreamCatalogInvalidationIsAtomic(t *testing.T) {
-	server := newExcelPricingTestServer(t, "http://127.0.0.1:1/wp-json/digitalogic/patris/product-sync")
+	server := newDormantSnapshotImplementationTestServer(t, "http://127.0.0.1:1/wp-json/digitalogic/patris/product-sync")
 	store := server.excelPricing.snapshots
 	source := excelPricingStateSourceForTest()
 	previousCatalog := excelPricingRevisionForTest("upstream-previous-catalog")
@@ -2852,7 +2854,7 @@ func TestExcelPricingSnapshotUpstreamCatalogInvalidationIsAtomic(t *testing.T) {
 }
 
 func TestExcelPricingRemoteRevisionAdvanceIsNotSourceChange(t *testing.T) {
-	server := newExcelPricingTestServer(t, "http://127.0.0.1:1/wp-json/digitalogic/patris/product-sync")
+	server := newDormantSnapshotImplementationTestServer(t, "http://127.0.0.1:1/wp-json/digitalogic/patris/product-sync")
 	store := server.excelPricing.snapshots
 	previousSource := excelPricingStateSourceForTest()
 	currentSource := previousSource
@@ -2892,7 +2894,7 @@ func TestExcelPricingRemoteRevisionAdvanceIsNotSourceChange(t *testing.T) {
 }
 
 func TestExcelPricingRemoteWebsiteCommitPrefersFastConfirmationOverDerivedCatalogChange(t *testing.T) {
-	server := newExcelPricingTestServer(t, "http://127.0.0.1:1/wp-json/digitalogic/patris/product-sync")
+	server := newDormantSnapshotImplementationTestServer(t, "http://127.0.0.1:1/wp-json/digitalogic/patris/product-sync")
 	store := server.excelPricing.snapshots
 	source := excelPricingStateSourceForTest()
 	previousState := excelPricingRevisionForTest("website-previous-state")
@@ -2933,7 +2935,7 @@ func TestExcelPricingRemoteWebsiteCommitPrefersFastConfirmationOverDerivedCatalo
 }
 
 func TestExcelPricingRemoteCatalogChangeRemainsCatalogChangeWhenPricingStateIsStable(t *testing.T) {
-	server := newExcelPricingTestServer(t, "http://127.0.0.1:1/wp-json/digitalogic/patris/product-sync")
+	server := newDormantSnapshotImplementationTestServer(t, "http://127.0.0.1:1/wp-json/digitalogic/patris/product-sync")
 	store := server.excelPricing.snapshots
 	source := excelPricingStateSourceForTest()
 	previousState := excelPricingRevisionForTest("catalog-previous-state")
@@ -2986,7 +2988,7 @@ func TestExcelPricingSnapshotWaitDisconnectCancelsRemoteWork(t *testing.T) {
 		close(remoteCancelled)
 	}))
 	defer remote.Close()
-	server := newExcelPricingTestServer(t, remote.URL+"/wp-json/digitalogic/patris/product-sync")
+	server := newDormantSnapshotImplementationTestServer(t, remote.URL+"/wp-json/digitalogic/patris/product-sync")
 	token := openExcelPricingSession(t, server)
 	requestID := "snapshot-wait-cancel-test-0001"
 	start := authenticatedExcelPricingRequest(
@@ -3041,7 +3043,7 @@ func TestExcelPricingSnapshotExpiryWinsOverConditionalETag(t *testing.T) {
 		)
 	}))
 	defer remote.Close()
-	server := newExcelPricingTestServer(t, remote.URL+"/wp-json/digitalogic/patris/product-sync")
+	server := newDormantSnapshotImplementationTestServer(t, remote.URL+"/wp-json/digitalogic/patris/product-sync")
 	token := openExcelPricingSession(t, server)
 	requestID := "snapshot-expiry-test-0001"
 	start := authenticatedExcelPricingRequest(
@@ -3094,7 +3096,7 @@ func TestExcelPricingSnapshotCoalescedExpectedRevisionIsPerCaller(t *testing.T) 
 		)
 	}))
 	defer remote.Close()
-	server := newExcelPricingTestServer(t, remote.URL+"/wp-json/digitalogic/patris/product-sync")
+	server := newDormantSnapshotImplementationTestServer(t, remote.URL+"/wp-json/digitalogic/patris/product-sync")
 	token := openExcelPricingSession(t, server)
 	startJob := func(requestID, expected string) string {
 		request := authenticatedExcelPricingRequest(
@@ -3379,7 +3381,7 @@ func TestExcelPricingSnapshotCancelPropagatesContext(t *testing.T) {
 		close(cancelled)
 	}))
 	defer remote.Close()
-	server := newExcelPricingTestServer(t, remote.URL+"/wp-json/digitalogic/patris/product-sync")
+	server := newDormantSnapshotImplementationTestServer(t, remote.URL+"/wp-json/digitalogic/patris/product-sync")
 	token := openExcelPricingSession(t, server)
 	requestID := "snapshot-cancel-test-0001"
 	start := authenticatedExcelPricingRequest(
@@ -3423,5 +3425,53 @@ func TestExcelPricingSnapshotNormalizesRemoteSnapshotDrift(t *testing.T) {
 	}
 	if got := excelPricingSnapshotFailureCode("remote_unavailable"); got != "remote_unavailable" {
 		t.Fatalf("unrelated failure code changed to %q", got)
+	}
+}
+
+// These retained-handler tests cover dormant implementation algorithms, not
+// deployed snapshot endpoint acceptance. The production router stays disabled.
+func newDormantSnapshotImplementationTestServer(t *testing.T, productSyncURL string) *Server {
+	t.Helper()
+	server := newExcelPricingTestServer(t, productSyncURL)
+	production := server.router
+	internal := mux.NewRouter()
+	internal.HandleFunc("/api/pricing-sync/snapshots", server.handlePostExcelPricingSnapshot).Methods("POST")
+	internal.HandleFunc("/api/pricing-sync/snapshots/{job_id}", server.handleGetExcelPricingSnapshot).Methods("GET")
+	internal.HandleFunc("/api/pricing-sync/snapshots/{job_id}/payload", server.handleGetExcelPricingSnapshotPayload).Methods("GET")
+	internal.PathPrefix("/").Handler(production)
+	server.router = internal
+	return server
+}
+
+func TestExcelPricingSnapshotProductionRoutesAreDisabledAndAuthenticated(t *testing.T) {
+	server := newExcelPricingTestServer(t, "http://127.0.0.1:1/product-sync")
+	token := openExcelPricingSession(t, server)
+	server.excelPricing.snapshotCollector = func(context.Context, string, excelPricingSnapshotStartRequest, updateout.Config) (*excelPricingSnapshot, string) {
+		t.Error("disabled production endpoint started snapshot work")
+		return nil, "unexpected_collection"
+	}
+	for _, route := range []struct{ method, path string }{
+		{"POST", "/api/pricing-sync/snapshots"},
+		{"GET", "/api/pricing-sync/snapshots/job-test"},
+		{"GET", "/api/pricing-sync/snapshots/job-test/payload"},
+	} {
+		for _, authorized := range []bool{false, true} {
+			request := newExcelPricingRequest(route.method, route.path, "")
+			if authorized {
+				request.Header.Set(excelPricingCSRFHeader, token)
+			}
+			response := httptest.NewRecorder()
+			server.router.ServeHTTP(response, request)
+			want := http.StatusForbidden
+			if authorized {
+				want = http.StatusServiceUnavailable
+			}
+			if response.Code != want {
+				t.Fatalf("%s %s auth=%v: %d %s", route.method, route.path, authorized, response.Code, response.Body.String())
+			}
+			if authorized && !strings.Contains(response.Body.String(), "snapshot_disabled") {
+				t.Fatal(response.Body.String())
+			}
+		}
 	}
 }
