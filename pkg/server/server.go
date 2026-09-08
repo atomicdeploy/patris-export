@@ -46,48 +46,49 @@ import (
 
 // Server represents the HTTP/WebSocket server
 type Server struct {
-	router               *mux.Router
-	dbPath               string
-	charMap              converter.CharMapping
-	dataSource           datasource.DataSource
-	dataSourceMu         sync.RWMutex
-	watcher              *watcher.FileWatcher
-	wsClients            map[*websocket.Conn]*sync.Mutex
-	wsClientsMu          sync.RWMutex
-	upgrader             websocket.Upgrader
-	lastRecords          []map[string]interface{}
-	lastRecordsMu        sync.RWMutex
-	lastRecordsReady     bool
-	lastContractRevision string
-	lastModTime          time.Time
-	lastModTimeMu        sync.RWMutex
-	useTempFile          bool
-	config               *appconfig.Manager
-	configWatcher        *appconfig.ConfigWatcher
-	version              version.Info
-	processMu            sync.Mutex
-	processStatusCache   map[string]interface{}
-	processStatusAt      time.Time
-	lastSourceHash       string
-	lastSourceHashMu     sync.Mutex
-	eventSubscribers     map[chan map[string]interface{}]struct{}
-	eventSubscribersMu   sync.RWMutex
-	catalogProvider      pricingcatalog.Provider
-	catalogProviderKey   string
-	catalogProviderMu    sync.Mutex
-	canonicalProjection  *canonicalProjectionCache
-	pricingPublication   *canonicalProjectionCache
-	pricingActuation     *pricingActuator
-	refreshDiagnosticMu  sync.Mutex
-	refreshDiagnostic    *refreshOperationDiagnostic
-	sqlOperations        *sqlOperationsState
-	excelPricing         *excelPricingState
-	excelPricingRemote   *excelPricingRemoteEventsBridge
-	excelPricingWrites   *excelPricingWritebackQueue
-	backgroundCtx        context.Context
-	backgroundCancel     context.CancelFunc
-	backgroundWG         sync.WaitGroup
-	serviceWG            sync.WaitGroup
+	router                 *mux.Router
+	dbPath                 string
+	charMap                converter.CharMapping
+	dataSource             datasource.DataSource
+	dataSourceMu           sync.RWMutex
+	watcher                *watcher.FileWatcher
+	wsClients              map[*websocket.Conn]*sync.Mutex
+	wsClientsMu            sync.RWMutex
+	upgrader               websocket.Upgrader
+	lastRecords            []map[string]interface{}
+	lastRecordsMu          sync.RWMutex
+	lastRecordsReady       bool
+	lastContractRevision   string
+	lastModTime            time.Time
+	lastModTimeMu          sync.RWMutex
+	useTempFile            bool
+	config                 *appconfig.Manager
+	configWatcher          *appconfig.ConfigWatcher
+	version                version.Info
+	processMu              sync.Mutex
+	processStatusCache     map[string]interface{}
+	processStatusAt        time.Time
+	lastSourceHash         string
+	lastSourceHashMu       sync.Mutex
+	eventSubscribers       map[chan map[string]interface{}]struct{}
+	eventSubscribersMu     sync.RWMutex
+	catalogProvider        pricingcatalog.Provider
+	catalogProviderKey     string
+	catalogProviderMu      sync.Mutex
+	canonicalProjection    *canonicalProjectionCache
+	pricingPublication     *canonicalProjectionCache
+	pricingActuation       *pricingActuator
+	refreshDiagnosticMu    sync.Mutex
+	refreshDiagnostic      *refreshOperationDiagnostic
+	lastPreDispatchFailure *preDispatchFailure
+	sqlOperations          *sqlOperationsState
+	excelPricing           *excelPricingState
+	excelPricingRemote     *excelPricingRemoteEventsBridge
+	excelPricingWrites     *excelPricingWritebackQueue
+	backgroundCtx          context.Context
+	backgroundCancel       context.CancelFunc
+	backgroundWG           sync.WaitGroup
+	serviceWG              sync.WaitGroup
 }
 
 type Options struct {
@@ -2165,6 +2166,7 @@ func (s *Server) broadcastInitialSnapshot(reason string) {
 	preparedAt := time.Now()
 	result, err := s.RecordResult()
 	if err != nil {
+		s.recordPreDispatchFailure("initial", "source_prepare", preparedAt, err)
 		log.Printf("Failed to read records for initial snapshot: %v", err)
 		return
 	}
@@ -2226,6 +2228,7 @@ func (s *Server) broadcastUpdate() {
 	// Get current records
 	result, err := s.RecordResult()
 	if err != nil {
+		s.recordPreDispatchFailure("update", "source_prepare", preparedAt, err)
 		log.Printf("Failed to read records: %v", err)
 		return
 	}
@@ -2287,6 +2290,7 @@ func (s *Server) dispatchInitialUpdate(ctx context.Context) {
 	}
 	result, err := s.RecordResultContext(ctx)
 	if err != nil {
+		s.recordPreDispatchFailure("initial", "source_prepare", preparedAt, err)
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return
 		}
@@ -2338,6 +2342,7 @@ func (s *Server) dispatchUpdateEvent(event updateout.Event, preparedAt time.Time
 			case s.excelPricing.permit <- struct{}{}:
 				defer func() { <-s.excelPricing.permit }()
 			case <-ctx.Done():
+				s.recordPreDispatchFailure(event.Type, "permit_wait", queuedAt, ctx.Err())
 				return
 			}
 		}

@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -104,5 +105,52 @@ func TestQueuedDeliveryTimingPreservesZeroWait(t *testing.T) {
 	wait, present := got.StageMS["permit_wait"]
 	if !present || wait != 0 || got.ElapsedMS < 0 {
 		t.Fatalf("zero wait missing or negative duration: %+v", got)
+	}
+}
+
+func TestCancelledQueuedDeliveryPreservesActiveOperation(t *testing.T) {
+	s := newCanonicalProjectionTestServer(t, "http://127.0.0.1:1", "1s", true, true)
+	defer s.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	s.backgroundCtx = ctx
+	s.excelPricing.permit <- struct{}{}
+	defer func() { <-s.excelPricing.permit }()
+	s.beginPricingOperationDiagnostic("manual_refresh", "dispatch")
+	s.dispatchUpdateEvent(updateout.Event{Type: "initial"}, time.Now())
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		got := s.refreshDiagnosticStatus(true)
+		if got.LastPreDispatchFailure != nil {
+			if got.Operation != "manual_refresh" || !got.Active || got.LastPreDispatchFailure.Code != "operation_cancelled" || got.LastPreDispatchFailure.Stage != "permit_wait" {
+				t.Fatalf("incorrect cancellation status: %+v", got)
+			}
+			if got.Dispatch != nil {
+				t.Fatal("cancelled waiter dispatched")
+			}
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatal("cancelled queued delivery has no failure status")
+}
+
+func TestStartupPreparationFailurePreservesActiveOperation(t *testing.T) {
+	s := newCanonicalProjectionTestServer(t, "http://127.0.0.1:1", "1s", true, true)
+	defer s.Close()
+	s.dataSourceMu.Lock()
+	original := s.dataSource
+	s.dataSource = nil
+	s.dataSourceMu.Unlock()
+	defer func() { s.dataSourceMu.Lock(); s.dataSource = original; s.dataSourceMu.Unlock() }()
+	s.beginPricingOperationDiagnostic("manual_refresh", "dispatch")
+	s.dispatchInitialUpdate(context.Background())
+	got := s.refreshDiagnosticStatus(true)
+	failure := got.LastPreDispatchFailure
+	if got.Operation != "manual_refresh" || !got.Active || got.Dispatch != nil || failure == nil {
+		t.Fatalf("preparation failure replaced active status: %+v", got)
+	}
+	if failure.Operation != "startup_delivery" || failure.Stage != "source_prepare" || failure.Code != "source_prepare_failed" || failure.EndedAt.Before(failure.StartedAt) {
+		t.Fatalf("incorrect preparation failure: %+v", failure)
 	}
 }
