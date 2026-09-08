@@ -35,7 +35,7 @@ func TestExcelPricingEventBridgeSourceDoesNotMaterializeCatalogOnColdStart(t *te
 	if elapsed := time.Since(started); elapsed > 100*time.Millisecond {
 		t.Fatalf("cold event source took %s; catalog projection must not run", elapsed)
 	}
-	if source.ID != "patris-office" || source.Dataset != "kala.db" || !isSHA256Revision(source.Revision) {
+	if source.ID != "patris-office" || source.Dataset != "kala.db" || source.Revision != "" {
 		t.Fatalf("cold event source=%+v", source)
 	}
 	if server.lastRecordsReady || server.lastContractRevision != "" {
