@@ -18,3 +18,37 @@ Observed production results: full fixed-rate bulk14.058s; actual PHP CNY34000->3
 Independent current readback classifies all1022 Patris source records:901 positive prices match,120 unavailable prices cleared,1 preserved. One public product's main price HTML changed814600->817000toman during the rate test; original34000rate restored. This is not all-page browser acceptance. Six unmapped product structures remain in digitalogic-wp#299.
 
 Snapshot re-enablement requires redesign against current owner/authority and latency criteria, consumer-controlled configuration, and validation of both enabled and disabled modes. Current disablement is hard-coded. Deferred integration work and its justification are tracked in digitalogic-wp#296; overall plan is#288.
+
+## Read operation timing and delivery outcome
+
+Read the existing local `GET /api/status` response and its `pricing_operation`:
+
+| Field | Meaning |
+| --- | --- |
+| `operation` | `manual_refresh`, `startup_delivery`, or `source_delivery` |
+| `busy` | Shared pricing permit is held; false alone does not prove delivery |
+| `active` | The recorded operation has not reached its terminal diagnostic |
+| `elapsed_ms` | Recorded operation time; terminal values remain available |
+| `stage_ms` | Accumulated `owner_inputs`, `canonical_input`, and `dispatch` durations as applicable |
+| `dispatch_diagnostic.delivery` | Actual receiver receipt, never synthesized from requested input |
+| `code` | Terminal classification; inspect this together with the receipt and pending/deferred counts |
+
+For manual refresh, `owner_inputs` includes projection invalidation and owner
+selection; `canonical_input` groups source reading, transformation and assignment
+resolution. `dispatch` includes sending and waiting for the receiver response.
+These are stage measurements, not individual database-query timings. Millisecond
+rounding and control overhead can leave a small difference from total elapsed time.
+
+Startup/source diagnostics start after acquiring the shared permit. They exclude
+startup preparation and queued waiting. `receipt_received` means a matching complete
+receiver receipt was observed, not that startup independently validated the current
+pricing owner. `delivery_failed`, `delivery_receipt_unresolved`, `delivery_pending`
+and `delivery_deferred` must not be displayed as successful price delivery.
+The latest operation replaces the prior diagnostic; it is not a durable history.
+
+Live measured manual example: 13.626 seconds at the CLI, 13.527 seconds on the
+server: owner inputs 1.385 seconds, canonical input 4.559 seconds, dispatch 7.581
+seconds. Receipt was already-current with no pending/deferred; subsequent readback
+verified 901 positive leaf prices. This does not establish changed-rate latency or
+all rendered product pages. Startup preparation errors and controlled timeout
+acceptance remain tracked in issue #312.
