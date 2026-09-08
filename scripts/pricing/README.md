@@ -27,6 +27,28 @@ Without arguments it shows help.
 
 ## Single-product pricing
 
+To read fresh Patris data and deliver one exact product through the configured
+PHP or Go authority, use the existing local Go service:
+
+```cmd
+pricing-sync.cmd fresh 113001002 --json
+```
+
+This mode uses the local service session, not the WooCommerce credentials below.
+It requires the updated Go endpoint and validates an exact scoped receipt. Missing,
+quarantined or ambiguous products must not silently become bulk refreshes.
+The current implementation reads the complete source to preserve source identity,
+then delivers the selected row. If other unsent rows changed, the receiver can
+reject the aggregate revision; inspect the result and run an explicit bulk refresh.
+No automatic fallback to bulk or write retry occurs.
+
+Production fresh-input acceptance on 2026-09-08 took10418ms, with already-current
+receipt: canonical input5254ms, owner inputs1461ms, dispatch3591ms. This fails the
+single-product speed target and does not prove changed-price acceptance. Matched
+server stage timings appear in `server_stage_ms` when the status event matches the
+receipt; missing timings are not zero. The following modes instead recalculate
+the already committed input:
+
 Configure the dedicated WooCommerce write credentials in
 `DIGITALOGIC_PRICING_WRITE_KEY` and `DIGITALOGIC_PRICING_WRITE_SECRET` in the
 calling process environment. Never place secrets in command arguments. On Windows,
