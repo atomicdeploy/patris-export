@@ -171,6 +171,7 @@ type refreshOperationDiagnostic struct {
 	mu                sync.Mutex
 	started           time.Time
 	phaseStarted      time.Time
+	stageMS           map[string]int64
 	ended             time.Time
 	operation         string
 	phase             string
@@ -191,6 +192,7 @@ type refreshOperationStatus struct {
 	StartedAt      time.Time                    `json:"started_at,omitempty"`
 	ElapsedMS      int64                        `json:"elapsed_ms"`
 	PhaseElapsedMS int64                        `json:"phase_elapsed_ms"`
+	StageMS        map[string]int64             `json:"stage_ms,omitempty"`
 	Code           string                       `json:"code,omitempty"`
 	ErrorStage     string                       `json:"error_stage,omitempty"`
 	ErrorDetail    string                       `json:"error_detail,omitempty"`
@@ -214,13 +216,23 @@ func (s *Server) beginPricingOperationDiagnostic(operation, phase string) *refre
 func (d *refreshOperationDiagnostic) phaseChanged(phase string) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	d.recordStage(time.Now())
 	d.phase, d.phaseStarted = phase, time.Now()
+}
+
+// Called with the diagnostic mutex held; only fixed internal phase names are used.
+func (d *refreshOperationDiagnostic) recordStage(end time.Time) {
+	if d.stageMS == nil {
+		d.stageMS = make(map[string]int64)
+	}
+	d.stageMS[d.phase] += end.Sub(d.phaseStarted).Milliseconds()
 }
 
 func (d *refreshOperationDiagnostic) finish(code, stage, detail string) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	d.ended, d.code, d.errorStage, d.errorDetail = time.Now(), code, stage, detail
+	d.recordStage(d.ended)
 }
 
 func (s *Server) refreshDiagnosticStatus(busy bool) refreshOperationStatus {
@@ -240,6 +252,13 @@ func (s *Server) refreshDiagnosticStatus(busy bool) refreshOperationStatus {
 	}
 	r.Phase, r.StartedAt, r.ElapsedMS, r.PhaseElapsedMS = d.phase, d.started, end.Sub(d.started).Milliseconds(), end.Sub(d.phaseStarted).Milliseconds()
 	r.Operation = d.operation
+	r.StageMS = make(map[string]int64, len(d.stageMS)+1)
+	for stage, ms := range d.stageMS {
+		r.StageMS[stage] = ms
+	}
+	if r.Active {
+		r.StageMS[d.phase] += end.Sub(d.phaseStarted).Milliseconds()
+	}
 	r.Code, r.ErrorStage, r.ErrorDetail, r.Dispatch, r.Snapshot = d.code, d.errorStage, d.errorDetail, d.dispatch, d.snapshot
 	if r.Active && d.timing != nil {
 		r.Snapshot = d.timing.snapshot(d.projectionStarted)
