@@ -9,6 +9,12 @@ const LIMIT_MS = 60000;
 const HELP = `Usage: node pricing-sync.cjs bulk [--base-url URL] [--timeout-ms N] [--json]
        pricing-sync.cmd bulk
        pricing-sync.cmd single PRODUCT_CODE [--site-url URL] [--timeout-ms N] [--json]
+       pricing-sync.cmd session [--site-url URL] [--timeout-ms N] [--json]
+       pricing-sync.cmd fresh PRODUCT_CODE [--base-url URL] [--timeout-ms N] [--json]
+
+Session: Node.js 22+; authenticate once, then enter one product code per line.
+Enter quit or end input to close. Session readiness reports authentication time;
+each product receipt measures the subsequent command. No automatic write retry.
 
 Bulk refresh through the existing Go pricing session and /api/refresh delivery:wait.
 Default URL: http://127.0.0.1:18080 (loopback only). Node.js 18+; no dependencies.
@@ -45,7 +51,8 @@ function baseURL(value) {
   return url.origin;
 }
 
-async function requestJSON(base, path, { body, token, authorization, timeoutMs = 5000 } = {}) {
+async function requestJSON(base, path, { body, token, authorization, timeoutMs = 5000, timing } = {}) {
+  const requestStarted = performance.now();
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
@@ -58,9 +65,10 @@ async function requestJSON(base, path, { body, token, authorization, timeoutMs =
       body: body === undefined ? undefined : JSON.stringify(body),
       redirect: 'error', signal: controller.signal,
     });
+    if (timing) timing.response_headers_ms = Math.round(performance.now() - requestStarted);
     // Never print a raw response, URL error, header or session token.
     const inspectBusy = path === '/api/refresh' && body !== undefined && response.status === 429;
-    const inspectRefreshFailure = path === '/api/refresh' && body !== undefined && response.status === 502;
+    const inspectRefreshFailure = path === '/api/refresh' && body !== undefined && [502, 503].includes(response.status);
     if (!response.ok && !inspectBusy && !inspectRefreshFailure) {
       await response.body?.cancel();
       throw new Error('http_' + response.status);
@@ -72,17 +80,25 @@ async function requestJSON(base, path, { body, token, authorization, timeoutMs =
       if (length > 65536) { controller.abort(); throw new Error('response_too_large'); }
       chunks.push(chunk);
     }
+    if (timing) timing.response_complete_ms = Math.round(performance.now() - requestStarted);
     let data;
     try { data = JSON.parse(Buffer.concat(chunks).toString('utf8')); }
-    catch { throw new Error(inspectBusy ? 'http_429' : inspectRefreshFailure ? 'http_502' : 'invalid_json'); }
+    catch { throw new Error(inspectBusy ? 'http_429' : inspectRefreshFailure ? 'http_' + response.status : 'invalid_json'); }
     if (inspectBusy) {
       // This exact refresh rejection precedes source reads and delivery dispatch.
       throw new Error(data?.success === false && data.code === 'pricing_busy' ? 'pricing_busy' : 'http_429');
     }
     if (inspectRefreshFailure) {
+      const predispatch = ['pricing_authority_unavailable', 'delivery_unavailable', 'canonical_unavailable'];
+      if (response.status === 503 && data?.refreshed === false && data?.delivered === false
+          && predispatch.includes(data.code) && !data.dispatch_diagnostic && !data.delivery) {
+        const failure = new Error(data.code);
+        failure.predispatch = true;
+        throw failure;
+      }
       const allowed = ['delivery_failed', 'delivery_receipt_unresolved', 'owner_projection_unavailable'];
-      const failure = new Error(data?.refreshed === true && data?.delivered === false && allowed.includes(data.code) ? data.code : 'http_502');
-      if (failure.message !== 'http_502') {
+      const failure = new Error(response.status === 502 && data?.refreshed === true && data?.delivered === false && allowed.includes(data.code) ? data.code : 'http_' + response.status);
+      if (allowed.includes(failure.message)) {
         failure.dispatch_diagnostic = data.dispatch_diagnostic;
         failure.snapshot_timing = data.snapshot_timing;
       }
@@ -91,7 +107,7 @@ async function requestJSON(base, path, { body, token, authorization, timeoutMs =
     return data;
   } catch (error) {
     if (controller.signal.aborted && error.message !== 'response_too_large') throw new Error('request_timeout');
-    if (/^(http_[0-9]{3}|pricing_busy|delivery_failed|delivery_receipt_unresolved|owner_projection_unavailable|response_too_large|invalid_json)$/.test(error.message)) throw error;
+    if (/^(http_[0-9]{3}|pricing_busy|pricing_authority_unavailable|delivery_unavailable|canonical_unavailable|delivery_failed|delivery_receipt_unresolved|owner_projection_unavailable|response_too_large|invalid_json)$/.test(error.message)) throw error;
     throw new Error('transport_failed');
   } finally { clearTimeout(timer); }
 }
@@ -113,10 +129,13 @@ function receiptFrom(body) {
   };
 }
 
-async function runBulk({ baseUrl = 'http://127.0.0.1:18080', timeoutMs = LIMIT_MS,
+async function runBulk({ baseUrl = 'http://127.0.0.1:18080', timeoutMs = LIMIT_MS, productCode,
   log = () => {}, onEvent = () => {}, now = () => performance.now(),
   schedule = setTimeout, unschedule = clearTimeout } = {}) {
   const base = baseURL(baseUrl);
+  if (productCode !== undefined && (typeof productCode !== 'string' || !/^[0-9]{1,128}$/.test(productCode))) throw Error('invalid_product_code');
+  const scoped = productCode !== undefined;
+  const targetMs = scoped ? 1000 : LIMIT_MS;
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 600000) throw new Error('invalid_timeout_ms');
   const start = now();
   const remaining = (cap = timeoutMs) => {
@@ -126,10 +145,10 @@ async function runBulk({ baseUrl = 'http://127.0.0.1:18080', timeoutMs = LIMIT_M
   };
   const criticalTimer = schedule(() => onEvent({
     event: 'critical_threshold_reached', elapsed_ms: Math.round(now() - start),
-    message: 'CRITICAL: 60 seconds reached; the operation has not completed. No retry was sent.',
-  }), LIMIT_MS);
+    message: scoped ? 'Single-product 1-second target reached; still waiting without retry.' : 'CRITICAL: 60 seconds reached; the operation has not completed. No retry was sent.',
+  }), targetMs);
   const checkpoints = {};
-  const result = { scope: 'bulk', delivered: false, outcome: 'not_started',
+  const result = { scope: scoped ? 'single' : 'bulk', delivered: false, outcome: 'not_started',
     readiness_before: false, readiness_after: false,
     receipt_scope: 'go_receiver_ack', n8n_notification_receipt: 'not_exposed_by_endpoint' };
   let refreshSent = false;
@@ -138,6 +157,15 @@ async function runBulk({ baseUrl = 'http://127.0.0.1:18080', timeoutMs = LIMIT_M
     if (!data || typeof data !== 'object' || Array.isArray(data)
       || typeof data.timestamp !== 'string' || !data.patris81 || !data.file_access) {
       throw new Error('http_readiness_unverified');
+    }
+    const operation = data.pricing_operation;
+    if (result.receipt && operation?.dispatch_diagnostic?.delivery?.event_id === result.receipt.event_id) {
+      const stages = {};
+      for (const key of ['canonical_input', 'source_read', 'canonical_build', 'owner_inputs', 'dispatch', 'source_prepare', 'permit_wait']) {
+        const value = operation.stage_ms?.[key];
+        if (Number.isSafeInteger(value) && value >= 0) stages[key] = value;
+      }
+      result.server_stage_ms = stages;
     }
   };
   try {
@@ -152,10 +180,15 @@ async function runBulk({ baseUrl = 'http://127.0.0.1:18080', timeoutMs = LIMIT_M
       throw new Error('session_unverified');
     }
     checkpoints.session_ms = Math.round(now() - start);
-    log('Refreshing bulk prices; waiting for terminal delivery receipt...');
+    log(scoped ? 'Reading fresh Patris input and delivering the selected product...' : 'Refreshing bulk prices; waiting for terminal delivery receipt...');
     const refreshBudget = remaining();
     refreshSent = true;
-    const body = await requestJSON(base, '/api/refresh', { body: { delivery: 'wait' }, token: session.csrf_token, timeoutMs: refreshBudget });
+    const payload = scoped ? { delivery: 'wait', product_code: productCode } : { delivery: 'wait' };
+    const body = await requestJSON(base, '/api/refresh', { body: payload, token: session.csrf_token, timeoutMs: refreshBudget });
+    if (scoped) {
+      if (body.scope !== 'single' || body.product_code !== productCode || body.input_scope !== 'fresh_patris_source' || !['php', 'go'].includes(body.authority)) throw Error('terminal_receipt_unverified');
+      Object.assign(result, { product_code: productCode, input_scope: body.input_scope, authority: body.authority });
+    }
     result.dispatch_diagnostic = body.dispatch_diagnostic;
     result.snapshot_timing = body.snapshot_timing;
     result.receipt = receiptFrom(body);
@@ -167,8 +200,12 @@ async function runBulk({ baseUrl = 'http://127.0.0.1:18080', timeoutMs = LIMIT_M
     result.dispatch_diagnostic = error.dispatch_diagnostic;
     result.snapshot_timing = error.snapshot_timing;
     const rejectedBusy = error.message === 'pricing_busy';
-    result.outcome = refreshSent && !rejectedBusy ? 'unknown_delivery_outcome' : 'not_started';
+    const knownRejection = error.dispatch_diagnostic?.outcome_unknown === false;
+    result.outcome = error.predispatch || rejectedBusy || !refreshSent ? 'not_started'
+      : knownRejection ? 'delivery_failed' : 'unknown_delivery_outcome';
     if (rejectedBusy) result.next_action = 'Wait for the active pricing operation and inspect its delivery receipt before an explicit retry.';
+    else if (error.predispatch) result.next_action = 'Resolve the owner or source preparation failure before an explicit retry; delivery was not dispatched.';
+    else if (knownRejection) result.next_action = 'Resolve the reported command rejection before an explicit retry.';
     else if (refreshSent) result.next_action = 'Inspect the existing server delivery receipt before any manual retry.';
   } finally {
     log('Checking Go HTTP readiness after operation...');
@@ -179,15 +216,18 @@ async function runBulk({ baseUrl = 'http://127.0.0.1:18080', timeoutMs = LIMIT_M
   const elapsed = now() - start;
   result.elapsed_ms = Math.round(elapsed);
   result.checkpoints_ms = checkpoints;
-  result.performance = elapsed > LIMIT_MS ? 'critical_over_60_seconds' : 'within_60_seconds';
-  result.exit_code = elapsed > LIMIT_MS ? 2
-    : !result.delivered || !result.readiness_after ? 1
+  const missed = scoped ? elapsed >= targetMs : elapsed > targetMs;
+  result.target_ms = targetMs;
+  result.performance = !result.delivered ? 'not_delivered'
+    : scoped ? (missed ? 'target_missed' : 'under_1_second') : (missed ? 'critical_over_60_seconds' : 'within_60_seconds');
+  result.exit_code = !result.delivered || !result.readiness_after ? 1
+    : missed ? 2
       : result.receipt.deferred_missing ? 3 : 0;
   return result;
 }
 
 async function runSingle({ productCode, siteUrl = 'https://digitalogic.ir', timeoutMs = LIMIT_MS,
-  env = process.env, now = () => performance.now() } = {}) {
+  env = process.env, now = () => performance.now(), session } = {}) {
   if (typeof productCode !== 'string' || !productCode || productCode.trim() !== productCode
     || /[\x00-\x1f\x7f]/.test(productCode)) throw new Error('invalid_product_code');
   let site;
@@ -205,8 +245,9 @@ async function runSingle({ productCode, siteUrl = 'https://digitalogic.ir', time
     input_scope: 'committed_patris_source', delivered: false, outcome: 'unknown_delivery_outcome',
     receipt_scope: 'wordpress_reconciliation', n8n_notification_receipt: 'not_exposed_by_endpoint' };
   try {
-    const body = await requestJSON(site.origin, '/wp-json/digitalogic/v1/pricing/products/recalculate', {
-      body: { product_code: productCode }, timeoutMs,
+    result.timing = {};
+    const body = session ? await session.request(productCode) : await requestJSON(site.origin, '/wp-json/digitalogic/v1/pricing/products/recalculate', {
+      body: { product_code: productCode }, timeoutMs, timing: (result.timing = {}),
       authorization: 'Basic ' + Buffer.from(key + ':' + secret).toString('base64'),
     });
     const d = body?.data;
@@ -239,7 +280,11 @@ async function runSingle({ productCode, siteUrl = 'https://digitalogic.ir', time
   const elapsed = now() - start;
   result.elapsed_ms = Math.round(elapsed);
   result.target_ms = 1000;
-  result.performance = elapsed < 1000 ? 'under_1_second' : 'target_missed';
+  if (result.delivered) {
+    result.timing.outside_reported_coordinator_ms = Math.max(0, result.elapsed_ms - result.receipt.server_elapsed_ms);
+    result.timing.scope = 'Client response timing; outside coordinator includes network and WordPress bootstrap, not network alone.';
+  }
+  result.performance = !result.delivered ? 'not_delivered' : elapsed < 1000 ? 'under_1_second' : 'target_missed';
   result.changed_price_latency_proven = false;
   result.exit_code = !result.delivered ? 1 : elapsed >= 1000 ? 2 : 0;
   return result;
@@ -248,20 +293,44 @@ async function runSingle({ productCode, siteUrl = 'https://digitalogic.ir', time
 async function main(args) {
   if (!args.length || args.includes('--help') || args.includes('-h')) { process.stdout.write(HELP); return 0; }
   const mode = args.shift();
-  if (!['bulk', 'single'].includes(mode)) throw new Error('invalid_arguments_use_help');
+  if (!['bulk', 'single', 'session', 'fresh'].includes(mode)) throw new Error('invalid_arguments_use_help');
   const options = {};
-  if (mode === 'single') options.productCode = args.shift();
+  if (mode === 'single' || mode === 'fresh') options.productCode = args.shift();
+  if (mode === 'fresh' && !options.productCode) throw Error('invalid_product_code');
   let json = false;
   while (args.length) {
     const key = args.shift();
     if (key === '--json') json = true;
-    else if (key === '--base-url' && mode === 'bulk' && args.length) options.baseUrl = args.shift();
-    else if (key === '--site-url' && mode === 'single' && args.length) options.siteUrl = args.shift();
+    else if (key === '--base-url' && ['bulk', 'fresh'].includes(mode) && args.length) options.baseUrl = args.shift();
+    else if (key === '--site-url' && ['single', 'session'].includes(mode) && args.length) options.siteUrl = args.shift();
     else if (key === '--timeout-ms' && args.length) options.timeoutMs = Number(args.shift());
     else throw new Error('invalid_arguments_use_help');
   }
   options.log = json ? () => {} : message => process.stderr.write(message + '\n');
   options.onEvent = event => process.stderr.write(json ? JSON.stringify(event) + '\n' : event.message + '\n');
+  if (mode === 'session') {
+    const { openPricingSession } = require('./pricing-session.cjs');
+    const key = process.env.DIGITALOGIC_PRICING_WRITE_KEY;
+    const secret = process.env.DIGITALOGIC_PRICING_WRITE_SECRET;
+    if (!/^ck_[a-f0-9]{40}$/.test(key || '') || !/^cs_[a-f0-9]{40}$/.test(secret || '')) throw Error('separate_woocommerce_write_credentials_required');
+    if (options.timeoutMs !== undefined && (!Number.isSafeInteger(options.timeoutMs) || options.timeoutMs < 1 || options.timeoutMs > 600000)) throw Error('invalid_timeout_ms');
+    const started = performance.now();
+    const session = await openPricingSession({ ...options, siteUrl: options.siteUrl || 'https://digitalogic.ir', authorization: 'Basic ' + Buffer.from(key + ':' + secret).toString('base64') });
+    process.stdout.write(JSON.stringify({ event: 'session_ready', authentication_and_connection_ms: Math.round(performance.now() - started) }) + '\n');
+    const lines = require('node:readline').createInterface({ input: process.stdin, crlfDelay: Infinity });
+    let exitCode = 0;
+    try {
+      for await (const line of lines) {
+        if (line === 'quit') break;
+        if (!line) continue;
+        const result = await runSingle({ ...options, productCode: line, session });
+        process.stdout.write(JSON.stringify(result) + '\n');
+        exitCode = Math.max(exitCode, result.exit_code);
+        if (!result.delivered) break;
+      }
+    } finally { lines.close(); session.close(); }
+    return exitCode;
+  }
   const result = await (mode === 'single' ? runSingle(options) : runBulk(options));
   process.stdout.write(JSON.stringify(result, null, 2) + '\n');
   return result.exit_code;

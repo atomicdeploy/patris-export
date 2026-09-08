@@ -1,7 +1,8 @@
 {
   "schema": "patris.product-sync",
   "event_type": "snapshot",
-  "event_id": "sha256:ab188e19ce426fdb627306f2a0d95dfb4049012a097cb0f303c578da089faa63",
+  "input_mode": "go_projection",
+  "event_id": "sha256:1fd3285c85f2e36936e81dfbe1caf339f6d4e052fedb37030a654b3742920a0f",
   "source": {
     "id": "fixture",
     "dataset": "kala.json",

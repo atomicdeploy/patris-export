@@ -157,6 +157,9 @@ func ValidateEnvelopeIdentity(envelope *Envelope) error {
 	if envelope.Schema != ContractName {
 		return fmt.Errorf("schema must be %q", ContractName)
 	}
+	if envelope.InputMode != InputModePatrisInputs && envelope.InputMode != InputModeGoProjection {
+		return fmt.Errorf("input_mode must be patris_inputs or go_projection")
+	}
 	if envelope.EventType != "snapshot" {
 		return fmt.Errorf("event_type must be snapshot for standalone verification")
 	}

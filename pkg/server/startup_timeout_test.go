@@ -259,5 +259,5 @@ func newCanonicalProjectionTestServer(
 
 func writeCanonicalProjectionCatalog(w http.ResponseWriter) {
 	w.Header().Set("Content-Type", "application/json")
-	fmt.Fprint(w, `{"data":{"schema":"digitalogic.integration-catalog","revision":"r1","currency":{"local":"IRT","cny_to_local":29000,"cny_to_irt":29000},"pricing":{"formula_id":"landed_price"},"selected_warehouses":[],"shipping_methods":[{"id":"air","price_per_kg":120,"currency":"CNY"}]}}`)
+	fmt.Fprint(w, `{"data":{"schema":"digitalogic.integration-catalog","revision":"r1","currency":{"local":"IRT","cny_to_local":29000,"cny_to_irt":29000},"pricing":{"authority":"go","formula_id":"landed_price"},"selected_warehouses":[],"shipping_methods":[{"id":"air","price_per_kg":120,"currency":"CNY"}]}}`)
 }

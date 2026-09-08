@@ -1,7 +1,8 @@
 {
   "schema": "patris.product-sync",
   "event_type": "snapshot",
-  "event_id": "sha256:3f99aa284d4ff116de864f49d813bebdeb51f41e3669c57c035b9deca3e659fd",
+  "input_mode": "go_projection",
+  "event_id": "sha256:ff885ef9329b640b930a29239628e0216362f4ac1b6cbf637d888564c0ce25d2",
   "local_currency": "IRT",
   "formula_id": "landed_price",
   "source": {

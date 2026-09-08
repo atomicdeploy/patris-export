@@ -78,9 +78,18 @@ func (s *Server) projectPricingInput(ctx context.Context, input recordpipe.Resul
 		if input.PricingAuthority != owner.Authority {
 			return recordpipe.Result{}, pricingProjectionFailure("input_authority_mismatch")
 		}
-		for _, product := range input.Contract.Products {
-			if product.PricingCatalogRevision != owner.CatalogRevision {
-				return recordpipe.Result{}, pricingProjectionFailure("input_catalog_revision_mismatch")
+		expectedMode := canonical.InputModeGoProjection
+		if owner.Authority == pricingcatalog.AuthorityPHP {
+			expectedMode = canonical.InputModePatrisInputs
+		}
+		if input.Contract.InputMode != expectedMode {
+			return recordpipe.Result{}, pricingProjectionFailure("input_mode_mismatch")
+		}
+		if owner.Authority == pricingcatalog.AuthorityGo {
+			for _, product := range input.Contract.Products {
+				if product.PricingCatalogRevision != owner.CatalogRevision {
+					return recordpipe.Result{}, pricingProjectionFailure("input_catalog_revision_mismatch")
+				}
 			}
 		}
 	}

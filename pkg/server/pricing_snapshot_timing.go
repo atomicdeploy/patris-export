@@ -13,18 +13,31 @@ import (
 
 type pricingSnapshotTimingKey struct{}
 
+// Only the refresh that owns this context may annotate its source-build stages.
+// Concurrent viewer/background projections must not mutate another request's timing.
+type refreshOperationDiagnosticKey struct{}
+
+func refreshInputPhase(ctx context.Context, phase string) {
+	if diagnostic, ok := ctx.Value(refreshOperationDiagnosticKey{}).(*refreshOperationDiagnostic); ok {
+		diagnostic.phaseChanged(phase)
+	}
+}
+
 type refreshDispatchDiagnostic struct {
-	ElapsedMS         int64                      `json:"elapsed_ms"`
-	HTTPStatus        int                        `json:"http_status"`
-	Status            string                     `json:"status,omitempty"`
-	Attempts          int                        `json:"attempts"`
-	PendingProducts   int                        `json:"pending_products"`
-	DeferredProducts  int                        `json:"deferred_products"`
-	DeferredMissing   int                        `json:"deferred_missing"`
-	DeferredAmbiguous int                        `json:"deferred_ambiguous"`
-	Retryable         bool                       `json:"retryable"`
-	Code              string                     `json:"code,omitempty"`
-	Delivery          *updateout.DeliveryReceipt `json:"delivery,omitempty"`
+	OutcomeUnknown    *bool                        `json:"outcome_unknown,omitempty"`
+	ReceiverTiming    *updateout.ReceiverTiming    `json:"receiver_timing_ms,omitempty"`
+	ElapsedMS         int64                        `json:"elapsed_ms"`
+	HTTPStatus        int                          `json:"http_status"`
+	Status            string                       `json:"status,omitempty"`
+	Attempts          int                          `json:"attempts"`
+	PendingProducts   int                          `json:"pending_products"`
+	DeferredProducts  int                          `json:"deferred_products"`
+	DeferredMissing   int                          `json:"deferred_missing"`
+	DeferredAmbiguous int                          `json:"deferred_ambiguous"`
+	Retryable         bool                         `json:"retryable"`
+	Code              string                       `json:"code,omitempty"`
+	Delivery          *updateout.DeliveryReceipt   `json:"delivery,omitempty"`
+	HTTPTrace         *updateout.HTTPAttemptTiming `json:"http_trace,omitempty"`
 }
 
 func refreshDispatchDetails(result updateout.DeliveryResult, err error, started time.Time) *refreshDispatchDiagnostic {
@@ -32,6 +45,9 @@ func refreshDispatchDetails(result updateout.DeliveryResult, err error, started 
 		Status: result.Status, Attempts: result.Attempts, PendingProducts: result.PendingProducts,
 		DeferredProducts: result.DeferredProducts, DeferredMissing: result.DeferredMissing,
 		DeferredAmbiguous: result.DeferredAmbiguous, Retryable: result.Retryable}
+	d.HTTPTrace = result.HTTPTrace
+	d.OutcomeUnknown = result.OutcomeUnknown
+	d.ReceiverTiming = result.ReceiverTiming
 	if result.Delivery != nil {
 		receipt := *result.Delivery
 		d.Delivery = &receipt
@@ -61,6 +77,9 @@ func refreshDispatchDetails(result updateout.DeliveryResult, err error, started 
 	} else if err != nil {
 		d.Code = "dispatch_failed"
 	}
+	if result.FailureCode != "" {
+		d.Code = result.FailureCode
+	}
 	return d
 }
 
@@ -68,6 +87,12 @@ func refreshDispatchDetails(result updateout.DeliveryResult, err error, started 
 // successful webhook without a ledger is not proof of completed website writes.
 func backgroundDeliveryOutcome(result updateout.DeliveryResult, err error, input *canonical.Envelope) string {
 	if err != nil {
+		if result.OutcomeUnknown != nil {
+			if *result.OutcomeUnknown {
+				return "delivery_outcome_unknown"
+			}
+			return "delivery_failed"
+		}
 		// A transport failure or server error after an attempt cannot prove
 		// that the receiver did not commit the write. Never suggest a safe retry.
 		if result.Attempts > 0 && (result.HTTPStatus < 400 || result.HTTPStatus == http.StatusRequestTimeout || result.HTTPStatus >= 500) {

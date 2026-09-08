@@ -75,6 +75,7 @@ type Server struct {
 	catalogProvider        pricingcatalog.Provider
 	catalogProviderKey     string
 	catalogProviderMu      sync.Mutex
+	pricingCommands        pricingCommandState
 	canonicalProjection    *canonicalProjectionCache
 	pricingPublication     *canonicalProjectionCache
 	pricingActuation       *pricingActuator
@@ -145,7 +146,8 @@ const (
 )
 
 type refreshRequest struct {
-	Delivery string `json:"delivery"`
+	Delivery    string `json:"delivery"`
+	ProductCode string `json:"product_code,omitempty"`
 }
 
 type refreshDeliveryResponse struct {
@@ -159,6 +161,10 @@ type refreshDeliveryResponse struct {
 }
 
 type refreshWaitResponse struct {
+	Scope              string                       `json:"scope,omitempty"`
+	ProductCode        string                       `json:"product_code,omitempty"`
+	Authority          string                       `json:"authority,omitempty"`
+	InputScope         string                       `json:"input_scope,omitempty"`
 	DispatchDiagnostic *refreshDispatchDiagnostic   `json:"dispatch_diagnostic,omitempty"`
 	SnapshotTiming     *pricingSnapshotTimingReport `json:"snapshot_timing,omitempty"`
 	Refreshed          bool                         `json:"refreshed"`
@@ -426,6 +432,7 @@ func (s *Server) recordResultContext(ctx context.Context, options recordpipe.Opt
 		records []map[string]interface{}
 		err     error
 	)
+	refreshInputPhase(ctx, "source_read")
 	if contextSource, ok := ds.(datasource.ContextDataSource); ok {
 		records, err = contextSource.GetRawRecordsContext(ctx)
 	} else {
@@ -440,7 +447,9 @@ func (s *Server) recordResultContext(ctx context.Context, options recordpipe.Opt
 	if err := ctx.Err(); err != nil {
 		return recordpipe.Result{}, err
 	}
+	refreshInputPhase(ctx, "canonical_build")
 	result, err := recordpipe.BuildContext(ctx, records, dbPath, options)
+	refreshInputPhase(ctx, "canonical_input")
 	if err != nil {
 		return recordpipe.Result{}, err
 	}
@@ -524,6 +533,7 @@ func browserConfig(cfg appconfig.Config) browserConfigView {
 	cfg.Export.XLTMTarget = ""
 	cfg.RecentSales = recentsales.Config{}
 	cfg.Canonical.Pricing.Digitalogic.BaseURL = browserSafeURL(cfg.Canonical.Pricing.Digitalogic.BaseURL)
+	cfg.Canonical.Pricing.Digitalogic.CommandWebSocketURL = browserSafeURL(cfg.Canonical.Pricing.Digitalogic.CommandWebSocketURL)
 	cfg.SendUpdates.URL = browserSafeURL(cfg.SendUpdates.URL)
 	cfg.SendUpdates.Headers = nil
 	cfg.SendUpdates.Command = nil
@@ -620,6 +630,7 @@ func preserveBrowserProtectedConfig(cfg, protected appconfig.Config) appconfig.C
 	cfg.Export.XLTMTemplate = protected.Export.XLTMTemplate
 	cfg.Export.XLTMTarget = protected.Export.XLTMTarget
 	cfg.RecentSales = protected.RecentSales
+	cfg.Canonical.Pricing.Digitalogic.CommandWebSocketURL = protected.Canonical.Pricing.Digitalogic.CommandWebSocketURL
 	cfg.Canonical.Pricing.Digitalogic.BaseURL = preserveBrowserURL(
 		cfg.Canonical.Pricing.Digitalogic.BaseURL,
 		protected.Canonical.Pricing.Digitalogic.BaseURL,
@@ -660,11 +671,11 @@ func (s *Server) recordOptions() recordpipe.Options {
 
 func (s *Server) pricingCatalogProvider(cfg appconfig.Config) pricingcatalog.Provider {
 	material, _ := json.Marshal(cfg.Canonical.Pricing)
-	key := string(material)
+	key := string(material) + s.pricingCommandFingerprint(cfg)
 	s.catalogProviderMu.Lock()
 	defer s.catalogProviderMu.Unlock()
 	if s.catalogProvider == nil || s.catalogProviderKey != key {
-		s.catalogProvider = pricingcatalog.NewProvider(cfg.Canonical.Pricing)
+		s.catalogProvider = pricingcatalog.NewProviderWithHTTPClient(cfg.Canonical.Pricing, s.pricingCommandHTTPClient(cfg))
 		s.catalogProviderKey = key
 	}
 	return s.catalogProvider
@@ -1594,13 +1605,13 @@ func (s *Server) handlePostRefresh(w http.ResponseWriter, r *http.Request) {
 			writeRefreshWaitError(w, http.StatusUnsupportedMediaType, false, "", "json_required")
 			return
 		}
-		delivery, err := refreshDeliveryMode(w, r)
+		request, err := decodeRefreshRequest(w, r)
 		if err != nil {
 			writeRefreshWaitError(w, http.StatusBadRequest, false, "", "invalid_request")
 			return
 		}
-		if delivery == "wait" {
-			s.handlePostRefreshWait(w, r)
+		if request.Delivery == "wait" {
+			s.handlePostRefreshWait(w, r, request.ProductCode)
 			return
 		}
 	}
@@ -1609,32 +1620,53 @@ func (s *Server) handlePostRefresh(w http.ResponseWriter, r *http.Request) {
 }
 
 func refreshDeliveryMode(w http.ResponseWriter, r *http.Request) (string, error) {
+	request, err := decodeRefreshRequest(w, r)
+	return request.Delivery, err
+}
+
+func decodeRefreshRequest(w http.ResponseWriter, r *http.Request) (refreshRequest, error) {
 	if r.Body == nil || r.Body == http.NoBody || r.ContentLength == 0 {
-		return "", nil
+		return refreshRequest{}, nil
 	}
 	var request refreshRequest
 	if err := decodeBoundedJSON(w, r, refreshWaitMaxRequestBytes, &request); err != nil {
 		if errors.Is(err, io.EOF) {
-			return "", nil
+			return refreshRequest{}, nil
 		}
-		return "", err
+		return refreshRequest{}, err
 	}
 	delivery := strings.ToLower(strings.TrimSpace(request.Delivery))
+	if request.ProductCode != "" {
+		// Product codes are canonical digit identifiers, never a name or SKU.
+		if delivery != "wait" || len(request.ProductCode) > 128 {
+			return refreshRequest{}, errors.New("invalid scoped refresh")
+		}
+		for _, digit := range request.ProductCode {
+			if digit < '0' || digit > '9' {
+				return refreshRequest{}, errors.New("invalid product code")
+			}
+		}
+	}
+	request.Delivery = delivery
 	switch delivery {
 	case "", "wait":
-		return delivery, nil
+		return request, nil
 	default:
-		return "", errors.New("unsupported refresh delivery mode")
+		return refreshRequest{}, errors.New("unsupported refresh delivery mode")
 	}
 }
 
-func (s *Server) handlePostRefreshWait(w http.ResponseWriter, r *http.Request) {
+func (s *Server) handlePostRefreshWait(w http.ResponseWriter, r *http.Request, selectedCodes ...string) {
 	setExcelPricingResponseHeaders(w)
 	if !excelPricingLocalRequestAllowed(r) ||
 		!singleHeaderEquals(r, excelPricingClientHeader, excelPricingClientID) ||
 		!s.excelPricing.authorizedSession(r) {
 		writeRefreshWaitError(w, http.StatusForbidden, false, "", "local_session_required")
 		return
+	}
+	productCode := ""
+	if len(selectedCodes) != 0 {
+		productCode = selectedCodes[0]
 	}
 
 	cfg := s.Config()
@@ -1664,6 +1696,7 @@ func (s *Server) handlePostRefreshWait(w http.ResponseWriter, r *http.Request) {
 
 	// A fresh sync observes both the source and its owner's pricing inputs once.
 	diagnostic := s.beginRefreshDiagnostic()
+	ctx = context.WithValue(ctx, refreshOperationDiagnosticKey{}, diagnostic)
 	terminalCode, terminalStage, terminalDetail := "request_aborted", "", ""
 	defer func() { diagnostic.finish(terminalCode, terminalStage, terminalDetail) }()
 	// Fence old in-flight builds and replace the provider's catalog/assignment
@@ -1689,6 +1722,39 @@ func (s *Server) handlePostRefreshWait(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if productCode != "" {
+		for _, code := range contract.QuarantinedCodes {
+			if code == productCode {
+				terminalCode = "product_quarantined"
+				writeRefreshWaitError(w, http.StatusConflict, false, contract.Source.Revision, terminalCode)
+				return
+			}
+		}
+		matches := 0
+		for _, product := range contract.Products {
+			if product.ProductCode == productCode {
+				matches++
+			}
+		}
+		if matches != 1 {
+			terminalCode = "product_missing"
+			status := http.StatusNotFound
+			if matches > 1 {
+				terminalCode = "product_ambiguous"
+				status = http.StatusConflict
+			}
+			writeRefreshWaitError(w, status, false, contract.Source.Revision, terminalCode)
+			return
+		}
+		// Select from the complete fresh projection, retaining its source identity.
+		// A one-product snapshot would instead replace the receiver's source.
+		contract = canonical.ChangeEnvelope(contract, &recorddiff.ChangeSet{
+			KeyField: "product_code",
+			Modified: []recorddiff.RecordChange{{Code: productCode}},
+		})
+		deliveryConfig.Mode = "changes"
+	}
+
 	// The wait extension synchronously delivers this freshly projected canonical
 	// envelope. Calling Refresh here would also enqueue the legacy asynchronous
 	// "initial" delivery and could send the same source revision twice.
@@ -1700,12 +1766,16 @@ func (s *Server) handlePostRefreshWait(w http.ResponseWriter, r *http.Request) {
 		Contract:         contract,
 		SnapshotContract: contract,
 	}
+	if productCode != "" {
+		event.SnapshotContract = nil
+	}
 	dispatch := s.excelPricing.dispatch
 	if dispatch == nil {
 		dispatch = updateout.DispatchWithResult
 	}
 	dispatchStarted := time.Now()
 	diagnostic.phaseChanged("dispatch")
+	ctx = s.pricingCommandContext(ctx, cfg, deliveryConfig)
 	result, err := dispatch(ctx, deliveryConfig, event)
 	dispatchDiagnostic := refreshDispatchDetails(result, err, dispatchStarted)
 	diagnostic.mu.Lock()
@@ -1729,7 +1799,7 @@ func (s *Server) handlePostRefreshWait(w http.ResponseWriter, r *http.Request) {
 	}
 
 	terminalCode = "complete"
-	writeJSON(w, refreshWaitResponse{
+	response := refreshWaitResponse{
 		Refreshed:          true,
 		Delivered:          true,
 		SourceRevision:     completedSource.Revision,
@@ -1743,7 +1813,14 @@ func (s *Server) handlePostRefreshWait(w http.ResponseWriter, r *http.Request) {
 			DeferredMissing:   result.DeferredMissing,
 			DeferredAmbiguous: result.DeferredAmbiguous,
 		},
-	})
+	}
+	if productCode != "" {
+		response.Scope = "single"
+		response.ProductCode = productCode
+		response.Authority = owner.Authority
+		response.InputScope = "fresh_patris_source"
+	}
+	writeJSON(w, response)
 }
 
 func (s *Server) handleSnapshotDisabled(w http.ResponseWriter, r *http.Request) {
@@ -2357,6 +2434,7 @@ func (s *Server) dispatchUpdateEvent(event updateout.Event, preparedAt time.Time
 		terminalCode := "request_aborted"
 		defer func() { diagnostic.finish(terminalCode, "", "") }()
 		started := time.Now()
+		ctx = s.pricingCommandContext(ctx, s.Config(), cfg)
 		result, err := updateout.DispatchWithResult(ctx, cfg, event)
 		details := refreshDispatchDetails(result, err, started)
 		contract := event.Contract
@@ -3202,6 +3280,7 @@ func (s *Server) StartWatching(debounceDuration time.Duration) error {
 // Close cleans up server resources
 func (s *Server) Close() error {
 	var firstErr error
+	s.closePricingCommands()
 	if s.backgroundCancel != nil {
 		s.backgroundCancel()
 	}

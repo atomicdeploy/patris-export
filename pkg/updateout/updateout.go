@@ -68,6 +68,10 @@ var (
 // its response body or any credential material. Generic webhooks leave Status
 // and EventID empty.
 type DeliveryResult struct {
+	FailureCode       string
+	OutcomeUnknown    *bool
+	ReceiverTiming    *ReceiverTiming
+	HTTPTrace         *HTTPAttemptTiming
 	Delivery          *DeliveryReceipt
 	HTTPStatus        int
 	Status            string
@@ -95,6 +99,8 @@ func (result DeliveryResult) DiagnosticSummary() string {
 // DeliveryError is safe to print. Endpoint query strings, response bodies,
 // request headers, and transport error strings are deliberately excluded.
 type DeliveryError struct {
+	FailureCode      string
+	OutcomeUnknown   *bool
 	Endpoint         string
 	HTTPStatus       int
 	Status           string
@@ -257,6 +263,24 @@ func sendHTTP(ctx context.Context, cfg Config, event Event) (DeliveryResult, err
 		return DeliveryResult{}, err
 	}
 	contract := selectedContract(cfg, event)
+	if exchange, ok := ctx.Value(productSyncExchangeKey{}).(ProductSyncExchange); ok && exchange != nil {
+		if secret == "" || contract == nil {
+			return DeliveryResult{}, errInvalidDestination
+		}
+		result := DeliveryResult{Attempts: 1}
+		response, exchangeErr := exchange(ctx, body)
+		if exchangeErr != nil {
+			var safe interface{ SafeTransportFailure() (string, bool) }
+			if errors.As(exchangeErr, &safe) {
+				code, unknown := safe.SafeTransportFailure()
+				result.FailureCode = safeExchangeFailureCode(code)
+				result.OutcomeUnknown = &unknown
+			}
+			return result, deliveryError(safeEndpoint(cfg.URL), result, false, "persistent exchange failed")
+		}
+		result.HTTPStatus = http.StatusOK
+		return classifyHTTPResponse(result, response, contract, true)
+	}
 	endpoint := safeEndpoint(cfg.URL)
 	client := http.DefaultClient
 	if secret != "" {
@@ -317,6 +341,8 @@ func sendHTTPAttempt(
 ) (DeliveryResult, error) {
 	reqCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
+	trace := newHTTPAttemptTrace()
+	reqCtx = trace.context(reqCtx)
 	req, err := http.NewRequestWithContext(reqCtx, cfg.Method, cfg.URL, bytes.NewReader(body))
 	if err != nil {
 		return result, errInvalidDestination
@@ -328,10 +354,13 @@ func sendHTTPAttempt(
 			resp.Body.Close()
 		}
 		result.Retryable = true
+		result.HTTPTrace = trace.snapshot(nil)
 		return result, errRequestFailed
 	}
+	bodyStarted := time.Now()
 	responseBody, readErr := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
 	resp.Body.Close()
+	result.HTTPTrace = trace.snapshot(&bodyStarted)
 	result.HTTPStatus = resp.StatusCode
 	if readErr != nil {
 		result.Retryable = true
@@ -437,6 +466,7 @@ func ResolveProductSyncSecret(cfg Config) (string, error) {
 }
 
 type receiverResponseData struct {
+	ReceiverTiming         json.RawMessage  `json:"receiver_timing_ms"`
 	Delivery               *DeliveryReceipt `json:"delivery"`
 	Status                 json.RawMessage  `json:"status"`
 	EventID                json.RawMessage  `json:"event_id"`
@@ -506,6 +536,10 @@ func classifyHTTPResponse(result DeliveryResult, body []byte, contract *canonica
 }
 
 func applySuccessfulReceiverState(result *DeliveryResult, data receiverResponseData) error {
+	var timing ReceiverTiming
+	if len(data.ReceiverTiming) > 0 && string(data.ReceiverTiming) != "null" && json.Unmarshal(data.ReceiverTiming, &timing) == nil && timing.valid() {
+		result.ReceiverTiming = &timing
+	}
 	status, err := requiredReceiverString(data.Status)
 	if err != nil {
 		return err
@@ -721,6 +755,7 @@ func waitForRetry(ctx context.Context, delay time.Duration) error {
 
 func deliveryError(endpoint string, result DeliveryResult, retryable bool, reason string) error {
 	return &DeliveryError{
+		FailureCode: result.FailureCode, OutcomeUnknown: result.OutcomeUnknown,
 		Endpoint: endpoint, HTTPStatus: result.HTTPStatus, Status: result.Status,
 		Attempts: result.Attempts, PendingProducts: result.PendingProducts, DeferredProducts: result.DeferredProducts,
 		Retryable: retryable, Reason: reason,

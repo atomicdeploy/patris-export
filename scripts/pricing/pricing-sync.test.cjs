@@ -9,6 +9,30 @@ const receipt = () => ({ refreshed: true, delivered: true, source_revision: 'sha
   delivery: { status: 'accepted', event_id: 'sha256:' + 'b'.repeat(64), attempts: 1,
     pending_products: 0, deferred_products: 0, deferred_missing: 0, deferred_ambiguous: 0 } });
 
+test('exact predispatch owner rejection is not an unknown write or successful timing', async t => {
+  const f = await fixture(t, (req,res) => { res.writeHead(503); res.end(JSON.stringify({refreshed:false,delivered:false,code:'pricing_authority_unavailable'})); });
+  const result=await runBulk(f);
+  assert.equal(result.outcome,'not_started');
+  assert.equal(result.error,'pricing_authority_unavailable');
+  assert.equal(result.performance,'not_delivered');
+  assert.equal(result.exit_code,1);
+});
+
+test('unclassified 503 stays ambiguous and never reports successful performance', async t => {
+  const f = await fixture(t, (req,res) => { res.writeHead(503); res.end('{}'); });
+  const result=await runBulk(f);
+  assert.equal(result.outcome,'unknown_delivery_outcome');
+  assert.equal(result.performance,'not_delivered');
+});
+
+test('typed known command rejection survives delivery failure response', async t => {
+  const f = await fixture(t, (req,res) => { res.writeHead(502); res.end(JSON.stringify({refreshed:true,delivered:false,code:'delivery_failed',dispatch_diagnostic:{code:'source_identity_invalid',outcome_unknown:false}})); });
+  const result=await runBulk(f);
+  assert.equal(result.outcome,'delivery_failed');
+  assert.equal(result.dispatch_diagnostic.code,'source_identity_invalid');
+  assert.equal(result.performance,'not_delivered');
+});
+
 async function fixture(t, refresh, options = {}) {
   const calls = [];
   const server = http.createServer(async (req, res) => {
@@ -149,7 +173,8 @@ test('default 60-second budget includes session time and never starts a late mut
   assert.equal(result.outcome, 'not_started');
   assert.equal(result.error, 'overall_deadline_exhausted');
   assert.equal(f.calls.includes('/api/refresh'), false);
-  assert.equal(result.exit_code, 2);
+  assert.equal(result.exit_code, 1);
+  assert.equal(result.performance, 'not_delivered');
 });
 
 test('longer override emits a critical event at the threshold before receipt arrives', async t => {

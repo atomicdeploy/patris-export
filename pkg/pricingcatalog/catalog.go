@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"math/big"
+	"net/http"
 	"sort"
 	"strings"
 	"time"
@@ -63,6 +64,7 @@ type StaticConfig struct {
 }
 
 type DigitalogicConfig struct {
+	CommandWebSocketURL string `json:"command_websocket_url,omitempty" yaml:"command_websocket_url,omitempty" toml:"command_websocket_url,omitempty"`
 	BaseURL             string `json:"base_url,omitempty" yaml:"base_url,omitempty" toml:"base_url,omitempty"`
 	CatalogPath         string `json:"catalog_path,omitempty" yaml:"catalog_path,omitempty" toml:"catalog_path,omitempty"`
 	AssignmentPath      string `json:"assignment_path,omitempty" yaml:"assignment_path,omitempty" toml:"assignment_path,omitempty"`
@@ -170,6 +172,7 @@ func Normalize(cfg Config) Config {
 	}
 
 	d := &cfg.Digitalogic
+	d.CommandWebSocketURL = strings.TrimSpace(d.CommandWebSocketURL)
 	d.BaseURL = strings.TrimRight(strings.TrimSpace(d.BaseURL), "/")
 	if strings.TrimSpace(d.CatalogPath) == "" {
 		d.CatalogPath = "integration/catalog"
@@ -235,10 +238,16 @@ func Configured(cfg Config) bool {
 }
 
 func NewProvider(cfg Config) Provider {
+	return NewProviderWithHTTPClient(cfg, nil)
+}
+
+// NewProviderWithHTTPClient retains owner parsing and freshness rules while
+// allowing an authenticated in-process bridge to carry catalog requests.
+func NewProviderWithHTTPClient(cfg Config, client *http.Client) Provider {
 	cfg = Normalize(cfg)
 	switch cfg.Mode {
 	case ModeDigitalogic:
-		return newHTTPProvider(cfg.Digitalogic, nil, time.Now)
+		return newHTTPProvider(cfg.Digitalogic, client, time.Now)
 	case ModeNone:
 		return disabledProvider{}
 	default:

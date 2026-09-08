@@ -100,6 +100,7 @@ func TestEventIDContextMatchesLegacyJSONIdentity(t *testing.T) {
 	envelope := &Envelope{
 		Schema:        `patris.<sync>`,
 		EventType:     "snapshot",
+		InputMode:     InputModeGoProjection,
 		LocalCurrency: "IRT",
 		FormulaID:     "landed&price",
 		Source: Source{
@@ -127,6 +128,7 @@ func TestEventIDContextMatchesLegacyJSONIdentity(t *testing.T) {
 	legacyIdentity := struct {
 		Schema           string      `json:"schema"`
 		EventType        string      `json:"event_type"`
+		InputMode        string      `json:"input_mode"`
 		LocalCurrency    string      `json:"local_currency,omitempty"`
 		FormulaID        string      `json:"formula_id,omitempty"`
 		Source           Source      `json:"source"`
@@ -137,7 +139,7 @@ func TestEventIDContextMatchesLegacyJSONIdentity(t *testing.T) {
 		DeletedCodes     []Tombstone `json:"deleted_codes,omitempty"`
 		QuarantinedCodes []string    `json:"quarantined_codes"`
 	}{
-		Schema: envelope.Schema, EventType: envelope.EventType,
+		Schema: envelope.Schema, EventType: envelope.EventType, InputMode: envelope.InputMode,
 		LocalCurrency: envelope.LocalCurrency, FormulaID: envelope.FormulaID,
 		Source: envelope.Source, GeneratedAt: envelope.GeneratedAt,
 		Products: productHashes, Categories: categoryHashes,
