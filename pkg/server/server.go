@@ -2359,14 +2359,18 @@ func (s *Server) dispatchUpdateEvent(event updateout.Event, preparedAt time.Time
 		started := time.Now()
 		result, err := updateout.DispatchWithResult(ctx, cfg, event)
 		details := refreshDispatchDetails(result, err, started)
-		diagnostic.mu.Lock()
-		diagnostic.dispatch = details
-		diagnostic.mu.Unlock()
 		contract := event.Contract
 		if (updateout.Normalize(cfg).Mode == "full" || event.Type == "initial") && event.SnapshotContract != nil {
 			contract = event.SnapshotContract
 		}
 		terminalCode = backgroundDeliveryOutcome(result, err, contract)
+		if terminalCode == "delivery_outcome_unknown" {
+			details.Retryable = false
+		}
+		diagnostic.mu.Lock()
+		diagnostic.dispatch = details
+		diagnostic.mu.Unlock()
+
 		if err != nil {
 			log.Printf("Failed to send update event: code=%s http_status=%d attempts=%d", details.Code, details.HTTPStatus, details.Attempts)
 			return

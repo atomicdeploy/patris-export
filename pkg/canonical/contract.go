@@ -397,9 +397,9 @@ func ChangeEnvelope(snapshot *Envelope, changes *recorddiff.ChangeSet) *Envelope
 		GeneratedAt:      snapshot.GeneratedAt,
 		Products:         products,
 		Categories:       cloneCategories(snapshot.Categories),
-		ExcludedCodes:    append([]string(nil), snapshot.ExcludedCodes...),
+		ExcludedCodes:    append([]string{}, snapshot.ExcludedCodes...),
 		DeletedCodes:     deleted,
-		QuarantinedCodes: append([]string(nil), snapshot.QuarantinedCodes...),
+		QuarantinedCodes: append([]string{}, snapshot.QuarantinedCodes...),
 		Warnings:         normalizedWarnings(snapshot.Warnings),
 	}
 	envelope.EventID = eventID(envelope)

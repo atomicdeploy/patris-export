@@ -68,6 +68,11 @@ func refreshDispatchDetails(result updateout.DeliveryResult, err error, started 
 // successful webhook without a ledger is not proof of completed website writes.
 func backgroundDeliveryOutcome(result updateout.DeliveryResult, err error, input *canonical.Envelope) string {
 	if err != nil {
+		// A transport failure or server error after an attempt cannot prove
+		// that the receiver did not commit the write. Never suggest a safe retry.
+		if result.Attempts > 0 && (result.HTTPStatus < 400 || result.HTTPStatus == http.StatusRequestTimeout || result.HTTPStatus >= 500) {
+			return "delivery_outcome_unknown"
+		}
 		return "delivery_failed"
 	}
 	receipt := result.Delivery
