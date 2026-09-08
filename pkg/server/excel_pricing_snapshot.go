@@ -2284,6 +2284,7 @@ func (s *Server) deliverExcelPricingSnapshotSource(
 	if dispatch == nil {
 		dispatch = updateout.DispatchWithResult
 	}
+	ctx = s.pricingCommandContext(ctx, s.Config(), deliveryConfig)
 	delivery, err := dispatch(ctx, deliveryConfig, event)
 	if err != nil || !excelPricingSnapshotDeliveryAccepted(delivery, contract.EventID) {
 		return errExcelPricingRemoteSnapshotUnavailable

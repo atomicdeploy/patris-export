@@ -95,6 +95,7 @@ func newPricingActuator(s *Server, path string) *pricingActuator {
 		if dispatch == nil {
 			dispatch = updateout.DispatchWithResult
 		}
+		ctx = s.pricingCommandContext(ctx, s.Config(), cfg)
 		return dispatch(ctx, cfg, updateout.Event{Type: "update", Timestamp: time.Now().UTC().Format(time.RFC3339), Source: s.currentDBPath(), Contract: e, SnapshotContract: e})
 	}
 	a.receipt = func(ctx context.Context, st pricingActuationStatus) (*pricingDeliveryReceipt, error) {

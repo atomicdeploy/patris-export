@@ -68,7 +68,7 @@ async function requestJSON(base, path, { body, token, authorization, timeoutMs =
     if (timing) timing.response_headers_ms = Math.round(performance.now() - requestStarted);
     // Never print a raw response, URL error, header or session token.
     const inspectBusy = path === '/api/refresh' && body !== undefined && response.status === 429;
-    const inspectRefreshFailure = path === '/api/refresh' && body !== undefined && response.status === 502;
+    const inspectRefreshFailure = path === '/api/refresh' && body !== undefined && [502, 503].includes(response.status);
     if (!response.ok && !inspectBusy && !inspectRefreshFailure) {
       await response.body?.cancel();
       throw new Error('http_' + response.status);
@@ -83,15 +83,22 @@ async function requestJSON(base, path, { body, token, authorization, timeoutMs =
     if (timing) timing.response_complete_ms = Math.round(performance.now() - requestStarted);
     let data;
     try { data = JSON.parse(Buffer.concat(chunks).toString('utf8')); }
-    catch { throw new Error(inspectBusy ? 'http_429' : inspectRefreshFailure ? 'http_502' : 'invalid_json'); }
+    catch { throw new Error(inspectBusy ? 'http_429' : inspectRefreshFailure ? 'http_' + response.status : 'invalid_json'); }
     if (inspectBusy) {
       // This exact refresh rejection precedes source reads and delivery dispatch.
       throw new Error(data?.success === false && data.code === 'pricing_busy' ? 'pricing_busy' : 'http_429');
     }
     if (inspectRefreshFailure) {
+      const predispatch = ['pricing_authority_unavailable', 'delivery_unavailable', 'canonical_unavailable'];
+      if (response.status === 503 && data?.refreshed === false && data?.delivered === false
+          && predispatch.includes(data.code) && !data.dispatch_diagnostic && !data.delivery) {
+        const failure = new Error(data.code);
+        failure.predispatch = true;
+        throw failure;
+      }
       const allowed = ['delivery_failed', 'delivery_receipt_unresolved', 'owner_projection_unavailable'];
-      const failure = new Error(data?.refreshed === true && data?.delivered === false && allowed.includes(data.code) ? data.code : 'http_502');
-      if (failure.message !== 'http_502') {
+      const failure = new Error(response.status === 502 && data?.refreshed === true && data?.delivered === false && allowed.includes(data.code) ? data.code : 'http_' + response.status);
+      if (allowed.includes(failure.message)) {
         failure.dispatch_diagnostic = data.dispatch_diagnostic;
         failure.snapshot_timing = data.snapshot_timing;
       }
@@ -100,7 +107,7 @@ async function requestJSON(base, path, { body, token, authorization, timeoutMs =
     return data;
   } catch (error) {
     if (controller.signal.aborted && error.message !== 'response_too_large') throw new Error('request_timeout');
-    if (/^(http_[0-9]{3}|pricing_busy|delivery_failed|delivery_receipt_unresolved|owner_projection_unavailable|response_too_large|invalid_json)$/.test(error.message)) throw error;
+    if (/^(http_[0-9]{3}|pricing_busy|pricing_authority_unavailable|delivery_unavailable|canonical_unavailable|delivery_failed|delivery_receipt_unresolved|owner_projection_unavailable|response_too_large|invalid_json)$/.test(error.message)) throw error;
     throw new Error('transport_failed');
   } finally { clearTimeout(timer); }
 }
@@ -193,8 +200,12 @@ async function runBulk({ baseUrl = 'http://127.0.0.1:18080', timeoutMs = LIMIT_M
     result.dispatch_diagnostic = error.dispatch_diagnostic;
     result.snapshot_timing = error.snapshot_timing;
     const rejectedBusy = error.message === 'pricing_busy';
-    result.outcome = refreshSent && !rejectedBusy ? 'unknown_delivery_outcome' : 'not_started';
+    const knownRejection = error.dispatch_diagnostic?.outcome_unknown === false;
+    result.outcome = error.predispatch || rejectedBusy || !refreshSent ? 'not_started'
+      : knownRejection ? 'delivery_failed' : 'unknown_delivery_outcome';
     if (rejectedBusy) result.next_action = 'Wait for the active pricing operation and inspect its delivery receipt before an explicit retry.';
+    else if (error.predispatch) result.next_action = 'Resolve the owner or source preparation failure before an explicit retry; delivery was not dispatched.';
+    else if (knownRejection) result.next_action = 'Resolve the reported command rejection before an explicit retry.';
     else if (refreshSent) result.next_action = 'Inspect the existing server delivery receipt before any manual retry.';
   } finally {
     log('Checking Go HTTP readiness after operation...');
@@ -207,9 +218,10 @@ async function runBulk({ baseUrl = 'http://127.0.0.1:18080', timeoutMs = LIMIT_M
   result.checkpoints_ms = checkpoints;
   const missed = scoped ? elapsed >= targetMs : elapsed > targetMs;
   result.target_ms = targetMs;
-  result.performance = scoped ? (missed ? 'target_missed' : 'under_1_second') : (missed ? 'critical_over_60_seconds' : 'within_60_seconds');
-  result.exit_code = missed ? 2
-    : !result.delivered || !result.readiness_after ? 1
+  result.performance = !result.delivered ? 'not_delivered'
+    : scoped ? (missed ? 'target_missed' : 'under_1_second') : (missed ? 'critical_over_60_seconds' : 'within_60_seconds');
+  result.exit_code = !result.delivered || !result.readiness_after ? 1
+    : missed ? 2
       : result.receipt.deferred_missing ? 3 : 0;
   return result;
 }
@@ -272,7 +284,7 @@ async function runSingle({ productCode, siteUrl = 'https://digitalogic.ir', time
     result.timing.outside_reported_coordinator_ms = Math.max(0, result.elapsed_ms - result.receipt.server_elapsed_ms);
     result.timing.scope = 'Client response timing; outside coordinator includes network and WordPress bootstrap, not network alone.';
   }
-  result.performance = elapsed < 1000 ? 'under_1_second' : 'target_missed';
+  result.performance = !result.delivered ? 'not_delivered' : elapsed < 1000 ? 'under_1_second' : 'target_missed';
   result.changed_price_latency_proven = false;
   result.exit_code = !result.delivered ? 1 : elapsed >= 1000 ? 2 : 0;
   return result;

@@ -766,6 +766,7 @@ func (s *Server) completeExcelPricingApply(
 	if backoff, err := time.ParseDuration(deliveryConfig.RetryBackoff); err != nil || backoff < 2*time.Second {
 		deliveryConfig.RetryBackoff = "2s"
 	}
+	ctx = s.pricingCommandContext(ctx, cfg, deliveryConfig)
 	delivery, err := dispatch(ctx, deliveryConfig, event)
 	if err != nil || !excelPricingDeliveryComplete(delivery, contract.EventID) {
 		return errors.New("canonical product-sync delivery failed")

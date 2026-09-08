@@ -68,6 +68,8 @@ var (
 // its response body or any credential material. Generic webhooks leave Status
 // and EventID empty.
 type DeliveryResult struct {
+	FailureCode       string
+	OutcomeUnknown    *bool
 	ReceiverTiming    *ReceiverTiming
 	HTTPTrace         *HTTPAttemptTiming
 	Delivery          *DeliveryReceipt
@@ -97,6 +99,8 @@ func (result DeliveryResult) DiagnosticSummary() string {
 // DeliveryError is safe to print. Endpoint query strings, response bodies,
 // request headers, and transport error strings are deliberately excluded.
 type DeliveryError struct {
+	FailureCode      string
+	OutcomeUnknown   *bool
 	Endpoint         string
 	HTTPStatus       int
 	Status           string
@@ -259,6 +263,24 @@ func sendHTTP(ctx context.Context, cfg Config, event Event) (DeliveryResult, err
 		return DeliveryResult{}, err
 	}
 	contract := selectedContract(cfg, event)
+	if exchange, ok := ctx.Value(productSyncExchangeKey{}).(ProductSyncExchange); ok && exchange != nil {
+		if secret == "" || contract == nil {
+			return DeliveryResult{}, errInvalidDestination
+		}
+		result := DeliveryResult{Attempts: 1}
+		response, exchangeErr := exchange(ctx, body)
+		if exchangeErr != nil {
+			var safe interface{ SafeTransportFailure() (string, bool) }
+			if errors.As(exchangeErr, &safe) {
+				code, unknown := safe.SafeTransportFailure()
+				result.FailureCode = safeExchangeFailureCode(code)
+				result.OutcomeUnknown = &unknown
+			}
+			return result, deliveryError(safeEndpoint(cfg.URL), result, false, "persistent exchange failed")
+		}
+		result.HTTPStatus = http.StatusOK
+		return classifyHTTPResponse(result, response, contract, true)
+	}
 	endpoint := safeEndpoint(cfg.URL)
 	client := http.DefaultClient
 	if secret != "" {
@@ -733,6 +755,7 @@ func waitForRetry(ctx context.Context, delay time.Duration) error {
 
 func deliveryError(endpoint string, result DeliveryResult, retryable bool, reason string) error {
 	return &DeliveryError{
+		FailureCode: result.FailureCode, OutcomeUnknown: result.OutcomeUnknown,
 		Endpoint: endpoint, HTTPStatus: result.HTTPStatus, Status: result.Status,
 		Attempts: result.Attempts, PendingProducts: result.PendingProducts, DeferredProducts: result.DeferredProducts,
 		Retryable: retryable, Reason: reason,

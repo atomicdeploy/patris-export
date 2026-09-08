@@ -75,6 +75,7 @@ type Server struct {
 	catalogProvider        pricingcatalog.Provider
 	catalogProviderKey     string
 	catalogProviderMu      sync.Mutex
+	pricingCommands        pricingCommandState
 	canonicalProjection    *canonicalProjectionCache
 	pricingPublication     *canonicalProjectionCache
 	pricingActuation       *pricingActuator
@@ -532,6 +533,7 @@ func browserConfig(cfg appconfig.Config) browserConfigView {
 	cfg.Export.XLTMTarget = ""
 	cfg.RecentSales = recentsales.Config{}
 	cfg.Canonical.Pricing.Digitalogic.BaseURL = browserSafeURL(cfg.Canonical.Pricing.Digitalogic.BaseURL)
+	cfg.Canonical.Pricing.Digitalogic.CommandWebSocketURL = browserSafeURL(cfg.Canonical.Pricing.Digitalogic.CommandWebSocketURL)
 	cfg.SendUpdates.URL = browserSafeURL(cfg.SendUpdates.URL)
 	cfg.SendUpdates.Headers = nil
 	cfg.SendUpdates.Command = nil
@@ -628,6 +630,7 @@ func preserveBrowserProtectedConfig(cfg, protected appconfig.Config) appconfig.C
 	cfg.Export.XLTMTemplate = protected.Export.XLTMTemplate
 	cfg.Export.XLTMTarget = protected.Export.XLTMTarget
 	cfg.RecentSales = protected.RecentSales
+	cfg.Canonical.Pricing.Digitalogic.CommandWebSocketURL = protected.Canonical.Pricing.Digitalogic.CommandWebSocketURL
 	cfg.Canonical.Pricing.Digitalogic.BaseURL = preserveBrowserURL(
 		cfg.Canonical.Pricing.Digitalogic.BaseURL,
 		protected.Canonical.Pricing.Digitalogic.BaseURL,
@@ -668,11 +671,11 @@ func (s *Server) recordOptions() recordpipe.Options {
 
 func (s *Server) pricingCatalogProvider(cfg appconfig.Config) pricingcatalog.Provider {
 	material, _ := json.Marshal(cfg.Canonical.Pricing)
-	key := string(material)
+	key := string(material) + s.pricingCommandFingerprint(cfg)
 	s.catalogProviderMu.Lock()
 	defer s.catalogProviderMu.Unlock()
 	if s.catalogProvider == nil || s.catalogProviderKey != key {
-		s.catalogProvider = pricingcatalog.NewProvider(cfg.Canonical.Pricing)
+		s.catalogProvider = pricingcatalog.NewProviderWithHTTPClient(cfg.Canonical.Pricing, s.pricingCommandHTTPClient(cfg))
 		s.catalogProviderKey = key
 	}
 	return s.catalogProvider
@@ -1772,6 +1775,7 @@ func (s *Server) handlePostRefreshWait(w http.ResponseWriter, r *http.Request, s
 	}
 	dispatchStarted := time.Now()
 	diagnostic.phaseChanged("dispatch")
+	ctx = s.pricingCommandContext(ctx, cfg, deliveryConfig)
 	result, err := dispatch(ctx, deliveryConfig, event)
 	dispatchDiagnostic := refreshDispatchDetails(result, err, dispatchStarted)
 	diagnostic.mu.Lock()
@@ -2430,6 +2434,7 @@ func (s *Server) dispatchUpdateEvent(event updateout.Event, preparedAt time.Time
 		terminalCode := "request_aborted"
 		defer func() { diagnostic.finish(terminalCode, "", "") }()
 		started := time.Now()
+		ctx = s.pricingCommandContext(ctx, s.Config(), cfg)
 		result, err := updateout.DispatchWithResult(ctx, cfg, event)
 		details := refreshDispatchDetails(result, err, started)
 		contract := event.Contract
@@ -3275,6 +3280,7 @@ func (s *Server) StartWatching(debounceDuration time.Duration) error {
 // Close cleans up server resources
 func (s *Server) Close() error {
 	var firstErr error
+	s.closePricingCommands()
 	if s.backgroundCancel != nil {
 		s.backgroundCancel()
 	}

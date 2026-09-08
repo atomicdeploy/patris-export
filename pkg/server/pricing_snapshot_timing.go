@@ -24,6 +24,7 @@ func refreshInputPhase(ctx context.Context, phase string) {
 }
 
 type refreshDispatchDiagnostic struct {
+	OutcomeUnknown    *bool                        `json:"outcome_unknown,omitempty"`
 	ReceiverTiming    *updateout.ReceiverTiming    `json:"receiver_timing_ms,omitempty"`
 	ElapsedMS         int64                        `json:"elapsed_ms"`
 	HTTPStatus        int                          `json:"http_status"`
@@ -45,6 +46,7 @@ func refreshDispatchDetails(result updateout.DeliveryResult, err error, started 
 		DeferredProducts: result.DeferredProducts, DeferredMissing: result.DeferredMissing,
 		DeferredAmbiguous: result.DeferredAmbiguous, Retryable: result.Retryable}
 	d.HTTPTrace = result.HTTPTrace
+	d.OutcomeUnknown = result.OutcomeUnknown
 	d.ReceiverTiming = result.ReceiverTiming
 	if result.Delivery != nil {
 		receipt := *result.Delivery
@@ -75,6 +77,9 @@ func refreshDispatchDetails(result updateout.DeliveryResult, err error, started 
 	} else if err != nil {
 		d.Code = "dispatch_failed"
 	}
+	if result.FailureCode != "" {
+		d.Code = result.FailureCode
+	}
 	return d
 }
 
@@ -82,6 +87,12 @@ func refreshDispatchDetails(result updateout.DeliveryResult, err error, started 
 // successful webhook without a ledger is not proof of completed website writes.
 func backgroundDeliveryOutcome(result updateout.DeliveryResult, err error, input *canonical.Envelope) string {
 	if err != nil {
+		if result.OutcomeUnknown != nil {
+			if *result.OutcomeUnknown {
+				return "delivery_outcome_unknown"
+			}
+			return "delivery_failed"
+		}
 		// A transport failure or server error after an attempt cannot prove
 		// that the receiver did not commit the write. Never suggest a safe retry.
 		if result.Attempts > 0 && (result.HTTPStatus < 400 || result.HTTPStatus == http.StatusRequestTimeout || result.HTTPStatus >= 500) {
