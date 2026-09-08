@@ -46,48 +46,49 @@ import (
 
 // Server represents the HTTP/WebSocket server
 type Server struct {
-	router               *mux.Router
-	dbPath               string
-	charMap              converter.CharMapping
-	dataSource           datasource.DataSource
-	dataSourceMu         sync.RWMutex
-	watcher              *watcher.FileWatcher
-	wsClients            map[*websocket.Conn]*sync.Mutex
-	wsClientsMu          sync.RWMutex
-	upgrader             websocket.Upgrader
-	lastRecords          []map[string]interface{}
-	lastRecordsMu        sync.RWMutex
-	lastRecordsReady     bool
-	lastContractRevision string
-	lastModTime          time.Time
-	lastModTimeMu        sync.RWMutex
-	useTempFile          bool
-	config               *appconfig.Manager
-	configWatcher        *appconfig.ConfigWatcher
-	version              version.Info
-	processMu            sync.Mutex
-	processStatusCache   map[string]interface{}
-	processStatusAt      time.Time
-	lastSourceHash       string
-	lastSourceHashMu     sync.Mutex
-	eventSubscribers     map[chan map[string]interface{}]struct{}
-	eventSubscribersMu   sync.RWMutex
-	catalogProvider      pricingcatalog.Provider
-	catalogProviderKey   string
-	catalogProviderMu    sync.Mutex
-	canonicalProjection  *canonicalProjectionCache
-	pricingPublication   *canonicalProjectionCache
-	pricingActuation     *pricingActuator
-	refreshDiagnosticMu  sync.Mutex
-	refreshDiagnostic    *refreshOperationDiagnostic
-	sqlOperations        *sqlOperationsState
-	excelPricing         *excelPricingState
-	excelPricingRemote   *excelPricingRemoteEventsBridge
-	excelPricingWrites   *excelPricingWritebackQueue
-	backgroundCtx        context.Context
-	backgroundCancel     context.CancelFunc
-	backgroundWG         sync.WaitGroup
-	serviceWG            sync.WaitGroup
+	router                 *mux.Router
+	dbPath                 string
+	charMap                converter.CharMapping
+	dataSource             datasource.DataSource
+	dataSourceMu           sync.RWMutex
+	watcher                *watcher.FileWatcher
+	wsClients              map[*websocket.Conn]*sync.Mutex
+	wsClientsMu            sync.RWMutex
+	upgrader               websocket.Upgrader
+	lastRecords            []map[string]interface{}
+	lastRecordsMu          sync.RWMutex
+	lastRecordsReady       bool
+	lastContractRevision   string
+	lastModTime            time.Time
+	lastModTimeMu          sync.RWMutex
+	useTempFile            bool
+	config                 *appconfig.Manager
+	configWatcher          *appconfig.ConfigWatcher
+	version                version.Info
+	processMu              sync.Mutex
+	processStatusCache     map[string]interface{}
+	processStatusAt        time.Time
+	lastSourceHash         string
+	lastSourceHashMu       sync.Mutex
+	eventSubscribers       map[chan map[string]interface{}]struct{}
+	eventSubscribersMu     sync.RWMutex
+	catalogProvider        pricingcatalog.Provider
+	catalogProviderKey     string
+	catalogProviderMu      sync.Mutex
+	canonicalProjection    *canonicalProjectionCache
+	pricingPublication     *canonicalProjectionCache
+	pricingActuation       *pricingActuator
+	refreshDiagnosticMu    sync.Mutex
+	refreshDiagnostic      *refreshOperationDiagnostic
+	lastPreDispatchFailure *preDispatchFailure
+	sqlOperations          *sqlOperationsState
+	excelPricing           *excelPricingState
+	excelPricingRemote     *excelPricingRemoteEventsBridge
+	excelPricingWrites     *excelPricingWritebackQueue
+	backgroundCtx          context.Context
+	backgroundCancel       context.CancelFunc
+	backgroundWG           sync.WaitGroup
+	serviceWG              sync.WaitGroup
 }
 
 type Options struct {
@@ -439,7 +440,10 @@ func (s *Server) recordResultContext(ctx context.Context, options recordpipe.Opt
 	if err := ctx.Err(); err != nil {
 		return recordpipe.Result{}, err
 	}
-	result := recordpipe.BuildContext(ctx, records, dbPath, options)
+	result, err := recordpipe.BuildContext(ctx, records, dbPath, options)
+	if err != nil {
+		return recordpipe.Result{}, err
+	}
 	if !options.Raw && result.Contract != nil {
 		if owner, ok := options.CatalogProvider.(pricingcatalog.OwnerProvider); ok {
 			selection := owner.Owner(ctx)
@@ -2159,8 +2163,10 @@ func (s *Server) initialSnapshotMessage(result recordpipe.Result, dbPath, reason
 }
 
 func (s *Server) broadcastInitialSnapshot(reason string) {
+	preparedAt := time.Now()
 	result, err := s.RecordResult()
 	if err != nil {
+		s.recordPreDispatchFailure("initial", "source_prepare", preparedAt, err)
 		log.Printf("Failed to read records for initial snapshot: %v", err)
 		return
 	}
@@ -2201,12 +2207,13 @@ func (s *Server) broadcastInitialSnapshot(reason string) {
 		KeyField:         result.KeyField,
 		Contract:         result.SyncEnvelope(nil),
 		SnapshotContract: result.SyncEnvelope(nil),
-	})
+	}, preparedAt)
 	go s.broadcastProcessInfo()
 }
 
 // broadcastUpdate broadcasts database changes to all connected WebSocket clients
 func (s *Server) broadcastUpdate() {
+	preparedAt := time.Now()
 	s.wsClientsMu.RLock()
 	clientCount := len(s.wsClients)
 	s.wsClientsMu.RUnlock()
@@ -2221,6 +2228,7 @@ func (s *Server) broadcastUpdate() {
 	// Get current records
 	result, err := s.RecordResult()
 	if err != nil {
+		s.recordPreDispatchFailure("update", "source_prepare", preparedAt, err)
 		log.Printf("Failed to read records: %v", err)
 		return
 	}
@@ -2269,18 +2277,20 @@ func (s *Server) broadcastUpdate() {
 			KeyField:         result.KeyField,
 			Contract:         result.SyncEnvelope(&changeSet),
 			SnapshotContract: result.SyncEnvelope(nil),
-		})
+		}, preparedAt)
 	}
 	go s.broadcastProcessInfo()
 }
 
 func (s *Server) dispatchInitialUpdate(ctx context.Context) {
+	preparedAt := time.Now()
 	cfg := s.Config().SendUpdates
 	if !cfg.Enabled || !cfg.Initial {
 		return
 	}
 	result, err := s.RecordResultContext(ctx)
 	if err != nil {
+		s.recordPreDispatchFailure("initial", "source_prepare", preparedAt, err)
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return
 		}
@@ -2296,7 +2306,7 @@ func (s *Server) dispatchInitialUpdate(ctx context.Context) {
 		KeyField:         result.KeyField,
 		Contract:         result.SyncEnvelope(nil),
 		SnapshotContract: result.SyncEnvelope(nil),
-	})
+	}, preparedAt)
 }
 
 func (s *Server) dispatchInitialUpdateAsync() {
@@ -2313,7 +2323,7 @@ func (s *Server) dispatchInitialUpdateAsync() {
 	}()
 }
 
-func (s *Server) dispatchUpdateEvent(event updateout.Event) {
+func (s *Server) dispatchUpdateEvent(event updateout.Event, preparedAt time.Time) {
 	cfg := s.Config().SendUpdates
 	if !cfg.Enabled {
 		return
@@ -2332,6 +2342,7 @@ func (s *Server) dispatchUpdateEvent(event updateout.Event) {
 			case s.excelPricing.permit <- struct{}{}:
 				defer func() { <-s.excelPricing.permit }()
 			case <-ctx.Done():
+				s.recordPreDispatchFailure(event.Type, "permit_wait", queuedAt, ctx.Err())
 				return
 			}
 		}
@@ -2342,6 +2353,7 @@ func (s *Server) dispatchUpdateEvent(event updateout.Event) {
 			operation = "startup_delivery"
 		}
 		diagnostic := s.beginQueuedPricingOperationDiagnostic(operation, "dispatch", queuedAt)
+		diagnostic.includePreparation(preparedAt)
 		terminalCode := "request_aborted"
 		defer func() { diagnostic.finish(terminalCode, "", "") }()
 		started := time.Now()

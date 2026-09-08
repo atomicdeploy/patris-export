@@ -85,7 +85,10 @@ func TestAuthorityWaitPublishesOnlySelectedFinalProjection(t *testing.T) {
 			if err := json.Unmarshal(body, &keyed); err != nil {
 				t.Fatal(err)
 			}
-			owner := recordpipe.Build([]map[string]interface{}{keyed["1"]}, srv.currentDBPath(), options)
+			owner, err := recordpipe.Build([]map[string]interface{}{keyed["1"]}, srv.currentDBPath(), options)
+			if err != nil {
+				t.Fatal(err)
+			}
 			fixture.source = owner.Contract.Source
 			fixture.revision.Source = fixture.source
 			fixture.revision.InputSource = &input.Contract.Source

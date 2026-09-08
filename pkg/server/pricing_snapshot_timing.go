@@ -184,20 +184,30 @@ type refreshOperationDiagnostic struct {
 	snapshot          *pricingSnapshotTimingReport
 }
 
+type preDispatchFailure struct {
+	Operation string    `json:"operation"`
+	Stage     string    `json:"stage"`
+	Code      string    `json:"code"`
+	StartedAt time.Time `json:"started_at"`
+	EndedAt   time.Time `json:"ended_at"`
+	ElapsedMS int64     `json:"elapsed_ms"`
+}
+
 type refreshOperationStatus struct {
-	Busy           bool                         `json:"busy"`
-	Operation      string                       `json:"operation,omitempty"`
-	Phase          string                       `json:"phase,omitempty"`
-	Active         bool                         `json:"active"`
-	StartedAt      time.Time                    `json:"started_at,omitempty"`
-	ElapsedMS      int64                        `json:"elapsed_ms"`
-	PhaseElapsedMS int64                        `json:"phase_elapsed_ms"`
-	StageMS        map[string]int64             `json:"stage_ms,omitempty"`
-	Code           string                       `json:"code,omitempty"`
-	ErrorStage     string                       `json:"error_stage,omitempty"`
-	ErrorDetail    string                       `json:"error_detail,omitempty"`
-	Dispatch       *refreshDispatchDiagnostic   `json:"dispatch_diagnostic,omitempty"`
-	Snapshot       *pricingSnapshotTimingReport `json:"snapshot_timing,omitempty"`
+	LastPreDispatchFailure *preDispatchFailure          `json:"last_pre_dispatch_failure,omitempty"`
+	Busy                   bool                         `json:"busy"`
+	Operation              string                       `json:"operation,omitempty"`
+	Phase                  string                       `json:"phase,omitempty"`
+	Active                 bool                         `json:"active"`
+	StartedAt              time.Time                    `json:"started_at,omitempty"`
+	ElapsedMS              int64                        `json:"elapsed_ms"`
+	PhaseElapsedMS         int64                        `json:"phase_elapsed_ms"`
+	StageMS                map[string]int64             `json:"stage_ms,omitempty"`
+	Code                   string                       `json:"code,omitempty"`
+	ErrorStage             string                       `json:"error_stage,omitempty"`
+	ErrorDetail            string                       `json:"error_detail,omitempty"`
+	Dispatch               *refreshDispatchDiagnostic   `json:"dispatch_diagnostic,omitempty"`
+	Snapshot               *pricingSnapshotTimingReport `json:"snapshot_timing,omitempty"`
 }
 
 func (s *Server) beginRefreshDiagnostic() *refreshOperationDiagnostic {
@@ -249,8 +259,9 @@ func (d *refreshOperationDiagnostic) finish(code, stage, detail string) {
 func (s *Server) refreshDiagnosticStatus(busy bool) refreshOperationStatus {
 	s.refreshDiagnosticMu.Lock()
 	d := s.refreshDiagnostic
+	failure := s.lastPreDispatchFailure
 	s.refreshDiagnosticMu.Unlock()
-	r := refreshOperationStatus{Busy: busy}
+	r := refreshOperationStatus{Busy: busy, LastPreDispatchFailure: failure}
 	if d == nil {
 		return r
 	}
@@ -292,4 +303,46 @@ func snapshotTimingFromContext(ctx context.Context) *pricingSnapshotTiming {
 	}
 	timing, _ := ctx.Value(pricingSnapshotTimingKey{}).(*pricingSnapshotTiming)
 	return timing
+}
+
+// Attach completed source preparation only after this operation owns the permit.
+func (d *refreshOperationDiagnostic) includePreparation(start time.Time) {
+	if start.IsZero() {
+		return
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if start.After(d.started) {
+		start = d.started
+	}
+	if d.stageMS == nil {
+		d.stageMS = make(map[string]int64)
+	}
+	d.stageMS["source_prepare"] = d.started.Sub(start).Milliseconds()
+	d.started = start
+}
+
+// Keep one historical failure without replacing another operation's active status.
+// No raw error text, retry, or delivery-success inference is introduced.
+func (s *Server) recordPreDispatchFailure(eventType, stage string, start time.Time, err error) {
+	end := time.Now()
+	if start.IsZero() || start.After(end) {
+		start = end
+	}
+	code := "source_prepare_failed"
+	if errors.Is(err, context.Canceled) {
+		code = "operation_cancelled"
+	} else if errors.Is(err, context.DeadlineExceeded) {
+		code = "operation_timed_out"
+	}
+	operation := "source_delivery"
+	if eventType == "initial" {
+		operation = "startup_delivery"
+	}
+	failure := &preDispatchFailure{Operation: operation, Stage: stage, Code: code, StartedAt: start, EndedAt: end, ElapsedMS: end.Sub(start).Milliseconds()}
+	s.refreshDiagnosticMu.Lock()
+	if s.lastPreDispatchFailure == nil || s.lastPreDispatchFailure.EndedAt.Before(end) {
+		s.lastPreDispatchFailure = failure
+	}
+	s.refreshDiagnosticMu.Unlock()
 }

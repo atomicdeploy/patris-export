@@ -1,0 +1,11 @@
+# Source preparation and dispatch diagnostics
+
+Background source/startup delivery includes the elapsed interval before dispatch scheduling in `pricing_operation.stage_ms.source_prepare`. Permit wait and dispatch remain separate; timing begins at preparation, but a queued operation cannot replace an active owner's diagnostic before acquiring the shared permit. Preparation includes record projection and pre-dispatch event construction; it is not solely database-read time.
+
+`pricing_operation.last_pre_dispatch_failure` holds one timestamped historical failure when source preparation fails or permit waiting is cancelled. It contains operation, stage, a bounded code, start/end and elapsed time. It does not replace the active operation, imply receipt success, retain raw errors, or schedule retries. It is in-memory and lost on process restart; it is not a durable failure ledger. Consumers must distinguish this historical failure from the current operation and use its timestamps.
+
+Breaking Go API change: `recordpipe.Build` and `BuildContext` return `(Result, error)`. Server and CLI callers propagate errors rather than consuming an empty successful result. All repository call sites were updated; no compatibility wrapper was introduced.
+
+Production-first evidence: source a8c878acd6d699394575f4a67d3ba8ad4cf3f75d was installed as2.0.2-pre-dispatch-status, SHA256 FBCBF288F04A7EEB20FBA9E27868478A7F811109E3936E3DE1B92CE00E09E3AE. Startup completed with HTTP200/already_current, one attempt and zero pending/deferred:7623ms preparation,0ms permit wait,8374ms dispatch,total15997ms. The scheduled service/API and WordPress services remained available after startup. No deliberate production failure was injected.
+
+Local checks cover actual failed startup preparation, cancelled queued delivery retaining an active owner, timing arithmetic, error propagation on cancellation, and record-building fixtures using the installed pxlib runtime. These do not prove timeout-with-unknown-delivery recovery across every interface, changed-price latency, or durable delivery of failure events. Those acceptance requirements remain in issue312.

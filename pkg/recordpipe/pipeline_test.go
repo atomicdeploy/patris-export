@@ -31,7 +31,7 @@ func (value cancellingMappedValue) String() string {
 
 func TestBuildRawSkipsTransformAndMapping(t *testing.T) {
 	rows := []map[string]interface{}{{"Code": "100", "Name": "Raw", "ANBAR1": 2, "Sort": "ignored", "SortCode": "ignored too"}}
-	result := Build(rows, "kala.db", Options{
+	result := mustBuild(t, rows, "kala.db", Options{
 		Raw: true,
 		Mapping: recordmap.Config{
 			Enabled: true,
@@ -62,7 +62,7 @@ func TestBuildRawSkipsTransformAndMapping(t *testing.T) {
 
 func TestBuildContextStopsDuringNonCanonicalMapping(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
-	result := BuildContext(ctx, []map[string]interface{}{{
+	result, err := BuildContext(ctx, []map[string]interface{}{{
 		"Code":  "100",
 		"Name":  "Product",
 		"Value": cancellingMappedValue{cancel: cancel},
@@ -74,7 +74,7 @@ func TestBuildContextStopsDuringNonCanonicalMapping(t *testing.T) {
 			},
 		},
 	})
-	if !errors.Is(ctx.Err(), context.Canceled) {
+	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("context error=%v, want context.Canceled", ctx.Err())
 	}
 	if result.Rows != nil || result.Payload != nil || result.Contract != nil || result.KeyField != "" {
@@ -85,8 +85,8 @@ func TestBuildContextStopsDuringNonCanonicalMapping(t *testing.T) {
 func TestBuildContextRejectsPreCancelledRawProjection(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	result := BuildContext(ctx, []map[string]interface{}{{"Code": "100"}}, "products.db", Options{Raw: true})
-	if !errors.Is(ctx.Err(), context.Canceled) {
+	result, err := BuildContext(ctx, []map[string]interface{}{{"Code": "100"}}, "products.db", Options{Raw: true})
+	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("context error=%v, want context.Canceled", ctx.Err())
 	}
 	if result.Rows != nil || result.Payload != nil {
@@ -95,7 +95,7 @@ func TestBuildContextRejectsPreCancelledRawProjection(t *testing.T) {
 }
 
 func TestBuildAddsNamingWarningsAfterFieldMapping(t *testing.T) {
-	result := Build([]map[string]interface{}{{"Code": "100", "Name": "Bad  name"}}, "name.db", Options{
+	result := mustBuild(t, []map[string]interface{}{{"Code": "100", "Name": "Bad  name"}}, "name.db", Options{
 		Mapping: recordmap.Config{
 			Enabled:  true,
 			KeyField: "sku",
@@ -113,7 +113,7 @@ func TestBuildAddsNamingWarningsAfterFieldMapping(t *testing.T) {
 }
 
 func TestBuildCanonicalNamingWarningsRemainIdentityValid(t *testing.T) {
-	result := Build([]map[string]interface{}{{
+	result := mustBuild(t, []map[string]interface{}{{
 		"Code": "123456789", "Name": " Widget2 ", "Serial": "SKU",
 	}}, "kala.db", Options{
 		Canonical:       canonical.DefaultConfig(),
@@ -153,7 +153,7 @@ func TestBuildCanonicalHashVisibilityAndCompatibilitySurface(t *testing.T) {
 	cfg := canonical.DefaultConfig()
 	expose := false
 	cfg.Hashes.Expose = &expose
-	result := Build(sourceRows, "kala.db", Options{
+	result := mustBuild(t, sourceRows, "kala.db", Options{
 		Canonical:       cfg,
 		CatalogProvider: pricingcatalog.NewProvider(pricingcatalog.Config{Mode: pricingcatalog.ModeNone}),
 	})
@@ -170,7 +170,7 @@ func TestBuildCanonicalHashVisibilityAndCompatibilitySurface(t *testing.T) {
 
 	enabled := false
 	cfg.Hashes.Enabled = &enabled
-	result = Build(sourceRows, "kala.db", Options{
+	result = mustBuild(t, sourceRows, "kala.db", Options{
 		Canonical:       cfg,
 		CatalogProvider: pricingcatalog.NewProvider(pricingcatalog.Config{Mode: pricingcatalog.ModeNone}),
 	})
@@ -200,7 +200,7 @@ func TestBuildKalaProfileAgainstRealLegacyDatabaseFixture(t *testing.T) {
 		t.Fatalf("load canonical fixture config: %v", err)
 	}
 	cfg := manager.Get()
-	result := Build(rawRows, path, Options{
+	result := mustBuild(t, rawRows, path, Options{
 		Canonical:       cfg.Canonical,
 		CatalogProvider: pricingcatalog.NewProvider(cfg.Canonical.Pricing),
 		GeneratedAt:     time.Date(2026, 7, 16, 0, 0, 0, 0, time.UTC),
@@ -233,7 +233,7 @@ func TestBuildKalaProfileAgainstRealLegacyDatabaseFixture(t *testing.T) {
 
 func TestBuildCanonicalBoundaryQuarantinesDuplicateCodesBeforeKeying(t *testing.T) {
 	cfg := canonical.DefaultConfig()
-	result := Build([]map[string]interface{}{
+	result := mustBuild(t, []map[string]interface{}{
 		{"Code": "DUP", "Sharh1": "0 0 0 1", "Sharh2": "1 گرم"},
 		{"Code": "DUP", "Sharh1": "0 0 0 2", "Sharh2": "2 گرم"},
 	}, "kala.db", Options{
@@ -266,7 +266,7 @@ func TestQuarantinedCodeIsFilteredFromDeletionAndTombstone(t *testing.T) {
 
 func TestBuildAppliesTableSpecificMapping(t *testing.T) {
 	round := 0
-	result := Build([]map[string]interface{}{{"Code": "100", "Name": "Bolt", "FOROSH": 12.5}}, "kala.db", Options{
+	result := mustBuild(t, []map[string]interface{}{{"Code": "100", "Name": "Bolt", "FOROSH": 12.5}}, "kala.db", Options{
 		Mapping: recordmap.Config{
 			Enabled: true,
 			Tables: map[string]recordmap.TableConfig{
@@ -297,4 +297,13 @@ func TestBuildAppliesTableSpecificMapping(t *testing.T) {
 	if _, ok := payload["100"]; !ok {
 		t.Fatalf("expected payload keyed by sku, got %#v", payload)
 	}
+}
+
+func mustBuild(t *testing.T, rows []map[string]interface{}, source string, options Options) Result {
+	t.Helper()
+	result, err := Build(rows, source, options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return result
 }
