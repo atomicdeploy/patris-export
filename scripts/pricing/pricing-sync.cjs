@@ -8,6 +8,7 @@ const HASH = /^sha256:[a-f0-9]{64}$/;
 const LIMIT_MS = 60000;
 const HELP = `Usage: node pricing-sync.cjs bulk [--base-url URL] [--timeout-ms N] [--json]
        pricing-sync.cmd bulk
+       pricing-sync.cmd single PRODUCT_CODE [--site-url URL] [--timeout-ms N] [--json]
 
 Bulk refresh through the existing Go pricing session and /api/refresh delivery:wait.
 Default URL: http://127.0.0.1:18080 (loopback only). Node.js 18+; no dependencies.
@@ -15,15 +16,22 @@ Default overall budget: 60000 ms, shared by readiness, session, refresh and read
 An explicit longer --timeout-ms emits a CRITICAL event at 60 seconds while waiting.
 Checks HTTP /api/status before and after; outputs a terminal JSON receipt.
 No automatic refresh retry. A timeout may have applied changes; inspect the server
-receipt before retrying. This local Go command currently supports only bulk.
-For one product on the WordPress host with PHP authority, run:
+receipt before retrying. Single calls WordPress directly; it is not a Go refresh.
+Single requires separately configured DIGITALOGIC_PRICING_WRITE_KEY and
+DIGITALOGIC_PRICING_WRITE_SECRET environment variables (WooCommerce write key).
+Default --site-url: https://digitalogic.ir; HTTPS origin only, no redirects.
+Single reports client elapsed time against a strict <1000 ms target; an unchanged
+receipt does not prove changed-price latency. It uses committed Patris inputs and
+requires PHP authority. No fresh Patris row or independent notification receipt.
+Alternatively on the WordPress host, run:
   wp digitalogic pricing recalculate --product-code=YOUR_PATRIS_CODE
 It recalculates the committed Patris input; it does not fetch a fresh Patris row.
 Authenticated WordPress clients can POST product_code to:
   /wp-json/digitalogic/v1/pricing/products/recalculate
 The dedicated source-ingest secret is not a substitute for WordPress permissions.
 This endpoint does not expose an independent n8n notification receipt.
-Exit: 0 delivered, 1 failed/unknown, 2 over 60s, 3 delivered with missing-product deferrals.
+Exit: 0 delivered within target, 1 failed/unknown, 2 target missed (bulk >60s,
+single >=1000ms), 3 bulk delivered with missing-product deferrals.
 `;
 
 function baseURL(value) {
@@ -37,13 +45,14 @@ function baseURL(value) {
   return url.origin;
 }
 
-async function requestJSON(base, path, { body, token, timeoutMs = 5000 } = {}) {
+async function requestJSON(base, path, { body, token, authorization, timeoutMs = 5000 } = {}) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const headers = { Accept: 'application/json', 'X-Patris-Excel-Client': CLIENT };
     if (body !== undefined) headers['Content-Type'] = 'application/json';
     if (token) headers['X-Patris-Excel-CSRF-Token'] = token;
+    if (authorization) headers.Authorization = authorization;
     const response = await fetch(base + path, {
       method: body === undefined ? 'GET' : 'POST', headers,
       body: body === undefined ? undefined : JSON.stringify(body),
@@ -177,21 +186,83 @@ async function runBulk({ baseUrl = 'http://127.0.0.1:18080', timeoutMs = LIMIT_M
   return result;
 }
 
+async function runSingle({ productCode, siteUrl = 'https://digitalogic.ir', timeoutMs = LIMIT_MS,
+  env = process.env, now = () => performance.now() } = {}) {
+  if (typeof productCode !== 'string' || !productCode || productCode.trim() !== productCode
+    || /[\x00-\x1f\x7f]/.test(productCode)) throw new Error('invalid_product_code');
+  let site;
+  try { site = new URL(siteUrl); } catch { throw new Error('invalid_site_url'); }
+  if (site.protocol !== 'https:' || site.username || site.password || site.search || site.hash
+    || site.pathname !== '/') throw new Error('site_url_must_be_https_origin');
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 600000) throw new Error('invalid_timeout_ms');
+  const key = env.DIGITALOGIC_PRICING_WRITE_KEY;
+  const secret = env.DIGITALOGIC_PRICING_WRITE_SECRET;
+  if (!/^ck_[a-f0-9]{40}$/.test(key || '') || !/^cs_[a-f0-9]{40}$/.test(secret || '')) {
+    throw new Error('separate_woocommerce_write_credentials_required');
+  }
+  const start = now();
+  const result = { scope: 'single', product_code: productCode, authority: 'php',
+    input_scope: 'committed_patris_source', delivered: false, outcome: 'unknown_delivery_outcome',
+    receipt_scope: 'wordpress_reconciliation', n8n_notification_receipt: 'not_exposed_by_endpoint' };
+  try {
+    const body = await requestJSON(site.origin, '/wp-json/digitalogic/v1/pricing/products/recalculate', {
+      body: { product_code: productCode }, timeoutMs,
+      authorization: 'Basic ' + Buffer.from(key + ':' + secret).toString('base64'),
+    });
+    const d = body?.data;
+    const counts = ['source_count', 'changed_products', 'updated_products', 'already_current_products',
+      'deferred_missing', 'deferred_ambiguous', 'pending_products', 'warning_count', 'elapsed_ms'];
+    if (body?.success !== true || d?.schema !== 'digitalogic.pricing-reconcile-result'
+      || d.status !== 'reconciled' || d.authority !== 'php' || d.input_scope !== 'committed_patris_source'
+      || d.product_code !== productCode || !Array.isArray(d.scope_codes)
+      || d.scope_codes.length !== 1 || d.scope_codes[0] !== productCode
+      || !HASH.test(d.pricing_revision) || !counts.every(k => Number.isSafeInteger(d[k]) && d[k] >= 0)
+      || d.source_count < 1 || !Array.isArray(d.sources) || d.sources.length !== d.source_count
+      || d.pending_products || d.deferred_missing || d.deferred_ambiguous
+      || !d.sources.every(s => s.target_products === 1 && HASH.test(s.event_id)
+        && s.woocommerce && ['pending', 'deferred', 'failed', 'missing', 'ambiguous', 'identity_hazard',
+          'materialization_mismatch_stopped'].every(k => s.woocommerce[k] === 0)
+        && Number.isSafeInteger(s.woocommerce.updated) && s.woocommerce.updated >= 0
+        && Number.isSafeInteger(s.woocommerce.already_applied) && s.woocommerce.already_applied >= 0
+        && s.woocommerce.updated + s.woocommerce.already_applied === 1)) {
+      throw new Error('terminal_receipt_unverified');
+    }
+    // Whitelist scalar diagnostics only; never echo arbitrary response fields.
+    result.receipt = { status: d.status, pricing_revision: d.pricing_revision };
+    for (const k of counts) result.receipt[k === 'elapsed_ms' ? 'server_elapsed_ms' : k] = d[k];
+    result.delivered = true;
+    result.outcome = d.updated_products > 0 ? 'reconciled_with_updates' : 'already_current';
+  } catch (error) {
+    result.error = error.message;
+    result.next_action = 'Inspect the WordPress product and reconciliation state before any manual retry.';
+  }
+  const elapsed = now() - start;
+  result.elapsed_ms = Math.round(elapsed);
+  result.target_ms = 1000;
+  result.performance = elapsed < 1000 ? 'under_1_second' : 'target_missed';
+  result.changed_price_latency_proven = false;
+  result.exit_code = !result.delivered ? 1 : elapsed >= 1000 ? 2 : 0;
+  return result;
+}
+
 async function main(args) {
   if (!args.length || args.includes('--help') || args.includes('-h')) { process.stdout.write(HELP); return 0; }
-  if (args.shift() !== 'bulk') throw new Error('only_bulk_is_supported');
+  const mode = args.shift();
+  if (!['bulk', 'single'].includes(mode)) throw new Error('invalid_arguments_use_help');
   const options = {};
+  if (mode === 'single') options.productCode = args.shift();
   let json = false;
   while (args.length) {
     const key = args.shift();
     if (key === '--json') json = true;
-    else if (key === '--base-url' && args.length) options.baseUrl = args.shift();
+    else if (key === '--base-url' && mode === 'bulk' && args.length) options.baseUrl = args.shift();
+    else if (key === '--site-url' && mode === 'single' && args.length) options.siteUrl = args.shift();
     else if (key === '--timeout-ms' && args.length) options.timeoutMs = Number(args.shift());
     else throw new Error('invalid_arguments_use_help');
   }
   options.log = json ? () => {} : message => process.stderr.write(message + '\n');
   options.onEvent = event => process.stderr.write(json ? JSON.stringify(event) + '\n' : event.message + '\n');
-  const result = await runBulk(options);
+  const result = await (mode === 'single' ? runSingle(options) : runBulk(options));
   process.stdout.write(JSON.stringify(result, null, 2) + '\n');
   return result.exit_code;
 }
@@ -203,4 +274,4 @@ if (require.main === module) {
     process.stderr.write(code + '\n'); process.exitCode = 1;
   });
 }
-module.exports = { runBulk, receiptFrom, baseURL, main };
+module.exports = { runBulk, runSingle, receiptFrom, baseURL, main };

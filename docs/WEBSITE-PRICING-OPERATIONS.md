@@ -7,9 +7,25 @@ Current prototype: PHP is the selected calculator on digitalogic.ir. Go reads Pa
 | Full refresh from the office deployment | `scripts\pricing\pricing-sync.cmd bulk --json` | Reads the configured Patris source and waits for website delivery receipt |
 | Recalculate stored website inputs | `wp digitalogic currency update --recalculate` | Uses committed Patris inputs; no fresh office database fetch |
 | Recalculate one product | `wp digitalogic pricing recalculate --product-code=113001002` | Uses committed Patris inputs; PHP authority required |
+| Recalculate one product from the office CLI | `scripts\pricing\pricing-sync.cmd single 113001002 --json` | Direct authenticated HTTPS to WordPress; committed Patris inputs, PHP authority required |
 | Read configured rates | `wp digitalogic currency get` | Reports configured values, not verified market freshness |
 
 Run the first command from the installed office deployment directory. Run WordPress commands in the existing authorized server/WP-CLI context. Replace the example Product Code with the intended product. The REST equivalent for one product is POST `/wp-json/digitalogic/v1/pricing/products/recalculate` with JSON `{"product_code":"113001002"}` and the existing WordPress authentication/permissions.
+
+The office `single` command requires a separately provisioned WooCommerce write key
+in `DIGITALOGIC_PRICING_WRITE_KEY` and `DIGITALOGIC_PRICING_WRITE_SECRET` environment
+variables. Never pass credentials as command arguments. After setting Windows User
+environment variables, open a new terminal so the command inherits them. The CLI
+does not reuse the Patris input-read bearer or provider credentials. The default
+site is `https://digitalogic.ir`; `--site-url` accepts an HTTPS origin and redirects
+are refused. This is a WordPress operation, not single-product Go source refresh.
+
+Single receipts distinguish `already_current` from `reconciled_with_updates` and
+report client `elapsed_ms` separately from `server_elapsed_ms`. Exit 2 means the
+strict client target of less than 1000 ms was missed, even if `delivered:true`.
+Exit 1 means no verified terminal receipt. Neither result triggers an automatic
+retry. A fast unchanged receipt does not establish changed-price latency; the CLI
+does not claim downstream rendered-price or independent notification acceptance.
 
 Bulk JSON must report `delivered:true` with no pending/deferred products. A timeout or disconnected caller does not prove that the operation stopped: inspect `/api/status` and the current receipt before retrying. Snapshot endpoints intentionally report `snapshot_disabled`; PHP final-price consumer projection through Go is unavailable during this prototype.
 
