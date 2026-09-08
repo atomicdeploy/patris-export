@@ -42,12 +42,31 @@ then delivers the selected row. If other unsent rows changed, the receiver can
 reject the aggregate revision; inspect the result and run an explicit bulk refresh.
 No automatic fallback to bulk or write retry occurs.
 
-Production fresh-input acceptance on 2026-09-08 took10418ms, with already-current
-receipt: canonical input5254ms, owner inputs1461ms, dispatch3591ms. This fails the
-single-product speed target and does not prove changed-price acceptance. Matched
+Production fresh-input acceptance on 2026-09-08 with the persistent service transport
+took2507ms with an already-current receipt, including owner inputs21ms and dispatch2005ms.
+Subsequent measured runs took2022–2431ms. This still fails the single-product speed
+target and does not prove changed-Patris-row acceptance. Matched
 server stage timings appear in `server_stage_ms` when the status event matches the
 receipt; missing timings are not zero. The following modes instead recalculate
 the already committed input:
+
+An administrator can select the existing WordPress command service with
+`canonical.pricing.digitalogic.command_websocket_url` in the managed Go config,
+for example `wss://digitalogic.ir/wordpress-ws`. An empty value selects HTTP.
+This does not change the configured final pricing engine. Both the existing
+source-write secret and owner-read bearer token are required; endpoints must
+have the same origin. Catalog reads and source delivery reuse the connection,
+while assignment reads still use their existing HTTP endpoint. No automatic
+HTTP fallback is made after a persistent write failure.
+
+`fresh` and `bulk` use this service setting; the interactive `session` command
+below is a separate user command for committed inputs. The service setting is
+managed-file configuration, not editable in the current browser settings UI.
+
+Environment overrides apply after the config file. In particular,
+`PATRIS_EXPORT_SEND_INITIAL=true` overrides `send_updates.initial=false`.
+The Windows scheduled launcher imports the User environment value. Check the
+effective `/api/config` value before expecting a restart without source delivery.
 
 Configure the dedicated WooCommerce write credentials in
 `DIGITALOGIC_PRICING_WRITE_KEY` and `DIGITALOGIC_PRICING_WRITE_SECRET` in the
