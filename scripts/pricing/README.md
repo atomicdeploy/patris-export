@@ -1,6 +1,8 @@
 # Pricing sync command
 
-Requires Node.js 18 or newer. Keep `pricing-sync.cmd` beside `pricing-sync.cjs`.
+Bulk and REST single require Node.js 18 or newer; persistent `session` requires
+Node.js 22 or newer. Keep `pricing-sync.cmd`, `pricing-sync.cjs` and
+`pricing-session.cjs` together.
 
 The Windows ZIP and assisted installer include these files under `scripts/pricing`.
 For a default per-user installation, run:
@@ -21,8 +23,40 @@ node --test pricing-sync.test.cjs
 
 `bulk` invokes the existing Go service and changes downstream prices. The wrapper
 does not start or deploy the service and has no separate queue or calculation engine.
-Without arguments it shows help. Single-product refresh is unsupported until the
-server provides an actual product scope.
+Without arguments it shows help.
+
+## Single-product pricing
+
+Configure the dedicated WooCommerce write credentials in
+`DIGITALOGIC_PRICING_WRITE_KEY` and `DIGITALOGIC_PRICING_WRITE_SECRET` in the
+calling process environment. Never place secrets in command arguments. On Windows,
+an already-open shell may need to reload newly configured user environment values.
+
+```cmd
+pricing-sync.cmd single 113001002 --json
+pricing-sync.cmd session --json
+```
+
+`single` makes one REST request. `session` authenticates once using the existing
+WordPress endpoint, opens the existing WebSocket service, and prints `session_ready`
+with authentication/connection time. Enter one exact Patris product code per line;
+enter `quit` or end input to close. Each line returns the same validated pricing
+receipt. A failed or uncertain receipt closes the session without retrying the write.
+Tokens stay in memory and are not printed or stored by this command.
+
+Both modes recalculate committed Patris inputs through the shared PHP coordinator;
+they do not fetch a fresh Patris row or implement Go-authority single pricing.
+Each product operation targets less than 1000 ms; a successful but slower receipt
+returns exit code 2. Session startup time is separate and is not hidden inside a
+claim of sub-second cold-start performance. An already-current receipt does not
+prove changed-price latency or visible-page propagation.
+
+Live installed session acceptance on 2026-09-08: startup 1893 ms, product command
+165 ms, zero writes/pending products. The REST path previously measured 1902 ms,
+including 146 ms in the server coordinator. Timing outside the coordinator includes
+transport and WordPress setup; it is not a network-only measurement.
+
+## Bulk delivery
 
 The sequence is GET `/api/status`, POST `/api/pricing-sync/session` with `{}`, then
 authenticated POST `/api/refresh` with `{"delivery":"wait"}`, then GET `/api/status`.
@@ -56,4 +90,4 @@ remain required before claiming the owner's complete downstream acceptance.
 
 Source contract inspected: `pkg/server/excel_pricing.go` session/auth and
 `excelPricingDeliveryComplete`; `pkg/server/server.go` refresh-wait response and
-`/api/status`. No live refresh was invoked during implementation or tests.
+`/api/status`. See deployment acceptance evidence separately from automated checks.
