@@ -2321,6 +2321,7 @@ func (s *Server) dispatchUpdateEvent(event updateout.Event) {
 	if event.Type == "initial" && !cfg.Initial {
 		return
 	}
+	queuedAt := time.Now()
 	go func() {
 		ctx := s.backgroundCtx
 		if ctx == nil {
@@ -2334,13 +2335,13 @@ func (s *Server) dispatchUpdateEvent(event updateout.Event) {
 				return
 			}
 		}
-		// Only the permit owner publishes active telemetry. This clock excludes
-		// startup preparation and time queued behind another pricing operation.
+		// Only the permit owner publishes active telemetry. Include dispatch
+		// scheduling/permit wait once acquired; earlier source preparation is separate.
 		operation := "source_delivery"
 		if event.Type == "initial" {
 			operation = "startup_delivery"
 		}
-		diagnostic := s.beginPricingOperationDiagnostic(operation, "dispatch")
+		diagnostic := s.beginQueuedPricingOperationDiagnostic(operation, "dispatch", queuedAt)
 		terminalCode := "request_aborted"
 		defer func() { diagnostic.finish(terminalCode, "", "") }()
 		started := time.Now()

@@ -205,8 +205,16 @@ func (s *Server) beginRefreshDiagnostic() *refreshOperationDiagnostic {
 }
 
 func (s *Server) beginPricingOperationDiagnostic(operation, phase string) *refreshOperationDiagnostic {
+	return s.beginQueuedPricingOperationDiagnostic(operation, phase, time.Time{})
+}
+
+func (s *Server) beginQueuedPricingOperationDiagnostic(operation, phase string, queuedAt time.Time) *refreshOperationDiagnostic {
 	now := time.Now()
 	d := &refreshOperationDiagnostic{started: now, phaseStarted: now, operation: operation, phase: phase}
+	if !queuedAt.IsZero() && queuedAt.Before(now) {
+		d.started = queuedAt
+		d.stageMS = map[string]int64{"permit_wait": now.Sub(queuedAt).Milliseconds()}
+	}
 	s.refreshDiagnosticMu.Lock()
 	s.refreshDiagnostic = d
 	s.refreshDiagnosticMu.Unlock()
