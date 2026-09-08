@@ -15,6 +15,8 @@ import (
 )
 
 var errPricingAuthorityUnavailable = errors.New("pricing authority is unavailable")
+var errPricingSnapshotDisabled = errors.New("snapshot_disabled")
+
 var errPricingProjectionUnavailable = errors.New("verified owner pricing projection is unavailable")
 var ownerNumberPattern = regexp.MustCompile(`^-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?$`)
 
@@ -68,27 +70,7 @@ func (s *Server) canonicalPublicationResultContext(ctx context.Context) (recordp
 // An authenticated owner event names the existing final source. Refresh that
 // projection directly: owner settings changes do not require input redelivery.
 func (s *Server) projectPricingFinal(ctx context.Context, input recordpipe.Result, source canonical.Source, owner pricingcatalog.Resolution) (recordpipe.Result, error) {
-	if input.Contract == nil || !validExcelPricingRemoteSource(source) || input.Contract.Source.ID != source.ID || input.Contract.Source.Dataset != source.Dataset || s.excelPricingRemote == nil {
-		return recordpipe.Result{}, pricingProjectionFailure("final_input_identity_mismatch")
-	}
-	client, err := newExcelPricingRemoteSnapshotClient(s.Config().SendUpdates, source, excelPricingRemoteSnapshotClientOptions{HTTPClient: s.excelPricing.client, Terminals: s.excelPricingRemote.snapshotTerminals()})
-	if err != nil {
-		return recordpipe.Result{}, pricingProjectionFailure("final_snapshot_client_configuration")
-	}
-	// Each new publication collection is a distinct read operation. Its pinned
-	// composite may change while source and owner revisions stay unchanged.
-	requestID, err := randomExcelPricingWritebackID()
-	if err != nil {
-		return recordpipe.Result{}, pricingProjectionFailure("snapshot_request_identity_unavailable")
-	}
-	remote, err := client.Collect(ctx, requestID, 0)
-	if err != nil {
-		return recordpipe.Result{}, err
-	}
-	if remote.OwnerCatalogRevision != owner.CatalogRevision {
-		return recordpipe.Result{}, pricingProjectionFailure("final_owner_catalog_mismatch")
-	}
-	return ownerProductProjection(input.Contract, remote, owner.CatalogRevision)
+	return recordpipe.Result{}, errPricingSnapshotDisabled
 }
 
 func (s *Server) projectPricingInput(ctx context.Context, input recordpipe.Result, cfg appconfig.Config, owner pricingcatalog.Resolution) (recordpipe.Result, error) {
@@ -105,24 +87,7 @@ func (s *Server) projectPricingInput(ctx context.Context, input recordpipe.Resul
 	if owner.Authority == pricingcatalog.AuthorityGo {
 		return input, nil
 	}
-	if !isSHA256Revision(input.Contract.EventID) || s.excelPricingRemote == nil {
-		return recordpipe.Result{}, pricingProjectionFailure("input_event_or_remote_missing")
-	}
-	client, err := newExcelPricingRemoteSnapshotClient(cfg.SendUpdates, input.Contract.Source, excelPricingRemoteSnapshotClientOptions{
-		HTTPClient: s.excelPricing.client, Terminals: s.excelPricingRemote.snapshotTerminals(), InputCatalogRevision: owner.CatalogRevision,
-	})
-	if err != nil {
-		return recordpipe.Result{}, pricingProjectionFailure("snapshot_client_configuration")
-	}
-	requestID, err := randomExcelPricingWritebackID()
-	if err != nil {
-		return recordpipe.Result{}, pricingProjectionFailure("snapshot_request_identity_unavailable")
-	}
-	remote, err := client.Collect(ctx, requestID, 0)
-	if err != nil {
-		return recordpipe.Result{}, err
-	}
-	return ownerProductProjection(input.Contract, remote, owner.CatalogRevision)
+	return recordpipe.Result{}, errPricingSnapshotDisabled
 }
 
 func ownerProductProjection(input *canonical.Envelope, remote *excelPricingRemoteSnapshotResult, ownerRevision string) (recordpipe.Result, error) {
