@@ -21,6 +21,7 @@ async function openPricingSession({ siteUrl, authorization, timeoutMs = 15000 })
     const timer = setTimeout(() => { socket.close(); reject(Error('session_connect_timeout')); }, timeoutMs);
     socket.onopen = () => { clearTimeout(timer); resolve(); };
     socket.onerror = () => { clearTimeout(timer); reject(Error('session_connect_failed')); };
+    socket.onclose = () => { clearTimeout(timer); reject(Error('session_connect_closed')); };
   });
   const fail = () => { if (pending) { clearTimeout(pending.timer); pending.reject(Error('session_connection_lost')); pending = null; } };
   socket.onerror = fail;
@@ -41,7 +42,11 @@ async function openPricingSession({ siteUrl, authorization, timeoutMs = 15000 })
         const id = 'pricing-' + (++sequence);
         const timer = setTimeout(() => { pending = null; socket.close(); reject(Error('request_timeout')); }, timeoutMs);
         pending = { id, timer, resolve, reject };
-        socket.send(JSON.stringify({ id, command: 'digitalogic_recalculate_product_price', data: { product_code: productCode } }));
+        try {
+          socket.send(JSON.stringify({ id, command: 'digitalogic_recalculate_product_price', data: { product_code: productCode } }));
+        } catch {
+          clearTimeout(timer); pending = null; socket.close(); reject(Error('session_send_failed'));
+        }
       });
     },
   };
