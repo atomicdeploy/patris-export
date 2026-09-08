@@ -53,9 +53,10 @@ func TestPartnerPriceFallbackUsesSharh1SlotOneAsIRRWithoutFreightOrFX(t *testing
 		DefaultAssignment: &pricingcatalog.Assignment{ProfitPercent: &markup},
 	}}
 	product := parseKalaProduct(context.Background(), map[string]interface{}{
-		"Code":   "PARTNER-1",
-		"FOROSH": json.Number("9999990"),
-		"Sharh1": "1234500\r0\r0\r0",
+		"Code":         "PARTNER-1",
+		"weight_grams": 1,
+		"FOROSH":       json.Number("9999990"),
+		"Sharh1":       "1234500\r0\r0\r0",
 	}, pricingcatalog.NewProvider(config), true)
 	row := product.Map()
 
@@ -104,6 +105,7 @@ func TestPartnerPriceFallbackAcceptsLargeParadoxFloat32WithoutExponentAmbiguity(
 	}}
 	row := parseKalaProduct(context.Background(), map[string]interface{}{
 		"Code": "103133", "partner_price_source": float32(5500000), "FOROSH": float32(9000000), "foreign_price": float32(0),
+		"weight_grams": 1,
 	}, pricingcatalog.NewProvider(config), true).Map()
 	for field, want := range map[string]interface{}{
 		"price_source_amount":   json.Number("5500000"),
@@ -156,7 +158,7 @@ func TestPricingFallbackOrderRequiresCompleteForeignRouteThenPartnerThenOptInSal
 	fx := pricingcatalog.Decimal("30000")
 	freight := pricingcatalog.Decimal("22000000")
 	markup := pricingcatalog.Decimal("30")
-	enabled := true
+	enabled := false
 	base := pricingcatalog.Config{Mode: pricingcatalog.ModeStatic, Static: pricingcatalog.StaticConfig{
 		Authority:      pricingcatalog.AuthorityGo,
 		CNYToIRT:       &fx,
@@ -169,6 +171,7 @@ func TestPricingFallbackOrderRequiresCompleteForeignRouteThenPartnerThenOptInSal
 
 	partner := parseKalaProduct(context.Background(), map[string]interface{}{
 		"Code": "PARTNER-FALLBACK", "foreign_price": 10, "partner_price_source": 7000, "FOROSH": 12000,
+		"weight_grams": 1,
 	}, pricingcatalog.NewProvider(base), true).Map()
 	for field, want := range map[string]interface{}{
 		"price_source_amount":            json.Number("7000"),
@@ -188,8 +191,8 @@ func TestPricingFallbackOrderRequiresCompleteForeignRouteThenPartnerThenOptInSal
 	zeroWeight := parseKalaProduct(context.Background(), map[string]interface{}{
 		"Code": "ZERO-WEIGHT", "foreign_price": 10, "weight_grams": 0, "partner_price_source": 7000,
 	}, pricingcatalog.NewProvider(base), true).Map()
-	if zeroWeight["weight_grams"] != json.Number("0") || zeroWeight["price_source_kind"] != PriceSourceKindPartner {
-		t.Fatalf("explicit zero weight was not preserved while falling through: %#v", zeroWeight)
+	if zeroWeight["weight_grams"] != json.Number("0") || zeroWeight["final_price"] != nil || zeroWeight["price_source_kind"] != nil {
+		t.Fatalf("zero weight must remain unpriced across fallback routes: %#v", zeroWeight)
 	}
 	if !hasAny(zeroWeight["warnings"].([]string), "weight_non_positive_for_foreign_price") {
 		t.Fatalf("zero-weight foreign fallback lacked a diagnostic: %v", zeroWeight["warnings"])
@@ -199,6 +202,7 @@ func TestPricingFallbackOrderRequiresCompleteForeignRouteThenPartnerThenOptInSal
 	directConfig.UseSalePriceDirectFallback = true
 	direct := parseKalaProduct(context.Background(), map[string]interface{}{
 		"Code": "SALE-FALLBACK", "foreign_price": 10, "FOROSH": 12000,
+		"weight_grams": 1,
 	}, pricingcatalog.NewProvider(directConfig), true, true).Map()
 	for field, want := range map[string]interface{}{
 		"price_source_amount":            json.Number("12000"),
@@ -222,6 +226,7 @@ func TestPricingFallbackOrderRequiresCompleteForeignRouteThenPartnerThenOptInSal
 	noMarkup.Static.DefaultAssignment = &pricingcatalog.Assignment{MethodID: "air_express"}
 	directAfterUnusablePartner := parseKalaProduct(context.Background(), map[string]interface{}{
 		"Code": "PARTNER-INCOMPLETE", "partner_price_source": 7000, "FOROSH": 12000,
+		"weight_grams": 1,
 	}, pricingcatalog.NewProvider(noMarkup), true, true).Map()
 	if directAfterUnusablePartner["price_source_kind"] != PriceSourceKindSaleDirect ||
 		directAfterUnusablePartner["final_price"] != int64(1200) {
@@ -260,6 +265,7 @@ func TestTransformPassesConfiguredDirectSaleFallback(t *testing.T) {
 	}
 	rows, envelope, transformErr := TransformContext(context.Background(), []map[string]interface{}{{
 		"Code": "123456", "Name": "Direct product", "Serial": "DIRECT-1", "FOROSH": 12000,
+		"weight_grams": 1,
 	}}, "kala.db", config, nil, time.Unix(1, 0).UTC())
 	if transformErr != nil {
 		t.Fatal(transformErr)
@@ -276,6 +282,33 @@ func TestTransformPassesConfiguredDirectSaleFallback(t *testing.T) {
 	}
 	if _, _, err := VerifySnapshotJSON(encoded); err != nil {
 		t.Fatalf("direct fallback snapshot did not verify: %v", err)
+	}
+}
+
+func TestAllSelectedRoutesRequirePositiveWeight(t *testing.T) {
+	markup := pricingcatalog.Decimal("0")
+	digits := 0
+	config := pricingcatalog.Config{Mode: pricingcatalog.ModeStatic, Static: pricingcatalog.StaticConfig{Authority: pricingcatalog.AuthorityGo, RoundingDigits: &digits, DefaultAssignment: &pricingcatalog.Assignment{ProfitPercent: &markup}}, UseSalePriceDirectFallback: true}
+	for _, partner := range []bool{true, false} {
+		for _, weight := range []any{nil, "", 0} {
+			row := map[string]interface{}{"Code": "WEIGHT-GATE", "FOROSH": 12000, "weight_grams": weight}
+			if partner {
+				row["partner_price_source"] = 10000
+			}
+			product := parseKalaProduct(context.Background(), row, pricingcatalog.NewProvider(config), true, true)
+			if product.FinalPrice != nil {
+				t.Fatalf("missing/zero weight generated final price: %+v", product)
+			}
+			delete(row, "weight_grams")
+			if p := parseKalaProduct(context.Background(), row, pricingcatalog.NewProvider(config), true, true); p.FinalPrice != nil {
+				t.Fatal("absent weight generated price")
+			}
+			row["weight_grams"] = 1
+			p := parseKalaProduct(context.Background(), row, pricingcatalog.NewProvider(config), true, true)
+			if p.FinalPrice == nil || p.ShippingMethodID != pricingcatalog.MethodDomestic || p.ShippingPricePerKg == nil || p.ShippingPricePerKg.String() != "0" || p.IRTPerCNY != nil {
+				t.Fatalf("weighted domestic route must work with zero shipping and noCNY: %+v", p)
+			}
+		}
 	}
 }
 
