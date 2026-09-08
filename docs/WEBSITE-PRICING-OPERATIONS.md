@@ -55,11 +55,15 @@ resolution. `dispatch` includes sending and waiting for the receiver response.
 These are stage measurements, not individual database-query timings. Millisecond
 rounding and control overhead can leave a small difference from total elapsed time.
 
-Startup/source diagnostics start after acquiring the shared permit. They exclude
-startup preparation and queued waiting. `receipt_received` means a matching complete
+Startup/source diagnostics include source preparation and queued permit waiting,
+while a queued operation cannot replace the active owner's diagnostic. See
+SOURCE-PREPARATION-DIAGNOSTICS.md for timing boundaries and pre-dispatch failures.
+`receipt_received` means a matching complete
 receiver receipt was observed, not that startup independently validated the current
 pricing owner. `delivery_failed`, `delivery_receipt_unresolved`, `delivery_pending`
 and `delivery_deferred` must not be displayed as successful price delivery.
+`delivery_outcome_unknown` means the receiver may have committed; inspect its
+receipt before deciding on another request.
 The latest operation replaces the prior diagnostic; it is not a durable history.
 
 Live measured manual example: 13.626 seconds at the CLI, 13.527 seconds on the
@@ -68,3 +72,12 @@ seconds. Receipt was already-current with no pending/deferred; subsequent readba
 verified 901 positive leaf prices. This does not establish changed-rate latency or
 all rendered product pages. Startup preparation errors and controlled timeout
 acceptance remain tracked in issue #312.
+
+Installed single-command acceptance on 2026-09-08: a Windows-origin request using
+separately configured WooCommerce write credentials returned a verified PHP
+committed-input receipt for product113001002, already-current1, no pending or
+deferred products. Client2140ms, server354ms, exit2 (`target_missed`). The installed
+script matches the accepted candidate. This is functional single-command delivery,
+not changed-price or below-one-second acceptance. Standard WordPress application
+passwords were rejected on this installation; the existing WooCommerce write-key
+mechanism succeeded without changing Wordfence policy or input-read credentials.
