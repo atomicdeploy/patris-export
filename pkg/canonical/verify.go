@@ -511,6 +511,9 @@ func validateProductIdentity(product Product, index int) error {
 	if product.FinalPrice != nil && *product.FinalPrice < 0 {
 		return fmt.Errorf("%s.final_price must be a non-negative integer", path)
 	}
+	if product.FinalPrice != nil && !decimalStrictlyPositive(product.WeightGrams) {
+		return fmt.Errorf("%s.final_price requires positive weight_grams on every price route", path)
+	}
 	if product.FinalPrice != nil && !priceAmountPresent {
 		return fmt.Errorf("%s.final_price requires a usable selected source", path)
 	}

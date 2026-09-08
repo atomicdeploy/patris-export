@@ -763,7 +763,7 @@ func parseKalaProduct(ctx context.Context, row map[string]interface{}, provider 
 			}
 		}
 
-		if priceSourceKind == "" && partnerPositive &&
+		if priceSourceKind == "" && partnerPositive && decimalStrictlyPositive(weight) &&
 			resolution.MarkupPercent != nil && resolution.RoundingDigits != nil {
 			value, err := PartnerPrice(partnerPrice.String(), resolution.MarkupPercent.String(), *resolution.RoundingDigits)
 			if err != nil {
@@ -802,7 +802,7 @@ func parseKalaProduct(ctx context.Context, row map[string]interface{}, provider 
 				}
 			}
 		}
-		if priceSourceKind == "" && salePositive && useDirectSale {
+		if priceSourceKind == "" && salePositive && useDirectSale && decimalStrictlyPositive(weight) {
 			value, err := DirectSalePrice(salePrice.String())
 			if err != nil {
 				warnings = append(warnings, "sale_price_direct_calculation_failed")
