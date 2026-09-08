@@ -291,10 +291,10 @@ func (s *Server) setupRoutes() {
 	s.router.HandleFunc("/api/pricing-sync/writebacks/{job_id}", s.handleGetExcelPricingWriteback).Methods("GET")
 	s.router.HandleFunc("/api/pricing-sync/writebacks/{job_id}/ack", s.handlePostExcelPricingWritebackACK).Methods("POST")
 	s.router.HandleFunc("/api/pricing-sync/confirmations", s.handlePostExcelPricingConfirmation).Methods("POST")
-	s.router.HandleFunc("/api/pricing-sync/snapshots", s.handlePostExcelPricingSnapshot).Methods("POST")
+	s.router.HandleFunc("/api/pricing-sync/snapshots", s.handleSnapshotDisabled).Methods("POST")
 	s.router.HandleFunc("/api/pricing-sync/events", s.handleGetExcelPricingEvents).Methods("GET")
-	s.router.HandleFunc("/api/pricing-sync/snapshots/{job_id}", s.handleGetExcelPricingSnapshot).Methods("GET")
-	s.router.HandleFunc("/api/pricing-sync/snapshots/{job_id}/payload", s.handleGetExcelPricingSnapshotPayload).Methods("GET")
+	s.router.HandleFunc("/api/pricing-sync/snapshots/{job_id}", s.handleSnapshotDisabled).Methods("GET")
+	s.router.HandleFunc("/api/pricing-sync/snapshots/{job_id}/payload", s.handleSnapshotDisabled).Methods("GET")
 	s.router.HandleFunc("/api/pricing-sync/snapshots/{job_id}", s.handleDeleteExcelPricingSnapshot).Methods("DELETE")
 	s.router.HandleFunc("/api/info", s.handleGetInfo).Methods("GET")
 	s.router.HandleFunc("/api/app", s.handleGetApp).Methods("GET")
@@ -994,6 +994,10 @@ func (s *Server) canonicalResultForRequest(w http.ResponseWriter, r *http.Reques
 		result, err = s.canonicalRecordResultContext(ctx)
 	}
 	if err != nil {
+		if errors.Is(err, errPricingSnapshotDisabled) {
+			writeExcelPricingError(w, http.StatusServiceUnavailable, "snapshot_disabled")
+			return recordpipe.Result{}, false
+		}
 		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
 			http.Error(w, fmt.Sprintf("Canonical %s timed out after %s", resource, timeout), http.StatusServiceUnavailable)
 			return recordpipe.Result{}, false
@@ -1713,38 +1717,11 @@ func (s *Server) handlePostRefreshWait(w http.ResponseWriter, r *http.Request) {
 		writeJSONStatus(w, http.StatusBadGateway, refreshWaitResponse{Refreshed: true, Delivered: false, SourceRevision: contract.Source.Revision, Code: "delivery_receipt_unresolved", DispatchDiagnostic: dispatchDiagnostic})
 		return
 	}
+	// Website pricing is complete once its real delivery receipt is verified.
+	// Optional PHP catalog snapshots are disabled for this prototype.
 	completedSource := contract.Source
-	var snapshotReport *pricingSnapshotTimingReport
-	if owner.Authority == pricingcatalog.AuthorityPHP {
-		diagnostic.phaseChanged("owner_projection")
-		timing := &pricingSnapshotTiming{}
-		projectionStarted := time.Now()
-		diagnostic.mu.Lock()
-		diagnostic.timing, diagnostic.projectionStarted = timing, projectionStarted
-		diagnostic.mu.Unlock()
-		ctx = context.WithValue(ctx, pricingSnapshotTimingKey{}, timing)
-		build := func(ctx context.Context) (recordpipe.Result, error) {
-			return s.projectPricingInput(ctx, recordpipe.Result{Contract: contract, PricingAuthority: owner.Authority}, cfg, owner)
-		}
-		projection, projectionErr := s.pricingPublication.get(ctx, func() time.Duration { return canonicalProjectionMaxAge(cfg) }, build)
-		snapshotReport = timing.snapshot(projectionStarted)
-		diagnostic.mu.Lock()
-		diagnostic.snapshot = snapshotReport
-		diagnostic.mu.Unlock()
-		if projectionErr != nil || projection.Contract == nil || projection.PricingAuthority != pricingcatalog.AuthorityPHP ||
-			!projection.PricingInputSource.SameIdentity(contract.Source) || projection.OwnerCatalogRevision != owner.CatalogRevision {
-			stage, detail, staged := excelPricingRemoteSnapshotFailureDetails(projectionErr)
-			if !staged {
-				stage, detail = "owner_projection", "publication_identity_mismatch"
-			}
-			terminalCode, terminalStage, terminalDetail = "owner_projection_unavailable", stage, detail
-			writeJSONStatus(w, http.StatusBadGateway, refreshWaitResponse{
-				Refreshed: true, Delivered: false, SourceRevision: contract.Source.Revision,
-				Code: "owner_projection_unavailable", ErrorStage: stage, ErrorDetail: detail, SnapshotTiming: snapshotReport, DispatchDiagnostic: dispatchDiagnostic,
-			})
-			return
-		}
-		completedSource = projection.Contract.Source
+	if result.Delivery != nil {
+		completedSource = result.Delivery.Source
 	}
 
 	terminalCode = "complete"
@@ -1753,7 +1730,6 @@ func (s *Server) handlePostRefreshWait(w http.ResponseWriter, r *http.Request) {
 		Delivered:          true,
 		SourceRevision:     completedSource.Revision,
 		DispatchDiagnostic: dispatchDiagnostic,
-		SnapshotTiming:     snapshotReport,
 		Delivery: &refreshDeliveryResponse{
 			Status:            result.Status,
 			EventID:           result.EventID,
@@ -1764,6 +1740,15 @@ func (s *Server) handlePostRefreshWait(w http.ResponseWriter, r *http.Request) {
 			DeferredAmbiguous: result.DeferredAmbiguous,
 		},
 	})
+}
+
+func (s *Server) handleSnapshotDisabled(w http.ResponseWriter, r *http.Request) {
+	setExcelPricingResponseHeaders(w)
+	if _, ok := s.authorizeExcelPricingSnapshotRequest(r); !ok {
+		writeExcelPricingError(w, http.StatusForbidden, "local_session_required")
+		return
+	}
+	writeExcelPricingError(w, http.StatusServiceUnavailable, "snapshot_disabled")
 }
 
 func writeRefreshWaitError(w http.ResponseWriter, status int, refreshed bool, sourceRevision, code string) {
