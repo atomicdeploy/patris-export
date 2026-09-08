@@ -154,7 +154,7 @@ async function runBulk({ baseUrl = 'http://127.0.0.1:18080', timeoutMs = LIMIT_M
     const operation = data.pricing_operation;
     if (result.receipt && operation?.dispatch_diagnostic?.delivery?.event_id === result.receipt.event_id) {
       const stages = {};
-      for (const key of ['canonical_input', 'owner_inputs', 'dispatch', 'source_prepare', 'permit_wait']) {
+      for (const key of ['canonical_input', 'source_read', 'canonical_build', 'owner_inputs', 'dispatch', 'source_prepare', 'permit_wait']) {
         const value = operation.stage_ms?.[key];
         if (Number.isSafeInteger(value) && value >= 0) stages[key] = value;
       }

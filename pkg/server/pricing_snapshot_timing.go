@@ -13,6 +13,16 @@ import (
 
 type pricingSnapshotTimingKey struct{}
 
+// Only the refresh that owns this context may annotate its source-build stages.
+// Concurrent viewer/background projections must not mutate another request's timing.
+type refreshOperationDiagnosticKey struct{}
+
+func refreshInputPhase(ctx context.Context, phase string) {
+	if diagnostic, ok := ctx.Value(refreshOperationDiagnosticKey{}).(*refreshOperationDiagnostic); ok {
+		diagnostic.phaseChanged(phase)
+	}
+}
+
 type refreshDispatchDiagnostic struct {
 	ElapsedMS         int64                      `json:"elapsed_ms"`
 	HTTPStatus        int                        `json:"http_status"`

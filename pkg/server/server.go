@@ -431,6 +431,7 @@ func (s *Server) recordResultContext(ctx context.Context, options recordpipe.Opt
 		records []map[string]interface{}
 		err     error
 	)
+	refreshInputPhase(ctx, "source_read")
 	if contextSource, ok := ds.(datasource.ContextDataSource); ok {
 		records, err = contextSource.GetRawRecordsContext(ctx)
 	} else {
@@ -445,7 +446,9 @@ func (s *Server) recordResultContext(ctx context.Context, options recordpipe.Opt
 	if err := ctx.Err(); err != nil {
 		return recordpipe.Result{}, err
 	}
+	refreshInputPhase(ctx, "canonical_build")
 	result, err := recordpipe.BuildContext(ctx, records, dbPath, options)
+	refreshInputPhase(ctx, "canonical_input")
 	if err != nil {
 		return recordpipe.Result{}, err
 	}
@@ -1690,6 +1693,7 @@ func (s *Server) handlePostRefreshWait(w http.ResponseWriter, r *http.Request, s
 
 	// A fresh sync observes both the source and its owner's pricing inputs once.
 	diagnostic := s.beginRefreshDiagnostic()
+	ctx = context.WithValue(ctx, refreshOperationDiagnosticKey{}, diagnostic)
 	terminalCode, terminalStage, terminalDetail := "request_aborted", "", ""
 	defer func() { diagnostic.finish(terminalCode, terminalStage, terminalDetail) }()
 	// Fence old in-flight builds and replace the provider's catalog/assignment
