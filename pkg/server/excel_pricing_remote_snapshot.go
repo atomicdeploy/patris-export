@@ -22,7 +22,7 @@ import (
 )
 
 const (
-	excelPricingRemoteSnapshotRequestSchema = "digitalogic.pricing-snapshot-request/v1"
+	excelPricingRemoteSnapshotRequestSchema = "digitalogic.pricing-snapshot-request"
 	excelPricingRemoteSnapshotBuildSchema   = "digitalogic.pricing-snapshot-build/v1"
 	excelPricingRemoteSnapshotPayloadSchema = "digitalogic.pricing-snapshot/v1"
 	excelPricingRemoteSnapshotEventSchema   = "digitalogic.pricing-snapshot-build-event/v1"
@@ -241,6 +241,7 @@ type excelPricingRemoteSnapshotEndpoints struct {
 }
 
 type excelPricingRemoteSnapshotClient struct {
+	timing               *pricingSnapshotTiming
 	inputCatalogRevision string
 	receiptProbe         bool
 	cfg                  updateout.Config
@@ -640,12 +641,29 @@ func (client *excelPricingRemoteSnapshotClient) Collect(
 	ctx context.Context,
 	requestID string,
 	maxAgeSeconds int,
-) (*excelPricingRemoteSnapshotResult, error) {
+) (_ *excelPricingRemoteSnapshotResult, collectErr error) {
+	started := time.Now()
+	timing := snapshotTimingFromContext(ctx)
+	stage, stageStarted := "configuration", started
+	timing.active(stage)
+	advance := func(next string) {
+		timing.stage(stage, stageStarted)
+		stage, stageStarted = next, time.Now()
+		timing.active(next)
+	}
+	defer func() { timing.stage(stage, stageStarted); timing.finish(started, collectErr != nil) }()
+	if client != nil {
+		copy := *client
+		copy.timing = timing
+		client = &copy
+	}
+
 	if client == nil || client.terminals == nil ||
 		!excelPricingRemoteSnapshotIdentifierPattern.MatchString(requestID) ||
 		maxAgeSeconds < 0 || maxAgeSeconds > int(excelPricingSnapshotMaxCacheAge/time.Second) {
 		return nil, errExcelPricingRemoteSnapshotConfiguration
 	}
+	advance("revision_fetch")
 	revision, err := client.fetchRevision(ctx)
 	if err != nil {
 		return nil, wrapExcelPricingRemoteSnapshotStage(
@@ -662,6 +680,7 @@ func (client *excelPricingRemoteSnapshotClient) Collect(
 	}
 	// Register before POST. A terminal event emitted by an unusually fast build
 	// can therefore be queued while the POST response is still in flight.
+	advance("terminal_subscription")
 	subscription, err := client.terminals.Subscribe(requestID, client.source, revision.StateRevision)
 	if err != nil {
 		return nil, wrapExcelPricingRemoteSnapshotStage(
@@ -690,6 +709,7 @@ func (client *excelPricingRemoteSnapshotClient) Collect(
 	if remoteMaxAgeSeconds > int(excelPricingRemoteSnapshotMaxAge/time.Second) {
 		remoteMaxAgeSeconds = int(excelPricingRemoteSnapshotMaxAge / time.Second)
 	}
+	advance("snapshot_start")
 	build, status, err := client.startSnapshot(
 		startContext,
 		requestID,
@@ -717,6 +737,7 @@ func (client *excelPricingRemoteSnapshotClient) Collect(
 		)
 	}
 	if status == http.StatusAccepted {
+		advance("terminal_wait")
 		readyBuild, waitErr := client.waitForSnapshotReady(ctx, subscription, build, revision)
 		if waitErr != nil {
 			client.cancelSnapshot(build.CancelURL, build.BuildID)
@@ -736,6 +757,7 @@ func (client *excelPricingRemoteSnapshotClient) Collect(
 			errExcelPricingRemoteSnapshotUnavailable,
 		)
 	}
+	advance("snapshot_payload")
 	result, err := client.fetchSnapshot(ctx, build, revision)
 	if err != nil {
 		return nil, wrapExcelPricingRemoteSnapshotStage(
@@ -845,7 +867,7 @@ func (client *excelPricingRemoteSnapshotClient) fetchSnapshotStatus(
 		return excelPricingRemoteSnapshotBuildResponse{}, 0, errExcelPricingRemoteSnapshotConfiguration
 	}
 	client.setRemoteHeaders(request, false)
-	response, err := client.client.Do(request)
+	response, err := client.timedRequest(request)
 	if err != nil {
 		return excelPricingRemoteSnapshotBuildResponse{}, 0, errExcelPricingRemoteSnapshotUnavailable
 	}
@@ -939,7 +961,7 @@ func (client *excelPricingRemoteSnapshotClient) fetchRevision(
 	}
 	client.setRemoteHeaders(request, false)
 	request.Header.Set("Accept-Encoding", excelPricingRemoteIdentityEncoding)
-	response, err := client.client.Do(request)
+	response, err := client.timedRequest(request)
 	if err != nil {
 		return excelPricingRemoteSnapshotRevision{}, errExcelPricingRemoteSnapshotUnavailable
 	}
@@ -1025,7 +1047,7 @@ func (client *excelPricingRemoteSnapshotClient) startSnapshot(
 	client.setRemoteHeaders(request, true)
 	request.Header.Set("Idempotency-Key", requestID)
 	request.Header.Set("If-Match", revision.ETag)
-	response, err := client.client.Do(request)
+	response, err := client.timedRequest(request)
 	if err != nil {
 		return excelPricingRemoteSnapshotBuildResponse{}, 0, errExcelPricingRemoteSnapshotUnavailable
 	}
@@ -1085,7 +1107,7 @@ func (client *excelPricingRemoteSnapshotClient) fetchSnapshot(
 	// The payload ETag is the SHA-256 of the identity response bytes. Do not let
 	// automatic gzip negotiation substitute a representation-specific ETag.
 	request.Header.Set("Accept-Encoding", excelPricingRemoteIdentityEncoding)
-	response, err := client.client.Do(request)
+	response, err := client.timedRequest(request)
 	if err != nil {
 		return nil, errExcelPricingRemoteSnapshotUnavailable
 	}
@@ -1195,7 +1217,7 @@ func (client *excelPricingRemoteSnapshotClient) confirmSnapshotValidator(
 	client.setRemoteHeaders(request, false)
 	request.Header.Set("Accept-Encoding", excelPricingRemoteIdentityEncoding)
 	request.Header.Set("If-None-Match", expectedETag)
-	response, err := client.client.Do(request)
+	response, err := client.timedRequest(request)
 	if err != nil {
 		return errExcelPricingRemoteSnapshotUnavailable
 	}
@@ -1244,7 +1266,7 @@ func (client *excelPricingRemoteSnapshotClient) cancelSnapshot(cancelURL, buildI
 		return
 	}
 	client.setRemoteHeaders(request, false)
-	response, err := client.client.Do(request)
+	response, err := client.timedRequest(request)
 	if err == nil && response != nil && response.Body != nil {
 		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 4096))
 		_ = response.Body.Close()

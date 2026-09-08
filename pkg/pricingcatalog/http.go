@@ -1284,7 +1284,7 @@ func validateBatchAssignmentMarkup(assignment batchAssignmentWire, defaultMarkup
 		if profit != nil || len(warnings) == 0 {
 			return &contractError{reason: "unset assignment omitted its diagnostic or included a decimal"}
 		}
-	case "":
+	case "", "unavailable":
 		if profit != nil || len(warnings) == 0 {
 			return &contractError{reason: "invalid assignment markup omitted its diagnostic or included a decimal"}
 		}
@@ -1391,7 +1391,8 @@ func (p *httpProvider) doJSON(ctx context.Context, method, path string, body []b
 
 func decodeStrictJSON(data []byte, target interface{}) error {
 	decoder := json.NewDecoder(bytes.NewReader(data))
-	decoder.DisallowUnknownFields()
+	// Owner responses carry additive fields such as woocommerce_id. Validate
+	// consumed identity, decimal and cardinality semantics after decoding.
 	if err := decoder.Decode(target); err != nil {
 		return err
 	}

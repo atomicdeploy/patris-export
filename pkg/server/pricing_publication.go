@@ -18,6 +18,11 @@ var errPricingAuthorityUnavailable = errors.New("pricing authority is unavailabl
 var errPricingProjectionUnavailable = errors.New("verified owner pricing projection is unavailable")
 var ownerNumberPattern = regexp.MustCompile(`^-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?$`)
 
+// Codes are fixed boundary names; no source records or transport errors are exposed.
+func pricingProjectionFailure(code string) error {
+	return &excelPricingRemoteSnapshotStageError{stage: "owner_projection", code: code, cause: errPricingProjectionUnavailable}
+}
+
 func (s *Server) selectedPricingOwner(ctx context.Context, cfg appconfig.Config) (pricingcatalog.Resolution, error) {
 	// Standalone row conversion has no configured price publisher to select.
 	if !pricingcatalog.Configured(cfg.Canonical.Pricing) {
@@ -64,15 +69,24 @@ func (s *Server) canonicalPublicationResultContext(ctx context.Context) (recordp
 // projection directly: owner settings changes do not require input redelivery.
 func (s *Server) projectPricingFinal(ctx context.Context, input recordpipe.Result, source canonical.Source, owner pricingcatalog.Resolution) (recordpipe.Result, error) {
 	if input.Contract == nil || !validExcelPricingRemoteSource(source) || input.Contract.Source.ID != source.ID || input.Contract.Source.Dataset != source.Dataset || s.excelPricingRemote == nil {
-		return recordpipe.Result{}, errPricingProjectionUnavailable
+		return recordpipe.Result{}, pricingProjectionFailure("final_input_identity_mismatch")
 	}
 	client, err := newExcelPricingRemoteSnapshotClient(s.Config().SendUpdates, source, excelPricingRemoteSnapshotClientOptions{HTTPClient: s.excelPricing.client, Terminals: s.excelPricingRemote.snapshotTerminals()})
 	if err != nil {
-		return recordpipe.Result{}, errPricingProjectionUnavailable
+		return recordpipe.Result{}, pricingProjectionFailure("final_snapshot_client_configuration")
 	}
-	remote, err := client.Collect(ctx, excelPricingRemoteSnapshotRequestID(source.Revision+owner.CatalogRevision), 0)
-	if err != nil || remote.OwnerCatalogRevision != owner.CatalogRevision {
-		return recordpipe.Result{}, errPricingProjectionUnavailable
+	// Each new publication collection is a distinct read operation. Its pinned
+	// composite may change while source and owner revisions stay unchanged.
+	requestID, err := randomExcelPricingWritebackID()
+	if err != nil {
+		return recordpipe.Result{}, pricingProjectionFailure("snapshot_request_identity_unavailable")
+	}
+	remote, err := client.Collect(ctx, requestID, 0)
+	if err != nil {
+		return recordpipe.Result{}, err
+	}
+	if remote.OwnerCatalogRevision != owner.CatalogRevision {
+		return recordpipe.Result{}, pricingProjectionFailure("final_owner_catalog_mismatch")
 	}
 	return ownerProductProjection(input.Contract, remote, owner.CatalogRevision)
 }
@@ -80,11 +94,11 @@ func (s *Server) projectPricingFinal(ctx context.Context, input recordpipe.Resul
 func (s *Server) projectPricingInput(ctx context.Context, input recordpipe.Result, cfg appconfig.Config, owner pricingcatalog.Resolution) (recordpipe.Result, error) {
 	if pricingcatalog.Configured(cfg.Canonical.Pricing) {
 		if input.PricingAuthority != owner.Authority {
-			return recordpipe.Result{}, errPricingProjectionUnavailable
+			return recordpipe.Result{}, pricingProjectionFailure("input_authority_mismatch")
 		}
 		for _, product := range input.Contract.Products {
 			if product.PricingCatalogRevision != owner.CatalogRevision {
-				return recordpipe.Result{}, errPricingProjectionUnavailable
+				return recordpipe.Result{}, pricingProjectionFailure("input_catalog_revision_mismatch")
 			}
 		}
 	}
@@ -92,25 +106,28 @@ func (s *Server) projectPricingInput(ctx context.Context, input recordpipe.Resul
 		return input, nil
 	}
 	if !isSHA256Revision(input.Contract.EventID) || s.excelPricingRemote == nil {
-		return recordpipe.Result{}, errPricingProjectionUnavailable
+		return recordpipe.Result{}, pricingProjectionFailure("input_event_or_remote_missing")
 	}
 	client, err := newExcelPricingRemoteSnapshotClient(cfg.SendUpdates, input.Contract.Source, excelPricingRemoteSnapshotClientOptions{
 		HTTPClient: s.excelPricing.client, Terminals: s.excelPricingRemote.snapshotTerminals(), InputCatalogRevision: owner.CatalogRevision,
 	})
 	if err != nil {
-		return recordpipe.Result{}, errPricingProjectionUnavailable
+		return recordpipe.Result{}, pricingProjectionFailure("snapshot_client_configuration")
 	}
-	requestID := excelPricingRemoteSnapshotRequestID(input.Contract.EventID + owner.CatalogRevision)
+	requestID, err := randomExcelPricingWritebackID()
+	if err != nil {
+		return recordpipe.Result{}, pricingProjectionFailure("snapshot_request_identity_unavailable")
+	}
 	remote, err := client.Collect(ctx, requestID, 0)
 	if err != nil {
-		return recordpipe.Result{}, errPricingProjectionUnavailable
+		return recordpipe.Result{}, err
 	}
 	return ownerProductProjection(input.Contract, remote, owner.CatalogRevision)
 }
 
 func ownerProductProjection(input *canonical.Envelope, remote *excelPricingRemoteSnapshotResult, ownerRevision string) (recordpipe.Result, error) {
 	if input == nil || remote == nil || remote.Source.ID != input.Source.ID || remote.Source.Dataset != input.Source.Dataset {
-		return recordpipe.Result{}, errPricingProjectionUnavailable
+		return recordpipe.Result{}, pricingProjectionFailure("source_identity_mismatch")
 	}
 	expected := make(map[string]bool, len(input.Products))
 	for _, product := range input.Products {
@@ -123,37 +140,46 @@ func ownerProductProjection(input *canonical.Envelope, remote *excelPricingRemot
 			Product json.RawMessage `json:"canonical_product"`
 		}
 		if json.Unmarshal(row, &wire) != nil {
-			return recordpipe.Result{}, errPricingProjectionUnavailable
+			return recordpipe.Result{}, pricingProjectionFailure("row_json_invalid")
 		}
 		if wire.Code == "" {
 			if len(wire.Product) != 0 && !bytes.Equal(bytes.TrimSpace(wire.Product), []byte("null")) {
-				return recordpipe.Result{}, errPricingProjectionUnavailable
+				return recordpipe.Result{}, pricingProjectionFailure("canonical_product_without_code")
 			}
 			continue
 		}
 		seen, exists := expected[wire.Code]
-		if !exists || seen {
-			return recordpipe.Result{}, errPricingProjectionUnavailable
+		if !exists {
+			return recordpipe.Result{}, pricingProjectionFailure("unexpected_product_code")
+		}
+		if seen {
+			return recordpipe.Result{}, pricingProjectionFailure("duplicate_product_code")
 		}
 		normalized, err := normalizeOwnerProductNumbers(wire.Product)
 		if err != nil {
-			return recordpipe.Result{}, errPricingProjectionUnavailable
+			return recordpipe.Result{}, pricingProjectionFailure("canonical_product_numbers_invalid")
 		}
 		product, err := canonical.VerifyProductJSON(normalized)
-		if err != nil || product.ProductCode != wire.Code || product.PricingCatalogRevision != ownerRevision {
-			return recordpipe.Result{}, errPricingProjectionUnavailable
+		if err != nil {
+			return recordpipe.Result{}, pricingProjectionFailure("canonical_product_verification_failed")
+		}
+		if product.ProductCode != wire.Code {
+			return recordpipe.Result{}, pricingProjectionFailure("canonical_product_code_mismatch")
+		}
+		if product.PricingCatalogRevision != ownerRevision {
+			return recordpipe.Result{}, pricingProjectionFailure("canonical_product_catalog_mismatch")
 		}
 		products = append(products, product)
 		expected[wire.Code] = true
 	}
 	if len(products) != len(expected) {
-		return recordpipe.Result{}, errPricingProjectionUnavailable
+		return recordpipe.Result{}, pricingProjectionFailure("missing_product_codes")
 	}
 	// Recompute only to verify the owner's existing source hash; retain each
 	// transported product hash and use the authenticated final source identity.
 	verified := canonical.NewCatalogEnvelope(products, input.Categories, input.ExcludedCodes, input.Source.Dataset, input.Source.ID, time.Now(), input.QuarantinedCodes...)
 	if !verified.Source.SameIdentity(remote.Source) {
-		return recordpipe.Result{}, errPricingProjectionUnavailable
+		return recordpipe.Result{}, pricingProjectionFailure("final_source_hash_mismatch")
 	}
 	verified.Source = remote.Source
 	rows := canonical.ProductsToRows(verified.Products)

@@ -87,6 +87,7 @@ type Product struct {
 	fieldPresence              map[string]fieldPresence
 	warehouseNulls             map[string]bool
 	integrationActive          bool
+	pricingInputError          error
 }
 
 type fieldPresence uint8
@@ -257,6 +258,9 @@ func TransformContext(ctx context.Context, rows []map[string]interface{}, source
 	for _, product := range parsedProducts {
 		if err := ctx.Err(); err != nil {
 			return nil, nil, err
+		}
+		if product.pricingInputError != nil {
+			return nil, nil, product.pricingInputError
 		}
 		if product.ProductCode == "" {
 			continue
@@ -642,6 +646,20 @@ func parseKalaProduct(ctx context.Context, row map[string]interface{}, provider 
 		resolution = provider.Resolve(ctx, code)
 		if ctx != nil && ctx.Err() != nil {
 			return Product{}
+		}
+		if resolution.Authority != pricingcatalog.AuthorityPHP {
+			if resolution.AuthorityError != "" || (resolution.CatalogStatus != "fresh" && resolution.CatalogStatus != "static") {
+				return Product{pricingInputError: fmt.Errorf("pricing owner inputs unavailable")}
+			}
+			for _, warning := range resolution.Warnings {
+				if strings.HasPrefix(warning, "pricing_assignment_batch_") ||
+					strings.HasPrefix(warning, "product_pricing_assignment_batch_result_") ||
+					warning == "product_pricing_assignment_fetch_failed" || warning == "product_pricing_assignment_stale" ||
+					warning == "pricing_catalog_unavailable" || warning == "pricing_catalog_schema_incompatible" ||
+					warning == "pricing_catalog_revision_missing" || warning == "pricing_formula_incompatible" {
+					return Product{pricingInputError: fmt.Errorf("pricing owner assignment retrieval failed")}
+				}
+			}
 		}
 	}
 	warehouseStock, warehouseNulls := warehouseStock(row)

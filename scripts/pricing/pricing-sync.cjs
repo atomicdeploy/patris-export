@@ -45,7 +45,8 @@ async function requestJSON(base, path, { body, token, timeoutMs = 5000 } = {}) {
     });
     // Never print a raw response, URL error, header or session token.
     const inspectBusy = path === '/api/refresh' && body !== undefined && response.status === 429;
-    if (!response.ok && !inspectBusy) {
+    const inspectRefreshFailure = path === '/api/refresh' && body !== undefined && response.status === 502;
+    if (!response.ok && !inspectBusy && !inspectRefreshFailure) {
       await response.body?.cancel();
       throw new Error('http_' + response.status);
     }
@@ -58,15 +59,24 @@ async function requestJSON(base, path, { body, token, timeoutMs = 5000 } = {}) {
     }
     let data;
     try { data = JSON.parse(Buffer.concat(chunks).toString('utf8')); }
-    catch { throw new Error(inspectBusy ? 'http_429' : 'invalid_json'); }
+    catch { throw new Error(inspectBusy ? 'http_429' : inspectRefreshFailure ? 'http_502' : 'invalid_json'); }
     if (inspectBusy) {
       // This exact refresh rejection precedes source reads and delivery dispatch.
       throw new Error(data?.success === false && data.code === 'pricing_busy' ? 'pricing_busy' : 'http_429');
     }
+    if (inspectRefreshFailure) {
+      const allowed = ['delivery_failed', 'delivery_receipt_unresolved', 'owner_projection_unavailable'];
+      const failure = new Error(data?.refreshed === true && data?.delivered === false && allowed.includes(data.code) ? data.code : 'http_502');
+      if (failure.message !== 'http_502') {
+        failure.dispatch_diagnostic = data.dispatch_diagnostic;
+        failure.snapshot_timing = data.snapshot_timing;
+      }
+      throw failure;
+    }
     return data;
   } catch (error) {
     if (controller.signal.aborted && error.message !== 'response_too_large') throw new Error('request_timeout');
-    if (/^(http_[0-9]{3}|pricing_busy|response_too_large|invalid_json)$/.test(error.message)) throw error;
+    if (/^(http_[0-9]{3}|pricing_busy|delivery_failed|delivery_receipt_unresolved|owner_projection_unavailable|response_too_large|invalid_json)$/.test(error.message)) throw error;
     throw new Error('transport_failed');
   } finally { clearTimeout(timer); }
 }
@@ -131,12 +141,16 @@ async function runBulk({ baseUrl = 'http://127.0.0.1:18080', timeoutMs = LIMIT_M
     const refreshBudget = remaining();
     refreshSent = true;
     const body = await requestJSON(base, '/api/refresh', { body: { delivery: 'wait' }, token: session.csrf_token, timeoutMs: refreshBudget });
+    result.dispatch_diagnostic = body.dispatch_diagnostic;
+    result.snapshot_timing = body.snapshot_timing;
     result.receipt = receiptFrom(body);
     result.delivered = true;
     result.outcome = result.receipt.deferred_missing ? 'delivered_with_deferrals' : 'delivered';
     checkpoints.receipt_ms = Math.round(now() - start);
   } catch (error) {
     result.error = error.message;
+    result.dispatch_diagnostic = error.dispatch_diagnostic;
+    result.snapshot_timing = error.snapshot_timing;
     const rejectedBusy = error.message === 'pricing_busy';
     result.outcome = refreshSent && !rejectedBusy ? 'unknown_delivery_outcome' : 'not_started';
     if (rejectedBusy) result.next_action = 'Wait for the active pricing operation and inspect its delivery receipt before an explicit retry.';

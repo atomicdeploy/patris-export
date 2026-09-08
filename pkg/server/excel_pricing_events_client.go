@@ -70,6 +70,8 @@ type excelPricingRemoteEventsOptions struct {
 	OnRevision          func(excelPricingRemoteRevision) error
 	OnSnapshotTerminal  func(excelPricingRemoteSnapshotTerminalEvent) error
 	OnCursor            func(uint64)
+	OnDiagnostic        func(string, string, int)
+	OnSourceAbsent      func(canonical.Source) error
 	WebSocketDialer     *websocket.Dialer
 	HTTPClient          *http.Client
 	MinReconnectBackoff time.Duration
@@ -77,19 +79,22 @@ type excelPricingRemoteEventsOptions struct {
 }
 
 type excelPricingRemoteEventsClient struct {
-	cfg          updateout.Config
-	source       canonical.Source
-	secret       string
-	webSocketURL string
-	revisionURL  string
-	revisionPath string
-	dialer       *websocket.Dialer
-	httpClient   *http.Client
-	onRevision   func(excelPricingRemoteRevision) error
-	onTerminal   func(excelPricingRemoteSnapshotTerminalEvent) error
-	onCursor     func(uint64)
-	minBackoff   time.Duration
-	maxBackoff   time.Duration
+	cfg            updateout.Config
+	source         canonical.Source
+	secret         string
+	webSocketURL   string
+	revisionURL    string
+	revisionPath   string
+	dialer         *websocket.Dialer
+	httpClient     *http.Client
+	onRevision     func(excelPricingRemoteRevision) error
+	onTerminal     func(excelPricingRemoteSnapshotTerminalEvent) error
+	onCursor       func(uint64)
+	onDiagnostic   func(string, string, int)
+	onSourceAbsent func(canonical.Source) error
+	sourceAbsent   bool
+	minBackoff     time.Duration
+	maxBackoff     time.Duration
 
 	stateMu       sync.Mutex
 	cursor        uint64
@@ -188,7 +193,7 @@ func newExcelPricingRemoteEventsClient(
 	options excelPricingRemoteEventsOptions,
 ) (*excelPricingRemoteEventsClient, error) {
 	cfg, secret, _, err := resolveExcelPricingRemote(cfg, "state")
-	if err != nil || !validExcelPricingRemoteSource(source) || options.OnRevision == nil {
+	if err != nil || !validExcelPricingRemoteDiscoverySource(source) || options.OnRevision == nil {
 		return nil, errExcelPricingRemoteConfiguration
 	}
 	webSocketURL, revisionURL, revisionPath, err := excelPricingRemoteEventEndpoints(cfg.URL)
@@ -236,22 +241,24 @@ func newExcelPricingRemoteEventsClient(
 		return nil, errExcelPricingRemoteConfiguration
 	}
 	return &excelPricingRemoteEventsClient{
-		cfg:          cfg,
-		source:       source,
-		secret:       secret,
-		webSocketURL: webSocketURL,
-		revisionURL:  revisionURL,
-		revisionPath: revisionPath,
-		dialer:       dialer,
-		httpClient:   httpClient,
-		onRevision:   options.OnRevision,
-		onTerminal:   options.OnSnapshotTerminal,
-		onCursor:     options.OnCursor,
-		minBackoff:   minBackoff,
-		maxBackoff:   maxBackoff,
-		cursor:       options.InitialCursor,
-		etag:         initialETag,
-		seen:         make(map[string]struct{}),
+		cfg:            cfg,
+		source:         source,
+		secret:         secret,
+		webSocketURL:   webSocketURL,
+		revisionURL:    revisionURL,
+		revisionPath:   revisionPath,
+		dialer:         dialer,
+		httpClient:     httpClient,
+		onRevision:     options.OnRevision,
+		onTerminal:     options.OnSnapshotTerminal,
+		onCursor:       options.OnCursor,
+		onDiagnostic:   options.OnDiagnostic,
+		onSourceAbsent: options.OnSourceAbsent,
+		minBackoff:     minBackoff,
+		maxBackoff:     maxBackoff,
+		cursor:         options.InitialCursor,
+		etag:           initialETag,
+		seen:           make(map[string]struct{}),
 	}, nil
 }
 
@@ -261,13 +268,21 @@ func validExcelPricingRemoteSource(source canonical.Source) bool {
 		isSHA256Revision(source.Revision)
 }
 
+// Only a subscription request may omit revision. Received events and immutable
+// snapshot requests must still carry a verified SHA-256 revision.
+func validExcelPricingRemoteDiscoverySource(source canonical.Source) bool {
+	return validExcelPricingRemoteHeaderValue(source.ID) &&
+		validExcelPricingRemoteHeaderValue(source.Dataset) &&
+		(source.Revision == "" || isSHA256Revision(source.Revision))
+}
+
 // sameExcelPricingRemoteSourceIdentity keeps the stable provider identity
 // strict while allowing the revision to advance during a live subscription.
 // Patris is expected to change continuously; an authenticated pricing event
 // must not be discarded merely because it was emitted from a newer coherent
 // source revision than the one used for the initial handshake.
 func sameExcelPricingRemoteSourceIdentity(expected, candidate canonical.Source) bool {
-	return validExcelPricingRemoteSource(expected) &&
+	return validExcelPricingRemoteDiscoverySource(expected) &&
 		validExcelPricingRemoteSource(candidate) &&
 		expected.ID == candidate.ID &&
 		expected.Dataset == candidate.Dataset
@@ -369,6 +384,7 @@ func waitExcelPricingRemoteReconnect(ctx context.Context, delay time.Duration) e
 }
 
 func (client *excelPricingRemoteEventsClient) runConnection(ctx context.Context) (bool, error) {
+	client.diagnostic("connecting", "", 0)
 	headers := make(http.Header)
 	headers.Set(excelPricingRemoteSecretHeader, client.secret)
 	headers.Set(excelPricingRemoteSourceIDHeader, client.source.ID)
@@ -381,10 +397,16 @@ func (client *excelPricingRemoteEventsClient) runConnection(ctx context.Context)
 		_ = response.Body.Close()
 	}
 	if err != nil {
+		status := 0
+		if response != nil {
+			status = response.StatusCode
+		}
+		client.diagnostic("disconnected", "handshake_failed", status)
 		return false, errExcelPricingRemoteHandshake
 	}
 	defer connection.Close()
 	if connection.Subprotocol() != excelPricingRemoteWebSocketProtocol {
+		client.diagnostic("disconnected", "subprotocol_invalid", 0)
 		return false, errExcelPricingRemoteHandshake
 	}
 	connection.SetReadLimit(excelPricingRemoteEventsMaxFrameBytes)
@@ -404,17 +426,27 @@ func (client *excelPricingRemoteEventsClient) runConnection(ctx context.Context)
 			if ctx.Err() != nil {
 				return connected, ctx.Err()
 			}
+			client.diagnostic("disconnected", "stream_closed", 0)
 			return connected, errExcelPricingRemoteHandshake
 		}
 		_ = connection.SetReadDeadline(time.Now().Add(excelPricingRemotePongTimeout))
 		if messageType != websocket.TextMessage || len(body) == 0 || len(body) > excelPricingRemoteEventsMaxFrameBytes {
+			client.diagnostic("disconnected", "frame_invalid", 0)
 			return connected, errExcelPricingRemoteProtocol
 		}
 		frameConnected, err := client.handleExcelPricingRemoteFrame(ctx, body, connected)
 		if err != nil {
+			if errors.Is(err, errExcelPricingRemoteProtocol) {
+				client.diagnostic("disconnected", "frame_semantics_invalid", 0)
+			}
 			return connected, err
 		}
 		connected = connected || frameConnected
+		if client.sourceAbsent {
+			client.diagnostic("source_absent", "", 0)
+		} else {
+			client.diagnostic("connected", "", 0)
+		}
 	}
 }
 
@@ -492,6 +524,50 @@ func (client *excelPricingRemoteEventsClient) handleExcelPricingRemoteFrame(
 		}
 		client.replaceCursor(data.Cursor)
 		return false, nil
+	case "pricing.source.changed", "pricing.source.removed":
+		if frame.ID == 0 {
+			return false, errExcelPricingRemoteProtocol
+		}
+		if frame.ID <= client.currentCursor() {
+			return false, nil
+		}
+		var data struct {
+			Projection                 string           `json:"projection"`
+			Change                     string           `json:"change"`
+			Source                     canonical.Source `json:"source"`
+			Previous                   *string          `json:"previous_source_revision"`
+			IdempotencyKey             string           `json:"idempotency_key"`
+			RevisionValidationRequired bool             `json:"revision_validation_required"`
+			RevisionPath               string           `json:"revision_path"`
+		}
+		if json.Unmarshal(frame.Data, &data) != nil || data.Projection != excelPricingRemoteProjection ||
+			!sameExcelPricingRemoteSourceIdentity(client.source, data.Source) ||
+			!isSHA256Revision(data.IdempotencyKey) || !data.RevisionValidationRequired || data.RevisionPath != client.revisionPath {
+			return false, errExcelPricingRemoteProtocol
+		}
+		switch data.Change {
+		case "added":
+			if eventName != "pricing.source.changed" || data.Previous != nil {
+				return false, errExcelPricingRemoteProtocol
+			}
+		case "changed":
+			if eventName != "pricing.source.changed" || data.Previous == nil || !isSHA256Revision(*data.Previous) || *data.Previous == data.Source.Revision {
+				return false, errExcelPricingRemoteProtocol
+			}
+		case "removed":
+			if eventName != "pricing.source.removed" || data.Previous == nil || *data.Previous != data.Source.Revision {
+				return false, errExcelPricingRemoteProtocol
+			}
+		default:
+			return false, errExcelPricingRemoteProtocol
+		}
+		// Replay may describe an intermediate source already superseded in PHP.
+		// Discover current truth unconditionally, fence it synchronously, then ACK.
+		if err := client.validateExcelPricingRemoteRevision(ctx, "source_event", frame.ID); err != nil {
+			return false, err
+		}
+		client.advanceCursor(frame.ID)
+		return false, nil
 	case "pricing.state.changed":
 		if frame.ID == 0 {
 			return false, errExcelPricingRemoteProtocol
@@ -509,6 +585,18 @@ func (client *excelPricingRemoteEventsClient) handleExcelPricingRemoteFrame(
 			!isSHA256Revision(data.IdempotencyKey) || strings.TrimSpace(data.Cause) == "" ||
 			data.RevisionPath != client.revisionPath {
 			return false, errExcelPricingRemoteProtocol
+		}
+		client.stateMu.Lock()
+		currentRevision := client.stateRevision
+		client.stateMu.Unlock()
+		if client.sourceAbsent || data.StateRevision != currentRevision {
+			// Discovery may already be ahead of replay. Never replace its current
+			// owner revision with an older queued state event.
+			if err := client.validateExcelPricingRemoteRevision(ctx, "source_event", frame.ID); err != nil {
+				return false, err
+			}
+			client.advanceCursor(frame.ID)
+			return false, nil
 		}
 		revision := excelPricingRemoteRevision{
 			Source:                data.Source,
@@ -542,6 +630,10 @@ func (client *excelPricingRemoteEventsClient) handleExcelPricingRemoteFrame(
 		if json.Unmarshal(frame.Data, &event) != nil {
 			return false, errExcelPricingRemoteProtocol
 		}
+		if client.sourceAbsent {
+			client.advanceCursor(frame.ID)
+			return false, nil
+		}
 		event.EventID = frame.ID
 		if !sameExcelPricingRemoteSourceIdentity(client.source, event.Source) ||
 			validateExcelPricingRemoteSnapshotTerminalEvent(event) != nil {
@@ -567,6 +659,12 @@ func normalizedExcelPricingRemoteEventName(event, name string) (string, bool) {
 		return event, true
 	case event == "pricing.state.changed" && (name == "" || name == event):
 		return event, true
+	case (event == "pricing.source.changed" || event == "pricing.source.removed") && (name == "" || name == event):
+		return event, true
+	case event == "pricing_source_changed" && name == "pricing.source.changed":
+		return name, true
+	case event == "pricing_source_removed" && name == "pricing.source.removed":
+		return name, true
 	case event == "pricing.snapshot.build.terminal" && (name == "" || name == event):
 		return event, true
 	case event == "pricing_state_changed" && name == "pricing.state.changed":
@@ -589,7 +687,14 @@ func (client *excelPricingRemoteEventsClient) validateExcelPricingRemoteRevision
 	ctx context.Context,
 	origin string,
 	eventID uint64,
-) error {
+) (validationErr error) {
+	client.diagnostic("revision_fetch", "", 0)
+	httpStatus := 0
+	defer func() {
+		if validationErr != nil {
+			client.diagnostic("revision_failed", "revision_validation_failed", httpStatus)
+		}
+	}()
 	requestURL, err := url.Parse(client.revisionURL)
 	if err != nil {
 		return errExcelPricingRemoteRevision
@@ -597,7 +702,8 @@ func (client *excelPricingRemoteEventsClient) validateExcelPricingRemoteRevision
 	query := requestURL.Query()
 	query.Set("source_id", client.source.ID)
 	query.Set("source_dataset", client.source.Dataset)
-	query.Set("source_revision", client.source.Revision)
+	// This event lane follows current owner state, including source changes.
+	// Exact revision pinning belongs to the independent snapshot collection lane.
 	query.Set("locale", "fa")
 	query.Set("page_size", strconv.Itoa(excelPricingSnapshotPageSize))
 	query.Set("schema_version", "1")
@@ -615,7 +721,7 @@ func (client *excelPricingRemoteEventsClient) validateExcelPricingRemoteRevision
 	request.Header.Set(excelPricingRemoteSecretHeader, client.secret)
 	request.Header.Set(excelPricingRemoteSourceIDHeader, client.source.ID)
 	request.Header.Set(excelPricingRemoteDatasetHeader, client.source.Dataset)
-	if etag := client.currentETag(); etag != "" {
+	if etag := client.currentETag(); etag != "" && origin != "source_event" {
 		request.Header.Set("If-None-Match", etag)
 	}
 
@@ -624,6 +730,30 @@ func (client *excelPricingRemoteEventsClient) validateExcelPricingRemoteRevision
 		return errExcelPricingRemoteRevision
 	}
 	defer response.Body.Close()
+	httpStatus = response.StatusCode
+	if response.StatusCode == http.StatusConflict && excelPricingRemoteJSONContentType(response.Header.Get("Content-Type")) {
+		body, readErr := io.ReadAll(io.LimitReader(response.Body, excelPricingRemoteRevisionMaxBytes+1))
+		var absent struct {
+			Code    string `json:"code"`
+			Details struct {
+				Source struct {
+					ID      string `json:"id"`
+					Dataset string `json:"dataset"`
+				} `json:"source"`
+			} `json:"details"`
+		}
+		if readErr != nil || len(body) > excelPricingRemoteRevisionMaxBytes || json.Unmarshal(body, &absent) != nil ||
+			absent.Code != "digitalogic_pricing_sync_source_absent" || absent.Details.Source.ID != client.source.ID ||
+			absent.Details.Source.Dataset != client.source.Dataset || client.onSourceAbsent == nil {
+			return errExcelPricingRemoteRevision
+		}
+		if err := client.onSourceAbsent(client.source); err != nil {
+			return errExcelPricingRemoteRevision
+		}
+		client.sourceAbsent = true
+		client.setValidatedRevision("", "")
+		return nil
+	}
 	responseETag := strings.TrimSpace(response.Header.Get("ETag"))
 	if response.StatusCode == http.StatusNotModified {
 		if client.currentETag() == "" || responseETag != client.currentETag() {
@@ -661,6 +791,7 @@ func (client *excelPricingRemoteEventsClient) validateExcelPricingRemoteRevision
 	if err := client.deliverRevision(revision); err != nil {
 		return err
 	}
+	client.sourceAbsent = false
 	client.setValidatedRevision(revision.StateRevision, revision.ETag)
 	return nil
 }
@@ -781,8 +912,14 @@ func runExcelPricingRemoteEvents(
 	onCursor func(uint64),
 	onRevision func(excelPricingRemoteRevision) error,
 	onSnapshotTerminal func(excelPricingRemoteSnapshotTerminalEvent) error,
+	diagnostics ...func(string, string, int),
 ) error {
+	var diagnostic func(string, string, int)
+	if len(diagnostics) != 0 {
+		diagnostic = diagnostics[0]
+	}
 	client, err := newExcelPricingRemoteEventsClient(cfg, source, excelPricingRemoteEventsOptions{
+		OnDiagnostic:       diagnostic,
 		InitialCursor:      initialCursor,
 		OnCursor:           onCursor,
 		OnRevision:         onRevision,
@@ -792,4 +929,10 @@ func runExcelPricingRemoteEvents(
 		return err
 	}
 	return client.Run(ctx)
+}
+
+func (client *excelPricingRemoteEventsClient) diagnostic(phase, code string, status int) {
+	if client.onDiagnostic != nil {
+		client.onDiagnostic(phase, code, status)
+	}
 }
