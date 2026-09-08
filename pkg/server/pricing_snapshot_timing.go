@@ -293,3 +293,20 @@ func snapshotTimingFromContext(ctx context.Context) *pricingSnapshotTiming {
 	timing, _ := ctx.Value(pricingSnapshotTimingKey{}).(*pricingSnapshotTiming)
 	return timing
 }
+
+// Attach completed source preparation only after this operation owns the permit.
+func (d *refreshOperationDiagnostic) includePreparation(start time.Time) {
+	if start.IsZero() {
+		return
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if start.After(d.started) {
+		start = d.started
+	}
+	if d.stageMS == nil {
+		d.stageMS = make(map[string]int64)
+	}
+	d.stageMS["source_prepare"] = d.started.Sub(start).Milliseconds()
+	d.started = start
+}

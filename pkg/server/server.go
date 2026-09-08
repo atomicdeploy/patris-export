@@ -2159,6 +2159,7 @@ func (s *Server) initialSnapshotMessage(result recordpipe.Result, dbPath, reason
 }
 
 func (s *Server) broadcastInitialSnapshot(reason string) {
+	preparedAt := time.Now()
 	result, err := s.RecordResult()
 	if err != nil {
 		log.Printf("Failed to read records for initial snapshot: %v", err)
@@ -2201,12 +2202,13 @@ func (s *Server) broadcastInitialSnapshot(reason string) {
 		KeyField:         result.KeyField,
 		Contract:         result.SyncEnvelope(nil),
 		SnapshotContract: result.SyncEnvelope(nil),
-	})
+	}, preparedAt)
 	go s.broadcastProcessInfo()
 }
 
 // broadcastUpdate broadcasts database changes to all connected WebSocket clients
 func (s *Server) broadcastUpdate() {
+	preparedAt := time.Now()
 	s.wsClientsMu.RLock()
 	clientCount := len(s.wsClients)
 	s.wsClientsMu.RUnlock()
@@ -2269,12 +2271,13 @@ func (s *Server) broadcastUpdate() {
 			KeyField:         result.KeyField,
 			Contract:         result.SyncEnvelope(&changeSet),
 			SnapshotContract: result.SyncEnvelope(nil),
-		})
+		}, preparedAt)
 	}
 	go s.broadcastProcessInfo()
 }
 
 func (s *Server) dispatchInitialUpdate(ctx context.Context) {
+	preparedAt := time.Now()
 	cfg := s.Config().SendUpdates
 	if !cfg.Enabled || !cfg.Initial {
 		return
@@ -2296,7 +2299,7 @@ func (s *Server) dispatchInitialUpdate(ctx context.Context) {
 		KeyField:         result.KeyField,
 		Contract:         result.SyncEnvelope(nil),
 		SnapshotContract: result.SyncEnvelope(nil),
-	})
+	}, preparedAt)
 }
 
 func (s *Server) dispatchInitialUpdateAsync() {
@@ -2313,7 +2316,7 @@ func (s *Server) dispatchInitialUpdateAsync() {
 	}()
 }
 
-func (s *Server) dispatchUpdateEvent(event updateout.Event) {
+func (s *Server) dispatchUpdateEvent(event updateout.Event, preparedAt time.Time) {
 	cfg := s.Config().SendUpdates
 	if !cfg.Enabled {
 		return
@@ -2342,6 +2345,7 @@ func (s *Server) dispatchUpdateEvent(event updateout.Event) {
 			operation = "startup_delivery"
 		}
 		diagnostic := s.beginQueuedPricingOperationDiagnostic(operation, "dispatch", queuedAt)
+		diagnostic.includePreparation(preparedAt)
 		terminalCode := "request_aborted"
 		defer func() { diagnostic.finish(terminalCode, "", "") }()
 		started := time.Now()

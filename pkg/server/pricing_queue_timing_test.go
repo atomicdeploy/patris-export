@@ -25,7 +25,7 @@ func TestQueuedStartupRetainsActiveOwnerUntilPermitReleased(t *testing.T) {
 	}
 	s.excelPricing.permit <- struct{}{}
 	owner := s.beginPricingOperationDiagnostic("manual_refresh", "dispatch")
-	s.dispatchUpdateEvent(updateout.Event{Type: "initial"})
+	s.dispatchUpdateEvent(updateout.Event{Type: "initial"}, time.Now().Add(-time.Second))
 	select {
 	case <-called:
 		t.Fatal("startup dispatched while another operation owned permit")
@@ -46,6 +46,9 @@ func TestQueuedStartupRetainsActiveOwnerUntilPermitReleased(t *testing.T) {
 		case <-tick.C:
 			got := s.refreshDiagnosticStatus(false)
 			if got.Operation == "startup_delivery" && !got.Active {
+				if got.StageMS["source_prepare"] < 1000 {
+					t.Fatalf("preparation missing: %+v", got)
+				}
 				if got.StageMS["permit_wait"] < 20 {
 					t.Fatalf("missing actual wait: %+v", got)
 				}
@@ -72,16 +75,18 @@ func TestQueuedDeliveryTimingSeparatesWaitFromDispatch(t *testing.T) {
 	}
 	active.finish("complete", "", "")
 	d := s.beginQueuedPricingOperationDiagnostic("startup_delivery", "dispatch", queuedAt)
+	preparedAt := queuedAt.Add(-time.Second)
+	d.includePreparation(preparedAt)
 	d.finish("complete", "", "")
 	got := s.refreshDiagnosticStatus(false)
 	if got.Active || got.Code != "complete" || got.Operation != "startup_delivery" {
 		t.Fatalf("incorrect terminal status: %+v", got)
 	}
-	if !got.StartedAt.Equal(queuedAt) || got.StageMS["permit_wait"] < 2000 {
+	if !got.StartedAt.Equal(preparedAt) || got.StageMS["source_prepare"] != 1000 || got.StageMS["permit_wait"] < 2000 {
 		t.Fatalf("queue wait missing: %+v", got)
 	}
 	// Millisecond truncation can lose one millisecond across the two stages.
-	delta := got.ElapsedMS - got.StageMS["permit_wait"] - got.StageMS["dispatch"]
+	delta := got.ElapsedMS - got.StageMS["source_prepare"] - got.StageMS["permit_wait"] - got.StageMS["dispatch"]
 	if delta < 0 || delta > 1 {
 		t.Fatalf("wait double-counted or absent from elapsed time: %+v", got)
 	}
