@@ -75,7 +75,13 @@ func (s *Server) projectPricingFinal(ctx context.Context, input recordpipe.Resul
 	if err != nil {
 		return recordpipe.Result{}, pricingProjectionFailure("final_snapshot_client_configuration")
 	}
-	remote, err := client.Collect(ctx, excelPricingRemoteSnapshotRequestID(source.Revision+owner.CatalogRevision), 0)
+	// Each new publication collection is a distinct read operation. Its pinned
+	// composite may change while source and owner revisions stay unchanged.
+	requestID, err := randomExcelPricingWritebackID()
+	if err != nil {
+		return recordpipe.Result{}, pricingProjectionFailure("snapshot_request_identity_unavailable")
+	}
+	remote, err := client.Collect(ctx, requestID, 0)
 	if err != nil {
 		return recordpipe.Result{}, err
 	}
@@ -108,7 +114,10 @@ func (s *Server) projectPricingInput(ctx context.Context, input recordpipe.Resul
 	if err != nil {
 		return recordpipe.Result{}, pricingProjectionFailure("snapshot_client_configuration")
 	}
-	requestID := excelPricingRemoteSnapshotRequestID(input.Contract.EventID + owner.CatalogRevision)
+	requestID, err := randomExcelPricingWritebackID()
+	if err != nil {
+		return recordpipe.Result{}, pricingProjectionFailure("snapshot_request_identity_unavailable")
+	}
 	remote, err := client.Collect(ctx, requestID, 0)
 	if err != nil {
 		return recordpipe.Result{}, err
