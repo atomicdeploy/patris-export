@@ -412,6 +412,29 @@ func TestPinnedProductSyncClientBypassesAmbientProxy(t *testing.T) {
 	}
 }
 
+func TestPinnedProductSyncClientReusesConnectionAcrossCalls(t *testing.T) {
+	peers := make(chan string, 2)
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		peers <- r.RemoteAddr
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer origin.Close()
+	for range 2 {
+		response, err := pinnedProductSyncHTTPClient().Get(origin.URL)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = io.Copy(io.Discard, response.Body)
+		response.Body.Close()
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if first, second := <-peers, <-peers; first != second {
+		t.Fatalf("separate deliveries opened separate connections: %s / %s", first, second)
+	}
+}
+
 func TestDispatchRequiresReceiverEventIdentityInStrictProductSyncResponse(t *testing.T) {
 	t.Setenv("PATRIS_PRODUCT_SYNC_TEST_SECRET", "strict-response")
 	contract := canonical.NewEnvelope(nil, "kala.db", "patris-office", time.Unix(1, 0))

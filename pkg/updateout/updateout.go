@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/atomicdeploy/patris-export/pkg/canonical"
@@ -286,6 +287,12 @@ func sendHTTP(ctx context.Context, cfg Config, event Event) (DeliveryResult, err
 // header-only and redirects remain forbidden. First-class explicit proxy
 // configuration and diagnostics are tracked separately.
 func pinnedProductSyncHTTPClient() *http.Client {
+	return sharedProductSyncHTTPClient()
+}
+
+// Retain the transport pool across deliveries. Request deadlines remain scoped
+// to each attempt; Go's transport pools connections by destination.
+var sharedProductSyncHTTPClient = sync.OnceValue(func() *http.Client {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.Proxy = nil
 	return &http.Client{
@@ -294,7 +301,7 @@ func pinnedProductSyncHTTPClient() *http.Client {
 			return http.ErrUseLastResponse
 		},
 	}
-}
+})
 
 func sendHTTPAttempt(
 	ctx context.Context,
