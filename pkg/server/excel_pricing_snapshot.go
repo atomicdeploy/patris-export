@@ -2257,7 +2257,8 @@ func (s *Server) deliverExcelPricingSnapshotSource(
 	if s == nil || s.excelPricing == nil || !validExcelPricingRemoteSource(expected) {
 		return errExcelPricingRemoteSnapshotSourceConflict
 	}
-	contract, err := s.excelPricingCanonical(ctx, s.Config())
+	operationConfig := s.Config()
+	contract, err := s.excelPricingCanonical(ctx, operationConfig)
 	if err != nil || contract == nil || !contract.Source.SameIdentity(expected) {
 		return errExcelPricingRemoteSnapshotSourceConflict
 	}
@@ -2284,8 +2285,10 @@ func (s *Server) deliverExcelPricingSnapshotSource(
 	if dispatch == nil {
 		dispatch = updateout.DispatchWithResult
 	}
-	ctx = s.pricingCommandContext(ctx, s.Config(), deliveryConfig)
+	ctx = s.pricingCommandContext(ctx, operationConfig, deliveryConfig)
+	ackKey := s.sourceDeliveryKey(operationConfig, deliveryConfig)
 	delivery, err := dispatch(ctx, deliveryConfig, event)
+	s.recordSourceDeliveryAcknowledgement(ackKey, deliveryConfig, event, delivery, err)
 	if err != nil || !excelPricingSnapshotDeliveryAccepted(delivery, contract.EventID) {
 		return errExcelPricingRemoteSnapshotUnavailable
 	}
