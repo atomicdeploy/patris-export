@@ -68,6 +68,7 @@ var (
 // its response body or any credential material. Generic webhooks leave Status
 // and EventID empty.
 type DeliveryResult struct {
+	HTTPTrace         *HTTPAttemptTiming
 	Delivery          *DeliveryReceipt
 	HTTPStatus        int
 	Status            string
@@ -317,6 +318,8 @@ func sendHTTPAttempt(
 ) (DeliveryResult, error) {
 	reqCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
+	trace := newHTTPAttemptTrace()
+	reqCtx = trace.context(reqCtx)
 	req, err := http.NewRequestWithContext(reqCtx, cfg.Method, cfg.URL, bytes.NewReader(body))
 	if err != nil {
 		return result, errInvalidDestination
@@ -328,10 +331,13 @@ func sendHTTPAttempt(
 			resp.Body.Close()
 		}
 		result.Retryable = true
+		result.HTTPTrace = trace.snapshot(nil)
 		return result, errRequestFailed
 	}
+	bodyStarted := time.Now()
 	responseBody, readErr := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
 	resp.Body.Close()
+	result.HTTPTrace = trace.snapshot(&bodyStarted)
 	result.HTTPStatus = resp.StatusCode
 	if readErr != nil {
 		result.Retryable = true

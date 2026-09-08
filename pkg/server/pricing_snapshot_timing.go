@@ -24,17 +24,18 @@ func refreshInputPhase(ctx context.Context, phase string) {
 }
 
 type refreshDispatchDiagnostic struct {
-	ElapsedMS         int64                      `json:"elapsed_ms"`
-	HTTPStatus        int                        `json:"http_status"`
-	Status            string                     `json:"status,omitempty"`
-	Attempts          int                        `json:"attempts"`
-	PendingProducts   int                        `json:"pending_products"`
-	DeferredProducts  int                        `json:"deferred_products"`
-	DeferredMissing   int                        `json:"deferred_missing"`
-	DeferredAmbiguous int                        `json:"deferred_ambiguous"`
-	Retryable         bool                       `json:"retryable"`
-	Code              string                     `json:"code,omitempty"`
-	Delivery          *updateout.DeliveryReceipt `json:"delivery,omitempty"`
+	ElapsedMS         int64                        `json:"elapsed_ms"`
+	HTTPStatus        int                          `json:"http_status"`
+	Status            string                       `json:"status,omitempty"`
+	Attempts          int                          `json:"attempts"`
+	PendingProducts   int                          `json:"pending_products"`
+	DeferredProducts  int                          `json:"deferred_products"`
+	DeferredMissing   int                          `json:"deferred_missing"`
+	DeferredAmbiguous int                          `json:"deferred_ambiguous"`
+	Retryable         bool                         `json:"retryable"`
+	Code              string                       `json:"code,omitempty"`
+	Delivery          *updateout.DeliveryReceipt   `json:"delivery,omitempty"`
+	HTTPTrace         *updateout.HTTPAttemptTiming `json:"http_trace,omitempty"`
 }
 
 func refreshDispatchDetails(result updateout.DeliveryResult, err error, started time.Time) *refreshDispatchDiagnostic {
@@ -42,6 +43,7 @@ func refreshDispatchDetails(result updateout.DeliveryResult, err error, started 
 		Status: result.Status, Attempts: result.Attempts, PendingProducts: result.PendingProducts,
 		DeferredProducts: result.DeferredProducts, DeferredMissing: result.DeferredMissing,
 		DeferredAmbiguous: result.DeferredAmbiguous, Retryable: result.Retryable}
+	d.HTTPTrace = result.HTTPTrace
 	if result.Delivery != nil {
 		receipt := *result.Delivery
 		d.Delivery = &receipt
