@@ -7,9 +7,25 @@ Current prototype: PHP is the selected calculator on digitalogic.ir. Go reads Pa
 | Full refresh from the office deployment | `scripts\pricing\pricing-sync.cmd bulk --json` | Reads the configured Patris source and waits for website delivery receipt |
 | Recalculate stored website inputs | `wp digitalogic currency update --recalculate` | Uses committed Patris inputs; no fresh office database fetch |
 | Recalculate one product | `wp digitalogic pricing recalculate --product-code=113001002` | Uses committed Patris inputs; PHP authority required |
+| Recalculate one product from the office CLI | `scripts\pricing\pricing-sync.cmd single 113001002 --json` | Direct authenticated HTTPS to WordPress; committed Patris inputs, PHP authority required |
 | Read configured rates | `wp digitalogic currency get` | Reports configured values, not verified market freshness |
 
 Run the first command from the installed office deployment directory. Run WordPress commands in the existing authorized server/WP-CLI context. Replace the example Product Code with the intended product. The REST equivalent for one product is POST `/wp-json/digitalogic/v1/pricing/products/recalculate` with JSON `{"product_code":"113001002"}` and the existing WordPress authentication/permissions.
+
+The office `single` command requires a separately provisioned WooCommerce write key
+in `DIGITALOGIC_PRICING_WRITE_KEY` and `DIGITALOGIC_PRICING_WRITE_SECRET` environment
+variables. Never pass credentials as command arguments. After setting Windows User
+environment variables, open a new terminal so the command inherits them. The CLI
+does not reuse the Patris input-read bearer or provider credentials. The default
+site is `https://digitalogic.ir`; `--site-url` accepts an HTTPS origin and redirects
+are refused. This is a WordPress operation, not single-product Go source refresh.
+
+Single receipts distinguish `already_current` from `reconciled_with_updates` and
+report client `elapsed_ms` separately from `server_elapsed_ms`. Exit 2 means the
+strict client target of less than 1000 ms was missed, even if `delivered:true`.
+Exit 1 means no verified terminal receipt. Neither result triggers an automatic
+retry. A fast unchanged receipt does not establish changed-price latency; the CLI
+does not claim downstream rendered-price or independent notification acceptance.
 
 Bulk JSON must report `delivered:true` with no pending/deferred products. A timeout or disconnected caller does not prove that the operation stopped: inspect `/api/status` and the current receipt before retrying. Snapshot endpoints intentionally report `snapshot_disabled`; PHP final-price consumer projection through Go is unavailable during this prototype.
 
@@ -39,11 +55,15 @@ resolution. `dispatch` includes sending and waiting for the receiver response.
 These are stage measurements, not individual database-query timings. Millisecond
 rounding and control overhead can leave a small difference from total elapsed time.
 
-Startup/source diagnostics start after acquiring the shared permit. They exclude
-startup preparation and queued waiting. `receipt_received` means a matching complete
+Startup/source diagnostics include source preparation and queued permit waiting,
+while a queued operation cannot replace the active owner's diagnostic. See
+SOURCE-PREPARATION-DIAGNOSTICS.md for timing boundaries and pre-dispatch failures.
+`receipt_received` means a matching complete
 receiver receipt was observed, not that startup independently validated the current
 pricing owner. `delivery_failed`, `delivery_receipt_unresolved`, `delivery_pending`
 and `delivery_deferred` must not be displayed as successful price delivery.
+`delivery_outcome_unknown` means the receiver may have committed; inspect its
+receipt before deciding on another request.
 The latest operation replaces the prior diagnostic; it is not a durable history.
 
 Live measured manual example: 13.626 seconds at the CLI, 13.527 seconds on the
@@ -52,3 +72,12 @@ seconds. Receipt was already-current with no pending/deferred; subsequent readba
 verified 901 positive leaf prices. This does not establish changed-rate latency or
 all rendered product pages. Startup preparation errors and controlled timeout
 acceptance remain tracked in issue #312.
+
+Installed single-command acceptance on 2026-09-08: a Windows-origin request using
+separately configured WooCommerce write credentials returned a verified PHP
+committed-input receipt for product113001002, already-current1, no pending or
+deferred products. Client2140ms, server354ms, exit2 (`target_missed`). The installed
+script matches the accepted candidate. This is functional single-command delivery,
+not changed-price or below-one-second acceptance. Standard WordPress application
+passwords were rejected on this installation; the existing WooCommerce write-key
+mechanism succeeded without changing Wordfence policy or input-read credentials.
