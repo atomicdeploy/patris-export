@@ -59,7 +59,7 @@ func TestPostRefreshWaitDeliversCanonicalSnapshotWhenInitialDeliveryIsDisabled(t
 		t.Fatalf("wait refresh status = %d: %s", recorder.Code, recorder.Body.String())
 	}
 	assertJSONKeys(t, recorder.Body.Bytes(),
-		[]string{"refreshed", "delivered", "source_revision", "delivery"},
+		[]string{"refreshed", "delivered", "source_revision", "delivery", "dispatch_diagnostic"},
 		map[string][]string{"delivery": {
 			"status", "event_id", "attempts", "pending_products",
 			"deferred_products", "deferred_missing", "deferred_ambiguous",

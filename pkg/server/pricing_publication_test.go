@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -63,8 +64,10 @@ func TestAuthorityWaitPublishesOnlySelectedFinalProjection(t *testing.T) {
 				if response.Code != 503 {
 					t.Fatalf("missing authority status=%d", response.Code)
 				}
-				if _, err := srv.RecordResult(); err == nil {
-					t.Fatal("missing authority leaked a stream projection")
+				products := httptest.NewRecorder()
+				srv.router.ServeHTTP(products, httptest.NewRequest(http.MethodGet, "/api/products", nil))
+				if products.Code == http.StatusOK {
+					t.Fatal("missing authority published final products")
 				}
 				return
 			}
@@ -144,9 +147,22 @@ func TestAuthorityWaitPublishesOnlySelectedFinalProjection(t *testing.T) {
 			}
 			products := httptest.NewRecorder()
 			srv.router.ServeHTTP(products, httptest.NewRequest(http.MethodGet, "/api/products", nil))
-			if mode == "bad-binding" {
-				if response.Code != 502 || products.Code == 200 {
-					t.Fatalf("failed binding published: refresh=%d products=%d", response.Code, products.Code)
+			if authority == "php" {
+				if response.Code != 200 || products.Code != 503 || !strings.Contains(products.Body.String(), "snapshot_disabled") {
+					t.Fatalf("website receipt/snapshot disabled: refresh=%d products=%d", response.Code, products.Code)
+				}
+				var completion refreshWaitResponse
+				if err := json.Unmarshal(response.Body.Bytes(), &completion); err != nil {
+					t.Fatal(err)
+				}
+				if !completion.Delivered || completion.SourceRevision != fixture.source.Revision || completion.Delivery == nil || completion.Delivery.EventID != acceptedEventID {
+					t.Fatalf("website receipt identity lost: %+v", completion)
+				}
+				fixture.mu.Lock()
+				remoteCalls := fixture.revisionCalls + fixture.startCalls + fixture.bulkCalls + fixture.statusCalls
+				fixture.mu.Unlock()
+				if remoteCalls != 0 || dispatches != 1 {
+					t.Fatalf("optional snapshot ran: calls=%d dispatches=%d", remoteCalls, dispatches)
 				}
 				return
 			}
@@ -167,30 +183,7 @@ func TestAuthorityWaitPublishesOnlySelectedFinalProjection(t *testing.T) {
 			if got.FinalPrice == nil || *got.FinalPrice != *want.FinalPrice || got.RecordHash != want.RecordHash {
 				t.Fatalf("wrong final product: %+v want %+v", got, want)
 			}
-			if mode == "php" {
-				// A subsequent authenticated owner event points at the final
-				// projection, even when its accepted input baseline differs from
-				// a newly built input. It must never dispatch to make a read work.
-				oldInput := input.Contract.Source
-				oldInput.Revision = excelPricingRevisionForTest("previous-input")
-				fixture.revision.InputSource = &oldInput
-				srv.pricingActuation.mu.Lock()
-				srv.pricingActuation.state.LatestSource = fixture.source
-				srv.pricingActuation.mu.Unlock()
-				srv.invalidateCanonicalProjection(true)
-				fresh := httptest.NewRecorder()
-				srv.router.ServeHTTP(fresh, httptest.NewRequest(http.MethodGet, "/api/products", nil))
-				if fresh.Code != 200 || dispatches != 1 {
-					t.Fatalf("owner event refresh status=%d dispatches=%d body=%s", fresh.Code, dispatches, fresh.Body.String())
-				}
-				fixture.revision.OwnerCatalogRevision = excelPricingRevisionForTest("wrong-owner")
-				srv.invalidateCanonicalProjection(true)
-				failed := httptest.NewRecorder()
-				srv.router.ServeHTTP(failed, httptest.NewRequest(http.MethodGet, "/api/products", nil))
-				if failed.Code == 200 || dispatches != 1 {
-					t.Fatalf("unbound owner projection published status=%d dispatches=%d", failed.Code, dispatches)
-				}
-			}
+
 		})
 	}
 }
