@@ -68,6 +68,7 @@ var (
 // its response body or any credential material. Generic webhooks leave Status
 // and EventID empty.
 type DeliveryResult struct {
+	ReceiverTiming    *ReceiverTiming
 	HTTPTrace         *HTTPAttemptTiming
 	Delivery          *DeliveryReceipt
 	HTTPStatus        int
@@ -443,6 +444,7 @@ func ResolveProductSyncSecret(cfg Config) (string, error) {
 }
 
 type receiverResponseData struct {
+	ReceiverTiming         json.RawMessage  `json:"receiver_timing_ms"`
 	Delivery               *DeliveryReceipt `json:"delivery"`
 	Status                 json.RawMessage  `json:"status"`
 	EventID                json.RawMessage  `json:"event_id"`
@@ -512,6 +514,10 @@ func classifyHTTPResponse(result DeliveryResult, body []byte, contract *canonica
 }
 
 func applySuccessfulReceiverState(result *DeliveryResult, data receiverResponseData) error {
+	var timing ReceiverTiming
+	if len(data.ReceiverTiming) > 0 && string(data.ReceiverTiming) != "null" && json.Unmarshal(data.ReceiverTiming, &timing) == nil && timing.valid() {
+		result.ReceiverTiming = &timing
+	}
 	status, err := requiredReceiverString(data.Status)
 	if err != nil {
 		return err

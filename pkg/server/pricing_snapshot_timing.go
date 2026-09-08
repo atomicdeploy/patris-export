@@ -24,6 +24,7 @@ func refreshInputPhase(ctx context.Context, phase string) {
 }
 
 type refreshDispatchDiagnostic struct {
+	ReceiverTiming    *updateout.ReceiverTiming    `json:"receiver_timing_ms,omitempty"`
 	ElapsedMS         int64                        `json:"elapsed_ms"`
 	HTTPStatus        int                          `json:"http_status"`
 	Status            string                       `json:"status,omitempty"`
@@ -44,6 +45,7 @@ func refreshDispatchDetails(result updateout.DeliveryResult, err error, started 
 		DeferredProducts: result.DeferredProducts, DeferredMissing: result.DeferredMissing,
 		DeferredAmbiguous: result.DeferredAmbiguous, Retryable: result.Retryable}
 	d.HTTPTrace = result.HTTPTrace
+	d.ReceiverTiming = result.ReceiverTiming
 	if result.Delivery != nil {
 		receipt := *result.Delivery
 		d.Delivery = &receipt
