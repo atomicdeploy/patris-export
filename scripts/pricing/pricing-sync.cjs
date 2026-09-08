@@ -10,6 +10,7 @@ const HELP = `Usage: node pricing-sync.cjs bulk [--base-url URL] [--timeout-ms N
        pricing-sync.cmd bulk
        pricing-sync.cmd single PRODUCT_CODE [--site-url URL] [--timeout-ms N] [--json]
        pricing-sync.cmd session [--site-url URL] [--timeout-ms N] [--json]
+       pricing-sync.cmd fresh PRODUCT_CODE [--base-url URL] [--timeout-ms N] [--json]
 
 Session: Node.js 22+; authenticate once, then enter one product code per line.
 Enter quit or end input to close. Session readiness reports authentication time;
@@ -121,10 +122,13 @@ function receiptFrom(body) {
   };
 }
 
-async function runBulk({ baseUrl = 'http://127.0.0.1:18080', timeoutMs = LIMIT_MS,
+async function runBulk({ baseUrl = 'http://127.0.0.1:18080', timeoutMs = LIMIT_MS, productCode,
   log = () => {}, onEvent = () => {}, now = () => performance.now(),
   schedule = setTimeout, unschedule = clearTimeout } = {}) {
   const base = baseURL(baseUrl);
+  if (productCode !== undefined && (typeof productCode !== 'string' || !/^[0-9]{1,128}$/.test(productCode))) throw Error('invalid_product_code');
+  const scoped = productCode !== undefined;
+  const targetMs = scoped ? 1000 : LIMIT_MS;
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 600000) throw new Error('invalid_timeout_ms');
   const start = now();
   const remaining = (cap = timeoutMs) => {
@@ -134,10 +138,10 @@ async function runBulk({ baseUrl = 'http://127.0.0.1:18080', timeoutMs = LIMIT_M
   };
   const criticalTimer = schedule(() => onEvent({
     event: 'critical_threshold_reached', elapsed_ms: Math.round(now() - start),
-    message: 'CRITICAL: 60 seconds reached; the operation has not completed. No retry was sent.',
-  }), LIMIT_MS);
+    message: scoped ? 'Single-product 1-second target reached; still waiting without retry.' : 'CRITICAL: 60 seconds reached; the operation has not completed. No retry was sent.',
+  }), targetMs);
   const checkpoints = {};
-  const result = { scope: 'bulk', delivered: false, outcome: 'not_started',
+  const result = { scope: scoped ? 'single' : 'bulk', delivered: false, outcome: 'not_started',
     readiness_before: false, readiness_after: false,
     receipt_scope: 'go_receiver_ack', n8n_notification_receipt: 'not_exposed_by_endpoint' };
   let refreshSent = false;
@@ -160,10 +164,15 @@ async function runBulk({ baseUrl = 'http://127.0.0.1:18080', timeoutMs = LIMIT_M
       throw new Error('session_unverified');
     }
     checkpoints.session_ms = Math.round(now() - start);
-    log('Refreshing bulk prices; waiting for terminal delivery receipt...');
+    log(scoped ? 'Reading fresh Patris input and delivering the selected product...' : 'Refreshing bulk prices; waiting for terminal delivery receipt...');
     const refreshBudget = remaining();
     refreshSent = true;
-    const body = await requestJSON(base, '/api/refresh', { body: { delivery: 'wait' }, token: session.csrf_token, timeoutMs: refreshBudget });
+    const payload = scoped ? { delivery: 'wait', product_code: productCode } : { delivery: 'wait' };
+    const body = await requestJSON(base, '/api/refresh', { body: payload, token: session.csrf_token, timeoutMs: refreshBudget });
+    if (scoped) {
+      if (body.scope !== 'single' || body.product_code !== productCode || body.input_scope !== 'fresh_patris_source' || !['php', 'go'].includes(body.authority)) throw Error('terminal_receipt_unverified');
+      Object.assign(result, { product_code: productCode, input_scope: body.input_scope, authority: body.authority });
+    }
     result.dispatch_diagnostic = body.dispatch_diagnostic;
     result.snapshot_timing = body.snapshot_timing;
     result.receipt = receiptFrom(body);
@@ -187,8 +196,10 @@ async function runBulk({ baseUrl = 'http://127.0.0.1:18080', timeoutMs = LIMIT_M
   const elapsed = now() - start;
   result.elapsed_ms = Math.round(elapsed);
   result.checkpoints_ms = checkpoints;
-  result.performance = elapsed > LIMIT_MS ? 'critical_over_60_seconds' : 'within_60_seconds';
-  result.exit_code = elapsed > LIMIT_MS ? 2
+  const missed = scoped ? elapsed >= targetMs : elapsed > targetMs;
+  result.target_ms = targetMs;
+  result.performance = scoped ? (missed ? 'target_missed' : 'under_1_second') : (missed ? 'critical_over_60_seconds' : 'within_60_seconds');
+  result.exit_code = missed ? 2
     : !result.delivered || !result.readiness_after ? 1
       : result.receipt.deferred_missing ? 3 : 0;
   return result;
@@ -261,15 +272,16 @@ async function runSingle({ productCode, siteUrl = 'https://digitalogic.ir', time
 async function main(args) {
   if (!args.length || args.includes('--help') || args.includes('-h')) { process.stdout.write(HELP); return 0; }
   const mode = args.shift();
-  if (!['bulk', 'single', 'session'].includes(mode)) throw new Error('invalid_arguments_use_help');
+  if (!['bulk', 'single', 'session', 'fresh'].includes(mode)) throw new Error('invalid_arguments_use_help');
   const options = {};
-  if (mode === 'single') options.productCode = args.shift();
+  if (mode === 'single' || mode === 'fresh') options.productCode = args.shift();
+  if (mode === 'fresh' && !options.productCode) throw Error('invalid_product_code');
   let json = false;
   while (args.length) {
     const key = args.shift();
     if (key === '--json') json = true;
-    else if (key === '--base-url' && mode === 'bulk' && args.length) options.baseUrl = args.shift();
-    else if (key === '--site-url' && mode !== 'bulk' && args.length) options.siteUrl = args.shift();
+    else if (key === '--base-url' && ['bulk', 'fresh'].includes(mode) && args.length) options.baseUrl = args.shift();
+    else if (key === '--site-url' && ['single', 'session'].includes(mode) && args.length) options.siteUrl = args.shift();
     else if (key === '--timeout-ms' && args.length) options.timeoutMs = Number(args.shift());
     else throw new Error('invalid_arguments_use_help');
   }

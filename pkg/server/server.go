@@ -145,7 +145,8 @@ const (
 )
 
 type refreshRequest struct {
-	Delivery string `json:"delivery"`
+	Delivery    string `json:"delivery"`
+	ProductCode string `json:"product_code,omitempty"`
 }
 
 type refreshDeliveryResponse struct {
@@ -159,6 +160,10 @@ type refreshDeliveryResponse struct {
 }
 
 type refreshWaitResponse struct {
+	Scope              string                       `json:"scope,omitempty"`
+	ProductCode        string                       `json:"product_code,omitempty"`
+	Authority          string                       `json:"authority,omitempty"`
+	InputScope         string                       `json:"input_scope,omitempty"`
 	DispatchDiagnostic *refreshDispatchDiagnostic   `json:"dispatch_diagnostic,omitempty"`
 	SnapshotTiming     *pricingSnapshotTimingReport `json:"snapshot_timing,omitempty"`
 	Refreshed          bool                         `json:"refreshed"`
@@ -1594,13 +1599,13 @@ func (s *Server) handlePostRefresh(w http.ResponseWriter, r *http.Request) {
 			writeRefreshWaitError(w, http.StatusUnsupportedMediaType, false, "", "json_required")
 			return
 		}
-		delivery, err := refreshDeliveryMode(w, r)
+		request, err := decodeRefreshRequest(w, r)
 		if err != nil {
 			writeRefreshWaitError(w, http.StatusBadRequest, false, "", "invalid_request")
 			return
 		}
-		if delivery == "wait" {
-			s.handlePostRefreshWait(w, r)
+		if request.Delivery == "wait" {
+			s.handlePostRefreshWait(w, r, request.ProductCode)
 			return
 		}
 	}
@@ -1609,32 +1614,53 @@ func (s *Server) handlePostRefresh(w http.ResponseWriter, r *http.Request) {
 }
 
 func refreshDeliveryMode(w http.ResponseWriter, r *http.Request) (string, error) {
+	request, err := decodeRefreshRequest(w, r)
+	return request.Delivery, err
+}
+
+func decodeRefreshRequest(w http.ResponseWriter, r *http.Request) (refreshRequest, error) {
 	if r.Body == nil || r.Body == http.NoBody || r.ContentLength == 0 {
-		return "", nil
+		return refreshRequest{}, nil
 	}
 	var request refreshRequest
 	if err := decodeBoundedJSON(w, r, refreshWaitMaxRequestBytes, &request); err != nil {
 		if errors.Is(err, io.EOF) {
-			return "", nil
+			return refreshRequest{}, nil
 		}
-		return "", err
+		return refreshRequest{}, err
 	}
 	delivery := strings.ToLower(strings.TrimSpace(request.Delivery))
+	if request.ProductCode != "" {
+		// Product codes are canonical digit identifiers, never a name or SKU.
+		if delivery != "wait" || len(request.ProductCode) > 128 {
+			return refreshRequest{}, errors.New("invalid scoped refresh")
+		}
+		for _, digit := range request.ProductCode {
+			if digit < '0' || digit > '9' {
+				return refreshRequest{}, errors.New("invalid product code")
+			}
+		}
+	}
+	request.Delivery = delivery
 	switch delivery {
 	case "", "wait":
-		return delivery, nil
+		return request, nil
 	default:
-		return "", errors.New("unsupported refresh delivery mode")
+		return refreshRequest{}, errors.New("unsupported refresh delivery mode")
 	}
 }
 
-func (s *Server) handlePostRefreshWait(w http.ResponseWriter, r *http.Request) {
+func (s *Server) handlePostRefreshWait(w http.ResponseWriter, r *http.Request, selectedCodes ...string) {
 	setExcelPricingResponseHeaders(w)
 	if !excelPricingLocalRequestAllowed(r) ||
 		!singleHeaderEquals(r, excelPricingClientHeader, excelPricingClientID) ||
 		!s.excelPricing.authorizedSession(r) {
 		writeRefreshWaitError(w, http.StatusForbidden, false, "", "local_session_required")
 		return
+	}
+	productCode := ""
+	if len(selectedCodes) != 0 {
+		productCode = selectedCodes[0]
 	}
 
 	cfg := s.Config()
@@ -1689,6 +1715,39 @@ func (s *Server) handlePostRefreshWait(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if productCode != "" {
+		for _, code := range contract.QuarantinedCodes {
+			if code == productCode {
+				terminalCode = "product_quarantined"
+				writeRefreshWaitError(w, http.StatusConflict, false, contract.Source.Revision, terminalCode)
+				return
+			}
+		}
+		matches := 0
+		for _, product := range contract.Products {
+			if product.ProductCode == productCode {
+				matches++
+			}
+		}
+		if matches != 1 {
+			terminalCode = "product_missing"
+			status := http.StatusNotFound
+			if matches > 1 {
+				terminalCode = "product_ambiguous"
+				status = http.StatusConflict
+			}
+			writeRefreshWaitError(w, status, false, contract.Source.Revision, terminalCode)
+			return
+		}
+		// Select from the complete fresh projection, retaining its source identity.
+		// A one-product snapshot would instead replace the receiver's source.
+		contract = canonical.ChangeEnvelope(contract, &recorddiff.ChangeSet{
+			KeyField: "product_code",
+			Modified: []recorddiff.RecordChange{{Code: productCode}},
+		})
+		deliveryConfig.Mode = "changes"
+	}
+
 	// The wait extension synchronously delivers this freshly projected canonical
 	// envelope. Calling Refresh here would also enqueue the legacy asynchronous
 	// "initial" delivery and could send the same source revision twice.
@@ -1699,6 +1758,9 @@ func (s *Server) handlePostRefreshWait(w http.ResponseWriter, r *http.Request) {
 		Raw:              false,
 		Contract:         contract,
 		SnapshotContract: contract,
+	}
+	if productCode != "" {
+		event.SnapshotContract = nil
 	}
 	dispatch := s.excelPricing.dispatch
 	if dispatch == nil {
@@ -1729,7 +1791,7 @@ func (s *Server) handlePostRefreshWait(w http.ResponseWriter, r *http.Request) {
 	}
 
 	terminalCode = "complete"
-	writeJSON(w, refreshWaitResponse{
+	response := refreshWaitResponse{
 		Refreshed:          true,
 		Delivered:          true,
 		SourceRevision:     completedSource.Revision,
@@ -1743,7 +1805,14 @@ func (s *Server) handlePostRefreshWait(w http.ResponseWriter, r *http.Request) {
 			DeferredMissing:   result.DeferredMissing,
 			DeferredAmbiguous: result.DeferredAmbiguous,
 		},
-	})
+	}
+	if productCode != "" {
+		response.Scope = "single"
+		response.ProductCode = productCode
+		response.Authority = owner.Authority
+		response.InputScope = "fresh_patris_source"
+	}
+	writeJSON(w, response)
 }
 
 func (s *Server) handleSnapshotDisabled(w http.ResponseWriter, r *http.Request) {
