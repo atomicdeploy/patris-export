@@ -306,7 +306,11 @@ func (a *pricingActuator) run(ctx context.Context, source canonical.Source) {
 			return
 		}
 		if err := a.project(ctx, source, owner); err != nil {
-			a.fail("owner_projection_unavailable")
+			if _, code, ok := excelPricingRemoteSnapshotFailureDetails(err); ok {
+				a.fail(code)
+			} else {
+				a.fail("owner_projection_unavailable")
+			}
 			return
 		}
 		a.transition(func(st *pricingActuationStatus) { st.Phase = "complete" })

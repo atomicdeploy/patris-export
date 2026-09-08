@@ -17,6 +17,8 @@ import (
 
 var errExcelPricingRemoteBridgeStale = errors.New("pricing event subscriber generation is stale")
 
+type excelPricingEventEpochKey struct{}
+
 type excelPricingRemoteBridgeConfig struct {
 	config updateout.Config
 	key    [sha256.Size]byte
@@ -60,6 +62,7 @@ type excelPricingRemoteEventsBridge struct {
 	desired           excelPricingRemoteBridgeConfig
 	cursor            uint64
 	acknowledged      bool
+	sourceAbsent      bool
 	verifiedRevision  atomic.Pointer[excelPricingRemoteRevision]
 	// lastAuthenticatedSource retains only the smallest authenticated routing
 	// identity needed by pricing-state reads and ACKs. A transient event-stream
@@ -96,20 +99,19 @@ func newExcelPricingRemoteEventsBridge(server *Server) *excelPricingRemoteEvents
 			onRevision func(excelPricingRemoteRevision) error,
 			onTerminal func(excelPricingRemoteSnapshotTerminalEvent) error,
 		) error {
-			return runExcelPricingRemoteEvents(
-				ctx,
-				cfg,
-				source,
-				initialCursor,
-				onCursor,
-				onRevision,
-				onTerminal,
-				func(phase, code string, status int) {
+			client, err := newExcelPricingRemoteEventsClient(cfg, source, excelPricingRemoteEventsOptions{
+				InitialCursor: initialCursor, OnCursor: onCursor, OnRevision: onRevision, OnSnapshotTerminal: onTerminal,
+				OnSourceAbsent: func(scope canonical.Source) error { return server.acceptExcelPricingSourceAbsence(ctx, scope) },
+				OnDiagnostic: func(phase, code string, status int) {
 					if server.excelPricingRemote != nil && ctx.Err() == nil {
 						server.excelPricingRemote.diagnostic.Store(&excelPricingEventDiagnostic{Phase: phase, Code: code, HTTPStatus: status, UpdatedAt: time.Now().UTC()})
 					}
 				},
-			)
+			})
+			if err != nil {
+				return err
+			}
+			return client.Run(ctx)
 		},
 		apply: server.notifyExcelPricingRemoteRevisionChanged,
 		logf:  log.Printf,
@@ -250,6 +252,7 @@ func (bridge *excelPricingRemoteEventsBridge) reconcile(
 	epoch := bridge.epoch
 	bridge.cursor = 0
 	bridge.acknowledged = false
+	bridge.sourceAbsent = false
 	bridge.verifiedRevision.Store(nil)
 	if configChanged {
 		bridge.lastAuthenticatedSource.Store(nil)
@@ -359,6 +362,7 @@ func (bridge *excelPricingRemoteEventsBridge) runGeneration(
 	epoch uint64,
 	cfg updateout.Config,
 ) {
+	ctx = context.WithValue(ctx, excelPricingEventEpochKey{}, epoch)
 	defer bridge.clearVerifiedRevision(epoch)
 	if bridge.dependencies.materialize == nil || bridge.dependencies.run == nil ||
 		bridge.dependencies.apply == nil {
@@ -433,10 +437,51 @@ func (bridge *excelPricingRemoteEventsBridge) acceptRevision(
 		return err
 	}
 	bridge.acknowledged = true
+	bridge.sourceAbsent = false
 	verified := revision
 	bridge.verifiedRevision.Store(&verified)
 	authenticatedSource := revision.Source
 	bridge.lastAuthenticatedSource.Store(&authenticatedSource)
+	return nil
+}
+
+// Positive authenticated absence fences local readers before the remote cursor
+// can advance. It does not enqueue a calculation or recreate the removed source.
+func (s *Server) acceptExcelPricingSourceAbsence(ctx context.Context, scope canonical.Source) error {
+	epoch, _ := ctx.Value(excelPricingEventEpochKey{}).(uint64)
+	bridge := s.excelPricingRemote
+	if bridge == nil || !validExcelPricingRemoteDiscoverySource(scope) || ctx.Err() != nil {
+		return errExcelPricingRemoteBridgeStale
+	}
+	bridge.mu.Lock()
+	defer bridge.mu.Unlock()
+	if epoch == 0 || bridge.epoch != epoch {
+		return errExcelPricingRemoteBridgeStale
+	}
+	if bridge.sourceAbsent {
+		return nil
+	}
+	previousSource := bridge.lastAuthenticatedSource.Load()
+	bridge.verifiedRevision.Store(nil)
+	bridge.lastAuthenticatedSource.Store(nil)
+	bridge.acknowledged = false
+	bridge.sourceAbsent = true
+	s.invalidateCanonicalProjection(true)
+	store := s.excelPricing.snapshots
+	store.mu.Lock()
+	previous := store.lastVerifiedChangeLocked()
+	cancel := store.invalidateGenerationLocked("snapshot_source_removed")
+	event := excelPricingStateChangeEvent{Kind: "source_changed", Reason: "upstream_source_removed", Stale: true, Verified: true}
+	if previousSource != nil && validExcelPricingRemoteSource(*previousSource) {
+		source := *previousSource
+		event.Source = &source
+	}
+	bindExcelPricingPreviousState(&event, previous)
+	store.publishChangeLocked(event)
+	store.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
 	return nil
 }
 
