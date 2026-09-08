@@ -1117,7 +1117,7 @@ func putWarehouses(row map[string]interface{}, product Product) {
 
 func recordHash(product Product) string {
 	product.RecordHash = ""
-	material, _ := json.Marshal(product)
+	material, _ := json.Marshal(product.Map())
 	return hashBytes(material)
 }
 

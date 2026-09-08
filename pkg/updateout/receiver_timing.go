@@ -13,6 +13,9 @@ type ReceiverTiming struct {
 	TransactionEntry   *float64 `json:"transaction_entry,omitempty"`
 	TransactionWork    *float64 `json:"transaction_work,omitempty"`
 	Projection         *float64 `json:"projection,omitempty"`
+	SourceTransition   *float64 `json:"source_transition,omitempty"`
+	DeliveryPlan       *float64 `json:"delivery_plan,omitempty"`
+	DestinationVerify  *float64 `json:"destination_verify,omitempty"`
 	Persistence        *float64 `json:"persistence,omitempty"`
 	DestinationDrain   *float64 `json:"destination_drain,omitempty"`
 	EventEmit          *float64 `json:"event_emit,omitempty"`
@@ -26,7 +29,7 @@ type ReceiverTiming struct {
 }
 
 func (t *ReceiverTiming) valid() bool {
-	for _, value := range []*float64{t.BootstrapToHandler, t.HandlerTotal, t.JsonDecode, t.Validation, t.TransactionTotal, t.TransactionEntry, t.TransactionWork, t.Projection, t.Persistence, t.DestinationDrain, t.EventEmit, t.EventHooks, t.EventLog, t.EventWebhooks, t.EventReports, t.EventFreshness, t.EventGoReceipt, t.ReceiverTotal} {
+	for _, value := range []*float64{t.BootstrapToHandler, t.HandlerTotal, t.JsonDecode, t.Validation, t.TransactionTotal, t.TransactionEntry, t.TransactionWork, t.Projection, t.SourceTransition, t.DeliveryPlan, t.DestinationVerify, t.Persistence, t.DestinationDrain, t.EventEmit, t.EventHooks, t.EventLog, t.EventWebhooks, t.EventReports, t.EventFreshness, t.EventGoReceipt, t.ReceiverTotal} {
 		if value != nil && (*value < 0 || math.IsNaN(*value) || math.IsInf(*value, 0)) {
 			return false
 		}
