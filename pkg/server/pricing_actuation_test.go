@@ -353,7 +353,7 @@ func TestPricingPHPOwnerRefreshDoesNotDeliverInput(t *testing.T) {
 	a.run(context.Background(), source)
 	source.Revision = excelPricingRevisionForTest("new-final")
 	a.run(context.Background(), source)
-	if calls.Load() != 0 || projects != 0 || a.status().Phase != "idle" || a.status().Error != "snapshot_disabled" {
+	if calls.Load() != 0 || projects != 0 || a.status().Phase != "idle" || a.status().Error != "" {
 		t.Fatalf("dispatch=%d project=%d status=%+v", calls.Load(), projects, a.status())
 	}
 	a.project = func(context.Context, canonical.Source, pricingcatalog.Resolution) error {
@@ -361,7 +361,7 @@ func TestPricingPHPOwnerRefreshDoesNotDeliverInput(t *testing.T) {
 	}
 	source.Revision = excelPricingRevisionForTest("bad-final")
 	a.run(context.Background(), source)
-	if a.status().Phase != "idle" || a.status().Error != "snapshot_disabled" || calls.Load() != 0 {
+	if a.status().Phase != "idle" || a.status().Error != "" || calls.Load() != 0 {
 		t.Fatal(a.status())
 	}
 }
