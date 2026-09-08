@@ -89,3 +89,15 @@ func TestQueuedDeliveryTimingSeparatesWaitFromDispatch(t *testing.T) {
 		t.Fatal("completed duration continued increasing")
 	}
 }
+
+func TestQueuedDeliveryTimingPreservesZeroWait(t *testing.T) {
+	s := &Server{}
+	// A future input is clamped to acquisition time, deterministically exercising zero wait.
+	d := s.beginQueuedPricingOperationDiagnostic("startup_delivery", "dispatch", time.Now().Add(time.Hour))
+	d.finish("receipt_received", "", "")
+	got := s.refreshDiagnosticStatus(false)
+	wait, present := got.StageMS["permit_wait"]
+	if !present || wait != 0 || got.ElapsedMS < 0 {
+		t.Fatalf("zero wait missing or negative duration: %+v", got)
+	}
+}

@@ -211,7 +211,10 @@ func (s *Server) beginPricingOperationDiagnostic(operation, phase string) *refre
 func (s *Server) beginQueuedPricingOperationDiagnostic(operation, phase string, queuedAt time.Time) *refreshOperationDiagnostic {
 	now := time.Now()
 	d := &refreshOperationDiagnostic{started: now, phaseStarted: now, operation: operation, phase: phase}
-	if !queuedAt.IsZero() && queuedAt.Before(now) {
+	if !queuedAt.IsZero() {
+		if queuedAt.After(now) {
+			queuedAt = now
+		}
 		d.started = queuedAt
 		d.stageMS = map[string]int64{"permit_wait": now.Sub(queuedAt).Milliseconds()}
 	}
