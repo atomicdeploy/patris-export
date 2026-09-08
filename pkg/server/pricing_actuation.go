@@ -84,7 +84,8 @@ func newPricingActuator(s *Server, path string) *pricingActuator {
 		return s.excelPricingCanonical(ctx, s.Config())
 	}
 	a.dispatch = func(ctx context.Context, e *canonical.Envelope) (updateout.DeliveryResult, error) {
-		cfg := updateout.Normalize(s.Config().SendUpdates)
+		operationConfig := s.Config()
+		cfg := updateout.Normalize(operationConfig.SendUpdates)
 		if !cfg.Enabled || cfg.Format != "json" || cfg.Method != "POST" {
 			return updateout.DeliveryResult{}, errPricingAuthorityUnavailable
 		}
@@ -95,8 +96,12 @@ func newPricingActuator(s *Server, path string) *pricingActuator {
 		if dispatch == nil {
 			dispatch = updateout.DispatchWithResult
 		}
-		ctx = s.pricingCommandContext(ctx, s.Config(), cfg)
-		return dispatch(ctx, cfg, updateout.Event{Type: "update", Timestamp: time.Now().UTC().Format(time.RFC3339), Source: s.currentDBPath(), Contract: e, SnapshotContract: e})
+		ctx = s.pricingCommandContext(ctx, operationConfig, cfg)
+		event := updateout.Event{Type: "update", Timestamp: time.Now().UTC().Format(time.RFC3339), Source: s.currentDBPath(), Contract: e, SnapshotContract: e}
+		ackKey := s.sourceDeliveryKey(operationConfig, cfg)
+		result, err := dispatch(ctx, cfg, event)
+		s.recordSourceDeliveryAcknowledgement(ackKey, cfg, event, result, err)
+		return result, err
 	}
 	a.receipt = func(ctx context.Context, st pricingActuationStatus) (*pricingDeliveryReceipt, error) {
 		client, err := newExcelPricingRemoteSnapshotClient(s.Config().SendUpdates, st.Source, excelPricingRemoteSnapshotClientOptions{HTTPClient: s.excelPricing.client, Terminals: s.excelPricingRemote.snapshotTerminals(), InputCatalogRevision: st.OwnerRevision})

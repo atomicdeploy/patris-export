@@ -76,6 +76,7 @@ type Server struct {
 	catalogProviderKey     string
 	catalogProviderMu      sync.Mutex
 	pricingCommands        pricingCommandState
+	sourceDeliveryAck      sourceDeliveryAcknowledgement
 	canonicalProjection    *canonicalProjectionCache
 	pricingPublication     *canonicalProjectionCache
 	pricingActuation       *pricingActuator
@@ -1746,12 +1747,7 @@ func (s *Server) handlePostRefreshWait(w http.ResponseWriter, r *http.Request, s
 			writeRefreshWaitError(w, status, false, contract.Source.Revision, terminalCode)
 			return
 		}
-		// Select from the complete fresh projection, retaining its source identity.
-		// A one-product snapshot would instead replace the receiver's source.
-		contract = canonical.ChangeEnvelope(contract, &recorddiff.ChangeSet{
-			KeyField: "product_code",
-			Modified: []recorddiff.RecordChange{{Code: productCode}},
-		})
+		contract = s.selectFreshSourceDelivery(contract, productCode, cfg, deliveryConfig)
 		deliveryConfig.Mode = "changes"
 	}
 
@@ -1776,7 +1772,9 @@ func (s *Server) handlePostRefreshWait(w http.ResponseWriter, r *http.Request, s
 	dispatchStarted := time.Now()
 	diagnostic.phaseChanged("dispatch")
 	ctx = s.pricingCommandContext(ctx, cfg, deliveryConfig)
+	ackKey := s.sourceDeliveryKey(cfg, deliveryConfig)
 	result, err := dispatch(ctx, deliveryConfig, event)
+	s.recordSourceDeliveryAcknowledgement(ackKey, deliveryConfig, event, result, err)
 	dispatchDiagnostic := refreshDispatchDetails(result, err, dispatchStarted)
 	diagnostic.mu.Lock()
 	diagnostic.dispatch = dispatchDiagnostic
@@ -2401,7 +2399,8 @@ func (s *Server) dispatchInitialUpdateAsync() {
 }
 
 func (s *Server) dispatchUpdateEvent(event updateout.Event, preparedAt time.Time) {
-	cfg := s.Config().SendUpdates
+	operationConfig := s.Config()
+	cfg := operationConfig.SendUpdates
 	if !cfg.Enabled {
 		return
 	}
@@ -2434,8 +2433,10 @@ func (s *Server) dispatchUpdateEvent(event updateout.Event, preparedAt time.Time
 		terminalCode := "request_aborted"
 		defer func() { diagnostic.finish(terminalCode, "", "") }()
 		started := time.Now()
-		ctx = s.pricingCommandContext(ctx, s.Config(), cfg)
+		ctx = s.pricingCommandContext(ctx, operationConfig, cfg)
+		ackKey := s.sourceDeliveryKey(operationConfig, cfg)
 		result, err := updateout.DispatchWithResult(ctx, cfg, event)
+		s.recordSourceDeliveryAcknowledgement(ackKey, cfg, event, result, err)
 		details := refreshDispatchDetails(result, err, started)
 		contract := event.Contract
 		if (updateout.Normalize(cfg).Mode == "full" || event.Type == "initial") && event.SnapshotContract != nil {
