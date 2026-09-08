@@ -519,10 +519,26 @@ func TestExcelPricingRemoteConnectedCursorResetMayClampAHighPersistedCursor(t *t
 func TestExcelPricingRemoteEventCursorAdvancesOnlyAfterAtomicAcceptance(t *testing.T) {
 	source := excelPricingRemoteTestSource()
 	state := excelPricingRemoteTestRevision("5")
-	cfg := excelPricingRemoteTestConfig(t, "http://127.0.0.1:18080")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/wp-json/digitalogic/pricing/sync/revision" ||
+			r.Header.Get(excelPricingRemoteSecretHeader) != excelPricingRemoteTestSecret ||
+			r.Header.Get(excelPricingRemoteSourceIDHeader) != source.ID || r.Header.Get(excelPricingRemoteDatasetHeader) != source.Dataset ||
+			r.URL.Query().Get("source_id") != source.ID || r.URL.Query().Get("source_dataset") != source.Dataset || r.URL.Query().Has("source_revision") {
+			t.Error("revision discovery must authenticate the source identity without pinning a revision")
+			http.Error(w, "invalid discovery", http.StatusForbidden)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("ETag", `"`+state+`"`)
+		_ = json.NewEncoder(w).Encode(excelPricingRemoteTestRevisionPayload(source, state))
+	}))
+	defer server.Close()
+	cfg := excelPricingRemoteTestConfig(t, server.URL)
+	callbackCalls := 0
 	client, err := newExcelPricingRemoteEventsClient(cfg, source, excelPricingRemoteEventsOptions{
 		InitialCursor: 5,
 		OnRevision: func(excelPricingRemoteRevision) error {
+			callbackCalls++
 			return errors.New("local generation was not invalidated")
 		},
 	})
@@ -539,12 +555,18 @@ func TestExcelPricingRemoteEventCursorAdvancesOnlyAfterAtomicAcceptance(t *testi
 	if client.currentCursor() != 5 {
 		t.Fatalf("failed acceptance advanced cursor to %d", client.currentCursor())
 	}
-	client.onRevision = func(excelPricingRemoteRevision) error { return nil }
+	if callbackCalls != 1 {
+		t.Fatalf("rejection callback calls = %d, want 1", callbackCalls)
+	}
+	client.onRevision = func(excelPricingRemoteRevision) error { callbackCalls++; return nil }
 	if _, err := client.handleExcelPricingRemoteFrame(t.Context(), body, true); err != nil {
 		t.Fatal(err)
 	}
 	if client.currentCursor() != 6 {
 		t.Fatalf("accepted event cursor = %d", client.currentCursor())
+	}
+	if callbackCalls != 2 {
+		t.Fatalf("acceptance callback calls = %d, want 2", callbackCalls)
 	}
 }
 
@@ -552,9 +574,24 @@ func TestExcelPricingRemoteStateEventAcceptsNewerRevisionForSameSourceIdentity(t
 	source := excelPricingRemoteTestSource()
 	newerSource := source
 	newerSource.Revision = excelPricingRemoteTestRevision("b")
+	state := excelPricingRemoteTestRevision("6")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/wp-json/digitalogic/pricing/sync/revision" ||
+			r.Header.Get(excelPricingRemoteSecretHeader) != excelPricingRemoteTestSecret ||
+			r.Header.Get(excelPricingRemoteSourceIDHeader) != source.ID || r.Header.Get(excelPricingRemoteDatasetHeader) != source.Dataset ||
+			r.URL.Query().Get("source_id") != source.ID || r.URL.Query().Get("source_dataset") != source.Dataset || r.URL.Query().Has("source_revision") {
+			t.Error("revision discovery must authenticate the source identity without pinning a revision")
+			http.Error(w, "invalid discovery", http.StatusForbidden)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("ETag", `"`+state+`"`)
+		_ = json.NewEncoder(w).Encode(excelPricingRemoteTestRevisionPayload(newerSource, state))
+	}))
+	defer server.Close()
 	var accepted excelPricingRemoteRevision
 	client, err := newExcelPricingRemoteEventsClient(
-		excelPricingRemoteTestConfig(t, "http://127.0.0.1:18080"), source,
+		excelPricingRemoteTestConfig(t, server.URL), source,
 		excelPricingRemoteEventsOptions{OnRevision: func(revision excelPricingRemoteRevision) error {
 			accepted = revision
 			return nil
@@ -564,7 +601,7 @@ func TestExcelPricingRemoteStateEventAcceptsNewerRevisionForSameSourceIdentity(t
 		t.Fatal(err)
 	}
 	body, err := json.Marshal(excelPricingRemoteTestStateFrame(
-		newerSource, 9, excelPricingRemoteTestRevision("6"),
+		newerSource, 9, state,
 	))
 	if err != nil {
 		t.Fatal(err)
