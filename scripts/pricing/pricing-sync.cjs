@@ -45,7 +45,8 @@ function baseURL(value) {
   return url.origin;
 }
 
-async function requestJSON(base, path, { body, token, authorization, timeoutMs = 5000 } = {}) {
+async function requestJSON(base, path, { body, token, authorization, timeoutMs = 5000, timing } = {}) {
+  const requestStarted = performance.now();
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
@@ -58,6 +59,7 @@ async function requestJSON(base, path, { body, token, authorization, timeoutMs =
       body: body === undefined ? undefined : JSON.stringify(body),
       redirect: 'error', signal: controller.signal,
     });
+    if (timing) timing.response_headers_ms = Math.round(performance.now() - requestStarted);
     // Never print a raw response, URL error, header or session token.
     const inspectBusy = path === '/api/refresh' && body !== undefined && response.status === 429;
     const inspectRefreshFailure = path === '/api/refresh' && body !== undefined && response.status === 502;
@@ -72,6 +74,7 @@ async function requestJSON(base, path, { body, token, authorization, timeoutMs =
       if (length > 65536) { controller.abort(); throw new Error('response_too_large'); }
       chunks.push(chunk);
     }
+    if (timing) timing.response_complete_ms = Math.round(performance.now() - requestStarted);
     let data;
     try { data = JSON.parse(Buffer.concat(chunks).toString('utf8')); }
     catch { throw new Error(inspectBusy ? 'http_429' : inspectRefreshFailure ? 'http_502' : 'invalid_json'); }
@@ -206,7 +209,7 @@ async function runSingle({ productCode, siteUrl = 'https://digitalogic.ir', time
     receipt_scope: 'wordpress_reconciliation', n8n_notification_receipt: 'not_exposed_by_endpoint' };
   try {
     const body = await requestJSON(site.origin, '/wp-json/digitalogic/v1/pricing/products/recalculate', {
-      body: { product_code: productCode }, timeoutMs,
+      body: { product_code: productCode }, timeoutMs, timing: (result.timing = {}),
       authorization: 'Basic ' + Buffer.from(key + ':' + secret).toString('base64'),
     });
     const d = body?.data;
@@ -239,6 +242,10 @@ async function runSingle({ productCode, siteUrl = 'https://digitalogic.ir', time
   const elapsed = now() - start;
   result.elapsed_ms = Math.round(elapsed);
   result.target_ms = 1000;
+  if (result.delivered) {
+    result.timing.outside_reported_coordinator_ms = Math.max(0, result.elapsed_ms - result.receipt.server_elapsed_ms);
+    result.timing.scope = 'Client response timing; outside coordinator includes network and WordPress bootstrap, not network alone.';
+  }
   result.performance = elapsed < 1000 ? 'under_1_second' : 'target_missed';
   result.changed_price_latency_proven = false;
   result.exit_code = !result.delivered ? 1 : elapsed >= 1000 ? 2 : 0;
