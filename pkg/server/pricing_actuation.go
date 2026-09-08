@@ -298,7 +298,7 @@ func (a *pricingActuator) run(ctx context.Context, source canonical.Source) {
 			st.OwnerRevision = owner.CatalogRevision
 			st.Source = source
 			st.EventID = ""
-			st.Error = "snapshot_disabled"
+			st.Error = ""
 			st.Delivery = nil
 		})
 		return
