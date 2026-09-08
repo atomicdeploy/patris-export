@@ -154,3 +154,41 @@ func TestStartupPreparationFailurePreservesActiveOperation(t *testing.T) {
 		t.Fatalf("incorrect preparation failure: %+v", failure)
 	}
 }
+
+func TestBackgroundTimeoutAfterReceiptRemainsUnknown(t *testing.T) {
+	received := make(chan struct{}, 1)
+	release := make(chan struct{})
+	remote := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		received <- struct{}{}
+		<-release
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer remote.Close()
+	defer close(release)
+	s := newCanonicalProjectionTestServer(t, remote.URL, "1s", true, true)
+	defer s.Close()
+	cfg := s.Config()
+	cfg.SendUpdates.URL = remote.URL
+	cfg.SendUpdates.Timeout = "50ms"
+	if err := s.config.Replace(cfg); err != nil {
+		t.Fatal(err)
+	}
+	s.dispatchUpdateEvent(updateout.Event{Type: "initial"}, time.Now())
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		got := s.refreshDiagnosticStatus(len(s.excelPricing.permit) != 0)
+		if got.Operation == "startup_delivery" && !got.Active {
+			if got.Code != "delivery_outcome_unknown" || got.Busy || got.Dispatch == nil || got.Dispatch.Attempts != 1 || got.Dispatch.Retryable {
+				t.Fatalf("timeout misclassified: %+v", got)
+			}
+			select {
+			case <-received:
+			default:
+				t.Fatal("receiver never got request")
+			}
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatal("timeout never reached terminal state")
+}
