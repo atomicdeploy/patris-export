@@ -121,6 +121,7 @@ $requiredPayload = @(
     "Run-PatrisExportScheduledTask.ps1",
     "BUILD-MANIFEST.txt",
     "scripts\pricing\pricing-sync.cjs",
+    "scripts\pricing\pricing-session.cjs",
     "scripts\pricing\pricing-sync.cmd",
     "scripts\pricing\README.md"
 )

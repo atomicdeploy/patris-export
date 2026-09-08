@@ -9,6 +9,11 @@ const LIMIT_MS = 60000;
 const HELP = `Usage: node pricing-sync.cjs bulk [--base-url URL] [--timeout-ms N] [--json]
        pricing-sync.cmd bulk
        pricing-sync.cmd single PRODUCT_CODE [--site-url URL] [--timeout-ms N] [--json]
+       pricing-sync.cmd session [--site-url URL] [--timeout-ms N] [--json]
+
+Session: Node.js 22+; authenticate once, then enter one product code per line.
+Enter quit or end input to close. Session readiness reports authentication time;
+each product receipt measures the subsequent command. No automatic write retry.
 
 Bulk refresh through the existing Go pricing session and /api/refresh delivery:wait.
 Default URL: http://127.0.0.1:18080 (loopback only). Node.js 18+; no dependencies.
@@ -190,7 +195,7 @@ async function runBulk({ baseUrl = 'http://127.0.0.1:18080', timeoutMs = LIMIT_M
 }
 
 async function runSingle({ productCode, siteUrl = 'https://digitalogic.ir', timeoutMs = LIMIT_MS,
-  env = process.env, now = () => performance.now() } = {}) {
+  env = process.env, now = () => performance.now(), session } = {}) {
   if (typeof productCode !== 'string' || !productCode || productCode.trim() !== productCode
     || /[\x00-\x1f\x7f]/.test(productCode)) throw new Error('invalid_product_code');
   let site;
@@ -208,7 +213,8 @@ async function runSingle({ productCode, siteUrl = 'https://digitalogic.ir', time
     input_scope: 'committed_patris_source', delivered: false, outcome: 'unknown_delivery_outcome',
     receipt_scope: 'wordpress_reconciliation', n8n_notification_receipt: 'not_exposed_by_endpoint' };
   try {
-    const body = await requestJSON(site.origin, '/wp-json/digitalogic/v1/pricing/products/recalculate', {
+    result.timing = {};
+    const body = session ? await session.request(productCode) : await requestJSON(site.origin, '/wp-json/digitalogic/v1/pricing/products/recalculate', {
       body: { product_code: productCode }, timeoutMs, timing: (result.timing = {}),
       authorization: 'Basic ' + Buffer.from(key + ':' + secret).toString('base64'),
     });
@@ -255,7 +261,7 @@ async function runSingle({ productCode, siteUrl = 'https://digitalogic.ir', time
 async function main(args) {
   if (!args.length || args.includes('--help') || args.includes('-h')) { process.stdout.write(HELP); return 0; }
   const mode = args.shift();
-  if (!['bulk', 'single'].includes(mode)) throw new Error('invalid_arguments_use_help');
+  if (!['bulk', 'single', 'session'].includes(mode)) throw new Error('invalid_arguments_use_help');
   const options = {};
   if (mode === 'single') options.productCode = args.shift();
   let json = false;
@@ -263,12 +269,35 @@ async function main(args) {
     const key = args.shift();
     if (key === '--json') json = true;
     else if (key === '--base-url' && mode === 'bulk' && args.length) options.baseUrl = args.shift();
-    else if (key === '--site-url' && mode === 'single' && args.length) options.siteUrl = args.shift();
+    else if (key === '--site-url' && mode !== 'bulk' && args.length) options.siteUrl = args.shift();
     else if (key === '--timeout-ms' && args.length) options.timeoutMs = Number(args.shift());
     else throw new Error('invalid_arguments_use_help');
   }
   options.log = json ? () => {} : message => process.stderr.write(message + '\n');
   options.onEvent = event => process.stderr.write(json ? JSON.stringify(event) + '\n' : event.message + '\n');
+  if (mode === 'session') {
+    const { openPricingSession } = require('./pricing-session.cjs');
+    const key = process.env.DIGITALOGIC_PRICING_WRITE_KEY;
+    const secret = process.env.DIGITALOGIC_PRICING_WRITE_SECRET;
+    if (!/^ck_[a-f0-9]{40}$/.test(key || '') || !/^cs_[a-f0-9]{40}$/.test(secret || '')) throw Error('separate_woocommerce_write_credentials_required');
+    if (options.timeoutMs !== undefined && (!Number.isSafeInteger(options.timeoutMs) || options.timeoutMs < 1 || options.timeoutMs > 600000)) throw Error('invalid_timeout_ms');
+    const started = performance.now();
+    const session = await openPricingSession({ ...options, siteUrl: options.siteUrl || 'https://digitalogic.ir', authorization: 'Basic ' + Buffer.from(key + ':' + secret).toString('base64') });
+    process.stdout.write(JSON.stringify({ event: 'session_ready', authentication_and_connection_ms: Math.round(performance.now() - started) }) + '\n');
+    const lines = require('node:readline').createInterface({ input: process.stdin, crlfDelay: Infinity });
+    let exitCode = 0;
+    try {
+      for await (const line of lines) {
+        if (line === 'quit') break;
+        if (!line) continue;
+        const result = await runSingle({ ...options, productCode: line, session });
+        process.stdout.write(JSON.stringify(result) + '\n');
+        exitCode = Math.max(exitCode, result.exit_code);
+        if (!result.delivered) break;
+      }
+    } finally { lines.close(); session.close(); }
+    return exitCode;
+  }
   const result = await (mode === 'single' ? runSingle(options) : runBulk(options));
   process.stdout.write(JSON.stringify(result, null, 2) + '\n');
   return result.exit_code;
