@@ -826,13 +826,16 @@ func convertFile(dbFile string, charMap converter.CharMapping, useStdout bool, c
 		errorColor.Printf("❌ Failed to read records: %v\n", err)
 		return recordpipe.Result{}, err
 	}
-	result := recordpipe.Build(rawRows, dbFile, recordpipe.Options{
+	result, err := recordpipe.Build(rawRows, dbFile, recordpipe.Options{
 		Raw:             cfg.Convert.Raw || cfg.Database.Raw,
 		Mapping:         cfg.Transform,
 		Canonical:       cfg.Canonical,
 		CatalogProvider: catalogProvider,
 		GeneratedAt:     time.Now(),
 	})
+	if err != nil {
+		return recordpipe.Result{}, err
+	}
 	if summary := summarizeNamingWarnings(result); summary.Violations > 0 {
 		warningColor.Fprintf(os.Stderr, "Warning: %d naming-convention violation(s) across %d row(s); inspect the warnings field for rule and field IDs.\n", summary.Violations, summary.Rows)
 	}

@@ -439,7 +439,10 @@ func (s *Server) recordResultContext(ctx context.Context, options recordpipe.Opt
 	if err := ctx.Err(); err != nil {
 		return recordpipe.Result{}, err
 	}
-	result := recordpipe.BuildContext(ctx, records, dbPath, options)
+	result, err := recordpipe.BuildContext(ctx, records, dbPath, options)
+	if err != nil {
+		return recordpipe.Result{}, err
+	}
 	if !options.Raw && result.Contract != nil {
 		if owner, ok := options.CatalogProvider.(pricingcatalog.OwnerProvider); ok {
 			selection := owner.Owner(ctx)
