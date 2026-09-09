@@ -1,5 +1,23 @@
 # Website pricing operations
 
+## Queued website recalculation
+
+Authenticated `POST /wp-json/digitalogic/v1/pricing/recalculate` queues bulk recalculation of committed website inputs. It does not fetch a fresh Patris database. Send `expected_state_revision` and `request_id` in the JSON body, with matching quoted `If-Match` and matching `Idempotency-Key` headers. Use the current canonical revision, not a cached or invented value.
+
+HTTP 202 is acceptance, not completed delivery. Observe the returned identity through `GET /wp-json/digitalogic/v1/currency/jobs/{job_id}/{generation}`, or resolve an uncertain response using `GET /wp-json/digitalogic/v1/currency/requests/{request_id}`. Do not submit a new identity merely because observation timed out. `publishing` and `awaiting_delivery` are still pending; inspect the terminal state and delivery evidence rather than treating a numeric progress value as success.
+
+Current implementation caveat: these status methods can recover queued work or committed publication. They are not strictly side-effect-free observers. Preserve that recovery until its liveness role has an operational replacement; the cross-domain redesign tracks this in [issue 325](https://github.com/atomicdeploy/digitalogic-wp/issues/325#issuecomment-5594404337). Current source inspection does not establish live acceptance of every queue/authority/write-mode combination.
+
+## Workload-aware bulk timing (9 September 2026)
+
+The 60-second bulk guideline is informational, not a delivery deadline or automatic failure. Evaluate elapsed time alongside product counts, changed products, write mode, source freshness and phase timings. Preserve useful correctness checks and remove measured unnecessary work.
+
+Bulk/fresh observation defaults to 180000 ms and can be changed with `--timeout-ms`. This bounded wait is separate from the performance guideline; timeout remains an unverified outcome and does not trigger an automatic retry. Single-product timing behavior is unchanged.
+
+CLI output change: bulk uses `guideline_ms`, `observation_timeout_ms`, and `performance: within_guideline|over_guideline`; crossing the guideline emits the informational `performance_guideline_exceeded` event. Verified delivery with ready services exits 0 even above the guideline. Failed, unverified, unready or incomplete deliveries retain failure/incomplete reporting. Consumers must stop interpreting bulk elapsed time alone as critical failure.
+
+Cross-domain progress architecture and implementation are tracked in [WordPress issue 325](https://github.com/atomicdeploy/digitalogic-wp/issues/325). Review and configurable restoration of valuable disabled features are tracked in [issue 296](https://github.com/atomicdeploy/digitalogic-wp/issues/296).
+
 Current prototype: PHP is the selected calculator on digitalogic.ir. Go reads Patris inputs and delivers them to the website. Optional snapshots are disabled; do not use snapshot availability as the website pricing completion criterion.
 
 | Operation | Command | Input freshness |

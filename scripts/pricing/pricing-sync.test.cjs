@@ -156,19 +156,21 @@ test('authentication failure never refreshes and does not reveal response secret
   assert.equal(JSON.stringify(result).includes(token), false);
 });
 
-test('more than 60 seconds is critical even with a delivered receipt', async t => {
+test('bulk above the guideline is successful with verified delivery', async t => {
   let time = 0;
   const f = await fixture(t, (req, res) => { time = 60004; res.end(JSON.stringify(receipt())); });
-  const result = await runBulk({ ...f, timeoutMs: 90000, now: () => time });
+  const result = await runBulk({ ...f, now: () => time });
   assert.equal(result.elapsed_ms, 60004);
   assert.equal(result.delivered, true);
-  assert.equal(result.performance, 'critical_over_60_seconds');
-  assert.equal(result.exit_code, 2);
+  assert.equal(result.performance, 'over_guideline');
+  assert.equal(result.guideline_ms, 60000);
+  assert.equal(result.observation_timeout_ms, 180000);
+  assert.equal(result.exit_code, 0);
 });
 
-test('default 60-second budget includes session time and never starts a late mutation', async t => {
+test('default observation budget is independent of the guideline and prevents late mutation', async t => {
   let time = 0;
-  const f = await fixture(t, () => assert.fail('budget is exhausted'), { onSession: () => { time = 60001; } });
+  const f = await fixture(t, () => assert.fail('budget is exhausted'), { onSession: () => { time = 180001; } });
   const result = await runBulk({ ...f, now: () => time });
   assert.equal(result.outcome, 'not_started');
   assert.equal(result.error, 'overall_deadline_exhausted');
@@ -177,7 +179,7 @@ test('default 60-second budget includes session time and never starts a late mut
   assert.equal(result.performance, 'not_delivered');
 });
 
-test('longer override emits a critical event at the threshold before receipt arrives', async t => {
+test('guideline event is informational while waiting for verified delivery', async t => {
   let threshold;
   let cleared = false;
   let time = 0;
@@ -186,7 +188,8 @@ test('longer override emits a critical event at the threshold before receipt arr
     time = 60000;
     threshold();
     assert.equal(events.length, 1);
-    assert.equal(events[0].event, 'critical_threshold_reached');
+    assert.equal(events[0].event, 'performance_guideline_exceeded');
+    assert.equal(events[0].severity, 'info');
     assert.equal(events[0].elapsed_ms, 60000);
     time = 61000;
     res.end(JSON.stringify(receipt()));
@@ -197,7 +200,7 @@ test('longer override emits a critical event at the threshold before receipt arr
     unschedule: id => { assert.equal(id, 1); cleared = true; },
   });
   assert.equal(result.delivered, true);
-  assert.equal(result.exit_code, 2);
+  assert.equal(result.exit_code, 0);
   assert.equal(cleared, true);
 });
 
