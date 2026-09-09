@@ -48,6 +48,16 @@ readback to match its desired values. `readiness_after` means this owner readbac
 succeeded, not that every downstream application has been independently tested.
 This CLI does not change the workbook writeback implementation.
 
+While observing, the command prints owner phases, operation identity and elapsed
+time to stderr, with at most one unchanged-state heartbeat every five seconds.
+With `--json`, stderr contains JSON events and stdout retains the final result.
+Use `--quiet-progress` to disable these events. No additional owner requests are
+made for display. Fixed owner phase percentages are deliberately not presented
+as measured product completion. A confirmed job first shows
+`verifying_owner_readback`; delivery is reported only after that read succeeds.
+Product/destination counts and other interfaces remain in progress backlog #325
+in digitalogic-wp.
+
 Production acceptance on 9 September 2026: an unchanged CNY 34500 submission
 confirmed as generation 64 in about four seconds; subsequent status-only recovery
 matched the owner values. This verifies authenticated admission and recovery,

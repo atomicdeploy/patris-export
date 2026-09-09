@@ -2,7 +2,7 @@
 
 // Transport only: WordPress owns currency dates and the selected pricing engine.
 async function runCurrency({ requestJSON, requestId, values = {}, observeOnly = false,
-  siteUrl = 'https://digitalogic.ir', timeoutMs = 180000,
+  siteUrl = 'https://digitalogic.ir', timeoutMs = 180000, onEvent = () => {},
   key = process.env.DIGITALOGIC_PRICING_WRITE_KEY,
   secret = process.env.DIGITALOGIC_PRICING_WRITE_SECRET }) {
   if (!/^[a-zA-Z0-9._:-]{8,128}$/.test(requestId || '')) throw Error('invalid_request_id');
@@ -23,17 +23,34 @@ async function runCurrency({ requestJSON, requestId, values = {}, observeOnly = 
   const remaining = () => { const n = timeoutMs - Math.round(performance.now() - started); if (n < 1) throw Error('observation_timeout'); return n; };
   const call = (path, extra = {}) => requestJSON(site.origin, '/wp-json/digitalogic/v1/' + path, { authorization, timeoutMs: remaining(), ...extra });
   const result = { request_id: requestId, operation: observeOnly ? 'currency_status' : 'currency_update', delivered: false, outcome: 'not_started', exit_code: 1 };
+  let lastEvent = '', lastEventAt = -Infinity;
+  const report = (phase, delivered = false) => {
+    const elapsed = Math.round(performance.now() - started);
+    const identity = JSON.stringify([phase, result.job_id, result.generation, delivered]);
+    if (identity === lastEvent && elapsed - lastEventAt < 5000) return;
+    lastEvent = identity; lastEventAt = elapsed;
+    // Owner percentages are fixed phase markers, not measured product counts.
+    // Never present them as a percentage of completed pricing work.
+    const event = { type: 'currency_progress', request_id: requestId,
+      job_id: result.job_id || null, generation: result.generation || null,
+      phase, delivered, elapsed_ms: elapsed,
+      message: `${requestId}: ${phase} (${(elapsed / 1000).toFixed(1)}s)` };
+    try { onEvent(event); } catch { /* Observation must not change write outcome. */ }
+  };
   try {
     let response;
     if (!observeOnly) {
+      report('reading_owner');
       const current = await call('currency');
       const revision = current?.data?.state_revision;
       if (current?.success !== true || !/^sha256:[a-f0-9]{64}$/.test(revision || '')) throw Error('owner_state_unverified');
       result.outcome = 'unknown_delivery_outcome';
+      report('submitting');
       response = await call('currency', { body: { ...values, request_id: requestId, expected_state_revision: revision },
         identityHeaders: { 'If-Match': '"' + revision + '"', 'Idempotency-Key': requestId } });
     } else {
       result.outcome = 'unknown_delivery_outcome';
+      report('observing_owner');
       response = await call('currency/requests/' + encodeURIComponent(requestId));
     }
     while (true) {
@@ -41,6 +58,8 @@ async function runCurrency({ requestJSON, requestId, values = {}, observeOnly = 
       if (response?.success !== true || !job || !/^[a-f0-9]{32}$/.test(job.job_id || '') || !Number.isSafeInteger(job.generation) || job.generation < 1 || job.request_id !== requestId) throw Error('job_identity_unverified');
       if (result.job_id && (result.job_id !== job.job_id || result.generation !== job.generation)) throw Error('job_identity_changed');
       result.job_id = job.job_id; result.generation = job.generation; result.status = job.status;
+      if (!/^[a-z_]{1,48}$/.test(job.status || '')) throw Error('job_status_unverified');
+      report(job.status === 'confirmed' ? 'verifying_owner_readback' : job.status);
       if (job.status === 'confirmed') {
         const readback = await call('currency');
         if (readback?.success !== true || !/^sha256:[a-f0-9]{64}$/.test(readback.data?.state_revision || '')) throw Error('owner_readback_unverified');
@@ -50,6 +69,7 @@ async function runCurrency({ requestJSON, requestId, values = {}, observeOnly = 
         result.delivered = true; result.outcome = 'confirmed'; result.exit_code = 0;
         result.currency = Object.fromEntries(['yuan_price','dollar_price','cny_effective_date','usd_effective_date'].map(k=>[k,readback.data[k]]));
         result.readiness_after = true;
+        report('confirmed', true);
         break;
       }
       if (!['queued','running','publishing','awaiting_delivery','cancelling'].includes(job.status)) {
@@ -60,6 +80,7 @@ async function runCurrency({ requestJSON, requestId, values = {}, observeOnly = 
     }
   } catch (error) {
     result.error = /^[a-z_0-9]+$/.test(error.message) ? error.message : 'currency_request_failed';
+    report('observation_failed');
   }
   result.elapsed_ms = Math.round(performance.now() - started);
   return result;
