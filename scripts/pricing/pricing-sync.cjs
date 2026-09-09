@@ -6,6 +6,7 @@ const { performance } = require('node:perf_hooks');
 const CLIENT = 'digitalogic-price-calculator/v1';
 const HASH = /^sha256:[a-f0-9]{64}$/;
 const LIMIT_MS = 60000;
+const DEFAULT_BULK_TIMEOUT_MS = 180000;
 const HELP = `Usage: node pricing-sync.cjs bulk [--base-url URL] [--timeout-ms N] [--json]
        pricing-sync.cmd bulk
        pricing-sync.cmd single PRODUCT_CODE [--site-url URL] [--timeout-ms N] [--json]
@@ -18,8 +19,9 @@ each product receipt measures the subsequent command. No automatic write retry.
 
 Bulk refresh through the existing Go pricing session and /api/refresh delivery:wait.
 Default URL: http://127.0.0.1:18080 (loopback only). Node.js 18+; no dependencies.
-Default overall budget: 60000 ms, shared by readiness, session, refresh and readback.
-An explicit longer --timeout-ms emits a CRITICAL event at 60 seconds while waiting.
+Default bulk/fresh observation timeout: 180000 ms; single: 60000 ms.
+The timeout covers readiness, session, refresh and readback; --timeout-ms overrides it.
+Bulk's 60-second guideline is informational and depends on workload and write mode.
 Checks HTTP /api/status before and after; outputs a terminal JSON receipt.
 No automatic refresh retry. A timeout may have applied changes; inspect the server
 receipt before retrying. Single calls WordPress directly; it is not a Go refresh.
@@ -36,8 +38,9 @@ Authenticated WordPress clients can POST product_code to:
   /wp-json/digitalogic/v1/pricing/products/recalculate
 The dedicated source-ingest secret is not a substitute for WordPress permissions.
 This endpoint does not expose an independent n8n notification receipt.
-Exit: 0 delivered within target, 1 failed/unknown, 2 target missed (bulk >60s,
-single >=1000ms), 3 bulk delivered with missing-product deferrals.
+Exit: 0 bulk delivered (regardless of guideline) or single within target,
+1 failed/unknown, 2 single target missed (>=1000ms),
+3 bulk delivered with missing-product deferrals. Bulk timing never overrides delivery.
 `;
 
 function baseURL(value) {
@@ -129,7 +132,7 @@ function receiptFrom(body) {
   };
 }
 
-async function runBulk({ baseUrl = 'http://127.0.0.1:18080', timeoutMs = LIMIT_MS, productCode,
+async function runBulk({ baseUrl = 'http://127.0.0.1:18080', timeoutMs = DEFAULT_BULK_TIMEOUT_MS, productCode,
   log = () => {}, onEvent = () => {}, now = () => performance.now(),
   schedule = setTimeout, unschedule = clearTimeout } = {}) {
   const base = baseURL(baseUrl);
@@ -143,9 +146,10 @@ async function runBulk({ baseUrl = 'http://127.0.0.1:18080', timeoutMs = LIMIT_M
     if (budget <= 0) throw new Error('overall_deadline_exhausted');
     return Math.max(1, Math.min(cap, Math.ceil(budget)));
   };
-  const criticalTimer = schedule(() => onEvent({
-    event: 'critical_threshold_reached', elapsed_ms: Math.round(now() - start),
-    message: scoped ? 'Single-product 1-second target reached; still waiting without retry.' : 'CRITICAL: 60 seconds reached; the operation has not completed. No retry was sent.',
+  const timingTimer = schedule(() => onEvent({
+    event: scoped ? 'single_target_reached' : 'performance_guideline_exceeded',
+    severity: 'info', elapsed_ms: Math.round(now() - start),
+    message: scoped ? 'Single-product 1-second target reached; still waiting without retry.' : 'The 60-second workload guideline was reached; waiting for verified delivery without retry.',
   }), targetMs);
   const checkpoints = {};
   const result = { scope: scoped ? 'single' : 'bulk', delivered: false, outcome: 'not_started',
@@ -211,17 +215,18 @@ async function runBulk({ baseUrl = 'http://127.0.0.1:18080', timeoutMs = LIMIT_M
     log('Checking Go HTTP readiness after operation...');
     try { await ready(); result.readiness_after = true; }
     catch (error) { result.readiness_after = false; result.readiness_after_error = error.message; }
-    unschedule(criticalTimer);
+    unschedule(timingTimer);
   }
   const elapsed = now() - start;
   result.elapsed_ms = Math.round(elapsed);
   result.checkpoints_ms = checkpoints;
   const missed = scoped ? elapsed >= targetMs : elapsed > targetMs;
-  result.target_ms = targetMs;
+  result[scoped ? 'target_ms' : 'guideline_ms'] = targetMs;
+  result.observation_timeout_ms = timeoutMs;
   result.performance = !result.delivered ? 'not_delivered'
-    : scoped ? (missed ? 'target_missed' : 'under_1_second') : (missed ? 'critical_over_60_seconds' : 'within_60_seconds');
+    : scoped ? (missed ? 'target_missed' : 'under_1_second') : (missed ? 'over_guideline' : 'within_guideline');
   result.exit_code = !result.delivered || !result.readiness_after ? 1
-    : missed ? 2
+    : scoped && missed ? 2
       : result.receipt.deferred_missing ? 3 : 0;
   return result;
 }
