@@ -69,10 +69,31 @@ func TestOwnerCurrencyWritebackQueue(t *testing.T) {
 				job := server.excelPricingWrites.get(accepted.JobID)
 				if job.Status == "confirmed" || job.Status == "observation_required" {
 					if mode == "uncertain_recovery" && !recoveryRequested && job.Status == "observation_required" {
+						expiredToken := openExcelPricingSession(t, server)
+						server.excelPricing.mu.Lock()
+						for key, session := range server.excelPricing.sessions {
+							session.expiresAt = time.Now().Add(-time.Minute)
+							server.excelPricing.sessions[key] = session
+						}
+						server.excelPricing.mu.Unlock()
+						path := "/api/pricing-sync/writebacks/" + job.JobID + "/observe"
+						denied := httptest.NewRecorder()
+						server.router.ServeHTTP(denied, authenticatedExcelPricingRequest(http.MethodPost, path, "{}", expiredToken))
+						if denied.Code != http.StatusForbidden || writes.Load() != 1 {
+							t.Fatal("expired observation session was not safely rejected")
+						}
+						token := openExcelPricingSession(t, server)
+						invalid := httptest.NewRecorder()
+						server.router.ServeHTTP(invalid, authenticatedExcelPricingRequest(http.MethodPost, path, `{"yuan_price":1}`, token))
+						if invalid.Code != http.StatusBadRequest || writes.Load() != 1 {
+							t.Fatal("observation endpoint accepted a currency payload")
+						}
 						recovered.Store(true)
 						recoveryRequested = true
-						if _, err := server.excelPricingWrites.observeCurrency(job.JobID); err != nil {
-							t.Fatal(err)
+						accepted := httptest.NewRecorder()
+						server.router.ServeHTTP(accepted, authenticatedExcelPricingRequest(http.MethodPost, path, "{}", token))
+						if accepted.Code != http.StatusAccepted {
+							t.Fatalf("observation status=%d", accepted.Code)
 						}
 						continue
 					}

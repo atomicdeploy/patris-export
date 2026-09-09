@@ -203,6 +203,7 @@ Private mWritebackCellAddress As String
 Private mWritebackRequestID As String
 Private mWritebackJobID As String
 Private mWritebackCSRFToken As String
+Private mWritebackObserveAfterSession As Boolean
 Private mWritebackPollCount As Long
 Private mWritebackHTTPWaitCount As Long
 Private mPricingEditGeneration As Long
@@ -5620,7 +5621,9 @@ Public Sub SyncPricingSettingsNow()
     ResumeAfterCancelledClose
     If Not mWorkbookClosing And mWritebackStage = "observation_required" And _
        mWritebackRequest Is Nothing Then
-        mWritebackStage = "observe"
+        mWritebackObserveAfterSession = True
+        mWritebackCSRFToken = vbNullString
+        mWritebackStage = "session"
         RunBackgroundWritebackStep
         Exit Sub
     End If
@@ -6066,7 +6069,11 @@ ResponseReady:
             mWritebackCSRFToken = Trim$(CStr(BlankIfNull( _
                 JsonRuntime.JsonText(root, "csrf_token"))))
             If Len(mWritebackCSRFToken) <> 43 Then GoTo InvalidResponse
-            mWritebackStage = "enqueue"
+            If mWritebackObserveAfterSession Then
+                mWritebackStage = "observe"
+            Else
+                mWritebackStage = "enqueue"
+            End If
             RunBackgroundWritebackStep
         Case "enqueue", "observe"
             If CStr(JsonRuntime.JsonText(root, "schema")) <> _
@@ -6074,6 +6081,7 @@ ResponseReady:
             mWritebackJobID = Trim$(CStr(BlankIfNull( _
                 JsonRuntime.JsonText(root, "job_id"))))
             If Len(mWritebackJobID) <> 32 Then GoTo InvalidResponse
+            mWritebackObserveAfterSession = False
             messageText = Trim$(CStr(BlankIfNull( _
                 JsonRuntime.JsonText(root, "message_fa"))))
             If Len(messageText) = 0 Then
@@ -6231,6 +6239,7 @@ Private Sub CompletePricingWriteback()
     mWritebackJobID = vbNullString
     mWritebackCSRFToken = vbNullString
     mWritebackPollCount = 0
+    mWritebackObserveAfterSession = False
     mWritebackHTTPWaitCount = 0
     mActiveWritebackGeneration = 0
     mActiveWritebackDesiredValue = vbNullString
@@ -6571,7 +6580,7 @@ End Sub
 Private Sub FailPricingWriteback(ByVal reasonText As String)
     Dim newerProposalQueued As Boolean
 
-    If mWritebackStage = "observe" Then
+    If mWritebackStage = "observe" Or mWritebackObserveAfterSession Then
         PausePricingOwnerObservation reasonText
         Exit Sub
     End If

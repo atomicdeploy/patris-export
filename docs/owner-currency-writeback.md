@@ -28,3 +28,6 @@ The explicit read-only live queue probe then passed against production generatio
 
 Actual Go queue admission checkpoint (2026-09-09):
 The explicit live probe passed through enqueue -> next -> processRemote -> finish -> get, then independently observed the owner request. It submitted the unchanged current CNY34500 using request go-owner-unchanged-20260909-01. Owner job4eb7068aaeded8a6de57546af443e490,generation67 confirmed; all canonical settings exactly matched before/after; no transaction ID or ACK deadline was created. Queue plus independent owner observation took5458ms (whole probe6.83s). This is actual authenticated admission from current Go code, not installed-service or changed-price bulk latency. No retry was needed or issued.
+
+Session recovery checkpoint:
+The existing SyncPricingSettingsNow action now renews the local session before /observe and retains the original request/job identity on renewal failure. It cannot fall through to currency enqueue after receiving the new session token. Explicit HTTP-route checks passed: expired token ->403, currency fields in observation body ->400, new token + empty observation ->202 -> confirmed, with total owner POST count still1. Relevant VBA source checks passed; no native workbook execution or installation is claimed.
