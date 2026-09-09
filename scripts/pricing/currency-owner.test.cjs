@@ -24,7 +24,18 @@ test('status recovery sends only GET and verifies current owner values',async()=
  assert.equal(result.delivered,true);assert.ok(calls.every(c=>c.body===undefined));
 });
 test('changed owner readback cannot be reported as delivered',async()=>{
- let reads=0;
- const result=await runCurrency({...options,requestJSON:async(base,path,args)=>args.body?job:(++reads===1?state:{success:true,data:{...state.data,yuan_price:35000}})});
+ let reads=0; const events=[];
+ const result=await runCurrency({...options,onEvent:e=>events.push(e),requestJSON:async(base,path,args)=>args.body?job:(++reads===1?state:{success:true,data:{...state.data,yuan_price:35000}})});
  assert.equal(result.delivered,false);assert.equal(result.error,'owner_readback_changed');
+ assert.ok(events.some(e=>e.phase==='verifying_owner_readback'));
+ assert.ok(events.every(e=>e.delivered===false && !Object.hasOwn(e,'percent')));
+});
+test('progress distinguishes confirmed owner job from verified delivery',async()=>{
+ const events=[];
+ const result=await runCurrency({...options,onEvent:e=>events.push(e),requestJSON:async(base,path,args)=>args.body?job:state});
+ assert.equal(result.delivered,true);
+ assert.deepEqual(events.map(e=>e.phase),['reading_owner','submitting','verifying_owner_readback','confirmed']);
+ assert.ok(events.slice(0,-1).every(e=>!e.delivered));
+ assert.equal(events.at(-1).delivered,true);
+ assert.equal(events.at(-1).job_id,job.data.job_id);
 });

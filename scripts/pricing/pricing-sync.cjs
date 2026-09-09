@@ -19,6 +19,7 @@ Currency commands use the separate WooCommerce credentials below and the owner R
 Only supplied fields are sent; omitted dates use owner policy. Default wait: 180000ms.
 Use currency-status after an uncertain result; it never resubmits the mutation.
 Currency supports --site-url and --timeout-ms. Exit 0 requires confirmed job and owner readback.
+Currency progress goes to stderr (JSON events with --json); --quiet-progress disables it.
 
 Session: Node.js 22+; authenticate once, then enter one product code per line.
 Enter quit or end input to close. Session readiness reports authentication time;
@@ -320,6 +321,7 @@ async function main(args) {
   while (args.length) {
     const key = args.shift();
     if (key === '--json') json = true;
+    else if (key === '--quiet-progress' && currency) options.quietProgress = true;
     else if (key === '--base-url' && ['bulk', 'fresh'].includes(mode) && args.length) options.baseUrl = args.shift();
     else if (key === '--site-url' && (currency || ['single', 'session'].includes(mode)) && args.length) options.siteUrl = args.shift();
     else if (key === '--request-id' && currency && args.length) options.requestId = args.shift();
@@ -334,6 +336,7 @@ async function main(args) {
   options.log = json ? () => {} : message => process.stderr.write(message + '\n');
   options.onEvent = event => process.stderr.write(json ? JSON.stringify(event) + '\n' : event.message + '\n');
   if (currency) {
+    if (options.quietProgress) options.onEvent = () => {};
     const result = await require('./currency-owner.cjs').runCurrency({ ...options, requestJSON });
     process.stdout.write(JSON.stringify(result, null, 2) + '\n');
     return result.exit_code;
