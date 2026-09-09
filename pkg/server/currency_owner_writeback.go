@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"math/big"
 	"net/http"
 	"net/url"
 	"os"
@@ -22,14 +23,14 @@ func currencyOwnerTerminal(status string) bool {
 	return false
 }
 
-func currencyOnlyWriteback(job *excelPricingWritebackJob) bool {
+func ownerSettingsWriteback(job *excelPricingWritebackJob) bool {
 	keys := excelPricingWritebackJobKeys(job)
 	if len(keys) == 0 || job.ackOnly || job.TransactionID != "" {
 		return false
 	}
 	for _, key := range keys {
 		switch key {
-		case "yuan_price", "dollar_price", "cny_effective_date", "usd_effective_date":
+		case "yuan_price", "dollar_price", "cny_effective_date", "usd_effective_date", "profit_margin_percent", "air_express_price_per_kg", "price_rounding_digits":
 		default:
 			return false
 		}
@@ -37,7 +38,8 @@ func currencyOnlyWriteback(job *excelPricingWritebackJob) bool {
 	return true
 }
 
-// Currency jobs use the canonical owner's admission/status path. Their website
+// All seven editable settings use one canonical settings admission/status path.
+// Their website
 // commit never depends on a workbook ACK or a client-side rollback deadline.
 func (queue *excelPricingWritebackQueue) processOwnerCurrency(ctx context.Context, job *excelPricingWritebackJob) excelPricingWritebackResult {
 	failed := func(code string) excelPricingWritebackResult {
@@ -55,6 +57,7 @@ func (queue *excelPricingWritebackQueue) processOwnerCurrency(ctx context.Contex
 	// The caller's identity survives a new local queue ID or process restart.
 	// An unclassified missing/error response is not permission to submit again.
 	owner, err := client.Observe(ctx, job.RequestID)
+	observedExisting := err == nil
 	if err != nil {
 		if job.ownerObserveOnly || !queue.isLatest(job) {
 			return failed("currency_owner_observation_failed")
@@ -66,7 +69,7 @@ func (queue *excelPricingWritebackQueue) processOwnerCurrency(ctx context.Contex
 		if !queue.isLatest(job) {
 			return excelPricingWritebackResult{status: "superseded", code: "superseded", messageFA: "درخواست جدیدتر جایگزین شد."}
 		}
-		owner, err = client.Submit(ctx, job.RequestID, job.expectedStateRevision, values)
+		owner, err = client.SubmitSettings(ctx, job.RequestID, job.expectedStateRevision, values)
 		if err != nil {
 			return failed("currency_owner_submission_unconfirmed")
 		}
@@ -76,8 +79,14 @@ func (queue *excelPricingWritebackQueue) processOwnerCurrency(ctx context.Contex
 		if owner.JobID != ownerID || owner.Generation != generation || owner.RequestID != job.RequestID {
 			return failed("currency_owner_identity_changed")
 		}
+		desiredFields := owner.DesiredFields
+		// Retained old owner requests can still be observed by their original
+		// identity. Every new submission uses settings intent and desired_fields.
+		if len(desiredFields) == 0 && observedExisting {
+			desiredFields = owner.DesiredCurrency
+		}
 		for key, want := range values {
-			if currencyRawString(owner.DesiredCurrency[key]) != want {
+			if !ownerSettingValueMatches(key, currencyRawString(desiredFields[key]), want) {
 				return failed("currency_owner_intent_conflict")
 			}
 		}
@@ -98,10 +107,10 @@ func (queue *excelPricingWritebackQueue) processOwnerCurrency(ctx context.Contex
 				return ownerComplete("currency_owner_settings_unverified")
 			}
 			document := excelPricingStateDocument{Settings: settings, StateRevision: state.StateRevision}
-			if len(owner.DesiredCurrency) == 0 {
+			if len(desiredFields) == 0 {
 				return ownerComplete("currency_owner_desired_missing")
 			}
-			for key, raw := range owner.DesiredCurrency {
+			for key, raw := range desiredFields {
 				var actual string
 				if key == "effective_date" {
 					actual = document.Settings.EffectiveDate
@@ -111,13 +120,18 @@ func (queue *excelPricingWritebackQueue) processOwnerCurrency(ctx context.Contex
 						return ownerComplete("currency_owner_readback_field_invalid")
 					}
 				}
-				if actual != currencyRawString(raw) {
+				if !ownerSettingValueMatches(key, actual, currencyRawString(raw)) {
 					return ownerComplete("currency_owner_readback_changed")
 				}
 			}
 			confirmed, readErr := excelPricingWritebackValues(document.Settings, job)
-			if readErr != nil || !excelPricingWritebackValuesMatchDesired(confirmed, job) {
+			if readErr != nil {
 				return ownerComplete("currency_owner_readback_changed")
+			}
+			for key, want := range values {
+				if !ownerSettingValueMatches(key, confirmed[key], want) {
+					return ownerComplete("currency_owner_readback_changed")
+				}
 			}
 			return excelPricingWritebackResult{status: "confirmed", ownerStatus: "confirmed", code: "confirmed", messageFA: "نرخ و تاریخ در مالک ثبت و قیمت‌ها تأیید شدند.", confirmedValue: confirmed[job.SettingKey], confirmedValues: confirmed, stateRevision: document.StateRevision, settings: document.Settings}
 		case "queued", "running", "publishing", "awaiting_delivery", "cancelling":
@@ -140,6 +154,16 @@ func (queue *excelPricingWritebackQueue) processOwnerCurrency(ctx context.Contex
 	}
 }
 
+// Compare decimal representations exactly; this is value normalization only.
+func ownerSettingValueMatches(key, actual, expected string) bool {
+	if key != "profit_margin_percent" && key != "air_express_price_per_kg" {
+		return actual == expected
+	}
+	left, leftOK := new(big.Rat).SetString(actual)
+	right, rightOK := new(big.Rat).SetString(expected)
+	return leftOK && rightOK && left.Cmp(right) == 0
+}
+
 // Explicit recovery observes the existing owner identity; it cannot submit.
 func (queue *excelPricingWritebackQueue) observeCurrency(jobID string) (*excelPricingWritebackJob, error) {
 	queue.mu.Lock()
@@ -148,7 +172,7 @@ func (queue *excelPricingWritebackQueue) observeCurrency(jobID string) (*excelPr
 	if job == nil {
 		return nil, errors.New("writeback_not_found")
 	}
-	if !currencyOnlyWriteback(job) {
+	if !ownerSettingsWriteback(job) {
 		return nil, errors.New("writeback_not_observable")
 	}
 	if currencyOwnerTerminal(job.OwnerStatus) || job.Status == "confirmed" || job.Status == "pending" || job.Status == "sending" {
@@ -204,7 +228,7 @@ func (s *Server) handleGetCurrencyWritebackReconcile(w http.ResponseWriter, r *h
 		writeExcelPricingError(w, http.StatusNotFound, "writeback_not_found")
 		return
 	}
-	if !currencyOnlyWriteback(job) || !currencyOwnerTerminal(job.OwnerStatus) {
+	if !ownerSettingsWriteback(job) || !currencyOwnerTerminal(job.OwnerStatus) {
 		writeExcelPricingError(w, http.StatusConflict, "currency_owner_not_terminal")
 		return
 	}

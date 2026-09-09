@@ -21,7 +21,7 @@ func TestOwnerCurrencyWritebackQueue(t *testing.T) {
 			settings := request.Settings
 			settings.CNYEffectiveDate = "2026-09-09"
 			settings.EffectiveDate = "2026-09-09"
-			owner := map[string]any{"success": true, "data": map[string]any{"job_id": strings.Repeat("d", 32), "generation": 1, "request_id": request.RequestID, "status": "confirmed", "desired_currency": map[string]any{"yuan_price": 29500, "cny_effective_date": "2026-09-09"}}}
+			owner := map[string]any{"success": true, "data": map[string]any{"job_id": strings.Repeat("d", 32), "generation": 1, "request_id": request.RequestID, "status": "confirmed", "desired_fields": map[string]any{"yuan_price": 29500, "cny_effective_date": "2026-09-09"}}}
 			var writes atomic.Int32
 			var recovered atomic.Bool
 			recoveryRequested := false
@@ -35,13 +35,17 @@ func TestOwnerCurrencyWritebackQueue(t *testing.T) {
 					}
 					w.WriteHeader(404)
 					json.NewEncoder(w).Encode(map[string]any{"success": false, "code": "digitalogic_currency_async_request_not_found"})
-				case r.URL.Path == "/wp-json/digitalogic/v1/currency" && r.Method == "POST":
+				case r.URL.Path == "/wp-json/digitalogic/v1/pricing/settings" && r.Method == "POST":
 					writes.Add(1)
-					var body map[string]string
+					var body struct {
+						Settings  map[string]string `json:"settings"`
+						RequestID string            `json:"request_id"`
+						Expected  string            `json:"expected_state_revision"`
+					}
 					if json.NewDecoder(r.Body).Decode(&body) != nil {
 						t.Error("invalid body")
 					}
-					if len(body) != 3 || body["yuan_price"] != "29500" || body["request_id"] != request.RequestID || body["expected_state_revision"] != request.ExpectedStateRevision {
+					if len(body.Settings) != 1 || body.Settings["yuan_price"] != "29500" || body.RequestID != request.RequestID || body.Expected != request.ExpectedStateRevision {
 						t.Errorf("intent changed: %v", body)
 					}
 					if uncertain {

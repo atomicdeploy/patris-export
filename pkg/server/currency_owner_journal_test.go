@@ -54,7 +54,7 @@ func TestCurrencyJournalRestartPreservesIdentityAndSupersession(t *testing.T) {
 	}
 }
 
-func TestCurrencyJournalCorruptionBlocksOnlyCurrencyAdmission(t *testing.T) {
+func TestCurrencyJournalCorruptionBlocksAllOwnerSettingsAdmission(t *testing.T) {
 	dir := t.TempDir()
 	q := journalTestQueue(dir, time.Now().UTC())
 	if err := os.WriteFile(filepath.Join(dir, strings.Repeat("a", 32)+".json"), []byte(`{"schema":`), 0600); err != nil {
@@ -68,8 +68,8 @@ func TestCurrencyJournalCorruptionBlocksOnlyCurrencyAdmission(t *testing.T) {
 		t.Fatal("corrupt journal allowed currency admission")
 	}
 	request := validExcelPricingWritebackRequest("journal-other-02", "profit_margin_percent", 29500)
-	if _, err := q.enqueue(request); err != nil {
-		t.Fatalf("unrelated path blocked: %v", err)
+	if _, err := q.enqueue(request); err == nil {
+		t.Fatal("shared settings bypassed corrupt journal")
 	}
 }
 

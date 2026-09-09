@@ -137,7 +137,7 @@ func validateCurrencyRecord(r currencyIntentRecord) error {
 	}
 	for _, key := range keys {
 		switch key {
-		case "yuan_price", "dollar_price", "cny_effective_date", "usd_effective_date":
+		case "yuan_price", "dollar_price", "cny_effective_date", "usd_effective_date", "profit_margin_percent", "air_express_price_per_kg", "price_rounding_digits":
 		default:
 			return errCurrencyJournal
 		}
@@ -224,7 +224,7 @@ func (queue *excelPricingWritebackQueue) saveCurrencyIntent(job *excelPricingWri
 	if queue.currencyJournalDir == "" {
 		return nil
 	}
-	if queue.currencyJournalError != nil || job == nil || !currencyOnlyWriteback(job) {
+	if queue.currencyJournalError != nil || job == nil || !ownerSettingsWriteback(job) {
 		return errCurrencyJournal
 	}
 	origin, e := queue.currencyJournalOrigin()
@@ -274,7 +274,7 @@ func (queue *excelPricingWritebackQueue) findCurrencyIntent(request excelPricing
 	}
 	for _, key := range keys {
 		switch key {
-		case "yuan_price", "dollar_price", "cny_effective_date", "usd_effective_date":
+		case "yuan_price", "dollar_price", "cny_effective_date", "usd_effective_date", "profit_margin_percent", "air_express_price_per_kg", "price_rounding_digits":
 		default:
 			return nil, nil
 		}
@@ -315,7 +315,7 @@ func (queue *excelPricingWritebackQueue) findCurrencyIntent(request excelPricing
 		return cloneExcelPricingWritebackJob(job), nil
 	}
 	for _, job := range queue.jobs {
-		if job.RequestID == request.RequestID && currencyOnlyWriteback(job) {
+		if job.RequestID == request.RequestID && ownerSettingsWriteback(job) {
 			if job.originalCurrencyRequest == nil || !reflect.DeepEqual(cloneCurrencyRequest(*job.originalCurrencyRequest), cloneCurrencyRequest(request)) {
 				return nil, errCurrencyIntentConflict
 			}
@@ -350,7 +350,7 @@ func writeCurrencyJournalJSON(path string, value any) error {
 }
 
 func (queue *excelPricingWritebackQueue) markCurrencyJournalTerminal(job *excelPricingWritebackJob) error {
-	if queue.currencyJournalDir == "" || job == nil || !currencyOnlyWriteback(job) {
+	if queue.currencyJournalDir == "" || job == nil || !ownerSettingsWriteback(job) {
 		return nil
 	}
 	if !currencyJournalID.MatchString(job.JobID) || (job.Status != "confirmed" && job.Status != "superseded" && !currencyOwnerTerminal(job.OwnerStatus)) {

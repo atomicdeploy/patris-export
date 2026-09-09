@@ -121,3 +121,41 @@ func TestOnlyExactOwnerRequestNotFoundIsActionable(t *testing.T) {
 		server.Close()
 	}
 }
+
+func TestSubmitSettingsAllSevenFieldsOnly(t *testing.T) {
+	values := map[string]string{"yuan_price": "34000", "dollar_price": "60000", "cny_effective_date": "2026-09-09", "usd_effective_date": "2026-09-08", "profit_margin_percent": "30.25", "air_express_price_per_kg": "125.5", "price_rounding_digits": "2"}
+	calls := 0
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if r.Method != "POST" || r.URL.Path != "/wp-json/digitalogic/v1/pricing/settings" {
+			t.Error("wrong settings operation")
+		}
+		var body struct {
+			Settings  map[string]string `json:"settings"`
+			RequestID string            `json:"request_id"`
+		}
+		if json.NewDecoder(r.Body).Decode(&body) != nil || len(body.Settings) != 7 {
+			t.Error("settings fields lost")
+		}
+		for key, want := range values {
+			if body.Settings[key] != want {
+				t.Errorf("field changed: %s", key)
+			}
+		}
+		fmt.Fprintf(w, `{"success":true,"data":{"job_id":"%s","generation":1,"request_id":%q,"status":"queued","desired_fields":{"profit_margin_percent":"30.25"}}}`, strings.Repeat("a", 32), body.RequestID)
+	}))
+	defer server.Close()
+	client := Client{Origin: server.URL, Key: "key", Secret: "secret", HTTPClient: server.Client()}
+	job, err := client.SubmitSettings(context.Background(), "settings-request-01", "sha256:"+strings.Repeat("b", 64), values)
+	if err != nil || string(job.DesiredFields["profit_margin_percent"]) != `"30.25"` {
+		t.Fatalf("settings transport: %v", err)
+	}
+	for _, invalid := range []map[string]string{{"shipping_catalog_revision": "sha256:" + strings.Repeat("a", 64)}, {"effective_date": "2026-09-09"}, {"profit_margin_percent": "1001"}, {"air_express_price_per_kg": "0"}, {"price_rounding_digits": "10"}} {
+		if _, err = client.SubmitSettings(context.Background(), "settings-request-02", "sha256:"+strings.Repeat("b", 64), invalid); err == nil {
+			t.Fatal("invalid settings accepted")
+		}
+	}
+	if calls != 1 {
+		t.Fatal("invalid settings transmitted")
+	}
+}
