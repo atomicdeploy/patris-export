@@ -25,8 +25,12 @@ func TestSubmitFieldIntentAndObserve(t *testing.T) {
 			if r.Header.Get("If-Match") != `"`+revision+`"` || r.Header.Get("Idempotency-Key") != id {
 				t.Error("identity headers missing")
 			}
-			var body map[string]string
-			if json.NewDecoder(r.Body).Decode(&body) != nil || len(body) != 3 || body["yuan_price"] != "34000" || body["request_id"] != id || body["expected_state_revision"] != revision {
+			var body struct {
+				Settings  map[string]string `json:"settings"`
+				RequestID string            `json:"request_id"`
+				Revision  string            `json:"expected_state_revision"`
+			}
+			if json.NewDecoder(r.Body).Decode(&body) != nil || len(body.Settings) != 1 || body.Settings["yuan_price"] != "34000" || body.RequestID != id || body.Revision != revision || r.URL.Path != "/wp-json/digitalogic/v1/pricing/settings" {
 				t.Errorf("intent changed: %v", body)
 			}
 		} else if r.URL.Path != "/wp-json/digitalogic/v1/currency/requests/"+id {
@@ -36,7 +40,7 @@ func TestSubmitFieldIntentAndObserve(t *testing.T) {
 	}))
 	defer server.Close()
 	client := Client{Origin: server.URL, Key: "test-key", Secret: "test-secret", HTTPClient: server.Client()}
-	job, err := client.Submit(context.Background(), id, revision, map[string]string{"yuan_price": "34000"})
+	job, err := client.SubmitSettings(context.Background(), id, revision, map[string]string{"yuan_price": "34000"})
 	if err != nil || job.RequestID != id {
 		t.Fatalf("submit: %v", err)
 	}
@@ -70,7 +74,7 @@ func TestRedirectAndMalformedResponseNeverRetryOrLeak(t *testing.T) {
 			followed := false
 			supplied.CheckRedirect = func(*http.Request, []*http.Request) error { followed = true; return nil }
 			client := Client{Origin: server.URL, Key: "test-key", Secret: "test-secret", HTTPClient: supplied}
-			_, err := client.Submit(context.Background(), "currency:test-123", "sha256:"+strings.Repeat("a", 64), map[string]string{"yuan_price": "34000"})
+			_, err := client.SubmitSettings(context.Background(), "currency:test-123", "sha256:"+strings.Repeat("a", 64), map[string]string{"yuan_price": "34000"})
 			var safe *Error
 			if !errors.As(err, &safe) || !safe.OutcomeUnknown || strings.Contains(err.Error(), "private") {
 				t.Fatalf("unsafe outcome: %v", err)
@@ -95,7 +99,7 @@ func TestReadAndRejectInvalidIntentBeforeTransmission(t *testing.T) {
 		t.Fatalf("read: %v", err)
 	}
 	for _, values := range []map[string]string{{"effective_date": "2026-09-09"}, {"yuan_price": "0"}, {"cny_effective_date": "2026-02-30"}, {}} {
-		if _, err := client.Submit(context.Background(), "currency:test-123", "sha256:"+strings.Repeat("a", 64), values); err == nil {
+		if _, err := client.SubmitSettings(context.Background(), "currency:test-123", "sha256:"+strings.Repeat("a", 64), values); err == nil {
 			t.Fatal("invalid intent accepted")
 		}
 	}

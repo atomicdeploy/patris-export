@@ -66,35 +66,6 @@ func (s State) Currency() map[string]json.RawMessage {
 	return map[string]json.RawMessage{"yuan_price": s.YuanPrice, "dollar_price": s.DollarPrice, "cny_effective_date": s.CNYEffectiveDate, "usd_effective_date": s.USDEffectiveDate}
 }
 
-func (c *Client) Submit(ctx context.Context, requestID, expectedRevision string, values map[string]string) (Job, error) {
-	if !requestPattern.MatchString(requestID) || !revisionPattern.MatchString(expectedRevision) || len(values) == 0 {
-		return Job{}, &Error{Code: "invalid_request"}
-	}
-	body := map[string]string{"request_id": requestID, "expected_state_revision": expectedRevision}
-	for k, v := range values {
-		switch k {
-		case "yuan_price", "dollar_price":
-			if !pricePattern.MatchString(v) {
-				return Job{}, &Error{Code: "invalid_currency_value"}
-			}
-		case "cny_effective_date", "usd_effective_date":
-			d, e := time.Parse("2006-01-02", v)
-			if e != nil || d.Format("2006-01-02") != v {
-				return Job{}, &Error{Code: "invalid_currency_value"}
-			}
-		default:
-			return Job{}, &Error{Code: "invalid_currency_field"}
-		}
-		body[k] = v
-	}
-	var job Job
-	err := c.call(ctx, "POST", "currency", body, requestID, expectedRevision, &job)
-	if err == nil {
-		err = validateJob(job, requestID, true)
-	}
-	return job, err
-}
-
 func (c *Client) Observe(ctx context.Context, requestID string) (Job, error) {
 	if !requestPattern.MatchString(requestID) {
 		return Job{}, &Error{Code: "invalid_request"}
