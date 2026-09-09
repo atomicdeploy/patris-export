@@ -6135,6 +6135,13 @@ ResponseReady:
                             JsonRuntime.JsonText(root, "updated_at"))))
                     End If
                     CompletePricingWriteback
+                Case "owner_terminal"
+                    ' Owner completion does not prove these workbook values
+                    ' are current. Preserve the visible proposal without
+                    ' applying historical settings or retrying the mutation.
+                    PausePricingOwnerObservation messageText
+                    mWritebackStage = "owner_terminal"
+                    Exit Sub
                 Case "observation_required"
                     ' Unknown delivery must not restore a stale value or erase
                     ' the exact request needed for owner-side recovery.

@@ -14,6 +14,14 @@ import (
 	"github.com/gorilla/mux"
 )
 
+func currencyOwnerTerminal(status string) bool {
+	switch status {
+	case "confirmed", "failed", "publication_failed", "cancelled", "superseded":
+		return true
+	}
+	return false
+}
+
 func currencyOnlyWriteback(job *excelPricingWritebackJob) bool {
 	keys := excelPricingWritebackJobKeys(job)
 	if len(keys) == 0 || job.ackOnly || job.TransactionID != "" {
@@ -48,7 +56,7 @@ func (queue *excelPricingWritebackQueue) processOwnerCurrency(ctx context.Contex
 	// An unclassified missing/error response is not permission to submit again.
 	owner, err := client.Observe(ctx, job.RequestID)
 	if err != nil {
-		if job.ownerObserveOnly {
+		if job.ownerObserveOnly || !queue.isLatest(job) {
 			return failed("currency_owner_observation_failed")
 		}
 		var remote *pricingcurrency.Error
@@ -75,17 +83,23 @@ func (queue *excelPricingWritebackQueue) processOwnerCurrency(ctx context.Contex
 		}
 		switch owner.Status {
 		case "confirmed":
+			ownerComplete := func(code string) excelPricingWritebackResult {
+				return excelPricingWritebackResult{status: "owner_terminal", ownerStatus: "confirmed", code: code, messageFA: "تکمیل درخواست قبلی در مالک تأیید شد؛ تنظیمات فعلی اکسل تغییر نمی‌کند."}
+			}
+			if !queue.isLatest(job) {
+				return ownerComplete("currency_owner_confirmed_historical")
+			}
 			state, readErr := client.Read(ctx)
 			if readErr != nil {
-				return failed("currency_owner_readback_failed")
+				return ownerComplete("currency_owner_readback_failed")
 			}
 			var settings excelPricingSettings
 			if json.Unmarshal(state.Settings, &settings) != nil || validateExcelPricingSettings(settings) != nil {
-				return failed("currency_owner_settings_unverified")
+				return ownerComplete("currency_owner_settings_unverified")
 			}
 			document := excelPricingStateDocument{Settings: settings, StateRevision: state.StateRevision}
 			if len(owner.DesiredCurrency) == 0 {
-				return failed("currency_owner_desired_missing")
+				return ownerComplete("currency_owner_desired_missing")
 			}
 			for key, raw := range owner.DesiredCurrency {
 				var actual string
@@ -94,19 +108,21 @@ func (queue *excelPricingWritebackQueue) processOwnerCurrency(ctx context.Contex
 				} else {
 					actual, err = excelPricingSettingValue(document.Settings, key)
 					if err != nil {
-						return failed("currency_owner_readback_field_invalid")
+						return ownerComplete("currency_owner_readback_field_invalid")
 					}
 				}
 				if actual != currencyRawString(raw) {
-					return failed("currency_owner_readback_changed")
+					return ownerComplete("currency_owner_readback_changed")
 				}
 			}
 			confirmed, readErr := excelPricingWritebackValues(document.Settings, job)
 			if readErr != nil || !excelPricingWritebackValuesMatchDesired(confirmed, job) {
-				return failed("currency_owner_readback_changed")
+				return ownerComplete("currency_owner_readback_changed")
 			}
-			return excelPricingWritebackResult{status: "confirmed", code: "confirmed", messageFA: "نرخ و تاریخ در مالک ثبت و قیمت‌ها تأیید شدند.", confirmedValue: confirmed[job.SettingKey], confirmedValues: confirmed, stateRevision: document.StateRevision, settings: document.Settings}
+			return excelPricingWritebackResult{status: "confirmed", ownerStatus: "confirmed", code: "confirmed", messageFA: "نرخ و تاریخ در مالک ثبت و قیمت‌ها تأیید شدند.", confirmedValue: confirmed[job.SettingKey], confirmedValues: confirmed, stateRevision: document.StateRevision, settings: document.Settings}
 		case "queued", "running", "publishing", "awaiting_delivery", "cancelling":
+		case "failed", "publication_failed", "cancelled", "superseded":
+			return excelPricingWritebackResult{status: "owner_terminal", ownerStatus: owner.Status, code: "currency_owner_" + owner.Status, messageFA: "درخواست قبلی در مالک به وضعیت نهایی رسید؛ تنظیمات اکسل تغییر نمی‌کند."}
 		default:
 			return failed("currency_owner_" + owner.Status)
 		}
@@ -132,10 +148,10 @@ func (queue *excelPricingWritebackQueue) observeCurrency(jobID string) (*excelPr
 	if job == nil {
 		return nil, errors.New("writeback_not_found")
 	}
-	if !currencyOnlyWriteback(job) || !queue.isLatestLocked(job) {
+	if !currencyOnlyWriteback(job) {
 		return nil, errors.New("writeback_not_observable")
 	}
-	if job.Status == "confirmed" || job.Status == "pending" || job.Status == "sending" {
+	if currencyOwnerTerminal(job.OwnerStatus) || job.Status == "confirmed" || job.Status == "pending" || job.Status == "sending" {
 		return cloneExcelPricingWritebackJob(job), nil
 	}
 	if job.Status != "observation_required" {

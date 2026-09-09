@@ -34,10 +34,11 @@ type currencyIntentRecord struct {
 	Request     excelPricingWritebackRequest `json:"request"`
 }
 type currencyTerminalRecord struct {
-	Schema     string    `json:"schema"`
-	JobID      string    `json:"job_id"`
-	Status     string    `json:"status"`
-	FinishedAt time.Time `json:"finished_at"`
+	Schema      string    `json:"schema"`
+	JobID       string    `json:"job_id"`
+	Status      string    `json:"status"`
+	OwnerStatus string    `json:"owner_status,omitempty"`
+	FinishedAt  time.Time `json:"finished_at"`
 }
 type currencyJournalEntry struct {
 	record   currencyIntentRecord
@@ -93,7 +94,7 @@ func (queue *excelPricingWritebackQueue) readCurrencyJournal() ([]currencyJourna
 		path := filepath.Join(queue.currencyJournalDir, name)
 		if terminal {
 			var m currencyTerminalRecord
-			if readCurrencyJournalJSON(path, &m) != nil || m.Schema != currencyJournalSchema || m.JobID != id || (m.Status != "confirmed" && m.Status != "superseded") || m.FinishedAt.IsZero() {
+			if readCurrencyJournalJSON(path, &m) != nil || m.Schema != currencyJournalSchema || m.JobID != id || !currencyOwnerTerminal(m.Status) || (m.OwnerStatus != "" && (!currencyOwnerTerminal(m.OwnerStatus) || m.OwnerStatus != m.Status)) || m.FinishedAt.IsZero() {
 				return nil, errCurrencyJournal
 			}
 			markers[id] = &m
@@ -194,6 +195,12 @@ func (queue *excelPricingWritebackQueue) loadCurrencyJournal() error {
 			job.Code = "superseded"
 			job.Blocking = false
 		}
+		if entry.terminal != nil && (entry.terminal.OwnerStatus != "" || entry.terminal.Status == "confirmed") {
+			job.OwnerStatus = entry.terminal.Status
+			job.Status = "owner_terminal"
+			job.Code = "currency_owner_" + entry.terminal.Status + "_restored"
+			job.Blocking = true
+		}
 		queue.jobs[r.JobID] = job
 		if r.Sequence > queue.sequence {
 			queue.sequence = r.Sequence
@@ -204,10 +211,10 @@ func (queue *excelPricingWritebackQueue) loadCurrencyJournal() error {
 	}
 	for _, entry := range entries {
 		job := queue.jobs[entry.record.JobID]
-		if !queue.isLatestLocked(job) {
-			job.Status = "superseded"
-			job.Code = "superseded"
-			job.Blocking = false
+		if !queue.isLatestLocked(job) && entry.terminal == nil {
+			job.Status = "observation_required"
+			job.Code = "currency_owner_historical_observation_required"
+			job.Blocking = true
 		}
 	}
 	return nil
@@ -346,7 +353,7 @@ func (queue *excelPricingWritebackQueue) markCurrencyJournalTerminal(job *excelP
 	if queue.currencyJournalDir == "" || job == nil || !currencyOnlyWriteback(job) {
 		return nil
 	}
-	if !currencyJournalID.MatchString(job.JobID) || (job.Status != "confirmed" && job.Status != "superseded") {
+	if !currencyJournalID.MatchString(job.JobID) || (job.Status != "confirmed" && job.Status != "superseded" && !currencyOwnerTerminal(job.OwnerStatus)) {
 		return errCurrencyJournal
 	}
 	entries, e := queue.readCurrencyJournal()
@@ -358,7 +365,11 @@ func (queue *excelPricingWritebackQueue) markCurrencyJournalTerminal(job *excelP
 			if entry.terminal != nil {
 				return nil
 			}
-			return writeCurrencyJournalJSON(filepath.Join(queue.currencyJournalDir, job.JobID+".terminal.json"), currencyTerminalRecord{Schema: currencyJournalSchema, JobID: job.JobID, Status: job.Status, FinishedAt: queue.now().UTC()})
+			status := job.Status
+			if currencyOwnerTerminal(job.OwnerStatus) {
+				status = job.OwnerStatus
+			}
+			return writeCurrencyJournalJSON(filepath.Join(queue.currencyJournalDir, job.JobID+".terminal.json"), currencyTerminalRecord{Schema: currencyJournalSchema, JobID: job.JobID, Status: status, OwnerStatus: job.OwnerStatus, FinishedAt: queue.now().UTC()})
 		}
 	}
 	return errCurrencyJournal
@@ -376,7 +387,7 @@ func (queue *excelPricingWritebackQueue) pruneCurrencyJournal(now time.Time) err
 			id := entry.record.JobID
 			// A restored confirmed record is deliberately re-observed. Keep its
 			// evidence while that local readback is unresolved.
-			if job := queue.jobs[id]; job != nil && job.Status != "confirmed" && job.Status != "superseded" {
+			if job := queue.jobs[id]; job != nil && job.Status != "confirmed" && job.Status != "superseded" && !currencyOwnerTerminal(job.OwnerStatus) {
 				continue
 			}
 			if os.Remove(filepath.Join(queue.currencyJournalDir, id+".terminal.json")) != nil || os.Remove(filepath.Join(queue.currencyJournalDir, id+".json")) != nil {

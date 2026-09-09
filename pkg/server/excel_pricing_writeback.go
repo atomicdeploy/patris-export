@@ -64,6 +64,7 @@ type excelPricingWritebackJob struct {
 	ConfirmedValues   map[string]string     `json:"confirmed_values,omitempty"`
 	ConfirmedSettings *excelPricingSettings `json:"confirmed_settings,omitempty"`
 	Status            string                `json:"status"`
+	OwnerStatus       string                `json:"owner_status,omitempty"`
 	Code              string                `json:"code"`
 	MessageFA         string                `json:"message_fa"`
 	Attempts          int                   `json:"attempts"`
@@ -108,6 +109,7 @@ type excelPricingWritebackQueue struct {
 }
 
 type excelPricingWritebackResult struct {
+	ownerStatus     string
 	status          string
 	code            string
 	messageFA       string
@@ -205,7 +207,7 @@ func (queue *excelPricingWritebackQueue) next() (*excelPricingWritebackJob, time
 		if job.Status != "pending" && job.Status != "pending_ack" {
 			continue
 		}
-		if !job.ackOnly {
+		if !job.ackOnly && !(currencyOnlyWriteback(job) && job.ownerObserveOnly) {
 			if !queue.isLatestLocked(job) {
 				queue.supersedeLocked(job, now)
 				continue
@@ -251,7 +253,7 @@ func (queue *excelPricingWritebackQueue) finish(job *excelPricingWritebackJob, r
 	now := queue.now().UTC()
 	stored.LastAttemptMS = result.attemptMS
 	stored.TotalElapsedMS = now.Sub(stored.createdAt).Milliseconds()
-	if !stored.ackOnly && !queue.isLatestLocked(stored) {
+	if !stored.ackOnly && !queue.isLatestLocked(stored) && !(currencyOnlyWriteback(stored) && stored.ownerObserveOnly) {
 		queue.supersedeLocked(stored, now)
 		return
 	}
@@ -273,6 +275,7 @@ func (queue *excelPricingWritebackQueue) finish(job *excelPricingWritebackJob, r
 		return
 	}
 	stored.Status = result.status
+	stored.OwnerStatus = result.ownerStatus
 	stored.Code = result.code
 	stored.MessageFA = result.messageFA
 	stored.Blocking = result.status != "confirmed" && result.status != "awaiting_excel"
@@ -291,7 +294,7 @@ func (queue *excelPricingWritebackQueue) finish(job *excelPricingWritebackJob, r
 		stored.confirmationSource = result.source
 	}
 	stored.UpdatedAt = now.Format(time.RFC3339)
-	if stored.Status == "confirmed" && currencyOnlyWriteback(stored) {
+	if (stored.Status == "confirmed" || currencyOwnerTerminal(stored.OwnerStatus)) && currencyOnlyWriteback(stored) {
 		if err := queue.markCurrencyJournalTerminal(stored); err != nil {
 			queue.currencyJournalError = err
 		}
@@ -593,6 +596,14 @@ func (queue *excelPricingWritebackQueue) isLatestLocked(job *excelPricingWriteba
 }
 
 func (queue *excelPricingWritebackQueue) supersedeLocked(job *excelPricingWritebackJob, now time.Time) {
+	if currencyOnlyWriteback(job) && !currencyOwnerTerminal(job.OwnerStatus) && (job.Attempts > 0 || job.ownerObserveOnly) {
+		job.Status = "observation_required"
+		job.Code = "currency_owner_historical_observation_required"
+		job.ownerObserveOnly = true
+		job.Blocking = true
+		job.UpdatedAt = now.Format(time.RFC3339)
+		return
+	}
 	job.Status = "superseded"
 	job.Code = "superseded"
 	job.MessageFA = "این تغییر با مقدار جدیدتر همان تنظیم جایگزین شد."
@@ -607,7 +618,7 @@ func (queue *excelPricingWritebackQueue) supersedeLocked(job *excelPricingWriteb
 
 func (queue *excelPricingWritebackQueue) purgeLocked(now time.Time) {
 	for id, job := range queue.jobs {
-		if currencyOnlyWriteback(job) && job.Status != "confirmed" && job.Status != "superseded" {
+		if currencyOnlyWriteback(job) && job.Status != "confirmed" && job.Status != "superseded" && !currencyOwnerTerminal(job.OwnerStatus) {
 			continue
 		}
 		if now.Sub(job.createdAt) > excelPricingWritebackJobTTL {
@@ -623,7 +634,7 @@ func (queue *excelPricingWritebackQueue) purgeLocked(now time.Time) {
 		return
 	}
 	for id, job := range queue.jobs {
-		if currencyOnlyWriteback(job) && job.Status != "confirmed" && job.Status != "superseded" {
+		if currencyOnlyWriteback(job) && job.Status != "confirmed" && job.Status != "superseded" && !currencyOwnerTerminal(job.OwnerStatus) {
 			continue
 		}
 		if job.Status == "pending" || job.Status == "sending" ||
