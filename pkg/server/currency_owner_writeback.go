@@ -191,6 +191,46 @@ func (s *Server) handlePostCurrencyWritebackObserve(w http.ResponseWriter, r *ht
 	writeExcelPricingJSON(w, http.StatusAccepted, job)
 }
 
+// Current owner values are a separate read, never confirmation of an obsolete
+// intent. No queue mutation, source refresh, snapshot or pricing admission.
+func (s *Server) handleGetCurrencyWritebackReconcile(w http.ResponseWriter, r *http.Request) {
+	setExcelPricingResponseHeaders(w)
+	if !s.authorizeExcelPricingWriteback(r) {
+		writeExcelPricingError(w, http.StatusForbidden, "local_session_required")
+		return
+	}
+	job := s.excelPricingWrites.get(strings.TrimSpace(mux.Vars(r)["job_id"]))
+	if job == nil {
+		writeExcelPricingError(w, http.StatusNotFound, "writeback_not_found")
+		return
+	}
+	if !currencyOnlyWriteback(job) || !currencyOwnerTerminal(job.OwnerStatus) {
+		writeExcelPricingError(w, http.StatusConflict, "currency_owner_not_terminal")
+		return
+	}
+	origin, err := url.Parse(s.Config().SendUpdates.URL)
+	if err != nil || origin.Scheme != "https" || origin.Host == "" || origin.User != nil {
+		writeExcelPricingError(w, http.StatusServiceUnavailable, "currency_owner_not_configured")
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	defer cancel()
+	client := pricingcurrency.Client{Origin: origin.Scheme + "://" + origin.Host, Key: os.Getenv("DIGITALOGIC_PRICING_WRITE_KEY"), Secret: os.Getenv("DIGITALOGIC_PRICING_WRITE_SECRET"), HTTPClient: s.excelPricing.client}
+	state, err := client.Read(ctx)
+	var settings excelPricingSettings
+	if err != nil || json.Unmarshal(state.Settings, &settings) != nil || validateExcelPricingSettings(settings) != nil || !isSHA256Revision(state.StateRevision) {
+		writeExcelPricingError(w, http.StatusBadGateway, "currency_owner_current_read_failed")
+		return
+	}
+	writeExcelPricingJSON(w, http.StatusOK, map[string]interface{}{
+		"schema": excelPricingWritebackJobSchema,
+		"job_id": job.JobID, "request_id": job.RequestID,
+		"owner_status": job.OwnerStatus, "status": "owner_terminal",
+		"current_settings": settings, "current_state_revision": state.StateRevision,
+		"reconciled_at": time.Now().UTC().Format(time.RFC3339),
+	})
+}
+
 func currencyRawString(raw json.RawMessage) string {
 	var value string
 	if json.Unmarshal(raw, &value) == nil {

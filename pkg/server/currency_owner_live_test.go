@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/atomicdeploy/patris-export/pkg/appconfig"
 	"github.com/atomicdeploy/patris-export/pkg/pricingcurrency"
+	"github.com/gorilla/mux"
 )
 
 type liveCurrencyReadOnlyTransport struct{ writes int }
@@ -122,4 +124,27 @@ func TestLiveOwnerCurrencyReadback(t *testing.T) {
 		t.Fatal("terminal persistence or read-only boundary failed")
 	}
 	t.Logf("read-only restart confirmed: request=%s cny=%d date=%s elapsed_ms=%d; terminal persisted; mutation attempts=%d", request.RequestID, result.settings.YuanPrice, result.settings.CNYEffectiveDate, time.Since(started).Milliseconds(), readOnly.writes)
+	server.excelPricingWrites = restored
+	server.router = mux.NewRouter()
+	server.router.HandleFunc("/api/pricing-sync/session", server.handlePostExcelPricingSession).Methods("POST")
+	routePath := "/api/pricing-sync/writebacks/{job_id}/reconcile"
+	server.router.HandleFunc(routePath, server.handleGetCurrencyWritebackReconcile).Methods("GET")
+	endpoint := "/api/pricing-sync/writebacks/" + job.JobID + "/reconcile"
+	denied := httptest.NewRecorder()
+	server.router.ServeHTTP(denied, newExcelPricingRequest(http.MethodGet, endpoint, ""))
+	if denied.Code != http.StatusForbidden {
+		t.Fatal("reconciliation session gate failed")
+	}
+	token := openExcelPricingSession(t, server)
+	response := httptest.NewRecorder()
+	server.router.ServeHTTP(response, authenticatedExcelPricingRequest(http.MethodGet, endpoint, "", token))
+	var current struct {
+		JobID    string               `json:"job_id"`
+		Settings excelPricingSettings `json:"current_settings"`
+		Revision string               `json:"current_state_revision"`
+	}
+	if response.Code != http.StatusOK || json.Unmarshal(response.Body.Bytes(), &current) != nil || current.JobID != job.JobID || current.Settings != result.settings || !isSHA256Revision(current.Revision) || readOnly.writes != 0 {
+		t.Fatal("live current-value reconciliation failed")
+	}
+	t.Log("authenticated current-value reconciliation passed; no mutation or original-intent confirmation")
 }

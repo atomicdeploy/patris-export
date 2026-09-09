@@ -297,6 +297,7 @@ func (s *Server) setupRoutes() {
 	s.router.HandleFunc("/api/pricing-sync/apply", s.handlePostExcelPricingApply).Methods("POST")
 	s.router.HandleFunc("/api/pricing-sync/writebacks", s.handlePostExcelPricingWriteback).Methods("POST")
 	s.router.HandleFunc("/api/pricing-sync/writebacks/{job_id}", s.handleGetExcelPricingWriteback).Methods("GET")
+	s.router.HandleFunc("/api/pricing-sync/writebacks/{job_id}/reconcile", s.handleGetCurrencyWritebackReconcile).Methods("GET")
 	s.router.HandleFunc("/api/pricing-sync/writebacks/{job_id}/ack", s.handlePostExcelPricingWritebackACK).Methods("POST")
 	s.router.HandleFunc("/api/pricing-sync/writebacks/{job_id}/observe", s.handlePostCurrencyWritebackObserve).Methods("POST")
 	s.router.HandleFunc("/api/pricing-sync/confirmations", s.handlePostExcelPricingConfirmation).Methods("POST")

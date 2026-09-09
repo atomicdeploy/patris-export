@@ -204,6 +204,7 @@ Private mWritebackRequestID As String
 Private mWritebackJobID As String
 Private mWritebackCSRFToken As String
 Private mWritebackObserveAfterSession As Boolean
+Private mWritebackReconcileAfterSession As Boolean
 Private mWritebackPollCount As Long
 Private mWritebackHTTPWaitCount As Long
 Private mPricingEditGeneration As Long
@@ -5619,6 +5620,16 @@ Public Sub SyncPricingSettingsNow()
     Dim visibleCNYPending As Boolean
 
     ResumeAfterCancelledClose
+    If Not mWorkbookClosing And mWritebackStage = "owner_terminal" And _
+       mWritebackRequest Is Nothing Then
+        mWritebackReconcileAfterSession = True
+        mWritebackCSRFToken = vbNullString
+        mWritebackStage = "session"
+        RunBackgroundWritebackStep
+        Exit Sub
+    End If
+    If mWritebackStage = "reconciled_waiting_sync" Then _
+        mWritebackStage = vbNullString
     If Not mWorkbookClosing And mWritebackStage = "observation_required" And _
        mWritebackRequest Is Nothing Then
         mWritebackObserveAfterSession = True
@@ -5888,6 +5899,8 @@ Public Sub RunScheduledPricingWriteback()
         RunBackgroundWritebackStep
         Exit Sub
     End If
+    ' Paused owner outcomes and reconciled proposals require explicit Sync Now.
+    If Len(mWritebackStage) > 0 Then Exit Sub
     EnsureWritebackQueue
     If mWritebackPending.Count = 0 Then Exit Sub
     For Each pendingKey In mWritebackPending.Keys
@@ -5947,6 +5960,8 @@ Private Sub RunBackgroundWritebackStep()
     Dim failureSource As String
     Dim failureDescription As String
     Dim newerProposalQueued As Boolean
+    Dim originalRequest As JsonValue
+    Dim expectedRequestID As String
 
     On Error GoTo RequestFailed
     If Not mWritebackRequest Is Nothing Then
@@ -6005,6 +6020,11 @@ Private Sub RunBackgroundWritebackStep()
             endpoint = PricingBaseURL() & "/writebacks/" & _
                 mWritebackJobID & "/observe"
             requestBody = "{}"
+        Case "reconcile"
+            If Len(mWritebackJobID) <> 32 Then GoTo InvalidResponse
+            methodName = "GET"
+            endpoint = PricingBaseURL() & "/writebacks/" & _
+                mWritebackJobID & "/reconcile"
         Case "ack"
             If Len(mWritebackJobID) <> 32 Then GoTo InvalidResponse
             methodName = "POST"
@@ -6069,15 +6089,32 @@ ResponseReady:
             mWritebackCSRFToken = Trim$(CStr(BlankIfNull( _
                 JsonRuntime.JsonText(root, "csrf_token"))))
             If Len(mWritebackCSRFToken) <> 43 Then GoTo InvalidResponse
-            If mWritebackObserveAfterSession Then
+            If mWritebackReconcileAfterSession Then
+                mWritebackStage = "reconcile"
+            ElseIf mWritebackObserveAfterSession Then
                 mWritebackStage = "observe"
             Else
                 mWritebackStage = "enqueue"
             End If
             RunBackgroundWritebackStep
+        Case "reconcile"
+            ApplyCurrentOwnerReconciliation root
+            CompletePricingWriteback False
+            mWritebackStage = "reconciled_waiting_sync"
         Case "enqueue", "observe"
             If CStr(JsonRuntime.JsonText(root, "schema")) <> _
                PRICING_WRITEBACK_JOB_SCHEMA Then GoTo InvalidResponse
+            expectedRequestID = mWritebackRequestID
+            If mWritebackStage = "enqueue" And _
+               mWritebackSettingKey = "settings_batch" Then
+                Set originalRequest = JsonRuntime.ParseJson(mActiveWritebackRequestBody)
+                If originalRequest Is Nothing Then GoTo InvalidResponse
+                expectedRequestID = CStr(JsonRuntime.JsonText(originalRequest, "request_id"))
+            End If
+            If Len(expectedRequestID) < 8 Or _
+               CStr(JsonRuntime.JsonText(root, "request_id")) <> expectedRequestID Then _
+                GoTo InvalidResponse
+            mWritebackRequestID = expectedRequestID
             mWritebackJobID = Trim$(CStr(BlankIfNull( _
                 JsonRuntime.JsonText(root, "job_id"))))
             If Len(mWritebackJobID) <> 32 Then GoTo InvalidResponse
@@ -6228,7 +6265,7 @@ RequestFailed:
     FailPricingWriteback messageText
 End Sub
 
-Private Sub CompletePricingWriteback()
+Private Sub CompletePricingWriteback(Optional ByVal dispatchPending As Boolean = True)
     Dim completedSiteConfirmation As Boolean
 
     completedSiteConfirmation = _
@@ -6247,14 +6284,15 @@ Private Sub CompletePricingWriteback()
     mWritebackCSRFToken = vbNullString
     mWritebackPollCount = 0
     mWritebackObserveAfterSession = False
+    mWritebackReconcileAfterSession = False
     mWritebackHTTPWaitCount = 0
     mActiveWritebackGeneration = 0
     mActiveWritebackDesiredValue = vbNullString
     mActiveWritebackKeys = vbNullString
     mActiveWritebackRequestBody = vbNullString
     EnsureWritebackQueue
-    If mWritebackPending.Count > 0 Then SchedulePricingWriteback 1
-    If mWritebackPending.Count = 0 And mPricingAutoSyncPending Then _
+    If dispatchPending And mWritebackPending.Count > 0 Then SchedulePricingWriteback 1
+    If dispatchPending And mWritebackPending.Count = 0 And mPricingAutoSyncPending Then _
         KickQueuedPricingAutoSync
     If completedSiteConfirmation Then
         ' Applying the website-confirmed setting already updates the hidden
@@ -6575,6 +6613,168 @@ RestoreExit:
     mInternalPricingRefresh = False
 End Sub
 
+Private Sub ApplyCurrentOwnerReconciliation(ByVal root As JsonValue)
+    Dim document As JsonValue
+    Dim settings As Worksheet
+    Dim currentValues As Object
+    Dim preserveProposal As Object
+    Dim keys As Variant
+    Dim keyValue As Variant
+    Dim fieldValue As Variant
+    Dim keepProposal As Boolean
+    Dim hasPendingProposal As Boolean
+    Dim relatedDate As Boolean
+    Dim revisionText As String
+    Dim ownerStatus As String
+    Dim shippingCurrency As String
+    Dim shippingRevision As String
+    Dim effectiveDate As String
+    Dim savedValues As Variant
+    Dim addresses As Variant
+    Dim index As Long
+    Dim savedM7 As Variant
+    Dim previousEvents As Boolean
+    Dim previousInternal As Boolean
+    Dim failureNumber As Long
+    Dim failureDescription As String
+    Dim noteText As String
+
+    If CStr(JsonRuntime.JsonText(root, "schema")) <> _
+       PRICING_WRITEBACK_JOB_SCHEMA Or _
+       CStr(JsonRuntime.JsonText(root, "job_id")) <> mWritebackJobID Or _
+       CStr(JsonRuntime.JsonText(root, "request_id")) <> mWritebackRequestID Or _
+       CStr(JsonRuntime.JsonText(root, "status")) <> "owner_terminal" Then _
+        GoTo InvalidReadback
+    ownerStatus = CStr(JsonRuntime.JsonText(root, "owner_status"))
+    Select Case ownerStatus
+        Case "confirmed", "failed", "publication_failed", "cancelled", "superseded"
+        Case Else: GoTo InvalidReadback
+    End Select
+    revisionText = CStr(JsonRuntime.JsonText(root, "current_state_revision"))
+    If Not IsSHA256RevisionText(revisionText) Then GoTo InvalidReadback
+    Set document = JsonRuntime.JsonMember(root, "current_settings")
+    If document Is Nothing Then GoTo InvalidReadback
+    If document.Kind <> "object" Then GoTo InvalidReadback
+    shippingCurrency = CStr(JsonRuntime.JsonText(document, "air_express_currency"))
+    shippingRevision = CStr(JsonRuntime.JsonText(document, "shipping_catalog_revision"))
+    effectiveDate = CanonicalDateText(JsonRuntime.JsonText(document, "effective_date"))
+    If shippingCurrency <> "CNY" And shippingCurrency <> "IRR" Then GoTo InvalidReadback
+    If Not IsSHA256RevisionText(shippingRevision) Then GoTo InvalidReadback
+    If Len(effectiveDate) <> 10 Then GoTo InvalidReadback
+    If CStr(JsonRuntime.JsonText(document, "price_rounding_mode")) <> _
+       PRICE_ROUNDING_MODE Then GoTo InvalidReadback
+    keys = Split("yuan_price,dollar_price,cny_effective_date," & _
+        "usd_effective_date,profit_margin_percent," & _
+        "air_express_price_per_kg,price_rounding_digits", ",")
+    Set currentValues = CreateObject("Scripting.Dictionary")
+    Set preserveProposal = CreateObject("Scripting.Dictionary")
+    EnsurePricingDirtyState
+    EnsureWritebackQueue
+    For Each keyValue In keys
+        fieldValue = BlankIfNull(JsonRuntime.JsonText(document, CStr(keyValue)))
+        Select Case CStr(keyValue)
+            Case "cny_effective_date", "usd_effective_date"
+                fieldValue = CanonicalDateText(fieldValue)
+                If Len(CStr(fieldValue)) <> 10 Then GoTo InvalidReadback
+            Case Else
+                If IsEmpty(fieldValue) Or Not IsNumeric(fieldValue) Then GoTo InvalidReadback
+                fieldValue = CDbl(fieldValue)
+                Select Case CStr(keyValue)
+                    Case "yuan_price", "dollar_price"
+                        If CDbl(fieldValue) < 1 Or CDbl(fieldValue) > 1000000000# Or _
+                           CDbl(fieldValue) <> Fix(CDbl(fieldValue)) Then GoTo InvalidReadback
+                    Case "air_express_price_per_kg"
+                        If CDbl(fieldValue) <= 0 Then GoTo InvalidReadback
+                    Case "profit_margin_percent"
+                        If CDbl(fieldValue) < 0 Or CDbl(fieldValue) > 1000 Then GoTo InvalidReadback
+                    Case "price_rounding_digits"
+                        If CDbl(fieldValue) < 0 Or CDbl(fieldValue) > 9 Or _
+                           CDbl(fieldValue) <> Fix(CDbl(fieldValue)) Then GoTo InvalidReadback
+                End Select
+        End Select
+        currentValues(CStr(keyValue)) = fieldValue
+        keepProposal = PricingKeyHasNewerProposal(CStr(keyValue)) Or _
+            mWritebackPending.Exists(CStr(keyValue))
+        relatedDate = (CStr(keyValue) = "cny_effective_date" And _
+            ActiveWritebackContainsKey("yuan_price")) Or _
+            (CStr(keyValue) = "usd_effective_date" And _
+            ActiveWritebackContainsKey("dollar_price"))
+        If Not ActiveWritebackContainsKey(CStr(keyValue)) And Not relatedDate Then
+            keepProposal = keepProposal Or mPricingDirty.Exists(CStr(keyValue)) Or _
+                (ProposedWritebackValue(CStr(keyValue)) <> _
+                 ConfirmedWritebackValue(CStr(keyValue)))
+        End If
+        preserveProposal(CStr(keyValue)) = keepProposal
+        If keepProposal Then hasPendingProposal = True
+    Next keyValue
+    If CStr(currentValues("cny_effective_date")) <> effectiveDate Then _
+        GoTo InvalidReadback
+
+    Set settings = ConfigSheet()
+    savedValues = CapturePricingStateSnapshot(settings)
+    savedM7 = ThisWorkbook.Worksheets(1).Range("M7").Formula
+    previousEvents = Application.EnableEvents
+    previousInternal = mInternalPricingRefresh
+    On Error GoTo RestoreReadback
+    Application.EnableEvents = False
+    mInternalPricingRefresh = True
+    For Each keyValue In keys
+        ApplyConfirmedWritebackValue settings, CStr(keyValue), _
+            currentValues(CStr(keyValue)), Not CBool(preserveProposal(CStr(keyValue)))
+    Next keyValue
+    settings.Range("B12").Value2 = effectiveDate
+    settings.Range("G14").Value2 = revisionText
+    settings.Range("H14").Value2 = shippingCurrency
+    settings.Range("H15").Value2 = shippingRevision
+    settings.Range("H19").Value2 = PRICE_ROUNDING_MODE
+    CalculateRefreshedWorkbook
+    Application.EnableEvents = previousEvents
+    mInternalPricingRefresh = previousInternal
+    On Error GoTo 0
+
+    ' Current readback is separate from the old request's outcome. Keep newer
+    ' proposals, but discard serialized batches built against an old revision.
+    ClearQueuedSettingsBatchMemoryOnly
+    mPricingAutoSyncPending = False
+    UnschedulePricingWriteback
+    noteText = U("064506420627062F06CC0631002006410639064406CC00200633062706CC062A0020062F063106CC06270641062A00200634062F002E")
+    For Each keyValue In keys
+        If CBool(preserveProposal(CStr(keyValue))) Then
+            MarkWritebackState CStr(keyValue), "pending", NewerPricingProposalPendingMessage()
+        Else
+            ClearPricingDirtyKey CStr(keyValue)
+            MarkWritebackState CStr(keyValue), "confirmed", noteText
+        End If
+    Next keyValue
+    settings.Range("B23").Value2 = noteText
+    If hasPendingProposal Then
+        settings.Range("B23").Value2 = noteText & " " & NewerPricingProposalPendingMessage()
+        SetOperationProgressSurface "writeback_reconciled", -1, _
+            settings.Range("B23").Value2, "pending", False
+    Else
+        SetOperationProgressSurface "writeback_reconciled", 100, _
+            noteText, "confirmed", False
+    End If
+    Exit Sub
+
+RestoreReadback:
+    failureNumber = Err.Number
+    failureDescription = Err.Description
+    On Error Resume Next
+    addresses = PricingStateAddresses()
+    For index = LBound(addresses) To UBound(addresses)
+        settings.Range(CStr(addresses(index))).Value2 = savedValues(index)
+    Next index
+    ThisWorkbook.Worksheets(1).Range("M7").Formula = savedM7
+    CalculateRefreshedWorkbook
+    Application.EnableEvents = previousEvents
+    mInternalPricingRefresh = previousInternal
+    On Error GoTo 0
+    Err.Raise failureNumber, "ApplyCurrentOwnerReconciliation", failureDescription
+InvalidReadback:
+    Err.Raise vbObjectError + 798, "ApplyCurrentOwnerReconciliation", T("bridge_missing")
+End Sub
+
 Private Sub PausePricingOwnerObservation(ByVal messageText As String)
     mWritebackStage = "observation_required"
     Set mWritebackRequest = Nothing
@@ -6587,6 +6787,11 @@ End Sub
 Private Sub FailPricingWriteback(ByVal reasonText As String)
     Dim newerProposalQueued As Boolean
 
+    If mWritebackStage = "reconcile" Or mWritebackReconcileAfterSession Then
+        PausePricingOwnerObservation reasonText
+        mWritebackStage = "owner_terminal"
+        Exit Sub
+    End If
     If mWritebackStage = "observe" Or mWritebackObserveAfterSession Then
         PausePricingOwnerObservation reasonText
         Exit Sub
