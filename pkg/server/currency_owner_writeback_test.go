@@ -50,8 +50,8 @@ func TestOwnerCurrencyWritebackQueue(t *testing.T) {
 						return
 					}
 					json.NewEncoder(w).Encode(owner)
-				case strings.HasSuffix(r.URL.Path, "/state"):
-					json.NewEncoder(w).Encode(map[string]any{"schema": excelPricingStateSchema, "state_revision": excelPricingRevisionForTest("owner-confirmed"), "settings": settings})
+				case r.URL.Path == "/wp-json/digitalogic/v1/currency" && r.Method == "GET":
+					json.NewEncoder(w).Encode(map[string]any{"success": true, "data": map[string]any{"state_revision": excelPricingRevisionForTest("owner-confirmed"), "settings": settings}})
 				default:
 					t.Errorf("unexpected path %s", r.URL.Path)
 					w.WriteHeader(500)

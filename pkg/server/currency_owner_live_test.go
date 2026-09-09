@@ -1,0 +1,54 @@
+package server
+
+import (
+	"context"
+	"encoding/json"
+	"github.com/atomicdeploy/patris-export/pkg/appconfig"
+	"github.com/atomicdeploy/patris-export/pkg/pricingcurrency"
+	"net/url"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"testing"
+	"time"
+)
+
+// Explicit operator-only probe. ownerObserveOnly prevents currency admission.
+func TestLiveOwnerCurrencyReadback(t *testing.T) {
+	if os.Getenv("DIGITALOGIC_LIVE_OWNER_PROBE") != "1" {
+		t.Skip("operator opt-in required")
+	}
+	path := filepath.Join(os.Getenv("APPDATA"), "Patris Export", "config.json")
+	if _, err := os.Stat(path); err != nil {
+		t.Fatal("existing configuration required")
+	}
+	manager, err := appconfig.Load(path)
+	if err != nil {
+		t.Fatal("configuration unavailable")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
+	server := &Server{config: manager, excelPricing: newExcelPricingState()}
+	queue := newExcelPricingWritebackQueue(server)
+	origin, err := url.Parse(server.Config().SendUpdates.URL)
+	if err != nil {
+		t.Fatal("invalid origin")
+	}
+	c := pricingcurrency.Client{Origin: origin.Scheme + "://" + origin.Host, Key: os.Getenv("DIGITALOGIC_PRICING_WRITE_KEY"), Secret: os.Getenv("DIGITALOGIC_PRICING_WRITE_SECRET")}
+	state, err := c.Read(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var settings excelPricingSettings
+	if json.Unmarshal(state.Settings, &settings) != nil || validateExcelPricingSettings(settings) != nil {
+		t.Fatal("canonical owner settings invalid")
+	}
+	job := &excelPricingWritebackJob{JobID: strings.Repeat("e", 32), RequestID: "cli-cny-restore-20260909-02", SettingKey: "yuan_price", ownerObserveOnly: true, settings: settings, DesiredValue: strconv.FormatInt(settings.YuanPrice, 10)}
+	started := time.Now()
+	result := queue.processOwnerCurrency(ctx, job)
+	if result.status != "confirmed" || result.transactionID != "" || result.ackDeadline != 0 {
+		t.Fatalf("unconfirmed: status=%s code=%s", result.status, result.code)
+	}
+	t.Logf("read-only owner request confirmed: cny=%d date=%s elapsed_ms=%d; no admission permitted", result.settings.YuanPrice, result.settings.CNYEffectiveDate, time.Since(started).Milliseconds())
+}

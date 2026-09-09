@@ -75,10 +75,15 @@ func (queue *excelPricingWritebackQueue) processOwnerCurrency(ctx context.Contex
 		}
 		switch owner.Status {
 		case "confirmed":
-			document, readErr := queue.readbackDocument(ctx, job)
+			state, readErr := client.Read(ctx)
 			if readErr != nil {
 				return failed("currency_owner_readback_failed")
 			}
+			var settings excelPricingSettings
+			if json.Unmarshal(state.Settings, &settings) != nil || validateExcelPricingSettings(settings) != nil {
+				return failed("currency_owner_settings_unverified")
+			}
+			document := excelPricingStateDocument{Settings: settings, StateRevision: state.StateRevision}
 			if len(owner.DesiredCurrency) == 0 {
 				return failed("currency_owner_desired_missing")
 			}

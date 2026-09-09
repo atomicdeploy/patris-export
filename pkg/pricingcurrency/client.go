@@ -49,6 +49,7 @@ type Job struct {
 }
 
 type State struct {
+	Settings         json.RawMessage `json:"settings"`
 	StateRevision    string          `json:"state_revision"`
 	YuanPrice        json.RawMessage `json:"yuan_price"`
 	DollarPrice      json.RawMessage `json:"dollar_price"`

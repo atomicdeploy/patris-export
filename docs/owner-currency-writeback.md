@@ -21,3 +21,7 @@ Consumer/recovery checkpoint:
 - Single and batch confirmations consume owner currency dates, preserving newer date proposals. Single-confirmation errors propagate instead of silently becoming successful completion.
 - Queue checks now cover uncertain submission followed by explicit recovery to confirmed with only one currency POST. Existing writeback and relevant VBA source checks pass.
 - Native VBA execution, recovery after workbook/service restart, local session expiry, full mixed-setting unification and service credential inheritance remain open. Paused intent here is retained in the active session; this is not a claim of a complete disk-backed journal.
+
+Live owner readback correction:
+The first real execution failed because currency confirmation still called the old pricing state projection, whose schema differed from production. Currency REST now exposes canonical settings alongside the same state_revision; Go verifies those owner settings directly through its currency client. This removes the old state-contract/product-source credential dependency from currency confirmation.
+The explicit read-only live queue probe then passed against production generation66: CNY34500,date2026-09-08, confirmation/readback2640ms (whole probe4.02s). No admission or price mutation was permitted. Transport and writeback tests passed. Installed-service writeback and native Excel remain unverified; the production Go binary is still unchanged.
