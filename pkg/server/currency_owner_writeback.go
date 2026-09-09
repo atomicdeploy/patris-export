@@ -4,12 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/http"
 	"net/url"
 	"os"
 	"strings"
 	"time"
 
 	"github.com/atomicdeploy/patris-export/pkg/pricingcurrency"
+	"github.com/gorilla/mux"
 )
 
 func currencyOnlyWriteback(job *excelPricingWritebackJob) bool {
@@ -46,6 +48,9 @@ func (queue *excelPricingWritebackQueue) processOwnerCurrency(ctx context.Contex
 	// An unclassified missing/error response is not permission to submit again.
 	owner, err := client.Observe(ctx, job.RequestID)
 	if err != nil {
+		if job.ownerObserveOnly {
+			return failed("currency_owner_observation_failed")
+		}
 		var remote *pricingcurrency.Error
 		if !errors.As(err, &remote) || !remote.NotFound {
 			return failed("currency_owner_observation_failed")
@@ -112,6 +117,57 @@ func (queue *excelPricingWritebackQueue) processOwnerCurrency(ctx context.Contex
 			return failed("currency_owner_observation_failed")
 		}
 	}
+}
+
+// Explicit recovery observes the existing owner identity; it cannot submit.
+func (queue *excelPricingWritebackQueue) observeCurrency(jobID string) (*excelPricingWritebackJob, error) {
+	queue.mu.Lock()
+	defer queue.mu.Unlock()
+	job := queue.jobs[jobID]
+	if job == nil {
+		return nil, errors.New("writeback_not_found")
+	}
+	if !currencyOnlyWriteback(job) || !queue.isLatestLocked(job) {
+		return nil, errors.New("writeback_not_observable")
+	}
+	if job.Status == "confirmed" || job.Status == "pending" || job.Status == "sending" {
+		return cloneExcelPricingWritebackJob(job), nil
+	}
+	if job.Status != "observation_required" {
+		return nil, errors.New("writeback_not_observable")
+	}
+	job.ownerObserveOnly = true
+	job.Status = "pending"
+	job.nextAttemptAt = queue.now().UTC()
+	queue.signal()
+	return cloneExcelPricingWritebackJob(job), nil
+}
+
+func (s *Server) handlePostCurrencyWritebackObserve(w http.ResponseWriter, r *http.Request) {
+	setExcelPricingResponseHeaders(w)
+	if !s.authorizeExcelPricingWriteback(r) {
+		writeExcelPricingError(w, http.StatusForbidden, "local_session_required")
+		return
+	}
+	if !singleJSONContentType(r) {
+		writeExcelPricingError(w, http.StatusUnsupportedMediaType, "json_required")
+		return
+	}
+	var empty map[string]json.RawMessage
+	if decodeBoundedJSON(w, r, 1024, &empty) != nil || empty == nil || len(empty) != 0 {
+		writeExcelPricingError(w, http.StatusBadRequest, "invalid_request")
+		return
+	}
+	job, err := s.excelPricingWrites.observeCurrency(strings.TrimSpace(mux.Vars(r)["job_id"]))
+	if err != nil {
+		status := http.StatusConflict
+		if err.Error() == "writeback_not_found" {
+			status = http.StatusNotFound
+		}
+		writeExcelPricingError(w, status, err.Error())
+		return
+	}
+	writeExcelPricingJSON(w, http.StatusAccepted, job)
 }
 
 func currencyRawString(raw json.RawMessage) string {

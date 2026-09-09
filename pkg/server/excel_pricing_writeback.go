@@ -87,6 +87,7 @@ type excelPricingWritebackJob struct {
 	confirmedSettings       excelPricingSettings
 	confirmationSource      canonical.Source
 	ackOnly                 bool
+	ownerObserveOnly        bool
 	createdAt               time.Time
 	nextAttemptAt           time.Time
 }

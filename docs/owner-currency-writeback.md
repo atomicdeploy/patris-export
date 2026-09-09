@@ -14,3 +14,10 @@ Before promotion:
 - Verify real installed-service admission, readback and restart/recovery before PR/merge. No claim of durable local journaling or native Excel acceptance is made.
 
 The existing production Go service remains unchanged and ready. Product snapshots, rollback features and broad compatibility paths are not prerequisites for this operational identity mechanism.
+
+Consumer/recovery checkpoint:
+- Explicit POST /api/pricing-sync/writebacks/{job_id}/observe requeues owner observation only; even request-not-found during this recovery cannot submit currency.
+- VBA observation_required preserves active value/request identity and pauses without RestoreWritebackValueFromTerminal or CompletePricingWriteback. SyncPricingSettingsNow resumes that local job through /observe instead of enqueueing another mutation.
+- Single and batch confirmations consume owner currency dates, preserving newer date proposals. Single-confirmation errors propagate instead of silently becoming successful completion.
+- Queue checks now cover uncertain submission followed by explicit recovery to confirmed with only one currency POST. Existing writeback and relevant VBA source checks pass.
+- Native VBA execution, recovery after workbook/service restart, local session expiry, full mixed-setting unification and service credential inheritance remain open. Paused intent here is retained in the active session; this is not a claim of a complete disk-backed journal.

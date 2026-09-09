@@ -11,9 +11,9 @@ import (
 )
 
 func TestOwnerCurrencyWritebackQueue(t *testing.T) {
-	for _, mode := range []string{"confirmed_without_ack", "uncertain_no_retry", "existing_owner_request"} {
+	for _, mode := range []string{"confirmed_without_ack", "uncertain_no_retry", "existing_owner_request", "uncertain_recovery"} {
 		t.Run(mode, func(t *testing.T) {
-			uncertain := mode == "uncertain_no_retry"
+			uncertain := strings.HasPrefix(mode, "uncertain_")
 			replay := mode == "existing_owner_request"
 			t.Setenv("DIGITALOGIC_PRICING_WRITE_KEY", "ck_"+strings.Repeat("a", 40))
 			t.Setenv("DIGITALOGIC_PRICING_WRITE_SECRET", "cs_"+strings.Repeat("b", 40))
@@ -23,11 +23,13 @@ func TestOwnerCurrencyWritebackQueue(t *testing.T) {
 			settings.EffectiveDate = "2026-09-09"
 			owner := map[string]any{"success": true, "data": map[string]any{"job_id": strings.Repeat("d", 32), "generation": 1, "request_id": request.RequestID, "status": "confirmed", "desired_currency": map[string]any{"yuan_price": 29500, "cny_effective_date": "2026-09-09"}}}
 			var writes atomic.Int32
+			var recovered atomic.Bool
+			recoveryRequested := false
 			remote := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				w.Header().Set("Content-Type", "application/json")
 				switch {
 				case strings.Contains(r.URL.Path, "/currency/requests/"):
-					if replay {
+					if replay || recovered.Load() {
 						json.NewEncoder(w).Encode(owner)
 						return
 					}
@@ -66,6 +68,14 @@ func TestOwnerCurrencyWritebackQueue(t *testing.T) {
 			for time.Now().Before(deadline) {
 				job := server.excelPricingWrites.get(accepted.JobID)
 				if job.Status == "confirmed" || job.Status == "observation_required" {
+					if mode == "uncertain_recovery" && !recoveryRequested && job.Status == "observation_required" {
+						recovered.Store(true)
+						recoveryRequested = true
+						if _, err := server.excelPricingWrites.observeCurrency(job.JobID); err != nil {
+							t.Fatal(err)
+						}
+						continue
+					}
 					wantWrites := int32(1)
 					if replay {
 						wantWrites = 0
@@ -73,7 +83,7 @@ func TestOwnerCurrencyWritebackQueue(t *testing.T) {
 					if writes.Load() != wantWrites {
 						t.Fatalf("writes=%d", writes.Load())
 					}
-					if uncertain {
+					if uncertain && !recoveryRequested {
 						if job.Status != "observation_required" || job.RetryCount != 0 {
 							t.Fatalf("unexpected uncertain state %#v", job)
 						}

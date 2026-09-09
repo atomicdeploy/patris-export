@@ -5618,6 +5618,12 @@ Public Sub SyncPricingSettingsNow()
     Dim visibleCNYPending As Boolean
 
     ResumeAfterCancelledClose
+    If Not mWorkbookClosing And mWritebackStage = "observation_required" And _
+       mWritebackRequest Is Nothing Then
+        mWritebackStage = "observe"
+        RunBackgroundWritebackStep
+        Exit Sub
+    End If
     If mWorkbookClosing Or Len(mWritebackStage) > 0 Or _
        Not mWritebackRequest Is Nothing Then Exit Sub
     RestoreQueuedVisibleCNYFormula
@@ -5990,6 +5996,12 @@ Private Sub RunBackgroundWritebackStep()
                 requestBody = BuildPricingWritebackRequest( _
                     mWritebackSettingKey, mWritebackRequestID)
             End If
+        Case "observe"
+            If Len(mWritebackJobID) <> 32 Then GoTo InvalidResponse
+            methodName = "POST"
+            endpoint = PricingBaseURL() & "/writebacks/" & _
+                mWritebackJobID & "/observe"
+            requestBody = "{}"
         Case "ack"
             If Len(mWritebackJobID) <> 32 Then GoTo InvalidResponse
             methodName = "POST"
@@ -6056,7 +6068,7 @@ ResponseReady:
             If Len(mWritebackCSRFToken) <> 43 Then GoTo InvalidResponse
             mWritebackStage = "enqueue"
             RunBackgroundWritebackStep
-        Case "enqueue"
+        Case "enqueue", "observe"
             If CStr(JsonRuntime.JsonText(root, "schema")) <> _
                PRICING_WRITEBACK_JOB_SCHEMA Then GoTo InvalidResponse
             mWritebackJobID = Trim$(CStr(BlankIfNull( _
@@ -6110,11 +6122,16 @@ ResponseReady:
                             revisionText, Trim$(CStr(BlankIfNull( _
                             JsonRuntime.JsonText(root, "updated_at"))))
                     Else
-                        ConfirmPricingWriteback messageText, revisionText, _
+                        ConfirmPricingWriteback root, messageText, revisionText, _
                             confirmedValue, Trim$(CStr(BlankIfNull( _
                             JsonRuntime.JsonText(root, "updated_at"))))
                     End If
                     CompletePricingWriteback
+                Case "observation_required"
+                    ' Unknown delivery must not restore a stale value or erase
+                    ' the exact request needed for owner-side recovery.
+                    PausePricingOwnerObservation messageText
+                    Exit Sub
                 Case "superseded"
                     CompletePricingWriteback
                 Case "conflict", "failed"
@@ -6349,6 +6366,35 @@ Private Sub ApplyConfirmedSettingsForActiveBatch( _
             confirmedValue, updateProposals And _
             Not PricingKeyHasNewerProposal(CStr(keyValue))
     Next keyValue
+    ApplyOwnerCurrencyDates root, settings, updateProposals
+End Sub
+
+Private Sub ApplyOwnerCurrencyDates(ByVal root As JsonValue, _
+        ByVal settings As Worksheet, ByVal updateProposals As Boolean)
+    Dim document As JsonValue
+    Dim keys As String
+    Dim dateKey As Variant
+    Dim rateKey As String
+    Dim confirmedDate As String
+
+    keys = "," & mWritebackSettingKey & ","
+    If mWritebackSettingKey = "settings_batch" Then _
+        keys = "," & mActiveWritebackKeys & ","
+    Set document = JsonRuntime.JsonMember(root, "confirmed_settings")
+    For Each dateKey In Array("cny_effective_date", "usd_effective_date")
+        rateKey = "yuan_price"
+        If CStr(dateKey) = "usd_effective_date" Then rateKey = "dollar_price"
+        If InStr(1, keys, "," & rateKey & ",", vbBinaryCompare) > 0 Then
+            If document Is Nothing Then Err.Raise vbObjectError + 784, _
+                "ApplyOwnerCurrencyDates", T("bridge_missing")
+            confirmedDate = CanonicalDateText( _
+                JsonRuntime.JsonText(document, CStr(dateKey)))
+            If Len(confirmedDate) = 0 Then Err.Raise vbObjectError + 784, _
+                "ApplyOwnerCurrencyDates", T("bridge_missing")
+            ApplyConfirmedWritebackValue settings, CStr(dateKey), confirmedDate, _
+                updateProposals And Not PricingKeyHasNewerProposal(CStr(dateKey))
+        End If
+    Next dateKey
 End Sub
 
 Private Sub ApplyConfirmedWritebackValue(ByVal settings As Worksheet, _
@@ -6513,9 +6559,22 @@ RestoreExit:
     mInternalPricingRefresh = False
 End Sub
 
+Private Sub PausePricingOwnerObservation(ByVal messageText As String)
+    mWritebackStage = "observation_required"
+    Set mWritebackRequest = Nothing
+    messageText = messageText & " Request: " & mWritebackRequestID
+    MarkActiveWritebackStatePreservingNewer "warning", messageText
+    SetOperationProgressSurface "writeback_observation_required", _
+        -1, messageText, "warning", True
+End Sub
+
 Private Sub FailPricingWriteback(ByVal reasonText As String)
     Dim newerProposalQueued As Boolean
 
+    If mWritebackStage = "observe" Then
+        PausePricingOwnerObservation reasonText
+        Exit Sub
+    End If
     If Len(Trim$(reasonText)) = 0 Then reasonText = T("sync_retry")
     If mWritebackSettingKey = "settings_batch" Then
         reasonText = _
@@ -6589,7 +6648,8 @@ ConfirmFailed:
     Err.Raise Err.Number, "ConfirmPricingBatchWriteback", Err.Description
 End Sub
 
-Private Sub ConfirmPricingWriteback(ByVal messageText As String, _
+Private Sub ConfirmPricingWriteback(ByVal root As JsonValue, _
+                                    ByVal messageText As String, _
                                     ByVal revisionText As String, _
                                     ByVal confirmedValue As String, _
                                     ByVal updatedAt As String)
@@ -6599,12 +6659,14 @@ Private Sub ConfirmPricingWriteback(ByVal messageText As String, _
     Dim noteText As String
     Dim normalizedSettingKey As String
     Dim newerProposalQueued As Boolean
+    Dim failureNumber As Long
+    Dim failureDescription As String
 
     Set settings = ConfigSheet()
     Set inputCell = WritebackCell(mWritebackSettingKey)
     If inputCell Is Nothing Then Exit Sub
     previousEvents = Application.EnableEvents
-    On Error GoTo CleanExit
+    On Error GoTo ConfirmFailed
     Application.EnableEvents = False
     If IsSHA256RevisionText(revisionText) Then
         settings.Range("G14").Value2 = revisionText
@@ -6615,6 +6677,7 @@ Private Sub ConfirmPricingWriteback(ByVal messageText As String, _
     newerProposalQueued = WritebackHasNewerProposal()
     ApplyConfirmedWritebackValue settings, normalizedSettingKey, _
         confirmedValue, Not newerProposalQueued
+    ApplyOwnerCurrencyDates root, settings, True
     If normalizedSettingKey = "yuan_price" And _
        Not newerProposalQueued Then ClearDurablePendingPricingIntent
     noteText = U("062A062306CC06CC062F002006480631062F067E06310633")
@@ -6640,6 +6703,12 @@ Private Sub ConfirmPricingWriteback(ByVal messageText As String, _
     End If
 CleanExit:
     Application.EnableEvents = previousEvents
+    Exit Sub
+ConfirmFailed:
+    failureNumber = Err.Number
+    failureDescription = Err.Description
+    Application.EnableEvents = previousEvents
+    Err.Raise failureNumber, "ConfirmPricingWriteback", failureDescription
 End Sub
 
 Private Sub MarkWritebackState(ByVal settingKey As String, _
