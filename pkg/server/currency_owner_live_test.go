@@ -3,8 +3,6 @@ package server
 import (
 	"context"
 	"encoding/json"
-	"github.com/atomicdeploy/patris-export/pkg/appconfig"
-	"github.com/atomicdeploy/patris-export/pkg/pricingcurrency"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -12,9 +10,13 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/atomicdeploy/patris-export/pkg/appconfig"
+	"github.com/atomicdeploy/patris-export/pkg/pricingcurrency"
 )
 
-// Explicit operator-only probe. ownerObserveOnly prevents currency admission.
+// Explicit operator-only probe. Default is read-only; admitting the unchanged
+// current value requires a second opt-in and a caller-supplied stable identity.
 func TestLiveOwnerCurrencyReadback(t *testing.T) {
 	if os.Getenv("DIGITALOGIC_LIVE_OWNER_PROBE") != "1" {
 		t.Skip("operator opt-in required")
@@ -43,6 +45,34 @@ func TestLiveOwnerCurrencyReadback(t *testing.T) {
 	var settings excelPricingSettings
 	if json.Unmarshal(state.Settings, &settings) != nil || validateExcelPricingSettings(settings) != nil {
 		t.Fatal("canonical owner settings invalid")
+	}
+	if os.Getenv("DIGITALOGIC_LIVE_OWNER_MODE") == "admit_unchanged" {
+		id := os.Getenv("DIGITALOGIC_LIVE_OWNER_REQUEST_ID")
+		if !strings.HasPrefix(id, "go-owner-unchanged-") {
+			t.Fatal("explicit unique probe request identity required")
+		}
+		request := excelPricingWritebackRequest{Schema: excelPricingWritebackRequestSchema, RequestID: id, SettingKey: "yuan_price", Settings: settings, ExpectedStateRevision: state.StateRevision, PreviousConfirmedValue: strconv.FormatInt(settings.YuanPrice, 10)}
+		accepted, err := queue.enqueue(request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		job, _ := queue.next()
+		if job == nil || job.JobID != accepted.JobID {
+			t.Fatal("queue did not select submitted intent")
+		}
+		started := time.Now()
+		result := queue.processRemote(ctx, job)
+		queue.finish(job, result)
+		confirmed := queue.get(job.JobID)
+		if confirmed.Status != "confirmed" || confirmed.TransactionID != "" || confirmed.ACKDeadline != 0 || confirmed.ConfirmedSettings == nil || *confirmed.ConfirmedSettings != settings {
+			t.Fatalf("request %s needs observation: status=%s code=%s", id, confirmed.Status, confirmed.Code)
+		}
+		owner, err := c.Observe(ctx, id)
+		if err != nil || owner.Status != "confirmed" {
+			t.Fatalf("request %s independent owner observation failed", id)
+		}
+		t.Logf("unchanged admission confirmed: request=%s owner_job=%s generation=%d cny=%d date=%s elapsed_ms=%d; no ACK", id, owner.JobID, owner.Generation, settings.YuanPrice, settings.CNYEffectiveDate, time.Since(started).Milliseconds())
+		return
 	}
 	job := &excelPricingWritebackJob{JobID: strings.Repeat("e", 32), RequestID: "cli-cny-restore-20260909-02", SettingKey: "yuan_price", ownerObserveOnly: true, settings: settings, DesiredValue: strconv.FormatInt(settings.YuanPrice, 10)}
 	started := time.Now()
