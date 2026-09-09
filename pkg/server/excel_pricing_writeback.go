@@ -88,6 +88,7 @@ type excelPricingWritebackJob struct {
 	confirmationSource      canonical.Source
 	ackOnly                 bool
 	ownerObserveOnly        bool
+	originalCurrencyRequest *excelPricingWritebackRequest
 	createdAt               time.Time
 	nextAttemptAt           time.Time
 }
@@ -366,6 +367,9 @@ func (queue *excelPricingWritebackQueue) enqueue(request excelPricingWritebackRe
 	now := queue.now().UTC()
 	queue.mu.Lock()
 	defer queue.mu.Unlock()
+	if existing, replayErr := queue.findCurrencyIntent(request); existing != nil || replayErr != nil {
+		return existing, replayErr
+	}
 	queue.purgeLocked(now)
 	for _, key := range keys {
 		if previousID := queue.latestByKey[key]; previousID != "" {
@@ -405,10 +409,15 @@ func (queue *excelPricingWritebackQueue) enqueue(request excelPricingWritebackRe
 		job.DesiredValue = desiredValues[keys[0]]
 	}
 	if currencyOnlyWriteback(job) {
+		original := cloneCurrencyRequest(request)
+		job.originalCurrencyRequest = &original
 		if queue.currencyJournalError != nil {
 			return nil, errors.New("currency_journal_unavailable")
 		}
 		if err := queue.saveCurrencyIntent(job, request); err != nil {
+			if errors.Is(err, errCurrencyJournalCapacity) || errors.Is(err, errCurrencyIntentConflict) {
+				return nil, err
+			}
 			queue.currencyJournalError = err
 			return nil, errors.New("currency_journal_unavailable")
 		}
@@ -948,9 +957,9 @@ func (s *Server) handlePostExcelPricingWriteback(w http.ResponseWriter, r *http.
 	if err != nil {
 		code := err.Error()
 		status := http.StatusBadRequest
-		if code == "queue_unavailable" || code == "currency_journal_unavailable" {
+		if code == "queue_unavailable" || code == "currency_journal_unavailable" || code == "currency_journal_capacity" {
 			status = http.StatusServiceUnavailable
-		} else if code == "writeback_in_flight" {
+		} else if code == "writeback_in_flight" || code == "currency_request_conflict" {
 			status = http.StatusConflict
 		}
 		writeExcelPricingError(w, status, code)

@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"sort"
 	"strings"
@@ -19,6 +20,8 @@ const currencyJournalLimit = 64 << 10
 
 var currencyJournalID = regexp.MustCompile(`^[a-f0-9]{32}$`)
 var errCurrencyJournal = errors.New("currency_journal_unavailable")
+var errCurrencyJournalCapacity = errors.New("currency_journal_capacity")
+var errCurrencyIntentConflict = errors.New("currency_request_conflict")
 
 // An immutable local admission, saved before any remote submission. It contains
 // only the original caller intent and its owner origin, never credentials.
@@ -174,6 +177,8 @@ func (queue *excelPricingWritebackQueue) loadCurrencyJournal() error {
 		request := r.Request
 		keys, previous, batch, _ := normalizeExcelPricingWritebackIntent(request)
 		job := &excelPricingWritebackJob{Schema: excelPricingWritebackJobSchema, JobID: r.JobID, RequestID: request.RequestID, SettingKey: request.SettingKey, Status: "observation_required", Code: "currency_owner_restart_observation_required", Blocking: true, UpdatedAt: queue.now().UTC().Format(time.RFC3339), settings: request.Settings, expectedStateRevision: request.ExpectedStateRevision, previousConfirmedValue: strings.TrimSpace(request.PreviousConfirmedValue), previousConfirmedValues: previous, sequence: r.Sequence, createdAt: r.CreatedAt, ownerObserveOnly: true}
+		original := cloneCurrencyRequest(request)
+		job.originalCurrencyRequest = &original
 		if batch {
 			job.SettingKey = "settings_batch"
 			job.SettingKeys = keys
@@ -231,10 +236,13 @@ func (queue *excelPricingWritebackQueue) saveCurrencyIntent(job *excelPricingWri
 		return e
 	}
 	if len(entries) >= excelPricingWritebackMaxJobs {
-		return errors.New("currency_journal_capacity")
+		return errCurrencyJournalCapacity
 	}
 	for _, entry := range entries {
-		if entry.record.Sequence == record.Sequence || entry.record.Request.RequestID == request.RequestID {
+		if entry.record.Request.RequestID == request.RequestID {
+			return errCurrencyIntentConflict
+		}
+		if entry.record.Sequence == record.Sequence {
 			return errCurrencyJournal
 		}
 	}
@@ -242,6 +250,72 @@ func (queue *excelPricingWritebackQueue) saveCurrencyIntent(job *excelPricingWri
 		return errCurrencyJournal
 	}
 	return writeCurrencyJournalJSON(filepath.Join(queue.currencyJournalDir, job.JobID+".json"), record)
+}
+
+func cloneCurrencyRequest(request excelPricingWritebackRequest) excelPricingWritebackRequest {
+	request.SettingKeys = append([]string(nil), request.SettingKeys...)
+	request.PreviousConfirmedValues = cloneExcelPricingStringMap(request.PreviousConfirmedValues)
+	return request
+}
+
+// Resolve retained identity before any TTL purge. A retransmitted immutable
+// request is observation of the original local admission, never a new write.
+func (queue *excelPricingWritebackQueue) findCurrencyIntent(request excelPricingWritebackRequest) (*excelPricingWritebackJob, error) {
+	keys, _, _, err := normalizeExcelPricingWritebackIntent(request)
+	if err != nil {
+		return nil, nil
+	}
+	for _, key := range keys {
+		switch key {
+		case "yuan_price", "dollar_price", "cny_effective_date", "usd_effective_date":
+		default:
+			return nil, nil
+		}
+	}
+	entries, err := queue.readCurrencyJournal()
+	if err != nil {
+		queue.currencyJournalError = err
+		return nil, errCurrencyJournal
+	}
+	for _, entry := range entries {
+		if entry.record.Request.RequestID != request.RequestID {
+			continue
+		}
+		if !reflect.DeepEqual(cloneCurrencyRequest(entry.record.Request), cloneCurrencyRequest(request)) {
+			return nil, errCurrencyIntentConflict
+		}
+		if job := queue.jobs[entry.record.JobID]; job != nil {
+			return cloneExcelPricingWritebackJob(job), nil
+		}
+		// The in-memory TTL may have elapsed while durable identity remains.
+		// Restore through an isolated queue so other active jobs are untouched.
+		temporary := &excelPricingWritebackQueue{server: queue.server, currencyJournalDir: queue.currencyJournalDir, jobs: map[string]*excelPricingWritebackJob{}, latestByKey: map[string]string{}, now: queue.now}
+		if err := temporary.loadCurrencyJournal(); err != nil {
+			queue.currencyJournalError = err
+			return nil, errCurrencyJournal
+		}
+		job := temporary.jobs[entry.record.JobID]
+		queue.jobs[job.JobID] = job
+		if temporary.sequence > queue.sequence {
+			queue.sequence = temporary.sequence
+		}
+		for _, key := range excelPricingWritebackJobKeys(job) {
+			current := queue.jobs[queue.latestByKey[key]]
+			if temporary.latestByKey[key] == job.JobID && (current == nil || current.sequence < job.sequence) {
+				queue.latestByKey[key] = job.JobID
+			}
+		}
+		return cloneExcelPricingWritebackJob(job), nil
+	}
+	for _, job := range queue.jobs {
+		if job.RequestID == request.RequestID && currencyOnlyWriteback(job) {
+			if job.originalCurrencyRequest == nil || !reflect.DeepEqual(cloneCurrencyRequest(*job.originalCurrencyRequest), cloneCurrencyRequest(request)) {
+				return nil, errCurrencyIntentConflict
+			}
+			return cloneExcelPricingWritebackJob(job), nil
+		}
+	}
+	return nil, nil
 }
 
 func writeCurrencyJournalJSON(path string, value any) error {

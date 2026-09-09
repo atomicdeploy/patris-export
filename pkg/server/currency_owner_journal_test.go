@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -143,11 +144,86 @@ func TestCurrencyJournalCapacityDoesNotEvictUnresolved(t *testing.T) {
 	if err := q.loadCurrencyJournal(); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := q.enqueue(validExcelPricingWritebackRequest("journal-capacity-overflow", "dollar_price", 29500)); err == nil {
+	if _, err := q.enqueue(validExcelPricingWritebackRequest("journal-capacity-overflow", "dollar_price", 29500)); !errors.Is(err, errCurrencyJournalCapacity) {
 		t.Fatal("unresolved journals evicted for admission")
+	}
+	if q.currencyJournalError != nil {
+		t.Fatal("capacity poisoned admission")
 	}
 	entries, err := q.readCurrencyJournal()
 	if err != nil || len(entries) != excelPricingWritebackMaxJobs {
 		t.Fatalf("capacity modified journals: %d %v", len(entries), err)
+	}
+	latest := q.jobs[q.latestByKey["yuan_price"]]
+	latest.Status = "confirmed"
+	if err := q.markCurrencyJournalTerminal(latest); err != nil {
+		t.Fatal(err)
+	}
+	now := q.now()
+	q.now = func() time.Time { return now.Add(time.Hour) }
+	if _, err := q.enqueue(validExcelPricingWritebackRequest("journal-capacity-retry", "dollar_price", 29500)); err != nil {
+		t.Fatalf("capacity did not recover: %v", err)
+	}
+}
+
+func TestCurrencyJournalDuplicateIdentityIsIdempotentAndConflictNonsticky(t *testing.T) {
+	for _, restart := range []bool{false, true} {
+		t.Run(fmt.Sprint(restart), func(t *testing.T) {
+			dir := t.TempDir()
+			now := time.Now().UTC()
+			q := journalTestQueue(dir, now)
+			request := validExcelPricingWritebackRequest("journal-idempotent-01", "yuan_price", 29500)
+			first, err := q.enqueue(request)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if restart {
+				q = journalTestQueue(dir, now)
+				if err = q.loadCurrencyJournal(); err != nil {
+					t.Fatal(err)
+				}
+			}
+			again, err := q.enqueue(request)
+			if err != nil || again.JobID != first.JobID || again.sequence != first.sequence {
+				t.Fatalf("replay changed identity: %+v %v", again, err)
+			}
+			conflict := request
+			conflict.Settings.YuanPrice++
+			if _, err = q.enqueue(conflict); !errors.Is(err, errCurrencyIntentConflict) {
+				t.Fatalf("missing conflict: %v", err)
+			}
+			if q.currencyJournalError != nil {
+				t.Fatal("conflict poisoned journal")
+			}
+			if _, err = q.enqueue(validExcelPricingWritebackRequest("journal-idempotent-next", "dollar_price", 29500)); err != nil {
+				t.Fatalf("conflict blocked next request: %v", err)
+			}
+		})
+	}
+}
+
+func TestCurrencyJournalReplayChecksDiskBeforePurgingConfirmed(t *testing.T) {
+	now := time.Now().UTC()
+	q := journalTestQueue(t.TempDir(), now)
+	request := validExcelPricingWritebackRequest("journal-confirmed-replay", "yuan_price", 29500)
+	first, err := q.enqueue(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	q.jobs[first.JobID].Status = "confirmed"
+	if err = q.markCurrencyJournalTerminal(q.jobs[first.JobID]); err != nil {
+		t.Fatal(err)
+	}
+	q.now = func() time.Time { return now.Add(time.Hour) }
+	q.purgeLocked(q.now())
+	if q.jobs[first.JobID] != nil {
+		t.Fatal("test did not purge memory")
+	}
+	again, err := q.enqueue(request)
+	if err != nil || again.JobID != first.JobID || !again.ownerObserveOnly {
+		t.Fatalf("retained identity replaced: %+v %v", again, err)
+	}
+	if _, err = os.Stat(filepath.Join(q.currencyJournalDir, first.JobID+".json")); err != nil {
+		t.Fatal("replay pruned its own identity")
 	}
 }
