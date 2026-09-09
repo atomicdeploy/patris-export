@@ -93,15 +93,17 @@ type excelPricingWritebackJob struct {
 }
 
 type excelPricingWritebackQueue struct {
-	mu          sync.Mutex
-	server      *Server
-	jobs        map[string]*excelPricingWritebackJob
-	latestByKey map[string]string
-	sequence    uint64
-	wake        chan struct{}
-	now         func() time.Time
-	retryDelay  func(int) time.Duration
-	process     func(context.Context, *excelPricingWritebackJob) excelPricingWritebackResult
+	mu                   sync.Mutex
+	server               *Server
+	jobs                 map[string]*excelPricingWritebackJob
+	latestByKey          map[string]string
+	sequence             uint64
+	wake                 chan struct{}
+	now                  func() time.Time
+	retryDelay           func(int) time.Duration
+	process              func(context.Context, *excelPricingWritebackJob) excelPricingWritebackResult
+	currencyJournalDir   string
+	currencyJournalError error
 }
 
 type excelPricingWritebackResult struct {
@@ -141,6 +143,10 @@ func newExcelPricingWritebackQueue(server *Server) *excelPricingWritebackQueue {
 		},
 	}
 	queue.process = queue.processRemote
+	if server != nil && server.config != nil {
+		queue.currencyJournalDir = server.config.Path() + ".currency-intents"
+		queue.currencyJournalError = queue.loadCurrencyJournal()
+	}
 	return queue
 }
 
@@ -284,6 +290,11 @@ func (queue *excelPricingWritebackQueue) finish(job *excelPricingWritebackJob, r
 		stored.confirmationSource = result.source
 	}
 	stored.UpdatedAt = now.Format(time.RFC3339)
+	if stored.Status == "confirmed" && currencyOnlyWriteback(stored) {
+		if err := queue.markCurrencyJournalTerminal(stored); err != nil {
+			queue.currencyJournalError = err
+		}
+	}
 }
 
 func (queue *excelPricingWritebackQueue) persistSafeRebase(job *excelPricingWritebackJob) {
@@ -366,13 +377,6 @@ func (queue *excelPricingWritebackQueue) enqueue(request excelPricingWritebackRe
 			}
 		}
 	}
-	for _, key := range keys {
-		if previousID := queue.latestByKey[key]; previousID != "" {
-			if previous := queue.jobs[previousID]; previous != nil && previous.Status == "pending" {
-				queue.supersedeLocked(previous, now)
-			}
-		}
-	}
 	queue.sequence++
 	job := &excelPricingWritebackJob{
 		Schema:                  excelPricingWritebackJobSchema,
@@ -399,6 +403,22 @@ func (queue *excelPricingWritebackQueue) enqueue(request excelPricingWritebackRe
 		job.MessageFA = "تغییرات تأییدنشدهٔ تنظیمات در یک صف امن برای ارسال به وردپرس قرار گرفت."
 	} else {
 		job.DesiredValue = desiredValues[keys[0]]
+	}
+	if currencyOnlyWriteback(job) {
+		if queue.currencyJournalError != nil {
+			return nil, errors.New("currency_journal_unavailable")
+		}
+		if err := queue.saveCurrencyIntent(job, request); err != nil {
+			queue.currencyJournalError = err
+			return nil, errors.New("currency_journal_unavailable")
+		}
+	}
+	for _, key := range keys {
+		if previousID := queue.latestByKey[key]; previousID != "" {
+			if previous := queue.jobs[previousID]; previous != nil && previous.Status == "pending" {
+				queue.supersedeLocked(previous, now)
+			}
+		}
 	}
 	queue.jobs[jobID] = job
 	for _, key := range keys {
@@ -569,10 +589,18 @@ func (queue *excelPricingWritebackQueue) supersedeLocked(job *excelPricingWriteb
 	job.MessageFA = "این تغییر با مقدار جدیدتر همان تنظیم جایگزین شد."
 	job.Blocking = false
 	job.UpdatedAt = now.Format(time.RFC3339)
+	if currencyOnlyWriteback(job) {
+		if err := queue.markCurrencyJournalTerminal(job); err != nil {
+			queue.currencyJournalError = err
+		}
+	}
 }
 
 func (queue *excelPricingWritebackQueue) purgeLocked(now time.Time) {
 	for id, job := range queue.jobs {
+		if currencyOnlyWriteback(job) && job.Status != "confirmed" && job.Status != "superseded" {
+			continue
+		}
 		if now.Sub(job.createdAt) > excelPricingWritebackJobTTL {
 			delete(queue.jobs, id)
 			for _, key := range excelPricingWritebackJobKeys(job) {
@@ -586,6 +614,9 @@ func (queue *excelPricingWritebackQueue) purgeLocked(now time.Time) {
 		return
 	}
 	for id, job := range queue.jobs {
+		if currencyOnlyWriteback(job) && job.Status != "confirmed" && job.Status != "superseded" {
+			continue
+		}
 		if job.Status == "pending" || job.Status == "sending" ||
 			job.Status == "pending_ack" || job.Status == "sending_ack" ||
 			job.Status == "awaiting_excel" {
@@ -917,7 +948,7 @@ func (s *Server) handlePostExcelPricingWriteback(w http.ResponseWriter, r *http.
 	if err != nil {
 		code := err.Error()
 		status := http.StatusBadRequest
-		if code == "queue_unavailable" {
+		if code == "queue_unavailable" || code == "currency_journal_unavailable" {
 			status = http.StatusServiceUnavailable
 		} else if code == "writeback_in_flight" {
 			status = http.StatusConflict
