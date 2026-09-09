@@ -95,12 +95,12 @@ func TestExcelPricingWritebackRejectsUnsupportedOrProductFields(t *testing.T) {
 	}
 }
 
-func TestExcelPricingWritebackWorkerUsesPreviewApplyIdempotencyAndReadback(t *testing.T) {
+func TestExcelPricingNonCurrencyWritebackWorkerUsesPreviewApplyIdempotencyAndReadback(t *testing.T) {
 	initialRevision := excelPricingRevisionForTest("writeback-initial")
 	confirmedRevision := excelPricingRevisionForTest("writeback-confirmed")
 	previewDigest := excelPricingRevisionForTest("writeback-preview")
 	settingsDigest := excelPricingRevisionForTest("writeback-settings")
-	settings := validExcelPricingWritebackRequest("excel-writeback-test-0005", "yuan_price", 29500).Settings
+	settings := validExcelPricingWritebackRequest("excel-writeback-test-0005", "profit_margin_percent", 29500).Settings
 	var previewCalls atomic.Int32
 	var applyCalls atomic.Int32
 	var stateCalls atomic.Int32
@@ -153,7 +153,7 @@ func TestExcelPricingWritebackWorkerUsesPreviewApplyIdempotencyAndReadback(t *te
 			stateSettings := settings
 			stateRevision := confirmedRevision
 			if call == 1 {
-				stateSettings.YuanPrice = 29400
+				stateSettings.ProfitMarginPercent = json.Number("29")
 				stateRevision = initialRevision
 			}
 			confirmationStatus := "awaiting_ack"
@@ -178,9 +178,9 @@ func TestExcelPricingWritebackWorkerUsesPreviewApplyIdempotencyAndReadback(t *te
 		}, nil
 	}
 	token := openExcelPricingSession(t, server)
-	request := validExcelPricingWritebackRequest("excel-writeback-test-0005", "yuan_price", 29500)
+	request := validExcelPricingWritebackRequest("excel-writeback-test-0005", "profit_margin_percent", 29500)
 	request.ExpectedStateRevision = initialRevision
-	request.PreviousConfirmedValue = "29400"
+	request.PreviousConfirmedValue = "29"
 	body, _ := json.Marshal(request)
 	response := httptest.NewRecorder()
 	server.router.ServeHTTP(response, authenticatedExcelPricingRequest(
@@ -212,7 +212,7 @@ func TestExcelPricingWritebackWorkerUsesPreviewApplyIdempotencyAndReadback(t *te
 			ackSent = true
 		}
 		if poll.Code == http.StatusOK && json.Unmarshal(poll.Body.Bytes(), &job) == nil && job.Status == "confirmed" {
-			if job.ConfirmedValue != "29500" || job.StateRevision != confirmedRevision {
+			if job.ConfirmedValue != "30" || job.StateRevision != confirmedRevision {
 				t.Fatalf("confirmed job=%#v", job)
 			}
 			if !ackSent || previewCalls.Load() != 1 || applyCalls.Load() != 1 || stateCalls.Load() < 2 {
@@ -341,9 +341,9 @@ func TestExcelPricingBatchWritebackReturnsFullWebsiteReadbackBeforeACK(t *testin
 	t.Fatalf("batch writeback did not confirm: %#v", server.excelPricingWrites.get(accepted.JobID))
 }
 
-func TestExcelPricingWritebackNoopConfirmsFromReadbackWithoutApply(t *testing.T) {
+func TestExcelPricingNonCurrencyWritebackNoopConfirmsFromReadbackWithoutApply(t *testing.T) {
 	confirmedRevision := excelPricingRevisionForTest("writeback-noop-confirmed")
-	settings := validExcelPricingWritebackRequest("excel-writeback-test-0006", "yuan_price", 29500).Settings
+	settings := validExcelPricingWritebackRequest("excel-writeback-test-0006", "profit_margin_percent", 29500).Settings
 	var stateCalls atomic.Int32
 	var mutationCalls atomic.Int32
 	remote := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -369,7 +369,7 @@ func TestExcelPricingWritebackNoopConfirmsFromReadbackWithoutApply(t *testing.T)
 	server.excelPricing.permit <- struct{}{}
 	t.Cleanup(func() { <-server.excelPricing.permit })
 	token := openExcelPricingSession(t, server)
-	request := validExcelPricingWritebackRequest("excel-writeback-test-0006", "yuan_price", 29500)
+	request := validExcelPricingWritebackRequest("excel-writeback-test-0006", "profit_margin_percent", 29500)
 	body, _ := json.Marshal(request)
 	response := httptest.NewRecorder()
 	server.router.ServeHTTP(response, authenticatedExcelPricingRequest(
@@ -386,7 +386,7 @@ func TestExcelPricingWritebackNoopConfirmsFromReadbackWithoutApply(t *testing.T)
 	for time.Now().Before(deadline) {
 		job := server.excelPricingWrites.get(accepted.JobID)
 		if job != nil && job.Status == "confirmed" {
-			if job.ConfirmedValue != "29500" || job.StateRevision != confirmedRevision {
+			if job.ConfirmedValue != "30" || job.StateRevision != confirmedRevision {
 				t.Fatalf("confirmed job=%#v", job)
 			}
 			if stateCalls.Load() != 1 || mutationCalls.Load() != 0 {

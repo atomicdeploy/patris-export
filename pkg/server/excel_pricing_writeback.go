@@ -271,7 +271,7 @@ func (queue *excelPricingWritebackQueue) finish(job *excelPricingWritebackJob, r
 	stored.ConfirmedValue = result.confirmedValue
 	stored.ConfirmedValues = cloneExcelPricingStringMap(result.confirmedValues)
 	stored.StateRevision = result.stateRevision
-	if len(stored.SettingKeys) > 0 && validateExcelPricingSettings(result.settings) == nil {
+	if (len(stored.SettingKeys) > 0 || currencyOnlyWriteback(stored)) && validateExcelPricingSettings(result.settings) == nil {
 		confirmed := result.settings
 		stored.ConfirmedSettings = &confirmed
 	}
@@ -628,6 +628,9 @@ func (queue *excelPricingWritebackQueue) processRemote(ctx context.Context, job 
 	}
 	bounded, cancel := context.WithTimeout(ctx, excelPricingWritebackTimeout)
 	defer cancel()
+	if currencyOnlyWriteback(job) {
+		return queue.processOwnerCurrency(bounded, job)
+	}
 	// The queue is already single-worker and coalesces newer edits per setting.
 	// Do not share the catalog snapshot permit here: an inbound product refresh
 	// may legitimately run for tens of seconds while a pricing proposal must
