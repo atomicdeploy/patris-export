@@ -3,6 +3,8 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -14,6 +16,16 @@ import (
 	"github.com/atomicdeploy/patris-export/pkg/appconfig"
 	"github.com/atomicdeploy/patris-export/pkg/pricingcurrency"
 )
+
+type liveCurrencyReadOnlyTransport struct{ writes int }
+
+func (transport *liveCurrencyReadOnlyTransport) RoundTrip(request *http.Request) (*http.Response, error) {
+	if request.Method != http.MethodGet {
+		transport.writes++
+		return nil, errors.New("live recovery probe forbids mutation")
+	}
+	return http.DefaultTransport.RoundTrip(request)
+}
 
 // Explicit operator-only probe. Default is read-only; admitting the unchanged
 // current value requires a second opt-in and a caller-supplied stable identity.
@@ -32,7 +44,13 @@ func TestLiveOwnerCurrencyReadback(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancel()
 	server := &Server{config: manager, excelPricing: newExcelPricingState()}
-	queue := newExcelPricingWritebackQueue(server)
+	queue := newExcelPricingWritebackQueue(nil)
+	queue.server = server
+	queue.currencyJournalDir = t.TempDir()
+	readOnly := &liveCurrencyReadOnlyTransport{}
+	if os.Getenv("DIGITALOGIC_LIVE_OWNER_MODE") != "admit_unchanged" {
+		server.excelPricing.client = &http.Client{Transport: readOnly, Timeout: 30 * time.Second}
+	}
 	origin, err := url.Parse(server.Config().SendUpdates.URL)
 	if err != nil {
 		t.Fatal("invalid origin")
@@ -74,11 +92,34 @@ func TestLiveOwnerCurrencyReadback(t *testing.T) {
 		t.Logf("unchanged admission confirmed: request=%s owner_job=%s generation=%d cny=%d date=%s elapsed_ms=%d; no ACK", id, owner.JobID, owner.Generation, settings.YuanPrice, settings.CNYEffectiveDate, time.Since(started).Milliseconds())
 		return
 	}
-	job := &excelPricingWritebackJob{JobID: strings.Repeat("e", 32), RequestID: "cli-cny-restore-20260909-02", SettingKey: "yuan_price", ownerObserveOnly: true, settings: settings, DesiredValue: strconv.FormatInt(settings.YuanPrice, 10)}
+	request := excelPricingWritebackRequest{Schema: excelPricingWritebackRequestSchema, RequestID: "cli-cny-restore-20260909-02", SettingKey: "yuan_price", Settings: settings, ExpectedStateRevision: state.StateRevision, PreviousConfirmedValue: strconv.FormatInt(settings.YuanPrice, 10)}
+	accepted, err := queue.enqueue(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Reconstruct from disk without starting a service or dispatching admission.
+	restored := newExcelPricingWritebackQueue(nil)
+	restored.server = server
+	restored.currencyJournalDir = queue.currencyJournalDir
+	if err = restored.loadCurrencyJournal(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = restored.observeCurrency(accepted.JobID); err != nil {
+		t.Fatal(err)
+	}
+	job, _ := restored.next()
+	if job == nil || !job.ownerObserveOnly || job.RequestID != request.RequestID {
+		t.Fatal("restart identity lost")
+	}
 	started := time.Now()
-	result := queue.processOwnerCurrency(ctx, job)
+	result := restored.processOwnerCurrency(ctx, job)
+	restored.finish(job, result)
 	if result.status != "confirmed" || result.transactionID != "" || result.ackDeadline != 0 {
 		t.Fatalf("unconfirmed: status=%s code=%s", result.status, result.code)
 	}
-	t.Logf("read-only owner request confirmed: cny=%d date=%s elapsed_ms=%d; no admission permitted", result.settings.YuanPrice, result.settings.CNYEffectiveDate, time.Since(started).Milliseconds())
+	entries, err := restored.readCurrencyJournal()
+	if err != nil || len(entries) != 1 || entries[0].terminal == nil || readOnly.writes != 0 {
+		t.Fatal("terminal persistence or read-only boundary failed")
+	}
+	t.Logf("read-only restart confirmed: request=%s cny=%d date=%s elapsed_ms=%d; terminal persisted; mutation attempts=%d", request.RequestID, result.settings.YuanPrice, result.settings.CNYEffectiveDate, time.Since(started).Milliseconds(), readOnly.writes)
 }
