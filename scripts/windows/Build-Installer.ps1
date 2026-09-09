@@ -122,6 +122,7 @@ $requiredPayload = @(
     "BUILD-MANIFEST.txt",
     "scripts\pricing\pricing-sync.cjs",
     "scripts\pricing\pricing-session.cjs",
+    "scripts\pricing\currency-owner.cjs",
     "scripts\pricing\pricing-sync.cmd",
     "scripts\pricing\README.md"
 )

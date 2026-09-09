@@ -12,6 +12,13 @@ const HELP = `Usage: node pricing-sync.cjs bulk [--base-url URL] [--timeout-ms N
        pricing-sync.cmd single PRODUCT_CODE [--site-url URL] [--timeout-ms N] [--json]
        pricing-sync.cmd session [--site-url URL] [--timeout-ms N] [--json]
        pricing-sync.cmd fresh PRODUCT_CODE [--base-url URL] [--timeout-ms N] [--json]
+       pricing-sync.cmd currency --request-id UNIQUE_ID [--cny N] [--usd N] [--cny-date YYYY-MM-DD] [--usd-date YYYY-MM-DD] [--json]
+       pricing-sync.cmd currency-status --request-id SAME_ID [--json]
+
+Currency commands use the separate WooCommerce credentials below and the owner REST API.
+Only supplied fields are sent; omitted dates use owner policy. Default wait: 180000ms.
+Use currency-status after an uncertain result; it never resubmits the mutation.
+Currency supports --site-url and --timeout-ms. Exit 0 requires confirmed job and owner readback.
 
 Session: Node.js 22+; authenticate once, then enter one product code per line.
 Enter quit or end input to close. Session readiness reports authentication time;
@@ -54,7 +61,7 @@ function baseURL(value) {
   return url.origin;
 }
 
-async function requestJSON(base, path, { body, token, authorization, timeoutMs = 5000, timing } = {}) {
+async function requestJSON(base, path, { body, token, authorization, timeoutMs = 5000, timing, identityHeaders } = {}) {
   const requestStarted = performance.now();
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -63,6 +70,11 @@ async function requestJSON(base, path, { body, token, authorization, timeoutMs =
     if (body !== undefined) headers['Content-Type'] = 'application/json';
     if (token) headers['X-Patris-Excel-CSRF-Token'] = token;
     if (authorization) headers.Authorization = authorization;
+    if (identityHeaders) {
+      for (const name of ['If-Match', 'Idempotency-Key']) {
+        if (identityHeaders[name]) headers[name] = identityHeaders[name];
+      }
+    }
     const response = await fetch(base + path, {
       method: body === undefined ? 'GET' : 'POST', headers,
       body: body === undefined ? undefined : JSON.stringify(body),
@@ -298,8 +310,10 @@ async function runSingle({ productCode, siteUrl = 'https://digitalogic.ir', time
 async function main(args) {
   if (!args.length || args.includes('--help') || args.includes('-h')) { process.stdout.write(HELP); return 0; }
   const mode = args.shift();
-  if (!['bulk', 'single', 'session', 'fresh'].includes(mode)) throw new Error('invalid_arguments_use_help');
+  if (!['bulk', 'single', 'session', 'fresh', 'currency', 'currency-status'].includes(mode)) throw new Error('invalid_arguments_use_help');
   const options = {};
+  const currency = mode === 'currency' || mode === 'currency-status';
+  if (currency) { options.values = {}; options.observeOnly = mode === 'currency-status'; }
   if (mode === 'single' || mode === 'fresh') options.productCode = args.shift();
   if (mode === 'fresh' && !options.productCode) throw Error('invalid_product_code');
   let json = false;
@@ -307,12 +321,23 @@ async function main(args) {
     const key = args.shift();
     if (key === '--json') json = true;
     else if (key === '--base-url' && ['bulk', 'fresh'].includes(mode) && args.length) options.baseUrl = args.shift();
-    else if (key === '--site-url' && ['single', 'session'].includes(mode) && args.length) options.siteUrl = args.shift();
+    else if (key === '--site-url' && (currency || ['single', 'session'].includes(mode)) && args.length) options.siteUrl = args.shift();
+    else if (key === '--request-id' && currency && args.length) options.requestId = args.shift();
+    else if (currency && ['--cny','--usd','--cny-date','--usd-date'].includes(key) && args.length) {
+      const field = { '--cny':'yuan_price', '--usd':'dollar_price', '--cny-date':'cny_effective_date', '--usd-date':'usd_effective_date' }[key];
+      if (Object.hasOwn(options.values, field)) throw Error('duplicate_currency_field');
+      options.values[field] = args.shift();
+    }
     else if (key === '--timeout-ms' && args.length) options.timeoutMs = Number(args.shift());
     else throw new Error('invalid_arguments_use_help');
   }
   options.log = json ? () => {} : message => process.stderr.write(message + '\n');
   options.onEvent = event => process.stderr.write(json ? JSON.stringify(event) + '\n' : event.message + '\n');
+  if (currency) {
+    const result = await require('./currency-owner.cjs').runCurrency({ ...options, requestJSON });
+    process.stdout.write(JSON.stringify(result, null, 2) + '\n');
+    return result.exit_code;
+  }
   if (mode === 'session') {
     const { openPricingSession } = require('./pricing-session.cjs');
     const key = process.env.DIGITALOGIC_PRICING_WRITE_KEY;

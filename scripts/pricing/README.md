@@ -2,7 +2,7 @@
 
 Bulk and REST single require Node.js 18 or newer; persistent `session` requires
 Node.js 22 or newer. Keep `pricing-sync.cmd`, `pricing-sync.cjs` and
-`pricing-session.cjs` together.
+`pricing-session.cjs` and `currency-owner.cjs` together.
 
 The Windows ZIP and assisted installer include these files under `scripts/pricing`.
 For a default per-user installation, run:
@@ -24,6 +24,34 @@ node --test pricing-sync.test.cjs
 `bulk` invokes the existing Go service and changes downstream prices. The wrapper
 does not start or deploy the service and has no separate queue or calculation engine.
 Without arguments it shows help.
+
+## Currency updates through the owner
+
+Use the separate WooCommerce write credentials described below. Send only the
+fields you intend to change; WordPress applies its currency-date policy and
+dispatches the configured calculator. This command adds no calculation engine.
+
+```cmd
+pricing-sync.cmd currency --request-id office-cny-20260909-01 --cny 34500 --json
+pricing-sync.cmd currency-status --request-id office-cny-20260909-01 --json
+```
+
+Choose a unique request ID for each intended operation. Optional `--usd`,
+`--cny-date` and `--usd-date` set explicit fields. Omitted dates follow owner
+policy; an unchanged rate preserves its existing date. The default observation
+timeout is 180 seconds (`--timeout-ms` can change it); this is not a performance
+acceptance threshold. After an uncertain result, use `currency-status` with the
+same ID. The command never retries a write automatically.
+
+Exit 0 requires the same owner job to be confirmed and a current currency
+readback to match its desired values. `readiness_after` means this owner readback
+succeeded, not that every downstream application has been independently tested.
+This CLI does not change the workbook writeback implementation.
+
+Production acceptance on 9 September 2026: an unchanged CNY 34500 submission
+confirmed as generation 64 in about four seconds; subsequent status-only recovery
+matched the owner values. This verifies authenticated admission and recovery,
+not changed-rate bulk latency.
 
 ## Single-product pricing
 
