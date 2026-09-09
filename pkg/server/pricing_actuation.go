@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/atomicdeploy/patris-export/pkg/canonical"
@@ -20,17 +21,25 @@ import (
 type pricingDeliveryReceipt = updateout.DeliveryReceipt
 
 type pricingActuationStatus struct {
-	Previous      *pricingPreviousOperation `json:"previous_operation,omitempty"`
-	Phase         string                    `json:"phase"`
-	Authority     string                    `json:"authority,omitempty"`
-	OwnerRevision string                    `json:"owner_catalog_revision,omitempty"`
-	Source        canonical.Source          `json:"source"`
-	EventID       string                    `json:"event_id,omitempty"`
-	Error         string                    `json:"error,omitempty"`
-	Pending       bool                      `json:"pending"`
-	LatestSource  canonical.Source          `json:"latest_source"`
-	UpdatedAt     time.Time                 `json:"updated_at"`
-	Delivery      *pricingDeliveryReceipt   `json:"delivery,omitempty"`
+	LastCheckpointFailure *pricingCheckpointFailure `json:"last_checkpoint_failure,omitempty"`
+	Previous              *pricingPreviousOperation `json:"previous_operation,omitempty"`
+	Phase                 string                    `json:"phase"`
+	Authority             string                    `json:"authority,omitempty"`
+	OwnerRevision         string                    `json:"owner_catalog_revision,omitempty"`
+	Source                canonical.Source          `json:"source"`
+	EventID               string                    `json:"event_id,omitempty"`
+	Error                 string                    `json:"error,omitempty"`
+	Pending               bool                      `json:"pending"`
+	LatestSource          canonical.Source          `json:"latest_source"`
+	UpdatedAt             time.Time                 `json:"updated_at"`
+	Delivery              *pricingDeliveryReceipt   `json:"delivery,omitempty"`
+}
+
+// Bounded diagnostics deliberately exclude filesystem paths and error messages.
+type pricingCheckpointFailure struct {
+	Stage      string    `json:"stage"`
+	SystemCode uint64    `json:"system_code,omitempty"`
+	At         time.Time `json:"at"`
 }
 
 // Retain one displaced operation's outcome, never an accumulating outbox.
@@ -145,29 +154,46 @@ func (a *pricingActuator) status() pricingActuationStatus {
 	return a.state
 }
 
-func (a *pricingActuator) saveLocked() error {
+func (a *pricingActuator) saveLocked() (err error) {
+	stage := "marshal"
+	defer func() {
+		if err != nil {
+			failure := &pricingCheckpointFailure{Stage: stage, At: time.Now().UTC()}
+			var code syscall.Errno
+			if errors.As(err, &code) {
+				failure.SystemCode = uint64(code)
+			}
+			a.state.LastCheckpointFailure = failure
+		}
+	}()
 	a.state.UpdatedAt = time.Now().UTC()
 	data, err := json.Marshal(a.state)
 	if err != nil {
 		return err
 	}
+	stage = "create_temp"
 	file, err := os.CreateTemp(filepath.Dir(a.path), ".pricing-*")
 	if err != nil {
 		return err
 	}
 	name := file.Name()
 	defer os.Remove(name)
+	stage = "chmod"
 	if err = file.Chmod(0600); err == nil {
+		stage = "write"
 		_, err = file.Write(data)
 	}
 	if err == nil {
+		stage = "sync"
 		err = file.Sync()
 	}
 	closeErr := file.Close()
 	if err == nil {
+		stage = "close"
 		err = closeErr
 	}
 	if err == nil {
+		stage = "replace"
 		err = os.Rename(name, a.path)
 	}
 	return err
