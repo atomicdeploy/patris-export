@@ -5,6 +5,11 @@ All notable changes to Patris Export are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.4] - 2026-09-10
+
+- Preserve PHP receiver timings for SQL commit, option-cache invalidation, report finalization, product-commit dispatch, and report notification through Go and CLI diagnostics. These measurements do not alter delivery acceptance or price calculation.
+- Document deployed PHP and Go authority acceptance, including full-owner checks after actual CNY changes, and retain explicit unverified interface/mode coverage.
+
 ## [2.0.3] - 2026-09-10
 
 - Route all seven ordinary pricing settings through the shared PHP owner, with canonical confirmation and persistent intent observation.
