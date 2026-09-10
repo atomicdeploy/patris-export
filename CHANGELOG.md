@@ -5,6 +5,13 @@ All notable changes to Patris Export are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.3] - 2026-09-10
+
+- Route all seven ordinary pricing settings through the shared PHP owner, with canonical confirmation and persistent intent observation.
+- Preserve unknown outcomes without automatic mutation replay; support current-owner reconciliation independently of historical completion.
+- Provide persistent scheduled-task credential imports for managed service updates.
+- Verified installed-service CNY change and restoration against all 1022 mapped products. Native workbook changes remain a separate acceptance task (PR334).
+
 ## [Unreleased]
 
 ## [2.0.2] - 2026-09-07
