@@ -1303,6 +1303,18 @@ func (p *httpProvider) getJSON(ctx context.Context, path string, target interfac
 	return p.doJSON(ctx, http.MethodGet, path, nil, target)
 }
 
+// ReadCurrentOwnerProducts uses the catalog read credential and transport for
+// an uncached projection of committed owner products. It never starts a build.
+func ReadCurrentOwnerProducts(ctx context.Context, cfg DigitalogicConfig, query url.Values, target interface{}) error {
+	p := newHTTPProvider(cfg, nil, nil)
+	if p.configError != "" {
+		return errors.New("owner projection configuration invalid")
+	}
+	query.Set("projection", "current-products")
+	_, err := p.getJSON(ctx, p.config.CatalogPath+"?"+query.Encode(), target)
+	return err
+}
+
 func (p *httpProvider) postJSON(ctx context.Context, path string, payload, target interface{}) (json.RawMessage, error) {
 	body, err := json.Marshal(payload)
 	if err != nil {
