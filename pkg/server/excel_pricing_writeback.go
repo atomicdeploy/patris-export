@@ -64,6 +64,7 @@ type excelPricingWritebackJob struct {
 	ConfirmedValues   map[string]string     `json:"confirmed_values,omitempty"`
 	ConfirmedSettings *excelPricingSettings `json:"confirmed_settings,omitempty"`
 	Status            string                `json:"status"`
+	OwnerStatus       string                `json:"owner_status,omitempty"`
 	Code              string                `json:"code"`
 	MessageFA         string                `json:"message_fa"`
 	Attempts          int                   `json:"attempts"`
@@ -87,23 +88,28 @@ type excelPricingWritebackJob struct {
 	confirmedSettings       excelPricingSettings
 	confirmationSource      canonical.Source
 	ackOnly                 bool
+	ownerObserveOnly        bool
+	originalCurrencyRequest *excelPricingWritebackRequest
 	createdAt               time.Time
 	nextAttemptAt           time.Time
 }
 
 type excelPricingWritebackQueue struct {
-	mu          sync.Mutex
-	server      *Server
-	jobs        map[string]*excelPricingWritebackJob
-	latestByKey map[string]string
-	sequence    uint64
-	wake        chan struct{}
-	now         func() time.Time
-	retryDelay  func(int) time.Duration
-	process     func(context.Context, *excelPricingWritebackJob) excelPricingWritebackResult
+	mu                   sync.Mutex
+	server               *Server
+	jobs                 map[string]*excelPricingWritebackJob
+	latestByKey          map[string]string
+	sequence             uint64
+	wake                 chan struct{}
+	now                  func() time.Time
+	retryDelay           func(int) time.Duration
+	process              func(context.Context, *excelPricingWritebackJob) excelPricingWritebackResult
+	currencyJournalDir   string
+	currencyJournalError error
 }
 
 type excelPricingWritebackResult struct {
+	ownerStatus     string
 	status          string
 	code            string
 	messageFA       string
@@ -140,6 +146,10 @@ func newExcelPricingWritebackQueue(server *Server) *excelPricingWritebackQueue {
 		},
 	}
 	queue.process = queue.processRemote
+	if server != nil && server.config != nil {
+		queue.currencyJournalDir = server.config.Path() + ".currency-intents"
+		queue.currencyJournalError = queue.loadCurrencyJournal()
+	}
 	return queue
 }
 
@@ -197,7 +207,7 @@ func (queue *excelPricingWritebackQueue) next() (*excelPricingWritebackJob, time
 		if job.Status != "pending" && job.Status != "pending_ack" {
 			continue
 		}
-		if !job.ackOnly {
+		if !job.ackOnly && !(ownerSettingsWriteback(job) && job.ownerObserveOnly) {
 			if !queue.isLatestLocked(job) {
 				queue.supersedeLocked(job, now)
 				continue
@@ -243,7 +253,7 @@ func (queue *excelPricingWritebackQueue) finish(job *excelPricingWritebackJob, r
 	now := queue.now().UTC()
 	stored.LastAttemptMS = result.attemptMS
 	stored.TotalElapsedMS = now.Sub(stored.createdAt).Milliseconds()
-	if !stored.ackOnly && !queue.isLatestLocked(stored) {
+	if !stored.ackOnly && !queue.isLatestLocked(stored) && !(ownerSettingsWriteback(stored) && stored.ownerObserveOnly) {
 		queue.supersedeLocked(stored, now)
 		return
 	}
@@ -265,13 +275,14 @@ func (queue *excelPricingWritebackQueue) finish(job *excelPricingWritebackJob, r
 		return
 	}
 	stored.Status = result.status
+	stored.OwnerStatus = result.ownerStatus
 	stored.Code = result.code
 	stored.MessageFA = result.messageFA
 	stored.Blocking = result.status != "confirmed" && result.status != "awaiting_excel"
 	stored.ConfirmedValue = result.confirmedValue
 	stored.ConfirmedValues = cloneExcelPricingStringMap(result.confirmedValues)
 	stored.StateRevision = result.stateRevision
-	if len(stored.SettingKeys) > 0 && validateExcelPricingSettings(result.settings) == nil {
+	if (len(stored.SettingKeys) > 0 || ownerSettingsWriteback(stored)) && validateExcelPricingSettings(result.settings) == nil {
 		confirmed := result.settings
 		stored.ConfirmedSettings = &confirmed
 	}
@@ -283,6 +294,11 @@ func (queue *excelPricingWritebackQueue) finish(job *excelPricingWritebackJob, r
 		stored.confirmationSource = result.source
 	}
 	stored.UpdatedAt = now.Format(time.RFC3339)
+	if (stored.Status == "confirmed" || currencyOwnerTerminal(stored.OwnerStatus)) && ownerSettingsWriteback(stored) {
+		if err := queue.markCurrencyJournalTerminal(stored); err != nil {
+			queue.currencyJournalError = err
+		}
+	}
 }
 
 func (queue *excelPricingWritebackQueue) persistSafeRebase(job *excelPricingWritebackJob) {
@@ -354,6 +370,9 @@ func (queue *excelPricingWritebackQueue) enqueue(request excelPricingWritebackRe
 	now := queue.now().UTC()
 	queue.mu.Lock()
 	defer queue.mu.Unlock()
+	if existing, replayErr := queue.findCurrencyIntent(request); existing != nil || replayErr != nil {
+		return existing, replayErr
+	}
 	queue.purgeLocked(now)
 	for _, key := range keys {
 		if previousID := queue.latestByKey[key]; previousID != "" {
@@ -362,13 +381,6 @@ func (queue *excelPricingWritebackQueue) enqueue(request excelPricingWritebackRe
 				case "sending", "awaiting_excel", "pending_ack", "sending_ack":
 					return nil, errors.New("writeback_in_flight")
 				}
-			}
-		}
-	}
-	for _, key := range keys {
-		if previousID := queue.latestByKey[key]; previousID != "" {
-			if previous := queue.jobs[previousID]; previous != nil && previous.Status == "pending" {
-				queue.supersedeLocked(previous, now)
 			}
 		}
 	}
@@ -398,6 +410,27 @@ func (queue *excelPricingWritebackQueue) enqueue(request excelPricingWritebackRe
 		job.MessageFA = "تغییرات تأییدنشدهٔ تنظیمات در یک صف امن برای ارسال به وردپرس قرار گرفت."
 	} else {
 		job.DesiredValue = desiredValues[keys[0]]
+	}
+	if ownerSettingsWriteback(job) {
+		original := cloneCurrencyRequest(request)
+		job.originalCurrencyRequest = &original
+		if queue.currencyJournalError != nil {
+			return nil, errors.New("currency_journal_unavailable")
+		}
+		if err := queue.saveCurrencyIntent(job, request); err != nil {
+			if errors.Is(err, errCurrencyJournalCapacity) || errors.Is(err, errCurrencyIntentConflict) {
+				return nil, err
+			}
+			queue.currencyJournalError = err
+			return nil, errors.New("currency_journal_unavailable")
+		}
+	}
+	for _, key := range keys {
+		if previousID := queue.latestByKey[key]; previousID != "" {
+			if previous := queue.jobs[previousID]; previous != nil && previous.Status == "pending" {
+				queue.supersedeLocked(previous, now)
+			}
+		}
 	}
 	queue.jobs[jobID] = job
 	for _, key := range keys {
@@ -563,15 +596,31 @@ func (queue *excelPricingWritebackQueue) isLatestLocked(job *excelPricingWriteba
 }
 
 func (queue *excelPricingWritebackQueue) supersedeLocked(job *excelPricingWritebackJob, now time.Time) {
+	if ownerSettingsWriteback(job) && !currencyOwnerTerminal(job.OwnerStatus) && (job.Attempts > 0 || job.ownerObserveOnly) {
+		job.Status = "observation_required"
+		job.Code = "currency_owner_historical_observation_required"
+		job.ownerObserveOnly = true
+		job.Blocking = true
+		job.UpdatedAt = now.Format(time.RFC3339)
+		return
+	}
 	job.Status = "superseded"
 	job.Code = "superseded"
 	job.MessageFA = "این تغییر با مقدار جدیدتر همان تنظیم جایگزین شد."
 	job.Blocking = false
 	job.UpdatedAt = now.Format(time.RFC3339)
+	if ownerSettingsWriteback(job) {
+		if err := queue.markCurrencyJournalTerminal(job); err != nil {
+			queue.currencyJournalError = err
+		}
+	}
 }
 
 func (queue *excelPricingWritebackQueue) purgeLocked(now time.Time) {
 	for id, job := range queue.jobs {
+		if ownerSettingsWriteback(job) && job.Status != "confirmed" && job.Status != "superseded" && !currencyOwnerTerminal(job.OwnerStatus) {
+			continue
+		}
 		if now.Sub(job.createdAt) > excelPricingWritebackJobTTL {
 			delete(queue.jobs, id)
 			for _, key := range excelPricingWritebackJobKeys(job) {
@@ -585,6 +634,9 @@ func (queue *excelPricingWritebackQueue) purgeLocked(now time.Time) {
 		return
 	}
 	for id, job := range queue.jobs {
+		if ownerSettingsWriteback(job) && job.Status != "confirmed" && job.Status != "superseded" && !currencyOwnerTerminal(job.OwnerStatus) {
+			continue
+		}
 		if job.Status == "pending" || job.Status == "sending" ||
 			job.Status == "pending_ack" || job.Status == "sending_ack" ||
 			job.Status == "awaiting_excel" {
@@ -628,121 +680,16 @@ func (queue *excelPricingWritebackQueue) processRemote(ctx context.Context, job 
 	}
 	bounded, cancel := context.WithTimeout(ctx, excelPricingWritebackTimeout)
 	defer cancel()
-	// The queue is already single-worker and coalesces newer edits per setting.
-	// Do not share the catalog snapshot permit here: an inbound product refresh
-	// may legitimately run for tens of seconds while a pricing proposal must
-	// still reach WordPress immediately. WordPress owns the cross-consumer
-	// mutation lock, revision fence, atomic repricing, and ACK transaction.
-	cfg := server.Config()
+	if ownerSettingsWriteback(job) {
+		return queue.processOwnerCurrency(bounded, job)
+	}
+	// Only an explicitly existing confirmation transaction can enter ACK recovery.
+	// Ordinary settings have no preview/apply fallback.
 	if job.TransactionID != "" {
-		return queue.ackRemote(bounded, cfg.SendUpdates, job)
+		return queue.ackRemote(bounded, server.Config().SendUpdates, job)
 	}
-	source, err := server.excelPricingWritebackSource(bounded, cfg)
-	if err != nil {
-		return excelPricingWritebackFailure("canonical_source_unavailable", true)
-	}
-	// Read the live website state before mutating. Patris may legitimately move
-	// the aggregate revision while the user is editing. Rebase only when the
-	// edited setting still equals Excel's last confirmed value and every other
-	// pricing setting is unchanged. A concurrent edit to the same setting stays
-	// a blocking conflict and is never overwritten.
-	currentDocument, readErr := queue.readbackDocument(bounded, job)
-	if readErr == nil {
-		// This revision belongs to WordPress's shipping-method catalog; it is not
-		// the Patris product-source revision. Always rebase the derived marker from
-		// the fresh website state while separately conflict-checking every editable
-		// shipping/pricing value. This permits live Patris movement without coupling
-		// two unrelated revision domains.
-		job.settings = excelPricingSettingsWithCurrentWebsiteState(job.settings, currentDocument.Settings)
-		currentValues, valueErr := excelPricingWritebackValues(currentDocument.Settings, job)
-		if valueErr == nil && excelPricingWritebackValuesMatchDesired(currentValues, job) {
-			return queue.resultFromCurrentDocument(job, source, currentDocument)
-		}
-		if currentDocument.StateRevision != job.expectedStateRevision {
-			if valueErr != nil || !excelPricingWritebackCurrentValuesSafe(currentValues, job) ||
-				!excelPricingSettingsEqualExceptKeys(currentDocument.Settings, job.settings, excelPricingWritebackJobKeys(job)) {
-				return excelPricingWritebackResult{
-					status: "conflict", code: "unsafe_concurrent_setting_change",
-					messageFA:      "همان تنظیم یا یکی از تنظیمات قیمت‌گذاری هم‌زمان تغییر کرده است؛ مقدار جدیدتر بازنویسی نشد.",
-					confirmedValue: currentValues[job.SettingKey], confirmedValues: currentValues,
-					stateRevision: currentDocument.StateRevision, settings: currentDocument.Settings,
-				}
-			}
-			job.expectedStateRevision = currentDocument.StateRevision
-			job.settings.ShippingCatalogRevision = currentDocument.Settings.ShippingCatalogRevision
-			queue.persistSafeRebase(job)
-		}
-	}
-	previewID := "excel-writeback-" + job.JobID + "-preview"
-	previewLocal := excelPricingLocalRequest{
-		Schema: excelPricingLocalRequestSchema, SchemaVersion: 1,
-		Operation: "preview", ClientID: excelPricingContractClientID,
-		Channel: excelPricingContractChannel, RequestID: previewID,
-		IdempotencyKey: previewID, ExpectedStateRevision: job.expectedStateRevision,
-		Settings: &job.settings, ProductChanges: json.RawMessage(`[]`),
-	}
-	previewRemote := buildExcelPricingRemoteRequest("preview", previewLocal, source)
-	preview, err := server.forwardExcelPricing(bounded, cfg.SendUpdates, "preview", previewRemote, previewLocal)
-	if err != nil {
-		return excelPricingWritebackErrorResult(err)
-	}
-	digest, present, err := excelPricingPreviewDigest(preview.body)
-	if err != nil || !present {
-		return excelPricingWritebackFailure("preview_contract_invalid", false)
-	}
-	if !queue.isLatest(job) {
-		return excelPricingWritebackResult{status: "superseded", code: "superseded", messageFA: "این تغییر با مقدار جدیدتر همان تنظیم جایگزین شد."}
-	}
-	applyID := "excel-writeback-" + job.JobID + "-apply"
-	applyLocal := previewLocal
-	applyLocal.Operation = "apply"
-	applyLocal.RequestID = applyID
-	applyLocal.IdempotencyKey = applyID
-	applyLocal.PreviewDigest = digest
-	applyLocal.Confirmation = "APPLY"
-	applyRemote := buildExcelPricingRemoteRequest("apply", applyLocal, source)
-	applied, err := server.forwardExcelPricing(bounded, cfg.SendUpdates, "apply", applyRemote, applyLocal)
-	if err != nil {
-		if readback := queue.readback(bounded, job); readback.status == "confirmed" {
-			return readback
-		}
-		return excelPricingWritebackErrorResult(err)
-	}
-	server.invalidateCanonicalProjection(true)
-	server.excelPricing.snapshots.publishPricingStateInvalidated(applied.stateRevision)
-	document, err := excelPricingStateDocumentFromBody(applied.body, excelPricingApplySchema)
-	if err != nil || document.Confirmation.Status != "awaiting_ack" ||
-		document.Confirmation.TransactionID == "" ||
-		document.Confirmation.CommittedRevision != applied.stateRevision ||
-		document.Confirmation.CommittedSettingsDigest == "" ||
-		document.Confirmation.ACKDeadline <= time.Now().Unix() ||
-		document.Confirmation.ACKPath != "/wp-json/digitalogic/pricing/sync/ack" ||
-		document.Confirmation.ConsumerID != excelPricingContractClientID ||
-		document.Confirmation.Channel != excelPricingContractChannel {
-		return excelPricingWritebackFailure("confirmation_contract_invalid", false)
-	}
-	confirmedValues, err := excelPricingWritebackValues(document.Settings, job)
-	if err != nil || !excelPricingWritebackValuesMatchDesired(confirmedValues, job) {
-		return excelPricingWritebackFailure("confirmation_value_conflict", false)
-	}
-	// The authenticated apply response is the website's terminal commit and
-	// repricing receipt. Do not block the short ACK window on another full state
-	// projection before Excel can apply the committed value. The ACK worker below
-	// still performs an independent website readback before it marks the cell
-	// green, so success is never inferred from the mutation response alone.
-	server.excelPricing.snapshots.publishPricingStateVerified(applied.stateRevision)
-	return excelPricingWritebackResult{
-		status: "awaiting_excel", code: "website_committed",
-		messageFA:      "وب‌سایت نرخ را ثبت و قیمت‌ها را بازتولید کرد؛ در انتظار اعمال در اکسل و تأیید نهایی است.",
-		confirmedValue: confirmedValues[job.SettingKey], confirmedValues: confirmedValues,
-		stateRevision:  applied.stateRevision,
-		transactionID:  document.Confirmation.TransactionID,
-		settingsDigest: document.Confirmation.CommittedSettingsDigest,
-		ackDeadline:    document.Confirmation.ACKDeadline,
-		settings:       document.Settings, source: source,
-	}
+	return excelPricingWritebackFailure("unsupported_owner_settings_intent", false)
 }
-
 func (queue *excelPricingWritebackQueue) ackRemote(
 	ctx context.Context,
 	cfg updateout.Config,
@@ -913,9 +860,9 @@ func (s *Server) handlePostExcelPricingWriteback(w http.ResponseWriter, r *http.
 	if err != nil {
 		code := err.Error()
 		status := http.StatusBadRequest
-		if code == "queue_unavailable" {
+		if code == "queue_unavailable" || code == "currency_journal_unavailable" || code == "currency_journal_capacity" {
 			status = http.StatusServiceUnavailable
-		} else if code == "writeback_in_flight" {
+		} else if code == "writeback_in_flight" || code == "currency_request_conflict" {
 			status = http.StatusConflict
 		}
 		writeExcelPricingError(w, status, code)
