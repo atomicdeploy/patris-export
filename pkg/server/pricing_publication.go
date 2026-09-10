@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/url"
 	"regexp"
 	"time"
 
@@ -70,7 +71,9 @@ func (s *Server) canonicalPublicationResultContext(ctx context.Context) (recordp
 // An authenticated owner event names the existing final source. Refresh that
 // projection directly: owner settings changes do not require input redelivery.
 func (s *Server) projectPricingFinal(ctx context.Context, input recordpipe.Result, source canonical.Source, owner pricingcatalog.Resolution) (recordpipe.Result, error) {
-	return recordpipe.Result{}, errPricingSnapshotDisabled
+	// The event is an invalidation hint. Read the currently committed owner
+	// source, bound to the current input, instead of reviving an old snapshot.
+	return s.projectPricingInput(ctx, input, s.Config(), owner)
 }
 
 func (s *Server) projectPricingInput(ctx context.Context, input recordpipe.Result, cfg appconfig.Config, owner pricingcatalog.Resolution) (recordpipe.Result, error) {
@@ -96,7 +99,29 @@ func (s *Server) projectPricingInput(ctx context.Context, input recordpipe.Resul
 	if owner.Authority == pricingcatalog.AuthorityGo {
 		return input, nil
 	}
-	return recordpipe.Result{}, errPricingSnapshotDisabled
+	return s.readCurrentOwnerProjection(ctx, input, cfg, owner)
+}
+
+func (s *Server) readCurrentOwnerProjection(ctx context.Context, input recordpipe.Result, cfg appconfig.Config, owner pricingcatalog.Resolution) (recordpipe.Result, error) {
+	var wire struct {
+		Data struct {
+			Schema    string            `json:"schema"`
+			Authority string            `json:"authority"`
+			Revision  string            `json:"owner_catalog_revision"`
+			Input     canonical.Source  `json:"input_source"`
+			Source    canonical.Source  `json:"source"`
+			Count     int               `json:"row_count"`
+			Rows      []json.RawMessage `json:"rows"`
+		} `json:"data"`
+	}
+	query := url.Values{"projection": {"current-products"}, "source_id": {input.Contract.Source.ID}, "source_dataset": {input.Contract.Source.Dataset}, "source_revision": {input.Contract.Source.Revision}, "owner_catalog_revision": {owner.CatalogRevision}}
+	if err := pricingcatalog.ReadCurrentOwnerProducts(ctx, cfg.Canonical.Pricing.Digitalogic, query, &wire.Data); err != nil {
+		return recordpipe.Result{}, pricingProjectionFailure("owner_read_rejected")
+	}
+	if wire.Data.Schema != "digitalogic.current-owner-products.v1" || wire.Data.Authority != pricingcatalog.AuthorityPHP || wire.Data.Revision != owner.CatalogRevision || !wire.Data.Input.SameIdentity(input.Contract.Source) || wire.Data.Count != len(wire.Data.Rows) {
+		return recordpipe.Result{}, pricingProjectionFailure("owner_binding_mismatch")
+	}
+	return ownerProductProjection(input.Contract, &excelPricingRemoteSnapshotResult{Source: wire.Data.Source, Rows: wire.Data.Rows}, owner.CatalogRevision)
 }
 
 func ownerProductProjection(input *canonical.Envelope, remote *excelPricingRemoteSnapshotResult, ownerRevision string) (recordpipe.Result, error) {
@@ -140,7 +165,7 @@ func ownerProductProjection(input *canonical.Envelope, remote *excelPricingRemot
 		if product.ProductCode != wire.Code {
 			return recordpipe.Result{}, pricingProjectionFailure("canonical_product_code_mismatch")
 		}
-		if product.PricingCatalogRevision != ownerRevision {
+		if (product.FinalPrice != nil || product.PricingCatalogRevision != "") && product.PricingCatalogRevision != ownerRevision {
 			return recordpipe.Result{}, pricingProjectionFailure("canonical_product_catalog_mismatch")
 		}
 		products = append(products, product)

@@ -1016,6 +1016,10 @@ func (s *Server) canonicalResultForRequest(w http.ResponseWriter, r *http.Reques
 			writeExcelPricingError(w, http.StatusServiceUnavailable, "snapshot_disabled")
 			return recordpipe.Result{}, false
 		}
+		if errors.Is(err, errPricingProjectionUnavailable) || errors.Is(err, errPricingAuthorityUnavailable) {
+			writeExcelPricingError(w, http.StatusServiceUnavailable, "owner_projection_unavailable")
+			return recordpipe.Result{}, false
+		}
 		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
 			http.Error(w, fmt.Sprintf("Canonical %s timed out after %s", resource, timeout), http.StatusServiceUnavailable)
 			return recordpipe.Result{}, false
