@@ -109,7 +109,7 @@ func backgroundDeliveryOutcome(result updateout.DeliveryResult, err error, input
 		result.DeferredMissing != receipt.DeferredMissing || result.DeferredAmbiguous != receipt.DeferredAmbiguous {
 		return "delivery_receipt_unresolved"
 	}
-	if receipt.Status == "pending" && receipt.PendingProducts > 0 {
+	if receipt.Status == "pending" && receipt.PendingProducts+receipt.DeferredProducts > 0 {
 		return "delivery_pending"
 	}
 	if receipt.Status == "deferred" && receipt.PendingProducts == 0 && receipt.DeferredProducts > 0 {

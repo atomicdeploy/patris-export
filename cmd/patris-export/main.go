@@ -159,8 +159,8 @@ Supports Persian/Farsi encoding conversion and file watching.
 		Run:   runConvert,
 	}
 	convertCmd.Flags().StringVarP(&outputFormat, "format", "f", "json", "Output format (json, csv, xlsx, sqlite, or mysql)")
-	convertCmd.Flags().BoolVarP(&watchMode, "watch", "w", false, "Watch file or URL for changes and auto-convert")
-	convertCmd.Flags().String("debounce", "1s", "Debounce duration for local files; polling interval for URLs (e.g., 0s, 500ms, 1s, 5m)")
+	convertCmd.Flags().BoolVarP(&watchMode, "watch", "w", false, "Watch a local file for changes and auto-convert")
+	convertCmd.Flags().String("debounce", "1s", "Debounce duration for local file events (e.g., 0s, 500ms, 1s)")
 	convertCmd.Flags().StringVar(&exportTable, "table", "", "Destination table name for SQLite/MySQL exports")
 	convertCmd.Flags().StringVar(&sqlitePath, "sqlite-path", "", "SQLite database path for --format sqlite")
 	convertCmd.Flags().StringVar(&sqliteTable, "sqlite-table", "", "SQLite table name for --format sqlite")
@@ -220,8 +220,8 @@ Supports Persian/Farsi encoding conversion and file watching.
 	serveCmd.Flags().StringP("addr", "a", "", "Server address override (e.g., 127.0.0.1:8080 or :8080)")
 	serveCmd.Flags().String("host", "", "Host to bind: 127.0.0.1, 0.0.0.0, or an explicit interface")
 	serveCmd.Flags().Int("port", 0, "Port to listen on")
-	serveCmd.Flags().BoolP("watch", "w", true, "Watch file or URL for changes and broadcast updates")
-	serveCmd.Flags().String("debounce", "0s", "Debounce duration for local files; polling interval for URLs (e.g., 0s, 500ms, 1s, 5m)")
+	serveCmd.Flags().BoolP("watch", "w", true, "Watch a local file for changes and broadcast updates")
+	serveCmd.Flags().String("debounce", "0s", "Debounce duration for local file events (e.g., 0s, 500ms, 1s)")
 	serveCmd.Flags().Bool("http", true, "Enable the HTTP REST/WebSocket/Web UI listener")
 	serveCmd.Flags().Bool("ipc", false, "Enable local IPC listener (Windows named pipe, Unix socket)")
 	serveCmd.Flags().String("ipc-path", "", "IPC path/name (default: platform-specific patris-export endpoint)")
@@ -684,20 +684,29 @@ func runConvert(cmd *cobra.Command, args []string) {
 	var convertMu sync.Mutex
 	var updateState watchChangeState
 	catalogProvider := pricingcatalog.NewProvider(cfg.Canonical.Pricing)
-	convertAndSend := func(path, eventType string) {
+	convertAndSend := func(path, eventType string) error {
 		convertMu.Lock()
 		defer convertMu.Unlock()
 
 		result, err := convertFile(path, charMap, useStdout, cfg, catalogProvider)
 		if err != nil {
-			return
+			return err
 		}
 
 		changes := updateState.Next(result, eventType, time.Now())
 		sendConvertUpdate(cfg, path, result, eventType, changes)
+		return nil
 	}
 
 	if watchMode {
+		if filecopy.IsURL(dbFile) {
+			errorColor.Println("❌ Event-driven watch mode requires a local database file; remote polling is disabled")
+			os.Exit(1)
+		}
+		if cfg.SendUpdates.Enabled {
+			errorColor.Println("❌ Durable catalog delivery is owned by serve mode; convert --watch cannot send updates")
+			os.Exit(1)
+		}
 		debounceStr, _ := cmd.Flags().GetString("debounce")
 		if !cmd.Flags().Changed("debounce") {
 			debounceStr = cfg.Convert.Debounce
@@ -706,7 +715,9 @@ func runConvert(cmd *cobra.Command, args []string) {
 
 		infoColor.Printf("👀 Watching file: %s\n", dbFile)
 		infoColor.Println("📝 Press Ctrl+C to stop watching")
-		convertAndSend(dbFile, "initial")
+		if err := convertAndSend(dbFile, "initial"); err != nil {
+			os.Exit(1)
+		}
 
 		fw, err := watcher.NewFileWatcher()
 		if err != nil {
@@ -715,25 +726,9 @@ func runConvert(cmd *cobra.Command, args []string) {
 		}
 		defer fw.Close()
 
-		if filecopy.IsURL(dbFile) {
-			pollInterval := debounceDuration
-			if pollInterval <= 0 {
-				pollInterval = 5 * time.Minute
-			}
-			infoColor.Printf("🔄 Polling URL every %v\n", pollInterval)
-			if err := fw.Poll(dbFile, func(path string) {
-				infoColor.Printf("🔄 Remote source changed: %s\n", path)
-				convertAndSend(path, "update")
-			}, pollInterval); err != nil {
-				errorColor.Printf("❌ Failed to poll URL: %v\n", err)
-				os.Exit(1)
-			}
-			select {}
-		}
-
-		if err := fw.Watch(dbFile, func(path string) {
-			infoColor.Printf("🔄 File changed: %s\n", filepath.Base(path))
-			convertAndSend(path, "update")
+		if err := fw.WatchEvents(dbFile, func(event watcher.Event) error {
+			infoColor.Printf("🔄 File changed: %s\n", filepath.Base(event.Path))
+			return convertAndSend(event.Path, "update")
 		}, debounceDuration); err != nil {
 			errorColor.Printf("❌ Failed to watch file: %v\n", err)
 			os.Exit(1)
@@ -1444,12 +1439,10 @@ func runStub(cmd *cobra.Command, args []string) {
 		return true
 	}
 
-	if edgeInitial || edgeOnce {
-		if ok := upload(dbFile); !ok && edgeOnce {
+	if edgeOnce {
+		if ok := upload(dbFile); !ok {
 			os.Exit(1)
 		}
-	}
-	if edgeOnce {
 		return
 	}
 
@@ -1460,14 +1453,23 @@ func runStub(cmd *cobra.Command, args []string) {
 	}
 	defer fw.Close()
 
-	if err := fw.Watch(dbFile, func(path string) {
-		infoColor.Printf("🔄 Local database changed: %s\n", filepath.Base(path))
-		upload(path)
+	if err := fw.WatchEvents(dbFile, func(event watcher.Event) error {
+		infoColor.Printf("🔄 Local database event (%s): %s\n", event.Reason, filepath.Base(event.Path))
+		if !upload(event.Path) {
+			return fmt.Errorf("edge upload was not accepted")
+		}
+		return nil
 	}, debounceDuration); err != nil {
 		errorColor.Printf("Failed to watch database file: %v\n", err)
 		os.Exit(1)
 	}
 	fw.Start()
+	// Continuous edge delivery always performs startup catch-up. The legacy
+	// initial switch cannot suppress revisions written while the stub was down.
+	if err := fw.Trigger(dbFile, watcher.EventStartup); err != nil {
+		errorColor.Printf("Failed to queue edge startup catch-up: %v\n", err)
+		os.Exit(1)
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()

@@ -8,7 +8,6 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -312,6 +311,13 @@ func TestSourceDeliveryOutboxPendingReceiptSuppressesAnotherWrite(t *testing.T) 
 		return sourceDeliveryReceiptProbe{Status: sourceDeliveryReceiptApplied, EventID: input.EventID, Source: input.Source}, nil
 	}
 	outbox.processOnce()
+	outbox.mu.Lock()
+	if outbox.state.Active == nil || outbox.state.Active.State != "receipt_pending" || outbox.state.Active.OutcomeUnknown {
+		state := outbox.state.Active
+		outbox.mu.Unlock()
+		t.Fatalf("known unapplied response was not persisted as probe-only pending: %#v", state)
+	}
+	outbox.mu.Unlock()
 	outbox.processOnce()
 	if writes != 1 {
 		t.Fatalf("pending receipt caused %d writes, want 1", writes)
@@ -462,10 +468,14 @@ func TestSourceDeliveryReceiptProbeRequiresExactGeneratedAtEcho(t *testing.T) {
 	t.Setenv(sourceDeliveryOutboxTestSecretEnv, "test-product-sync-secret")
 	input := freshAckSnapshot(t, []canonical.Product{{ProductCode: "A", Name: "one"}}, "patris-office")
 	receiver := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		generatedAt, parseErr := time.Parse(time.RFC3339Nano, input.GeneratedAt)
+		if parseErr != nil {
+			t.Fatal(parseErr)
+		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(sourceDeliveryReceiptResponse{Success: true, Data: sourceDeliveryReceiptProbe{
 			Schema: sourceDeliveryReceiptSchema, Status: sourceDeliveryReceiptApplied,
-			EventID: input.EventID, GeneratedAt: time.Now().UTC().Format(time.RFC3339Nano), Source: input.Source,
+			EventID: input.EventID, GeneratedAt: generatedAt.Add(time.Second).Format(time.RFC3339Nano), Source: input.Source,
 			ObservedAt: time.Now().UTC().Format(time.RFC3339),
 		}})
 	}))
@@ -477,29 +487,17 @@ func TestSourceDeliveryReceiptProbeRequiresExactGeneratedAtEcho(t *testing.T) {
 	}
 }
 
-func TestSourceDeliveryPeriodicFullSnapshotReconciliationRunsAndStops(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	server := &Server{backgroundCtx: ctx, sourceDeliveryOutbox: &sourceDeliveryOutbox{}}
-	var calls atomic.Int32
-	called := make(chan struct{}, 1)
-	server.startSourceDeliveryReconciliation(5*time.Millisecond, func(context.Context) {
-		calls.Add(1)
-		select {
-		case called <- struct{}{}:
-		default:
-		}
-	})
-	select {
-	case <-called:
-	case <-time.After(time.Second):
-		cancel()
-		t.Fatal("periodic full-snapshot reconciliation did not run")
+func TestSourceDeliveryStatusDeclaresEventDrivenWithoutSchedule(t *testing.T) {
+	server := &Server{sourceDeliveryOutbox: &sourceDeliveryOutbox{}}
+	status := server.Status()
+	outbox, ok := status["source_delivery_outbox"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("missing outbox status: %#v", status)
 	}
-	cancel()
-	server.serviceWG.Wait()
-	before := calls.Load()
-	time.Sleep(15 * time.Millisecond)
-	if calls.Load() != before {
-		t.Fatal("reconciliation continued after cancellation")
+	if outbox["delivery_mode"] != "event_driven" || outbox["scheduled_reconciliation"] != false {
+		t.Fatalf("catalog delivery still advertises a schedule: %#v", outbox)
+	}
+	if _, exists := outbox["reconcile_interval"]; exists {
+		t.Fatalf("removed reconciliation interval remains exposed: %#v", outbox)
 	}
 }

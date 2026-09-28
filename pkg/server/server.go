@@ -78,7 +78,6 @@ type Server struct {
 	pricingCommands        pricingCommandState
 	sourceDeliveryAck      sourceDeliveryAcknowledgement
 	sourceDeliveryOutbox   *sourceDeliveryOutbox
-	sourceReconcileOnce    sync.Once
 	canonicalProjection    *canonicalProjectionCache
 	pricingPublication     *canonicalProjectionCache
 	pricingActuation       *pricingActuator
@@ -94,8 +93,6 @@ type Server struct {
 	backgroundWG           sync.WaitGroup
 	serviceWG              sync.WaitGroup
 }
-
-const sourceDeliveryReconcileInterval = 15 * time.Minute
 
 type Options struct {
 	Config                   *appconfig.Manager
@@ -762,8 +759,8 @@ func (s *Server) Status() map[string]interface{} {
 	}
 	if s.sourceDeliveryOutbox != nil {
 		outboxStatus := s.sourceDeliveryOutbox.status()
-		outboxStatus["reconcile_interval"] = sourceDeliveryReconcileInterval.String()
-		outboxStatus["reconciliation_enabled"] = s.Config().SendUpdates.Enabled
+		outboxStatus["delivery_mode"] = "event_driven"
+		outboxStatus["scheduled_reconciliation"] = false
 		status["source_delivery_outbox"] = outboxStatus
 	}
 	return status
@@ -2304,7 +2301,7 @@ func (s *Server) broadcastInitialSnapshot(reason string) {
 }
 
 // broadcastUpdate broadcasts database changes to all connected WebSocket clients
-func (s *Server) broadcastUpdate() {
+func (s *Server) broadcastUpdate() error {
 	preparedAt := time.Now()
 	s.wsClientsMu.RLock()
 	clientCount := len(s.wsClients)
@@ -2312,7 +2309,7 @@ func (s *Server) broadcastUpdate() {
 
 	if clientCount < 0 {
 		log.Printf("⚠️  No clients connected, skipping broadcast")
-		return
+		return nil
 	}
 
 	log.Printf("📡 Broadcasting update to %d clients", clientCount)
@@ -2322,7 +2319,7 @@ func (s *Server) broadcastUpdate() {
 	if err != nil {
 		s.recordPreDispatchFailure("update", "source_prepare", preparedAt, err)
 		log.Printf("Failed to read records: %v", err)
-		return
+		return err
 	}
 	records := result.Rows
 
@@ -2373,32 +2370,37 @@ func (s *Server) broadcastUpdate() {
 			// Keep the previous watcher baseline. A later source notification will
 			// rediscover the same revision instead of silently losing it.
 			go s.broadcastProcessInfo()
-			return
+			return err
 		}
 	} else {
 		s.commitRecordBaseline(result)
 	}
 	go s.broadcastProcessInfo()
+	return nil
 }
 
-func (s *Server) dispatchInitialUpdate(ctx context.Context) {
+func (s *Server) dispatchInitialUpdate(ctx context.Context) error {
 	preparedAt := time.Now()
 	cfg := s.Config().SendUpdates
-	if !cfg.Enabled || !cfg.Initial {
-		return
+	if !cfg.Enabled {
+		return nil
 	}
+	return s.dispatchSourceSnapshot(ctx, preparedAt, "source_prepare")
+}
+
+func (s *Server) dispatchSourceSnapshot(ctx context.Context, preparedAt time.Time, failureStage string) error {
 	result, err := s.RecordResultContext(ctx)
 	if err != nil {
-		s.recordPreDispatchFailure("initial", "source_prepare", preparedAt, err)
+		s.recordPreDispatchFailure("initial", failureStage, preparedAt, err)
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-			return
+			return err
 		}
 		log.Printf("Failed to prepare initial send update payload: %v", err)
-		return
+		return err
 	}
-	s.dispatchUpdateEvent(updateout.Event{
+	return s.dispatchUpdateAndCommitBaseline(result, updateout.Event{
 		Type:             "initial",
-		Timestamp:        time.Now().Format(time.RFC3339),
+		Timestamp:        time.Now().UTC().Format(time.RFC3339Nano),
 		Source:           browserSafeURL(s.currentDBPath()),
 		Raw:              result.Raw,
 		Records:          result.Rows,
@@ -2408,27 +2410,13 @@ func (s *Server) dispatchInitialUpdate(ctx context.Context) {
 	}, preparedAt)
 }
 
-func (s *Server) dispatchInitialUpdateAsync() {
-	cfg := s.Config()
-	if !cfg.SendUpdates.Enabled || !cfg.SendUpdates.Initial {
-		return
-	}
-	s.backgroundWG.Add(1)
-	go func() {
-		defer s.backgroundWG.Done()
-		ctx, cancel := context.WithTimeout(s.backgroundCtx, canonicalRequestTimeout(cfg))
-		defer cancel()
-		s.dispatchInitialUpdate(ctx)
-	}()
-}
-
 func (s *Server) dispatchUpdateEvent(event updateout.Event, preparedAt time.Time) error {
 	operationConfig := s.Config()
 	cfg := operationConfig.SendUpdates
 	if !cfg.Enabled {
 		return nil
 	}
-	if event.Type == "initial" && !cfg.Initial {
+	if event.Type == "initial" && !cfg.Initial && !(s.sourceDeliveryOutbox != nil && canonicalSourceDeliveryEvent(event)) {
 		return nil
 	}
 	queuedAt := time.Now()
@@ -3295,8 +3283,14 @@ func (s *Server) logDetailedChanges(added []map[string]interface{}, deleted []st
 	log.Println(strings.Repeat("━", 80))
 }
 
-// StartWatching starts watching the database file for changes with the specified debounce duration
+// StartWatching starts deterministic operating-system event capture for the
+// local database. Remote polling is intentionally rejected: catalog delivery
+// has no recurring schedule and requires a local source with OS notifications.
 func (s *Server) StartWatching(debounceDuration time.Duration) error {
+	dbPath := s.currentDBPath()
+	if filecopy.IsURL(dbPath) {
+		return fmt.Errorf("event-driven catalog delivery requires a local database source")
+	}
 	fw, err := watcher.NewFileWatcher()
 	if err != nil {
 		return fmt.Errorf("failed to create file watcher: %w", err)
@@ -3304,30 +3298,9 @@ func (s *Server) StartWatching(debounceDuration time.Duration) error {
 
 	s.watcher = fw
 	s.updateSourceHash()
-	dbPath := s.currentDBPath()
 
-	if filecopy.IsURL(dbPath) {
-		pollInterval := debounceDuration
-		if pollInterval <= 0 {
-			pollInterval = 5 * time.Minute
-		}
-		if err := fw.Poll(dbPath, func(path string) {
-			log.Printf("🔄 Remote source changed: %s", browserSafeURL(path))
-			s.notifyFileUpdated(path)
-			s.broadcastUpdate()
-		}, pollInterval); err != nil {
-			return fmt.Errorf("failed to poll URL: %w", err)
-		}
-		log.Printf("👀 Polling remote source: %s (interval: %v)", browserSafeURL(dbPath), pollInterval)
-		s.dispatchInitialUpdateAsync()
-		s.startSourceDeliveryReconciliation(sourceDeliveryReconcileInterval, s.reconcileSourceDelivery)
-		return nil
-	}
-
-	if err := fw.Watch(dbPath, func(path string) {
-		log.Printf("🔄 File changed: %s", filepath.Base(path))
-		s.notifyFileUpdated(path)
-		s.broadcastUpdate()
+	if err := fw.WatchEvents(dbPath, func(event watcher.Event) error {
+		return s.handleSourceWatchEvent(event)
 	}, debounceDuration); err != nil {
 		return fmt.Errorf("failed to watch file: %w", err)
 	}
@@ -3339,66 +3312,37 @@ func (s *Server) StartWatching(debounceDuration time.Duration) error {
 		fileType = "JSON"
 	}
 	log.Printf("👀 Watching %s file: %s", fileType, filepath.Base(dbPath))
-
-	s.dispatchInitialUpdateAsync()
-	s.startSourceDeliveryReconciliation(sourceDeliveryReconcileInterval, s.reconcileSourceDelivery)
+	if err := fw.Trigger(dbPath, watcher.EventStartup); err != nil {
+		_ = fw.Close()
+		s.watcher = nil
+		return fmt.Errorf("failed to queue startup catch-up: %w", err)
+	}
 	return nil
 }
 
-func (s *Server) reconcileSourceDelivery(ctx context.Context) {
+func (s *Server) handleSourceWatchEvent(event watcher.Event) error {
 	cfg := s.Config()
-	if !cfg.SendUpdates.Enabled || s.sourceDeliveryOutbox == nil {
-		return
+	ctx := s.backgroundCtx
+	if ctx == nil {
+		ctx = context.Background()
 	}
 	bounded, cancel := context.WithTimeout(ctx, canonicalRequestTimeout(cfg))
 	defer cancel()
-	preparedAt := time.Now()
-	result, err := s.RecordResultContext(bounded)
-	if err != nil {
-		s.recordPreDispatchFailure("initial", "source_reconcile_prepare", preparedAt, err)
-		return
+	switch event.Reason {
+	case watcher.EventStartup:
+		log.Printf("🔄 Startup catalog catch-up: %s", filepath.Base(event.Path))
+		return s.dispatchInitialUpdate(bounded)
+	case watcher.EventOverflow:
+		log.Printf("⚠️  Watch overflow recovery snapshot: %s", filepath.Base(event.Path))
+		if !cfg.SendUpdates.Enabled {
+			return nil
+		}
+		return s.dispatchSourceSnapshot(bounded, time.Now(), "source_overflow_prepare")
+	default:
+		log.Printf("🔄 File changed: %s", filepath.Base(event.Path))
+		s.notifyFileUpdated(event.Path)
+		return s.broadcastUpdate()
 	}
-	event := updateout.Event{
-		Type:             "initial",
-		Timestamp:        time.Now().UTC().Format(time.RFC3339Nano),
-		Source:           browserSafeURL(s.currentDBPath()),
-		Raw:              result.Raw,
-		Records:          result.Rows,
-		KeyField:         result.KeyField,
-		Contract:         result.SyncEnvelope(nil),
-		SnapshotContract: result.SyncEnvelope(nil),
-	}
-	queuedAt := time.Now()
-	if err := s.sourceDeliveryOutbox.enqueue(cfg, event, preparedAt, queuedAt); err != nil {
-		s.recordPreDispatchFailure("initial", "source_reconcile_outbox", queuedAt, err)
-		log.Printf("Failed to persist scheduled source reconciliation")
-	}
-}
-
-// startSourceDeliveryReconciliation heals missed file notifications with a
-// bounded complete snapshot. The same durable outbox keeps at most one active
-// event plus one coalesced latest snapshot, so the schedule cannot create an
-// unbounded delivery backlog.
-func (s *Server) startSourceDeliveryReconciliation(interval time.Duration, reconcile func(context.Context)) {
-	if s.sourceDeliveryOutbox == nil || interval <= 0 || reconcile == nil || s.backgroundCtx == nil {
-		return
-	}
-	s.sourceReconcileOnce.Do(func() {
-		s.serviceWG.Add(1)
-		go func() {
-			defer s.serviceWG.Done()
-			ticker := time.NewTicker(interval)
-			defer ticker.Stop()
-			for {
-				select {
-				case <-s.backgroundCtx.Done():
-					return
-				case <-ticker.C:
-					reconcile(s.backgroundCtx)
-				}
-			}
-		}()
-	})
 }
 
 // Close cleans up server resources
@@ -3419,6 +3363,7 @@ func (s *Server) Close() error {
 		if err := s.watcher.Close(); err != nil && firstErr == nil {
 			firstErr = err
 		}
+		s.watcher.WaitCallbacks()
 	}
 	s.dataSourceMu.Lock()
 	ds := s.dataSource

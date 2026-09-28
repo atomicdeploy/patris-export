@@ -493,6 +493,33 @@ func TestClassifyProductSyncReceiverStateMachine(t *testing.T) {
 	}
 }
 
+func TestClassifyProductSyncUnappliedRequiresPendingDurableReceipt(t *testing.T) {
+	contract := canonical.NewEnvelope(nil, "kala.db", "patris-office", time.Unix(1, 0))
+	delivery := DeliveryReceipt{
+		EventID: contract.EventID, Status: "pending", Source: contract.Source, InputSource: contract.Source,
+		PendingProducts: 1, DeferredProducts: 0,
+	}
+	encodedDelivery, err := json.Marshal(delivery)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := fmt.Appendf(nil, `{"success":true,"data":{"status":"unapplied","event_id":%q,"retryable":false,"pending_products":1,"deferred_products":0,"delivery":%s}}`, contract.EventID, encodedDelivery)
+	result, err := classifyHTTPResponse(DeliveryResult{HTTPStatus: http.StatusOK, Attempts: 1}, body, contract, true)
+	if err != nil || result.Status != "unapplied" || result.Retryable || result.Delivery == nil || result.Delivery.Status != "pending" {
+		t.Fatalf("valid unapplied durable receipt was rejected: result=%+v err=%v", result, err)
+	}
+
+	for _, invalid := range [][]byte{
+		bytes.Replace(body, []byte(`"delivery":`), []byte(`"ignored_delivery":`), 1),
+		bytes.Replace(body, []byte(`"status":"pending"`), []byte(`"status":"complete"`), 1),
+		bytes.Replace(body, []byte(`"pending_products":1`), []byte(`"pending_products":0`), 1),
+	} {
+		if _, err := classifyHTTPResponse(DeliveryResult{HTTPStatus: http.StatusOK, Attempts: 1}, invalid, contract, true); !errors.Is(err, errReceiverStateInvalid) {
+			t.Fatalf("invalid unapplied response was accepted: %s err=%v", invalid, err)
+		}
+	}
+}
+
 func TestClassifyProductSyncReceiverDoesNotNormalizeEventIdentity(t *testing.T) {
 	contract := canonical.NewEnvelope(nil, "kala.db", "patris-office", time.Unix(1, 0))
 	alteredEventID := strings.Replace(contract.EventID, ":", ": ", 1)

@@ -690,6 +690,12 @@ func validateReceiverState(result DeliveryResult) error {
 		if result.Retryable || result.PendingProducts != 0 {
 			return errReceiverStateInvalid
 		}
+	case "unapplied":
+		if result.Retryable || result.PendingProducts+result.DeferredProducts <= 0 || result.Delivery == nil ||
+			result.Delivery.Status != "pending" || result.Delivery.PendingProducts != result.PendingProducts ||
+			result.Delivery.DeferredProducts != result.DeferredProducts {
+			return errReceiverStateInvalid
+		}
 	case "partially_applied", "retry_pending":
 		if !result.Retryable || result.PendingProducts <= 0 {
 			return errReceiverStateInvalid

@@ -111,8 +111,7 @@ Set `"native":true` to also try a native OS toast from the server process.
 
 ## Trigger An Immediate Refresh
 
-Use this when the server is polling a remote URL and you want to reload the
-source immediately:
+Use this when you explicitly want to reload the local source immediately:
 
 ```powershell
 '{"type":"refresh"}' |
@@ -120,7 +119,8 @@ source immediately:
 ```
 
 The server replies with the current update payload after it reloads the source.
-For URL sources, this bypasses the next polling interval.
+This manual action is separate from deterministic operating-system source
+events and is not a recurring reconciliation mechanism.
 
 ## Tips
 

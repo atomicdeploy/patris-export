@@ -117,14 +117,15 @@ func TestStartWatchingDoesNotWaitForInitialDigitalogicProjection(t *testing.T) {
 	releaseOnce.Do(func() { close(releaseBatch) })
 }
 
-func TestStartWatchingSkipsDisabledInitialProjection(t *testing.T) {
+func TestStartWatchingAlwaysRunsEnabledSourceCatchUp(t *testing.T) {
 	tests := []struct {
 		name        string
 		sendEnabled bool
 		sendInitial bool
+		wantRequest bool
 	}{
-		{name: "updates disabled", sendEnabled: false, sendInitial: true},
-		{name: "initial delivery disabled", sendEnabled: true, sendInitial: false},
+		{name: "updates disabled", sendEnabled: false, sendInitial: true, wantRequest: false},
+		{name: "legacy initial flag cannot disable catch-up", sendEnabled: true, sendInitial: false, wantRequest: true},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -142,8 +143,12 @@ func TestStartWatchingSkipsDisabledInitialProjection(t *testing.T) {
 				t.Fatalf("start watcher: %v", err)
 			}
 			time.Sleep(100 * time.Millisecond)
-			if got := requests.Load(); got != 0 {
-				t.Fatalf("disabled initial delivery issued %d pricing requests", got)
+			got := requests.Load()
+			if test.wantRequest && got == 0 {
+				t.Fatal("enabled source delivery skipped mandatory startup catch-up")
+			}
+			if !test.wantRequest && got != 0 {
+				t.Fatalf("disabled source delivery issued %d pricing requests", got)
 			}
 			if err := srv.Close(); err != nil {
 				t.Fatalf("close server: %v", err)

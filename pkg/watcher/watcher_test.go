@@ -2,8 +2,6 @@ package watcher
 
 import (
 	"errors"
-	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -11,6 +9,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/fsnotify/fsnotify"
 )
 
 func registeredGeneration(t *testing.T, fw *FileWatcher, path string) uint64 {
@@ -582,9 +582,6 @@ func TestFileWatcher_ClosedWatcherRejectsNewWork(t *testing.T) {
 	if err := fw.Watch(tmpFile, func(string) {}, 0); !errors.Is(err, ErrClosed) {
 		t.Fatalf("Watch after Close error = %v, want %v", err, ErrClosed)
 	}
-	if err := fw.Poll(tmpFile, func(string) {}, time.Second); !errors.Is(err, ErrClosed) {
-		t.Fatalf("Poll after Close error = %v, want %v", err, ErrClosed)
-	}
 	if err := fw.Unwatch(tmpFile); err != nil {
 		t.Fatalf("Unwatch after Close should be idempotent, got %v", err)
 	}
@@ -596,12 +593,7 @@ func TestFileWatcher_DuplicateRegistrationRequiresUnwatch(t *testing.T) {
 		name   string
 		first  string
 		second string
-	}{
-		{name: "watch then watch", first: "watch", second: "watch"},
-		{name: "poll then poll", first: "poll", second: "poll"},
-		{name: "watch then poll", first: "watch", second: "poll"},
-		{name: "poll then watch", first: "poll", second: "watch"},
-	}
+	}{{name: "watch then watch", first: "watch", second: "watch"}}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -616,9 +608,6 @@ func TestFileWatcher_DuplicateRegistrationRequiresUnwatch(t *testing.T) {
 			defer fw.Close()
 
 			register := func(kind string) error {
-				if kind == "poll" {
-					return fw.Poll(tmpFile, func(string) {}, time.Hour)
-				}
 				return fw.Watch(tmpFile, func(string) {}, 0)
 			}
 			if err := register(tt.first); err != nil {
@@ -653,15 +642,11 @@ func TestFileWatcher_ConcurrentMixedRegistrationHasSingleWinner(t *testing.T) {
 	results := make(chan error, workers)
 	var wg sync.WaitGroup
 	wg.Add(workers)
-	for worker := range workers {
+	for range workers {
 		go func() {
 			defer wg.Done()
 			<-start
-			if worker%2 == 0 {
-				results <- fw.Watch(tmpFile, func(string) {}, 0)
-				return
-			}
-			results <- fw.Poll(tmpFile, func(string) {}, time.Hour)
+			results <- fw.Watch(tmpFile, func(string) {}, 0)
 		}()
 	}
 	close(start)
@@ -795,39 +780,147 @@ func TestFileWatcher_ConcurrentDebounceReplacement(t *testing.T) {
 	}
 }
 
-func TestFileWatcher_PollURL(t *testing.T) {
-	var mu sync.Mutex
-	content := "initial"
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		mu.Lock()
-		defer mu.Unlock()
-		w.Write([]byte(content))
-	}))
-	defer server.Close()
-
+func TestFileWatcherEventsDoesNotAcknowledgeFailedCallback(t *testing.T) {
+	tmpFile := filepath.Join(t.TempDir(), "kala.db")
+	if err := os.WriteFile(tmpFile, []byte("initial"), 0600); err != nil {
+		t.Fatal(err)
+	}
 	fw, err := NewFileWatcher()
 	if err != nil {
-		t.Fatalf("Failed to create file watcher: %v", err)
+		t.Fatal(err)
 	}
 	defer fw.Close()
-
-	changed := make(chan string, 1)
-	if err := fw.Poll(server.URL+"/kala.db", func(path string) {
-		changed <- path
-	}, 50*time.Millisecond); err != nil {
-		t.Fatalf("Failed to poll URL: %v", err)
-	}
-
-	mu.Lock()
-	content = "changed content"
-	mu.Unlock()
-
-	select {
-	case got := <-changed:
-		if got != server.URL+"/kala.db" {
-			t.Fatalf("unexpected callback path: %s", got)
+	var calls atomic.Int32
+	if err := fw.WatchEvents(tmpFile, func(Event) error {
+		if calls.Add(1) == 1 {
+			return errors.New("durable capture failed")
 		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("expected polling callback after URL content changed")
+		return nil
+	}, 0); err != nil {
+		t.Fatal(err)
+	}
+	absPath, _ := filepath.Abs(tmpFile)
+	generation := registeredGeneration(t, fw, tmpFile)
+	if err := os.WriteFile(tmpFile, []byte("revision-2"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	fw.handleFileEvent(absPath, generation, EventChange)
+	fw.mu.RLock()
+	acknowledgedAfterFailure := fw.fileHashes[absPath]
+	fw.mu.RUnlock()
+	wantHash, err := fw.getFileHash(absPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if acknowledgedAfterFailure == wantHash {
+		t.Fatal("failed durable callback advanced the watcher hash")
+	}
+	fw.handleFileEvent(absPath, generation, EventChange)
+	if calls.Load() != 2 {
+		t.Fatalf("unacknowledged revision was not rediscovered: calls=%d", calls.Load())
+	}
+	fw.mu.RLock()
+	acknowledgedAfterSuccess := fw.fileHashes[absPath]
+	fw.mu.RUnlock()
+	if acknowledgedAfterSuccess != wantHash {
+		t.Fatal("successful durable callback did not advance the watcher hash")
+	}
+}
+
+func TestFileWatcherOverflowForcesOneCoalescedRecovery(t *testing.T) {
+	tmpFile := filepath.Join(t.TempDir(), "kala.db")
+	if err := os.WriteFile(tmpFile, []byte("stable"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	fw, err := NewFileWatcher()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer fw.Close()
+	started := make(chan struct{})
+	release := make(chan struct{})
+	completed := make(chan EventReason, 2)
+	var once sync.Once
+	if err := fw.WatchEvents(tmpFile, func(event Event) error {
+		if event.Reason != EventOverflow {
+			t.Fatalf("recovery reason=%q, want overflow", event.Reason)
+		}
+		once.Do(func() {
+			close(started)
+			<-release
+		})
+		completed <- event.Reason
+		return nil
+	}, 0); err != nil {
+		t.Fatal(err)
+	}
+	fw.handleWatchError(fsnotify.ErrEventOverflow)
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("overflow did not trigger recovery")
+	}
+	for range 32 {
+		fw.handleWatchError(fsnotify.ErrEventOverflow)
+	}
+	// Let every concurrently queued overflow reach the in-flight fence before
+	// releasing the first recovery callback.
+	time.Sleep(50 * time.Millisecond)
+	close(release)
+	for range 2 {
+		select {
+		case <-completed:
+		case <-time.After(time.Second):
+			t.Fatal("coalesced overflow recovery did not complete")
+		}
+	}
+	select {
+	case <-completed:
+		t.Fatal("overflow storm was not coalesced")
+	case <-time.After(50 * time.Millisecond):
+	}
+}
+
+func TestRelatedSourcePathIncludesDatabaseCompanions(t *testing.T) {
+	root := t.TempDir()
+	primary := filepath.Join(root, "kala.db")
+	for _, companion := range []string{"kala.px", "KALA.MB", "kala.db-wal", "kala.val"} {
+		if !relatedSourcePath(primary, filepath.Join(root, companion)) {
+			t.Fatalf("companion %s was not mapped to kala.db", companion)
+		}
+	}
+	for _, unrelated := range []string{"other.db", "kala-backup.db"} {
+		if relatedSourcePath(primary, filepath.Join(root, unrelated)) {
+			t.Fatalf("unrelated file %s triggered kala.db", unrelated)
+		}
+	}
+}
+
+func TestCompanionEventForcesLogicalDatabaseObservation(t *testing.T) {
+	root := t.TempDir()
+	primary := filepath.Join(root, "kala.db")
+	if err := os.WriteFile(primary, []byte("unchanged-primary"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	fw, err := NewFileWatcher()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer fw.Close()
+	observed := make(chan Event, 1)
+	if err := fw.WatchEvents(primary, func(event Event) error {
+		observed <- event
+		return nil
+	}, 0); err != nil {
+		t.Fatal(err)
+	}
+	fw.queueRelatedFileChange(filepath.Join(root, "kala.db-wal"))
+	select {
+	case event := <-observed:
+		if event.Path != primary || event.Reason != EventCompanion {
+			t.Fatalf("companion observation=%#v", event)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("companion/WAL event was suppressed by unchanged primary hash")
 	}
 }
