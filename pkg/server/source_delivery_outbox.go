@@ -188,7 +188,7 @@ func validateSourceDeliveryContracts(selected, snapshot *canonical.Envelope) err
 
 func sourceDeliveryDestinationKey(cfg appconfig.Config) string {
 	delivery := updateout.Normalize(cfg.SendUpdates)
-	if !delivery.Enabled || delivery.URL == "" || delivery.ProductSyncSecretEnv == "" {
+	if !delivery.Enabled || delivery.URL == "" || delivery.ProductSyncSecretEnv == "" || len(delivery.Command) != 0 {
 		return ""
 	}
 	material, err := json.Marshal([]any{
@@ -388,7 +388,10 @@ func (outbox *sourceDeliveryOutbox) processOnce() (bool, time.Duration) {
 
 	active := outbox.state.Active
 	active.State = "pending"
-	active.OutcomeUnknown = result.OutcomeUnknown != nil && *result.OutcomeUnknown
+	active.OutcomeUnknown = terminalCode != "delivery_failed"
+	if result.OutcomeUnknown != nil && *result.OutcomeUnknown {
+		active.OutcomeUnknown = true
+	}
 	if active.OutcomeUnknown {
 		active.State = "outcome_unknown"
 	}

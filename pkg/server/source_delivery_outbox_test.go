@@ -89,7 +89,7 @@ func TestSourceDeliveryOutboxRetriesDefinitiveTransientFailure(t *testing.T) {
 	outbox.deliver = func(_ appconfig.Config, event updateout.Event, _, _ time.Time) (updateout.DeliveryResult, string, error) {
 		deliveries++
 		if deliveries == 1 {
-			return updateout.DeliveryResult{FailureCode: "receiver_http_status", OutcomeUnknown: &known, Attempts: 1}, "request_failed", errors.New("known failure")
+			return updateout.DeliveryResult{FailureCode: "receiver_http_status", OutcomeUnknown: &known, Attempts: 1}, "delivery_failed", errors.New("known failure")
 		}
 		return completeSourceDeliveryResult(event.Contract), "receipt_received", nil
 	}
@@ -199,6 +199,38 @@ func TestSourceDeliveryOutboxRecoversIdempotentlyFromAcceptedResponseLoss(t *tes
 	}
 	if writes != 1 {
 		t.Fatalf("accepted event was written %d times, want exactly once", writes)
+	}
+}
+
+func TestSourceDeliveryOutboxPendingReceiptSuppressesAnotherWrite(t *testing.T) {
+	_, outbox, cfg := sourceDeliveryOutboxTestServer(t, filepath.Join(t.TempDir(), "outbox.json"))
+	event := sourceDeliveryOutboxTestEvent(t, []canonical.Product{{ProductCode: "A", Name: "one"}})
+	enqueueSourceDeliveryOutboxTestEvent(t, outbox, cfg, event)
+	writes := 0
+	outbox.deliver = func(_ appconfig.Config, _ updateout.Event, _, _ time.Time) (updateout.DeliveryResult, string, error) {
+		writes++
+		return updateout.DeliveryResult{HTTPStatus: http.StatusOK, Attempts: 1, Delivery: &updateout.DeliveryReceipt{
+			Status: "pending", EventID: event.Contract.EventID, Source: event.Contract.Source, InputSource: event.Contract.Source, PendingProducts: 1,
+		}}, "delivery_pending", nil
+	}
+	probes := 0
+	outbox.probe = func(_ context.Context, _ appconfig.Config, input *canonical.Envelope) (sourceDeliveryReceiptProbe, error) {
+		probes++
+		if probes == 1 {
+			return sourceDeliveryReceiptProbe{Status: sourceDeliveryReceiptPending, EventID: input.EventID, Source: input.Source, PendingProducts: 1}, nil
+		}
+		return sourceDeliveryReceiptProbe{Status: sourceDeliveryReceiptApplied, EventID: input.EventID, Source: input.Source}, nil
+	}
+	outbox.processOnce()
+	outbox.processOnce()
+	if writes != 1 {
+		t.Fatalf("pending receipt caused %d writes, want 1", writes)
+	}
+	if pending, _ := outbox.processOnce(); pending {
+		t.Fatal("applied receipt did not clear pending delivery")
+	}
+	if writes != 1 || probes != 2 {
+		t.Fatalf("writes=%d probes=%d, want 1 and 2", writes, probes)
 	}
 }
 
