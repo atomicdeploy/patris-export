@@ -256,6 +256,26 @@ when both `send_updates.enabled` and `send_updates.initial` are true. When
 enabled, that background projection uses the same canonical request ceiling;
 disabling initial delivery therefore avoids a startup pricing read entirely.
 
+Canonical product-sync delivery is also protected by a persistent outbox next
+to the active config file (`<config>.source-delivery-outbox.json`). The outbox
+stores at most the exact active event and one coalesced latest full snapshot.
+It is written atomically before the watcher baseline advances. A definitive
+transient failure may retry the exact event, but an uncertain HTTP outcome never
+repeats the write directly. It first calls the receiver's authenticated
+`POST /wp-json/digitalogic/patris/product-sync/receipt` endpoint with only the
+exact event and source identity. `applied` and `superseded` acknowledge the
+event, `pending` continues receipt polling, and only an exact `not_found`
+authorizes one controlled write. Unavailable, malformed, mismatched, or
+history-inconclusive probes remain pending without replaying the mutation.
+
+While file watching is active, Patris Export also prepares a complete canonical
+snapshot every 15 minutes. These reconciliation snapshots use the same bounded
+outbox, so missed filesystem notifications heal without creating an unbounded
+queue. `GET /api/status` exposes `source_delivery_outbox.pending`, `coalesced`,
+the current event identity/state, probe and delivery attempt counts, and the
+`reconcile_interval`. A healthy steady state is `pending: false`; receiver-side
+catalog/materialization checks remain the downstream acceptance proof.
+
 Transport completion is separate from catalog completeness. Digitalogic must
 still assign a shipping method to the intended product rows and configure a
 global or product-specific percentage markup before those rows can expose a

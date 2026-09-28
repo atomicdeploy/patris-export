@@ -19,6 +19,21 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Added
+
+- Persist canonical source deliveries in a bounded two-slot outbox, reconcile
+  uncertain writes through an authenticated exact-event receipt probe, and
+  coalesce later revisions into a complete snapshot fallback.
+- Enqueue a complete canonical source snapshot every 15 minutes while the file
+  watcher is active so missed filesystem notifications cannot permanently
+  strand receiver products.
+
+### Fixed
+
+- Couple watcher baseline advancement to durable outbox persistence. A failed
+  outbox write now leaves the prior baseline discoverable and retains the event
+  in memory for recovery instead of silently losing the revision.
+
 ## [2.0.2] - 2026-09-07
 
 ### Fixed
