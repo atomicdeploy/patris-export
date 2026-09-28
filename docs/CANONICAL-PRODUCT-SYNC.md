@@ -263,10 +263,19 @@ It is written atomically before the watcher baseline advances. A definitive
 transient failure may retry the exact event, but an uncertain HTTP outcome never
 repeats the write directly. It first calls the receiver's authenticated
 `POST /wp-json/digitalogic/patris/product-sync/receipt` endpoint with only the
-exact event and source identity. `applied` and `superseded` acknowledge the
-event, `pending` continues receipt polling, and only an exact `not_found`
-authorizes one controlled write. Unavailable, malformed, mismatched, or
-history-inconclusive probes remain pending without replaying the mutation.
+exact event, source identity, and canonical `generated_at`. Receipt schema
+`digitalogic.product-sync-receipt.v2` echoes all three values exactly.
+`applied` and `superseded` acknowledge the event, `pending` continues receipt
+polling, and only an exact `not_found` authorizes one controlled write. For a
+saturated receiver history, `not_found` is authoritative only when the
+requested `generated_at` is strictly newer than the receiver's durable
+per-source accepted high-water. Equal, older, unreasonably future-dated,
+unavailable, malformed, mismatched, or otherwise history-inconclusive probes
+remain pending without replaying the mutation.
+The outbox persists the exact contract identity chosen by the transport. In
+`full` mode and for initial deliveries this is the snapshot contract, even when
+the in-memory event also carries a delta contract. Restart migration derives
+and persists that same transmitted identity before any receipt probe or write.
 
 While file watching is active, Patris Export also prepares a complete canonical
 snapshot every 15 minutes. These reconciliation snapshots use the same bounded
