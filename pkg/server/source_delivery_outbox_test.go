@@ -296,7 +296,12 @@ func TestSourceDeliveryOutboxWriteFailureDoesNotAdvanceWatcherBaseline(t *testin
 	if err := os.WriteFile(blockedParent, []byte("blocked"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	server, outbox, _ := sourceDeliveryOutboxTestServer(t, filepath.Join(blockedParent, "outbox.json"))
+	server, outbox, _ := sourceDeliveryOutboxTestServer(t, filepath.Join(root, "initial-outbox.json"))
+	// Construct against a valid empty path first, then make the next atomic
+	// persist fail. On Unix, Lstat beneath a regular file correctly returns
+	// ENOTDIR, so constructing directly at the blocked path would test loading
+	// an invalid configured path rather than a runtime write failure.
+	outbox.path = filepath.Join(blockedParent, "outbox.json")
 	server.sourceDeliveryOutbox = outbox
 	server.seedLastSnapshot([]map[string]interface{}{{"Code": "A"}}, "sha256:before")
 	event := sourceDeliveryOutboxTestEvent(t, []canonical.Product{{ProductCode: "A", Name: "old"}, {ProductCode: "B", Name: "new"}})
