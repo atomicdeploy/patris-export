@@ -362,7 +362,12 @@ func (outbox *sourceDeliveryOutbox) processOnce() (bool, time.Duration) {
 	}
 	outbox.mu.Unlock()
 
-	result, terminalCode, dispatchErr := outbox.deliver(cfg, entry.Event, entry.PreparedAt, entry.QueuedAt)
+	// The outbox owns retry policy. Disable the transport's legacy in-call
+	// retries so an ambiguous first attempt can never be repeated before the
+	// authoritative receipt probe runs.
+	deliveryConfig := cfg
+	deliveryConfig.SendUpdates.RetryAttempts = 1
+	result, terminalCode, dispatchErr := outbox.deliver(deliveryConfig, entry.Event, entry.PreparedAt, entry.QueuedAt)
 	success := dispatchErr == nil && terminalCode == "receipt_received"
 	outbox.mu.Lock()
 	defer outbox.mu.Unlock()

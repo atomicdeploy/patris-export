@@ -111,12 +111,19 @@ func TestSourceDeliveryOutboxRetriesDefinitiveTransientFailure(t *testing.T) {
 
 func TestSourceDeliveryOutboxUnknownOutcomeProbesBeforeAnotherWrite(t *testing.T) {
 	_, outbox, cfg := sourceDeliveryOutboxTestServer(t, filepath.Join(t.TempDir(), "outbox.json"))
+	cfg.SendUpdates.RetryAttempts = 7
+	if err := outbox.server.config.Replace(cfg); err != nil {
+		t.Fatal(err)
+	}
 	event := sourceDeliveryOutboxTestEvent(t, []canonical.Product{{ProductCode: "A", Name: "one"}})
 	enqueueSourceDeliveryOutboxTestEvent(t, outbox, cfg, event)
 
 	unknown := true
 	deliveries := 0
-	outbox.deliver = func(_ appconfig.Config, _ updateout.Event, _, _ time.Time) (updateout.DeliveryResult, string, error) {
+	outbox.deliver = func(deliveryConfig appconfig.Config, _ updateout.Event, _, _ time.Time) (updateout.DeliveryResult, string, error) {
+		if deliveryConfig.SendUpdates.RetryAttempts != 1 {
+			t.Fatalf("transport retry attempts=%d, want 1 under outbox ownership", deliveryConfig.SendUpdates.RetryAttempts)
+		}
 		deliveries++
 		return updateout.DeliveryResult{FailureCode: "response_read_failed", OutcomeUnknown: &unknown, Attempts: 1}, "delivery_outcome_unknown", errors.New("response lost")
 	}
