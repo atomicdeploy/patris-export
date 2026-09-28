@@ -251,10 +251,11 @@ concurrently instead of waiting for them sequentially.
 Pricing catalog and assignment-prefetch cache fills are serialized with
 context-aware gates. A request waiting behind another projection stops at its
 own cancellation or deadline and does not start another remote page after that
-deadline. Initial outbound delivery materializes a canonical snapshot only
-when both `send_updates.enabled` and `send_updates.initial` are true. When
-enabled, that background projection uses the same canonical request ceiling;
-disabling initial delivery therefore avoids a startup pricing read entirely.
+deadline. Enabled canonical product-sync delivery always materializes a startup
+catch-up snapshot under the same canonical request ceiling. The legacy
+`send_updates.initial` switch still controls non-canonical webhook startup
+payloads, but cannot disable the canonical catch-up boundary: doing so could
+strand revisions written while this process was down.
 
 Canonical product-sync delivery is also protected by a persistent outbox next
 to the active config file (`<config>.source-delivery-outbox.json`). The outbox
@@ -277,13 +278,25 @@ The outbox persists the exact contract identity chosen by the transport. In
 the in-memory event also carries a delta contract. Restart migration derives
 and persists that same transmitted identity before any receipt probe or write.
 
-While file watching is active, Patris Export also prepares a complete canonical
-snapshot every 15 minutes. These reconciliation snapshots use the same bounded
-outbox, so missed filesystem notifications heal without creating an unbounded
-queue. `GET /api/status` exposes `source_delivery_outbox.pending`, `coalesced`,
-the current event identity/state, probe and delivery attempt counts, and the
-`reconcile_interval`. A healthy steady state is `pending: false`; receiver-side
-catalog/materialization checks remain the downstream acceptance proof.
+Catalog delivery is event-driven and has no recurring reconciliation timer or
+remote polling path. The watcher subscribes to the local database directory and
+maps primary database writes, replacements, and related Paradox/SQLite
+companion-file changes back to the configured source. A startup signal always
+queues a bounded complete canonical catch-up snapshot. An operating-system
+watch-queue overflow also queues a complete recovery snapshot, even if the
+primary file hash did not change. Normal source events emit exact product-code
+deltas; concurrent events coalesce behind the active outbox entry as one latest
+complete snapshot.
+
+The watcher acknowledges a source hash only after the outbox has atomically
+persisted the corresponding event. A process exit before that boundary leaves
+the revision discoverable at startup; a process exit after it leaves the event
+in the durable outbox. `GET /api/status` exposes
+`source_delivery_outbox.delivery_mode: event_driven`,
+`scheduled_reconciliation: false`, pending/coalesced state, the current event
+identity/state, and probe and delivery attempt counts. A healthy steady state is
+`pending: false`; receiver-side catalog/materialization checks remain the
+downstream acceptance proof.
 
 Transport completion is separate from catalog completeness. Digitalogic must
 still assign a shipping method to the intended product rows and configure a

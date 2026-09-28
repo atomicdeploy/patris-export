@@ -434,6 +434,15 @@ func (outbox *sourceDeliveryOutbox) processOnce() (bool, time.Duration) {
 	}
 
 	active := outbox.state.Active
+	if terminalCode == "delivery_pending" {
+		active.State = "receipt_pending"
+		active.OutcomeUnknown = false
+		active.FailureCode = ""
+		if persistErr := outbox.persistLocked(); persistErr != nil {
+			log.Printf("Failed to persist source delivery pending-receipt state")
+		}
+		return true, outbox.retryDelay(active.Attempts)
+	}
 	active.State = "pending"
 	active.OutcomeUnknown = terminalCode != "delivery_failed"
 	if result.OutcomeUnknown != nil && *result.OutcomeUnknown {

@@ -24,9 +24,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - Persist canonical source deliveries in a bounded two-slot outbox, reconcile
   uncertain writes through an authenticated exact-event receipt probe, and
   coalesce later revisions into a complete snapshot fallback.
-- Enqueue a complete canonical source snapshot every 15 minutes while the file
-  watcher is active so missed filesystem notifications cannot permanently
-  strand receiver products.
+- Replace scheduled catalog reconciliation and remote polling with durable
+  operating-system event capture. Startup and watch-overflow signals enqueue a
+  complete catch-up snapshot; ordinary database and companion-file changes
+  emit exact deltas and acknowledge the watcher hash only after outbox storage.
 
 ### Fixed
 

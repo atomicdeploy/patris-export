@@ -482,14 +482,16 @@ Convert a local or HTTP/HTTPS Paradox database file to JSON or CSV. Remote sourc
 
 **Flags:**
 - `-f, --format` - Output format: json or csv (default: json)
-- `-w, --watch` - Watch a local file or poll a URL for changes and auto-convert
-- `-d, --debounce` - Debounce duration for local watch mode; polling interval for URLs (default: 1s, examples: 500ms, 5s, 5m)
+- `-w, --watch` - Watch a local file for operating-system change events and auto-convert
+- `-d, --debounce` - Debounce duration for local watch events (default: 1s, examples: 500ms, 5s)
 
 **URL examples:**
 ```bash
 patris-export convert https://example.com/data/kala.db -o ./exports
-patris-export convert https://example.com/data/kala.db --watch --debounce 5m
 ```
+
+Remote sources are one-shot inputs. Watch-mode URL polling is intentionally
+unsupported; durable catalog delivery uses `serve` with a local database.
 
 #### `info [database-file]`
 Display information about a Paradox database file (fields, record count, etc.)
@@ -502,12 +504,12 @@ Start the REST API and WebSocket server.
 
 **Flags:**
 - `-a, --addr` - Server address (default: :8080)
-- `-w, --watch` - Watch local files or poll URL sources and broadcast updates (default: true)
-- `-d, --debounce` - Debounce duration for local files; polling interval for URLs (default: 0s for local files, 5m for URLs)
+- `-w, --watch` - Watch a local file and broadcast event-driven updates (default: true)
+- `-d, --debounce` - Debounce duration for local file events (default: 0s)
 
 **URL example:**
 ```bash
-patris-export serve https://example.com/data/kala.db --host 127.0.0.1 --port 8080 --debounce 5m
+patris-export serve C:\Patris\data4\kala.db --host 127.0.0.1 --port 8080
 ```
 
 #### `update`
@@ -712,7 +714,7 @@ Connect to receive real-time database updates.
 }
 ```
 
-Clients can request an immediate backend reload without waiting for the next file watcher event or URL polling interval:
+Clients can request an explicit backend reload independently of local file-watcher events:
 
 ```json
 {"type":"refresh"}
