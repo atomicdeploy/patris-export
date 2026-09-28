@@ -153,6 +153,96 @@ func TestSourceDeliveryOutboxUnknownOutcomeProbesBeforeAnotherWrite(t *testing.T
 	}
 }
 
+func TestSourceDeliveryOutboxFullModeProbesActualPostedSnapshotIdentity(t *testing.T) {
+	_, outbox, cfg := sourceDeliveryOutboxTestServer(t, filepath.Join(t.TempDir(), "outbox.json"))
+	cfg.SendUpdates.Mode = "full"
+	if err := outbox.server.config.Replace(cfg); err != nil {
+		t.Fatal(err)
+	}
+	snapshot := freshAckSnapshot(t, []canonical.Product{{ProductCode: "A", Name: "one"}, {ProductCode: "116038", Name: "GL850"}}, "patris-office")
+	delta := canonical.ChangeEnvelope(snapshot, &recorddiff.ChangeSet{KeyField: "product_code", Added: []map[string]interface{}{{"product_code": "116038"}}})
+	if delta.EventID == snapshot.EventID {
+		t.Fatal("fixture delta and snapshot identities unexpectedly match")
+	}
+	event := updateout.Event{Type: "update", Timestamp: time.Now().UTC().Format(time.RFC3339Nano), Source: "kala.db", KeyField: "Code", Contract: delta, SnapshotContract: snapshot}
+	enqueueSourceDeliveryOutboxTestEvent(t, outbox, cfg, event)
+	status := outbox.status()
+	if status["event_id"] != snapshot.EventID || status["generated_at"] != snapshot.GeneratedAt {
+		t.Fatalf("status identity=%v generated_at=%v, want posted snapshot %s at %s", status["event_id"], status["generated_at"], snapshot.EventID, snapshot.GeneratedAt)
+	}
+
+	unknown := true
+	writes := 0
+	postedEventID := ""
+	outbox.deliver = func(deliveryConfig appconfig.Config, got updateout.Event, _, _ time.Time) (updateout.DeliveryResult, string, error) {
+		writes++
+		posted := got.Contract
+		if updateout.Normalize(deliveryConfig.SendUpdates).Mode == "full" || got.Type == "initial" {
+			posted = got.SnapshotContract
+		}
+		postedEventID = posted.EventID
+		return updateout.DeliveryResult{FailureCode: "response_read_failed", OutcomeUnknown: &unknown, Attempts: 1}, "delivery_outcome_unknown", errors.New("response lost")
+	}
+	probes := 0
+	outbox.probe = func(_ context.Context, _ appconfig.Config, input *canonical.Envelope) (sourceDeliveryReceiptProbe, error) {
+		probes++
+		if input.EventID != postedEventID || input.EventID != snapshot.EventID {
+			t.Fatalf("probe event_id=%s posted=%s snapshot=%s delta=%s", input.EventID, postedEventID, snapshot.EventID, delta.EventID)
+		}
+		return sourceDeliveryReceiptProbe{Status: sourceDeliveryReceiptApplied, EventID: input.EventID, Source: input.Source}, nil
+	}
+
+	if pending, _ := outbox.processOnce(); !pending {
+		t.Fatal("unknown full-snapshot delivery disappeared")
+	}
+	if pending, _ := outbox.processOnce(); pending {
+		t.Fatal("exact snapshot receipt did not clear the outbox")
+	}
+	if writes != 1 || probes != 1 {
+		t.Fatalf("writes=%d probes=%d, want exactly 1 and 1", writes, probes)
+	}
+}
+
+func TestSourceDeliveryOutboxMigratesLegacyUnknownEntryBeforeAnyReplay(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "outbox.json")
+	server, outbox, cfg := sourceDeliveryOutboxTestServer(t, path)
+	cfg.SendUpdates.Mode = "full"
+	if err := server.config.Replace(cfg); err != nil {
+		t.Fatal(err)
+	}
+	snapshot := freshAckSnapshot(t, []canonical.Product{{ProductCode: "116038", Name: "GL850"}}, "patris-office")
+	delta := canonical.ChangeEnvelope(snapshot, &recorddiff.ChangeSet{KeyField: "product_code", Added: []map[string]interface{}{{"product_code": "116038"}}})
+	event := updateout.Event{Type: "update", Timestamp: time.Now().UTC().Format(time.RFC3339Nano), Source: "kala.db", KeyField: "Code", Contract: delta, SnapshotContract: snapshot}
+	enqueueSourceDeliveryOutboxTestEvent(t, outbox, cfg, event)
+	outbox.state.Active.TransmittedContract = nil
+	outbox.state.Active.State = "outcome_unknown"
+	outbox.state.Active.OutcomeUnknown = true
+	if err := outbox.persistLocked(); err != nil {
+		t.Fatal(err)
+	}
+
+	restarted, err := newSourceDeliveryOutbox(server, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := sourceDeliveryEntryID(restarted.state.Active); got != snapshot.EventID {
+		t.Fatalf("migrated transmitted event_id=%s, want snapshot %s", got, snapshot.EventID)
+	}
+	restarted.deliver = func(appconfig.Config, updateout.Event, time.Time, time.Time) (updateout.DeliveryResult, string, error) {
+		t.Fatal("legacy uncertain entry was replayed before receipt reconciliation")
+		return updateout.DeliveryResult{}, "", nil
+	}
+	restarted.probe = func(_ context.Context, _ appconfig.Config, input *canonical.Envelope) (sourceDeliveryReceiptProbe, error) {
+		if input.EventID != snapshot.EventID {
+			t.Fatalf("legacy probe event_id=%s, want posted snapshot %s", input.EventID, snapshot.EventID)
+		}
+		return sourceDeliveryReceiptProbe{Status: sourceDeliveryReceiptApplied, EventID: input.EventID, Source: input.Source}, nil
+	}
+	if pending, _ := restarted.processOnce(); pending {
+		t.Fatal("applied legacy snapshot receipt did not clear the outbox")
+	}
+}
+
 func TestSourceDeliveryOutboxPersistsAcrossRestart(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "outbox.json")
 	server, outbox, cfg := sourceDeliveryOutboxTestServer(t, path)
@@ -335,13 +425,13 @@ func TestSourceDeliveryReceiptProbeMatchesAuthenticatedWordPressContract(t *test
 		var body sourceDeliveryReceiptRequest
 		decoder := json.NewDecoder(request.Body)
 		decoder.DisallowUnknownFields()
-		if err := decoder.Decode(&body); err != nil || body.EventID != input.EventID || !body.Source.SameIdentity(input.Source) {
+		if err := decoder.Decode(&body); err != nil || body.EventID != input.EventID || body.GeneratedAt != input.GeneratedAt || !body.Source.SameIdentity(input.Source) {
 			t.Errorf("receipt identity mismatch: %#v err=%v", body, err)
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(sourceDeliveryReceiptResponse{Success: true, Data: sourceDeliveryReceiptProbe{
 			Schema: sourceDeliveryReceiptSchema, Status: sourceDeliveryReceiptApplied,
-			EventID: input.EventID, Source: input.Source, ObservedAt: time.Now().UTC().Format(time.RFC3339),
+			EventID: input.EventID, GeneratedAt: input.GeneratedAt, Source: input.Source, ObservedAt: time.Now().UTC().Format(time.RFC3339),
 		}})
 	}))
 	defer receiver.Close()
@@ -365,6 +455,25 @@ func TestSourceDeliveryReceiptProbeFailsClosedOnInconclusiveHistory(t *testing.T
 	cfg.SendUpdates = updateout.Config{Enabled: true, URL: receiver.URL + "/wp-json/digitalogic/patris/product-sync", Method: "POST", Format: "json", Timeout: "1s", RetryAttempts: 1, ProductSyncSecretEnv: sourceDeliveryOutboxTestSecretEnv}
 	if _, err := probeSourceDeliveryReceipt(context.Background(), cfg, input); !errors.Is(err, errSourceDeliveryReceiptProbe) {
 		t.Fatalf("503 receipt history was not inconclusive: %v", err)
+	}
+}
+
+func TestSourceDeliveryReceiptProbeRequiresExactGeneratedAtEcho(t *testing.T) {
+	t.Setenv(sourceDeliveryOutboxTestSecretEnv, "test-product-sync-secret")
+	input := freshAckSnapshot(t, []canonical.Product{{ProductCode: "A", Name: "one"}}, "patris-office")
+	receiver := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(sourceDeliveryReceiptResponse{Success: true, Data: sourceDeliveryReceiptProbe{
+			Schema: sourceDeliveryReceiptSchema, Status: sourceDeliveryReceiptApplied,
+			EventID: input.EventID, GeneratedAt: time.Now().UTC().Format(time.RFC3339Nano), Source: input.Source,
+			ObservedAt: time.Now().UTC().Format(time.RFC3339),
+		}})
+	}))
+	defer receiver.Close()
+	cfg := appconfig.Default()
+	cfg.SendUpdates = updateout.Config{Enabled: true, URL: receiver.URL + "/wp-json/digitalogic/patris/product-sync", Method: "POST", Format: "json", Timeout: "1s", RetryAttempts: 1, ProductSyncSecretEnv: sourceDeliveryOutboxTestSecretEnv}
+	if _, err := probeSourceDeliveryReceipt(context.Background(), cfg, input); !errors.Is(err, errSourceDeliveryReceiptProbe) {
+		t.Fatalf("mismatched generated_at echo was accepted: %v", err)
 	}
 }
 

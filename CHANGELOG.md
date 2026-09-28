@@ -33,6 +33,14 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - Couple watcher baseline advancement to durable outbox persistence. A failed
   outbox write now leaves the prior baseline discoverable and retains the event
   in memory for recovery instead of silently losing the revision.
+- Persist the exact contract identity selected by the outbound transport and
+  use that identity for receipt probes, status, completion, restart migration,
+  and idempotency checks. Full-mode and initial deliveries can no longer probe
+  a delta identity after posting the corresponding snapshot.
+- Bind receipt reconciliation to the canonical envelope `generated_at` under
+  receipt schema v2, allowing a saturated receiver ledger to prove a strictly
+  newer absent event safe for one controlled retry while older, equal, or
+  future-skewed evidence remains fail-closed.
 
 ## [2.0.2] - 2026-09-07
 

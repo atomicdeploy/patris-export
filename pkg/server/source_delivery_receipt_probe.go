@@ -18,7 +18,7 @@ import (
 )
 
 const (
-	sourceDeliveryReceiptSchema     = "digitalogic.product-sync-receipt.v1"
+	sourceDeliveryReceiptSchema     = "digitalogic.product-sync-receipt.v2"
 	sourceDeliveryReceiptApplied    = "applied"
 	sourceDeliveryReceiptPending    = "pending"
 	sourceDeliveryReceiptSuperseded = "superseded"
@@ -32,6 +32,7 @@ type sourceDeliveryReceiptProbe struct {
 	Schema           string           `json:"schema"`
 	Status           string           `json:"status"`
 	EventID          string           `json:"event_id"`
+	GeneratedAt      string           `json:"generated_at"`
 	Source           canonical.Source `json:"source"`
 	PendingProducts  int              `json:"pending_products"`
 	DeferredProducts int              `json:"deferred_products"`
@@ -44,12 +45,16 @@ type sourceDeliveryReceiptResponse struct {
 }
 
 type sourceDeliveryReceiptRequest struct {
-	EventID string           `json:"event_id"`
-	Source  canonical.Source `json:"source"`
+	EventID     string           `json:"event_id"`
+	GeneratedAt string           `json:"generated_at"`
+	Source      canonical.Source `json:"source"`
 }
 
 func probeSourceDeliveryReceipt(ctx context.Context, cfg appconfig.Config, input *canonical.Envelope) (sourceDeliveryReceiptProbe, error) {
-	if input == nil || strings.TrimSpace(input.EventID) == "" {
+	if input == nil || strings.TrimSpace(input.EventID) == "" || strings.TrimSpace(input.GeneratedAt) == "" {
+		return sourceDeliveryReceiptProbe{}, errSourceDeliveryReceiptProbe
+	}
+	if _, err := time.Parse(time.RFC3339Nano, input.GeneratedAt); err != nil {
 		return sourceDeliveryReceiptProbe{}, errSourceDeliveryReceiptProbe
 	}
 	delivery := updateout.Normalize(cfg.SendUpdates)
@@ -61,7 +66,7 @@ func probeSourceDeliveryReceipt(ctx context.Context, cfg appconfig.Config, input
 	if err != nil {
 		return sourceDeliveryReceiptProbe{}, errSourceDeliveryReceiptProbe
 	}
-	body, err := json.Marshal(sourceDeliveryReceiptRequest{EventID: input.EventID, Source: input.Source})
+	body, err := json.Marshal(sourceDeliveryReceiptRequest{EventID: input.EventID, GeneratedAt: input.GeneratedAt, Source: input.Source})
 	if err != nil {
 		return sourceDeliveryReceiptProbe{}, errSourceDeliveryReceiptProbe
 	}
@@ -120,7 +125,10 @@ func sourceDeliveryReceiptProbeURL(destination string) (string, error) {
 }
 
 func validateSourceDeliveryReceiptProbe(receipt sourceDeliveryReceiptProbe, input *canonical.Envelope) error {
-	if receipt.Schema != sourceDeliveryReceiptSchema || receipt.EventID != input.EventID || !receipt.Source.SameIdentity(input.Source) {
+	if receipt.Schema != sourceDeliveryReceiptSchema || receipt.EventID != input.EventID || receipt.GeneratedAt != input.GeneratedAt || !receipt.Source.SameIdentity(input.Source) {
+		return errSourceDeliveryReceiptProbe
+	}
+	if _, err := time.Parse(time.RFC3339Nano, receipt.GeneratedAt); err != nil {
 		return errSourceDeliveryReceiptProbe
 	}
 	switch receipt.Status {

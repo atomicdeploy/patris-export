@@ -30,14 +30,21 @@ const (
 var errSourceDeliveryOutbox = errors.New("source_delivery_outbox_unavailable")
 
 type sourceDeliveryOutboxEntry struct {
-	Event          updateout.Event `json:"event"`
-	PreparedAt     time.Time       `json:"prepared_at"`
-	QueuedAt       time.Time       `json:"queued_at"`
-	Attempts       int             `json:"attempts"`
-	ProbeAttempts  int             `json:"probe_attempts,omitempty"`
-	State          string          `json:"state"`
-	FailureCode    string          `json:"failure_code,omitempty"`
-	OutcomeUnknown bool            `json:"outcome_unknown,omitempty"`
+	Event               updateout.Event                 `json:"event"`
+	TransmittedContract *sourceDeliveryContractIdentity `json:"transmitted_contract,omitempty"`
+	PreparedAt          time.Time                       `json:"prepared_at"`
+	QueuedAt            time.Time                       `json:"queued_at"`
+	Attempts            int                             `json:"attempts"`
+	ProbeAttempts       int                             `json:"probe_attempts,omitempty"`
+	State               string                          `json:"state"`
+	FailureCode         string                          `json:"failure_code,omitempty"`
+	OutcomeUnknown      bool                            `json:"outcome_unknown,omitempty"`
+}
+
+type sourceDeliveryContractIdentity struct {
+	EventID     string           `json:"event_id"`
+	Source      canonical.Source `json:"source"`
+	GeneratedAt string           `json:"generated_at"`
 }
 
 type sourceDeliveryOutboxState struct {
@@ -77,6 +84,9 @@ func newSourceDeliveryOutbox(server *Server, path string) (*sourceDeliveryOutbox
 	if err := outbox.load(); err != nil {
 		return nil, err
 	}
+	if err := outbox.migrateTransmittedContracts(server.Config()); err != nil {
+		return nil, err
+	}
 	return outbox, nil
 }
 
@@ -85,12 +95,8 @@ func canonicalSourceDeliveryEvent(event updateout.Event) bool {
 }
 
 func (outbox *sourceDeliveryOutbox) enqueue(cfg appconfig.Config, event updateout.Event, preparedAt, queuedAt time.Time) error {
-	if updateout.Normalize(cfg.SendUpdates).Mode == "full" && event.SnapshotContract != nil {
-		// Bind persistence and receipt reconciliation to the exact contract that
-		// the configured transport will select.
-		event.Contract = event.SnapshotContract
-	}
-	entry, err := sourceDeliveryOutboxEntryForEvent(event, preparedAt, queuedAt)
+	transmitted := sourceDeliveryTransmittedContract(cfg.SendUpdates, event)
+	entry, err := sourceDeliveryOutboxEntryForEvent(event, transmitted, preparedAt, queuedAt)
 	if err != nil {
 		return err
 	}
@@ -128,7 +134,7 @@ func (outbox *sourceDeliveryOutbox) enqueue(cfg appconfig.Config, event updateou
 	return nil
 }
 
-func sourceDeliveryOutboxEntryForEvent(event updateout.Event, preparedAt, queuedAt time.Time) (*sourceDeliveryOutboxEntry, error) {
+func sourceDeliveryOutboxEntryForEvent(event updateout.Event, transmitted *canonical.Envelope, preparedAt, queuedAt time.Time) (*sourceDeliveryOutboxEntry, error) {
 	if event.Type != "initial" && event.Type != "update" {
 		return nil, errSourceDeliveryOutbox
 	}
@@ -138,6 +144,9 @@ func sourceDeliveryOutboxEntryForEvent(event updateout.Event, preparedAt, queued
 	if err := validateSourceDeliveryContracts(event.Contract, event.SnapshotContract); err != nil {
 		return nil, err
 	}
+	if !sourceDeliveryContractBelongsToEvent(transmitted, event) {
+		return nil, errSourceDeliveryOutbox
+	}
 	event.Raw = false
 	event.Records = nil
 	event.Changes = nil
@@ -145,7 +154,12 @@ func sourceDeliveryOutboxEntryForEvent(event updateout.Event, preparedAt, queued
 		event.Timestamp = queuedAt.UTC().Format(time.RFC3339Nano)
 	}
 	return &sourceDeliveryOutboxEntry{
-		Event:      event,
+		Event: event,
+		TransmittedContract: &sourceDeliveryContractIdentity{
+			EventID:     transmitted.EventID,
+			Source:      transmitted.Source,
+			GeneratedAt: transmitted.GeneratedAt,
+		},
 		PreparedAt: preparedAt.UTC(),
 		QueuedAt:   queuedAt.UTC(),
 		State:      "pending",
@@ -162,7 +176,39 @@ func sourceDeliverySnapshotFallback(event updateout.Event, preparedAt, queuedAt 
 		Contract:         snapshot,
 		SnapshotContract: snapshot,
 	}
-	return sourceDeliveryOutboxEntryForEvent(fallback, preparedAt, queuedAt)
+	return sourceDeliveryOutboxEntryForEvent(fallback, snapshot, preparedAt, queuedAt)
+}
+
+func sourceDeliveryTransmittedContract(delivery updateout.Config, event updateout.Event) *canonical.Envelope {
+	if (updateout.Normalize(delivery).Mode == "full" || event.Type == "initial") && event.SnapshotContract != nil {
+		return event.SnapshotContract
+	}
+	return event.Contract
+}
+
+func sourceDeliveryContractBelongsToEvent(contract *canonical.Envelope, event updateout.Event) bool {
+	if contract == nil || contract.EventID == "" {
+		return false
+	}
+	for _, candidate := range []*canonical.Envelope{event.Contract, event.SnapshotContract} {
+		if candidate != nil && candidate.EventID == contract.EventID && candidate.Source.SameIdentity(contract.Source) && candidate.GeneratedAt == contract.GeneratedAt {
+			return true
+		}
+	}
+	return false
+}
+
+func sourceDeliveryEntryContract(entry *sourceDeliveryOutboxEntry) *canonical.Envelope {
+	if entry == nil || entry.TransmittedContract == nil {
+		return nil
+	}
+	identity := entry.TransmittedContract
+	for _, candidate := range []*canonical.Envelope{entry.Event.Contract, entry.Event.SnapshotContract} {
+		if candidate != nil && candidate.EventID == identity.EventID && candidate.Source.SameIdentity(identity.Source) && candidate.GeneratedAt == identity.GeneratedAt {
+			return candidate
+		}
+	}
+	return nil
 }
 
 func validateSourceDeliveryContracts(selected, snapshot *canonical.Envelope) error {
@@ -208,10 +254,11 @@ func sourceDeliveryDestinationKey(cfg appconfig.Config) string {
 }
 
 func sourceDeliveryEntryID(entry *sourceDeliveryOutboxEntry) string {
-	if entry == nil || entry.Event.Contract == nil {
+	contract := sourceDeliveryEntryContract(entry)
+	if contract == nil {
 		return ""
 	}
-	return entry.Event.Contract.EventID
+	return contract.EventID
 }
 
 func (outbox *sourceDeliveryOutbox) start(ctx context.Context, group *sync.WaitGroup) {
@@ -285,7 +332,7 @@ func (outbox *sourceDeliveryOutbox) processOnce() (bool, time.Duration) {
 		if ctx == nil {
 			ctx = context.Background()
 		}
-		probe, probeErr := outbox.probe(ctx, cfg, entry.Event.Contract)
+		probe, probeErr := outbox.probe(ctx, cfg, sourceDeliveryEntryContract(&entry))
 
 		outbox.mu.Lock()
 		if outbox.state.Active == nil || sourceDeliveryEntryID(outbox.state.Active) != sourceDeliveryEntryID(&entry) {
@@ -375,7 +422,7 @@ func (outbox *sourceDeliveryOutbox) processOnce() (bool, time.Duration) {
 		return outbox.state.Active != nil, 0
 	}
 	if success {
-		completedSource := entry.Event.Contract.Source
+		completedSource := sourceDeliveryEntryContract(&entry).Source
 		if result.Delivery != nil {
 			completedSource = result.Delivery.Source
 		}
@@ -491,9 +538,10 @@ func (outbox *sourceDeliveryOutbox) status() map[string]interface{} {
 		result["probe_attempts"] = active.ProbeAttempts
 		result["failure_code"] = active.FailureCode
 		result["outcome_unknown"] = active.OutcomeUnknown
-		if active.Event.Contract != nil {
-			result["event_id"] = active.Event.Contract.EventID
-			result["source"] = active.Event.Contract.Source
+		if transmitted := sourceDeliveryEntryContract(active); transmitted != nil {
+			result["event_id"] = transmitted.EventID
+			result["source"] = transmitted.Source
+			result["generated_at"] = transmitted.GeneratedAt
 		}
 	}
 	return result
@@ -554,9 +602,41 @@ func validateSourceDeliveryOutboxState(state sourceDeliveryOutboxState) error {
 		default:
 			return errSourceDeliveryOutbox
 		}
-		if _, err := sourceDeliveryOutboxEntryForEvent(entry.Event, entry.PreparedAt, entry.QueuedAt); err != nil {
+		if err := validateSourceDeliveryContracts(entry.Event.Contract, entry.Event.SnapshotContract); err != nil {
 			return errSourceDeliveryOutbox
 		}
+		if entry.TransmittedContract != nil && sourceDeliveryEntryContract(entry) == nil {
+			return errSourceDeliveryOutbox
+		}
+	}
+	return nil
+}
+
+func (outbox *sourceDeliveryOutbox) migrateTransmittedContracts(cfg appconfig.Config) error {
+	if outbox.state.Active == nil {
+		return nil
+	}
+	// A changed destination/configuration must remain fail-closed. Its entries
+	// cannot be rebound to a different transport selection policy.
+	if sourceDeliveryDestinationKey(cfg) != outbox.state.DestinationKey {
+		return nil
+	}
+	changed := false
+	for _, entry := range []*sourceDeliveryOutboxEntry{outbox.state.Active, outbox.state.Latest} {
+		if entry == nil {
+			continue
+		}
+		transmitted := sourceDeliveryTransmittedContract(cfg.SendUpdates, entry.Event)
+		if !sourceDeliveryContractBelongsToEvent(transmitted, entry.Event) {
+			return errSourceDeliveryOutbox
+		}
+		if entry.TransmittedContract == nil || entry.TransmittedContract.EventID != transmitted.EventID || !entry.TransmittedContract.Source.SameIdentity(transmitted.Source) || entry.TransmittedContract.GeneratedAt != transmitted.GeneratedAt {
+			entry.TransmittedContract = &sourceDeliveryContractIdentity{EventID: transmitted.EventID, Source: transmitted.Source, GeneratedAt: transmitted.GeneratedAt}
+			changed = true
+		}
+	}
+	if changed {
+		return outbox.persistLocked()
 	}
 	return nil
 }
