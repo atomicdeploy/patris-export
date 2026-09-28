@@ -77,6 +77,8 @@ type Server struct {
 	catalogProviderMu      sync.Mutex
 	pricingCommands        pricingCommandState
 	sourceDeliveryAck      sourceDeliveryAcknowledgement
+	sourceDeliveryOutbox   *sourceDeliveryOutbox
+	sourceReconcileOnce    sync.Once
 	canonicalProjection    *canonicalProjectionCache
 	pricingPublication     *canonicalProjectionCache
 	pricingActuation       *pricingActuator
@@ -93,9 +95,12 @@ type Server struct {
 	serviceWG              sync.WaitGroup
 }
 
+const sourceDeliveryReconcileInterval = 15 * time.Minute
+
 type Options struct {
-	Config  *appconfig.Manager
-	Version version.Info
+	Config                   *appconfig.Manager
+	Version                  version.Info
+	SourceDeliveryOutboxPath string
 }
 
 // Compatibility aliases keep the existing server API while sharing one diff
@@ -244,6 +249,16 @@ func NewServerWithOptions(dbPath string, charMap converter.CharMapping, options 
 	s.excelPricingWrites = newExcelPricingWritebackQueue(s)
 	if s.config != nil {
 		s.pricingActuation = newPricingActuator(s, s.config.Path()+".pricing.json")
+		outboxPath := strings.TrimSpace(options.SourceDeliveryOutboxPath)
+		if outboxPath == "" {
+			outboxPath = s.config.Path() + ".source-delivery-outbox.json"
+		}
+		s.sourceDeliveryOutbox, err = newSourceDeliveryOutbox(s, outboxPath)
+		if err != nil {
+			backgroundCancel()
+			_ = ds.Close()
+			return nil, fmt.Errorf("failed to load source delivery outbox: %w", err)
+		}
 	}
 
 	// Set up routes
@@ -269,6 +284,7 @@ func NewServerWithOptions(dbPath string, charMap converter.CharMapping, options 
 		// The writeback queue is a process-lifetime worker. Keep it separate
 		// from backgroundWG, which is also used to await bounded startup work.
 		s.excelPricingWrites.start(s.backgroundCtx, &s.serviceWG)
+		s.sourceDeliveryOutbox.start(s.backgroundCtx, &s.serviceWG)
 	}
 
 	return s, nil
@@ -743,6 +759,12 @@ func (s *Server) Status() map[string]interface{} {
 	}
 	if s.pricingActuation != nil {
 		status["pricing"] = s.pricingActuation.status()
+	}
+	if s.sourceDeliveryOutbox != nil {
+		outboxStatus := s.sourceDeliveryOutbox.status()
+		outboxStatus["reconcile_interval"] = sourceDeliveryReconcileInterval.String()
+		outboxStatus["reconciliation_enabled"] = s.Config().SendUpdates.Enabled
+		status["source_delivery_outbox"] = outboxStatus
 	}
 	return status
 }
@@ -2251,16 +2273,6 @@ func (s *Server) broadcastInitialSnapshot(reason string) {
 	dbPath := s.currentDBPath()
 	message := s.initialSnapshotMessage(result, dbPath, reason)
 
-	s.lastRecordsMu.Lock()
-	s.lastRecords = records
-	s.lastRecordsReady = true
-	if result.Contract != nil && !result.DisableSyncContract {
-		s.lastContractRevision = result.Contract.Source.Revision
-	} else {
-		s.lastContractRevision = ""
-	}
-	s.lastRecordsMu.Unlock()
-
 	s.wsClientsMu.RLock()
 	for conn, connMu := range s.wsClients {
 		go func(c *websocket.Conn, mu *sync.Mutex) {
@@ -2275,7 +2287,7 @@ func (s *Server) broadcastInitialSnapshot(reason string) {
 	s.wsClientsMu.RUnlock()
 
 	log.Printf("📤 Broadcast initial snapshot (%s): %d records from %s", reason, len(records), sourceBaseName(dbPath))
-	s.dispatchUpdateEvent(updateout.Event{
+	if err := s.dispatchUpdateAndCommitBaseline(result, updateout.Event{
 		Type:             "initial",
 		Timestamp:        fmt.Sprintf("%v", message["timestamp"]),
 		Source:           browserSafeURL(dbPath),
@@ -2284,7 +2296,10 @@ func (s *Server) broadcastInitialSnapshot(reason string) {
 		KeyField:         result.KeyField,
 		Contract:         result.SyncEnvelope(nil),
 		SnapshotContract: result.SyncEnvelope(nil),
-	}, preparedAt)
+	}, preparedAt); err != nil {
+		go s.broadcastProcessInfo()
+		return
+	}
 	go s.broadcastProcessInfo()
 }
 
@@ -2312,7 +2327,7 @@ func (s *Server) broadcastUpdate() {
 	records := result.Rows
 
 	// Compute changes
-	changeSet, contractChanged := s.updateRecordBaseline(result)
+	changeSet, contractChanged := s.computeRecordUpdate(result)
 	changeSet.Raw = result.Raw
 	changes := changeSet.Map()
 	changes["pricing_authority"] = result.PricingAuthority
@@ -2344,7 +2359,7 @@ func (s *Server) broadcastUpdate() {
 			log.Printf("Catalog structure changed without product-row changes")
 		}
 		s.notifyConfigured("row_updated", "Patris rows changed", s.rowChangeMessage(added, modified, deleted, changes))
-		s.dispatchUpdateEvent(updateout.Event{
+		if err := s.dispatchUpdateAndCommitBaseline(result, updateout.Event{
 			Type:             "update",
 			Timestamp:        changeSet.Timestamp,
 			Source:           browserSafeURL(s.currentDBPath()),
@@ -2354,7 +2369,14 @@ func (s *Server) broadcastUpdate() {
 			KeyField:         result.KeyField,
 			Contract:         result.SyncEnvelope(&changeSet),
 			SnapshotContract: result.SyncEnvelope(nil),
-		}, preparedAt)
+		}, preparedAt); err != nil {
+			// Keep the previous watcher baseline. A later source notification will
+			// rediscover the same revision instead of silently losing it.
+			go s.broadcastProcessInfo()
+			return
+		}
+	} else {
+		s.commitRecordBaseline(result)
 	}
 	go s.broadcastProcessInfo()
 }
@@ -2400,66 +2422,92 @@ func (s *Server) dispatchInitialUpdateAsync() {
 	}()
 }
 
-func (s *Server) dispatchUpdateEvent(event updateout.Event, preparedAt time.Time) {
+func (s *Server) dispatchUpdateEvent(event updateout.Event, preparedAt time.Time) error {
 	operationConfig := s.Config()
 	cfg := operationConfig.SendUpdates
 	if !cfg.Enabled {
-		return
+		return nil
 	}
 	if event.Type == "initial" && !cfg.Initial {
-		return
+		return nil
 	}
 	queuedAt := time.Now()
+	if s.sourceDeliveryOutbox != nil && canonicalSourceDeliveryEvent(event) {
+		if err := s.sourceDeliveryOutbox.enqueue(operationConfig, event, preparedAt, queuedAt); err != nil {
+			s.recordPreDispatchFailure(event.Type, "outbox_persist", queuedAt, err)
+			log.Printf("Failed to persist source delivery before dispatch")
+			return err
+		}
+		return nil
+	}
 	go func() {
-		ctx := s.backgroundCtx
-		if ctx == nil {
-			ctx = context.Background()
-		}
-		if s.excelPricing != nil {
-			select {
-			case s.excelPricing.permit <- struct{}{}:
-				defer func() { <-s.excelPricing.permit }()
-			case <-ctx.Done():
-				s.recordPreDispatchFailure(event.Type, "permit_wait", queuedAt, ctx.Err())
-				return
-			}
-		}
-		// Only the permit owner publishes active telemetry. Include dispatch
-		// scheduling/permit wait once acquired; earlier source preparation is separate.
-		operation := "source_delivery"
-		if event.Type == "initial" {
-			operation = "startup_delivery"
-		}
-		diagnostic := s.beginQueuedPricingOperationDiagnostic(operation, "dispatch", queuedAt)
-		diagnostic.includePreparation(preparedAt)
-		terminalCode := "request_aborted"
-		defer func() { diagnostic.finish(terminalCode, "", "") }()
-		started := time.Now()
-		ctx = s.pricingCommandContext(ctx, operationConfig, cfg)
-		ackKey := s.sourceDeliveryKey(operationConfig, cfg)
-		result, err := updateout.DispatchWithResult(ctx, cfg, event)
-		s.recordSourceDeliveryAcknowledgement(ackKey, cfg, event, result, err)
-		details := refreshDispatchDetails(result, err, started)
-		contract := event.Contract
-		if (updateout.Normalize(cfg).Mode == "full" || event.Type == "initial") && event.SnapshotContract != nil {
-			contract = event.SnapshotContract
-		}
-		terminalCode = backgroundDeliveryOutcome(result, err, contract)
-		if terminalCode == "delivery_outcome_unknown" {
-			details.Retryable = false
-		}
-		diagnostic.mu.Lock()
-		diagnostic.dispatch = details
-		diagnostic.mu.Unlock()
-
-		if err != nil {
-			log.Printf("Failed to send update event: code=%s http_status=%d attempts=%d", details.Code, details.HTTPStatus, details.Attempts)
-			return
-		}
-		if result.Status != "" {
-			log.Printf("Sent update event: %s", result.DiagnosticSummary())
-		}
+		_, _, _ = s.dispatchUpdateEventNow(operationConfig, event, preparedAt, queuedAt)
 	}()
+	return nil
+}
+
+// dispatchUpdateAndCommitBaseline couples a watcher revision to its durable
+// delivery enqueue. A storage failure leaves the prior baseline intact so the
+// same source revision remains discoverable on the next observation.
+func (s *Server) dispatchUpdateAndCommitBaseline(result recordpipe.Result, event updateout.Event, preparedAt time.Time) error {
+	if err := s.dispatchUpdateEvent(event, preparedAt); err != nil {
+		return err
+	}
+	s.commitRecordBaseline(result)
+	return nil
+}
+
+func (s *Server) dispatchUpdateEventNow(operationConfig appconfig.Config, event updateout.Event, preparedAt, queuedAt time.Time) (updateout.DeliveryResult, string, error) {
+	cfg := operationConfig.SendUpdates
+	ctx := s.backgroundCtx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if s.excelPricing != nil {
+		select {
+		case s.excelPricing.permit <- struct{}{}:
+			defer func() { <-s.excelPricing.permit }()
+		case <-ctx.Done():
+			s.recordPreDispatchFailure(event.Type, "permit_wait", queuedAt, ctx.Err())
+			return updateout.DeliveryResult{}, "request_aborted", ctx.Err()
+		}
+	}
+	// Only the permit owner publishes active telemetry. Include dispatch
+	// scheduling/permit wait once acquired; earlier source preparation is separate.
+	operation := "source_delivery"
+	if event.Type == "initial" {
+		operation = "startup_delivery"
+	}
+	diagnostic := s.beginQueuedPricingOperationDiagnostic(operation, "dispatch", queuedAt)
+	diagnostic.includePreparation(preparedAt)
+	terminalCode := "request_aborted"
+	defer func() { diagnostic.finish(terminalCode, "", "") }()
+	started := time.Now()
+	ctx = s.pricingCommandContext(ctx, operationConfig, cfg)
+	ackKey := s.sourceDeliveryKey(operationConfig, cfg)
+	result, err := updateout.DispatchWithResult(ctx, cfg, event)
+	s.recordSourceDeliveryAcknowledgement(ackKey, cfg, event, result, err)
+	details := refreshDispatchDetails(result, err, started)
+	contract := event.Contract
+	if (updateout.Normalize(cfg).Mode == "full" || event.Type == "initial") && event.SnapshotContract != nil {
+		contract = event.SnapshotContract
+	}
+	terminalCode = backgroundDeliveryOutcome(result, err, contract)
+	if terminalCode == "delivery_outcome_unknown" {
+		details.Retryable = false
+	}
+	diagnostic.mu.Lock()
+	diagnostic.dispatch = details
+	diagnostic.mu.Unlock()
+
+	if err != nil {
+		log.Printf("Failed to send update event: code=%s http_status=%d attempts=%d", details.Code, details.HTTPStatus, details.Attempts)
+		return result, terminalCode, err
+	}
+	if result.Status != "" {
+		log.Printf("Sent update event: %s", result.DiagnosticSummary())
+	}
+	return result, terminalCode, nil
 }
 
 func (s *Server) processToastRequest(req ToastRequest) error {
@@ -3008,6 +3056,12 @@ func (s *Server) seedLastSnapshot(records []map[string]interface{}, contractRevi
 }
 
 func (s *Server) updateRecordBaseline(result recordpipe.Result) (recorddiff.ChangeSet, bool) {
+	changeSet, contractChanged := s.computeRecordUpdate(result)
+	s.commitRecordBaseline(result)
+	return changeSet, contractChanged
+}
+
+func (s *Server) computeRecordUpdate(result recordpipe.Result) (recorddiff.ChangeSet, bool) {
 	s.lastRecordsMu.Lock()
 	defer s.lastRecordsMu.Unlock()
 
@@ -3017,10 +3071,19 @@ func (s *Server) updateRecordBaseline(result recordpipe.Result) (recorddiff.Chan
 	}
 	contractChanged := s.lastRecordsReady && currentRevision != s.lastContractRevision
 	changeSet := result.FilterChanges(s.computeChangeSetByKey(result.Rows, result.KeyField))
+	return changeSet, contractChanged
+}
+
+func (s *Server) commitRecordBaseline(result recordpipe.Result) {
+	s.lastRecordsMu.Lock()
+	defer s.lastRecordsMu.Unlock()
+	currentRevision := ""
+	if result.Contract != nil && !result.DisableSyncContract {
+		currentRevision = result.Contract.Source.Revision
+	}
 	s.lastRecords = recordmap.CopyRows(result.Rows)
 	s.lastRecordsReady = true
 	s.lastContractRevision = currentRevision
-	return changeSet, contractChanged
 }
 
 // logDetailedChanges logs detailed information about what changed
@@ -3257,6 +3320,7 @@ func (s *Server) StartWatching(debounceDuration time.Duration) error {
 		}
 		log.Printf("👀 Polling remote source: %s (interval: %v)", browserSafeURL(dbPath), pollInterval)
 		s.dispatchInitialUpdateAsync()
+		s.startSourceDeliveryReconciliation(sourceDeliveryReconcileInterval, s.reconcileSourceDelivery)
 		return nil
 	}
 
@@ -3277,7 +3341,64 @@ func (s *Server) StartWatching(debounceDuration time.Duration) error {
 	log.Printf("👀 Watching %s file: %s", fileType, filepath.Base(dbPath))
 
 	s.dispatchInitialUpdateAsync()
+	s.startSourceDeliveryReconciliation(sourceDeliveryReconcileInterval, s.reconcileSourceDelivery)
 	return nil
+}
+
+func (s *Server) reconcileSourceDelivery(ctx context.Context) {
+	cfg := s.Config()
+	if !cfg.SendUpdates.Enabled || s.sourceDeliveryOutbox == nil {
+		return
+	}
+	bounded, cancel := context.WithTimeout(ctx, canonicalRequestTimeout(cfg))
+	defer cancel()
+	preparedAt := time.Now()
+	result, err := s.RecordResultContext(bounded)
+	if err != nil {
+		s.recordPreDispatchFailure("initial", "source_reconcile_prepare", preparedAt, err)
+		return
+	}
+	event := updateout.Event{
+		Type:             "initial",
+		Timestamp:        time.Now().UTC().Format(time.RFC3339Nano),
+		Source:           browserSafeURL(s.currentDBPath()),
+		Raw:              result.Raw,
+		Records:          result.Rows,
+		KeyField:         result.KeyField,
+		Contract:         result.SyncEnvelope(nil),
+		SnapshotContract: result.SyncEnvelope(nil),
+	}
+	queuedAt := time.Now()
+	if err := s.sourceDeliveryOutbox.enqueue(cfg, event, preparedAt, queuedAt); err != nil {
+		s.recordPreDispatchFailure("initial", "source_reconcile_outbox", queuedAt, err)
+		log.Printf("Failed to persist scheduled source reconciliation")
+	}
+}
+
+// startSourceDeliveryReconciliation heals missed file notifications with a
+// bounded complete snapshot. The same durable outbox keeps at most one active
+// event plus one coalesced latest snapshot, so the schedule cannot create an
+// unbounded delivery backlog.
+func (s *Server) startSourceDeliveryReconciliation(interval time.Duration, reconcile func(context.Context)) {
+	if s.sourceDeliveryOutbox == nil || interval <= 0 || reconcile == nil || s.backgroundCtx == nil {
+		return
+	}
+	s.sourceReconcileOnce.Do(func() {
+		s.serviceWG.Add(1)
+		go func() {
+			defer s.serviceWG.Done()
+			ticker := time.NewTicker(interval)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-s.backgroundCtx.Done():
+					return
+				case <-ticker.C:
+					reconcile(s.backgroundCtx)
+				}
+			}
+		}()
+	})
 }
 
 // Close cleans up server resources
