@@ -1574,9 +1574,10 @@ func (fixture *excelPricingRemoteSnapshotFixture) Client(t *testing.T) *excelPri
 }
 
 func (fixture *excelPricingRemoteSnapshotFixture) handle(w http.ResponseWriter, r *http.Request) {
-	if r.Header.Get(excelPricingRemoteSecretHeader) != "test-remote-snapshot-secret-value" ||
+	projectionRead := r.URL.Path == "/wp-json/digitalogic/integration/catalog" && r.Header.Get("Authorization") == "Bearer test-remote-snapshot-secret-value"
+	if !projectionRead && (r.Header.Get(excelPricingRemoteSecretHeader) != "test-remote-snapshot-secret-value" ||
 		r.Header.Get(excelPricingRemoteSourceIDHeader) != fixture.source.ID ||
-		r.Header.Get(excelPricingRemoteDatasetHeader) != fixture.source.Dataset {
+		r.Header.Get(excelPricingRemoteDatasetHeader) != fixture.source.Dataset) {
 		fixture.mu.Lock()
 		fixture.headerFailure = "missing protected machine headers"
 		fixture.mu.Unlock()
@@ -1585,6 +1586,16 @@ func (fixture *excelPricingRemoteSnapshotFixture) handle(w http.ResponseWriter, 
 	}
 	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
 	switch {
+	case r.Method == http.MethodGet && r.URL.Path == "/wp-json/digitalogic/integration/catalog":
+		q := r.URL.Query()
+		if q.Get("projection") != "current-products" || fixture.revision.InputSource == nil || q.Get("source_revision") != fixture.revision.InputSource.Revision || q.Get("owner_catalog_revision") != fixture.revision.OwnerCatalogRevision {
+			http.Error(w, "unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "data": map[string]interface{}{
+			"schema": "digitalogic.current-owner-products.v1", "authority": "php", "owner_catalog_revision": fixture.revision.OwnerCatalogRevision,
+			"source": fixture.source, "input_source": fixture.revision.InputSource, "row_count": len(fixture.payload.Catalog.Rows), "rows": fixture.payload.Catalog.Rows,
+		}})
 	case r.Method == http.MethodGet && r.URL.Path == "/wp-json/digitalogic/pricing/sync/revision":
 		fixture.mu.Lock()
 		fixture.revisionCalls++
