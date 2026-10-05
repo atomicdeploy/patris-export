@@ -1,25 +1,25 @@
 module github.com/atomicdeploy/patris-export
 
-go 1.25.0
+go 1.26.0
 
 require (
 	github.com/Microsoft/go-winio v0.6.2
 	github.com/charmbracelet/bubbletea v1.3.10
 	github.com/charmbracelet/lipgloss v1.1.0
-	github.com/ebitengine/purego v0.11.0
+	github.com/ebitengine/purego v0.11.1
 	github.com/fatih/color v1.19.0
 	github.com/fsnotify/fsnotify v1.10.1
 	github.com/gen2brain/beeep v0.11.2
 	github.com/go-sql-driver/mysql v1.10.1
 	github.com/gorilla/mux v1.8.1
 	github.com/gorilla/websocket v1.5.3
-	github.com/mattn/go-sqlite3 v1.14.50
+	github.com/mattn/go-sqlite3 v1.14.52
 	github.com/pelletier/go-toml/v2 v2.4.3
-	github.com/shirou/gopsutil/v4 v4.26.8
+	github.com/shirou/gopsutil/v4 v4.26.9
 	github.com/spf13/cobra v1.10.2
 	github.com/xuri/excelize/v2 v2.11.0
-	golang.org/x/sys v0.47.0
-	golang.org/x/text v0.41.0
+	golang.org/x/sys v0.48.0
+	golang.org/x/text v0.42.0
 	gopkg.in/yaml.v3 v3.0.1
 )
 
@@ -51,7 +51,7 @@ require (
 	github.com/muesli/cancelreader v0.2.2 // indirect
 	github.com/muesli/termenv v0.16.0 // indirect
 	github.com/nfnt/resize v0.0.0-20180221191011-83c6a9932646 // indirect
-	github.com/power-devops/perfstat v0.0.0-20240221224432-82ca36839d55 // indirect
+	github.com/power-devops/perfstat v0.0.0-20260805114148-88456608a4f6 // indirect
 	github.com/richardlehane/mscfb v1.0.7 // indirect
 	github.com/richardlehane/msoleps v1.0.6 // indirect
 	github.com/rivo/uniseg v0.4.7 // indirect
@@ -60,8 +60,8 @@ require (
 	github.com/spf13/pflag v1.0.9 // indirect
 	github.com/tadvi/systray v0.0.0-20190226123456-11a2b8fa57af // indirect
 	github.com/tiendc/go-deepcopy v1.7.2 // indirect
-	github.com/tklauser/go-sysconf v0.3.16 // indirect
-	github.com/tklauser/numcpus v0.11.0 // indirect
+	github.com/tklauser/go-sysconf v0.4.0 // indirect
+	github.com/tklauser/numcpus v0.12.0 // indirect
 	github.com/xo/terminfo v0.0.0-20220910002029-abceb7e1c41e // indirect
 	github.com/xuri/efp v0.0.1 // indirect
 	github.com/xuri/nfp v0.0.2-0.20250530014748-2ddeb826f9a9 // indirect
