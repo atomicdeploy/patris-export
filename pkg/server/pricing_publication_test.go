@@ -17,7 +17,7 @@ import (
 )
 
 func TestAuthorityWaitPublishesOnlySelectedFinalProjection(t *testing.T) {
-	for _, mode := range []string{"go", "php", "bad-binding", "missing-authority", "replayed-new-owner"} {
+	for _, mode := range []string{"go", "php", "php-magnitude", "bad-binding", "missing-authority", "replayed-new-owner"} {
 		t.Run(mode, func(t *testing.T) {
 			fixture := newExcelPricingRemoteSnapshotFixture(t, "ready")
 			fixture.acceptAnyID = true
@@ -26,7 +26,7 @@ func TestAuthorityWaitPublishesOnlySelectedFinalProjection(t *testing.T) {
 			if mode == "replayed-new-owner" {
 				authority = "go"
 			}
-			if mode == "bad-binding" {
+			if mode == "bad-binding" || mode == "php-magnitude" {
 				authority = "php"
 			}
 			if mode == "missing-authority" {
@@ -43,6 +43,9 @@ func TestAuthorityWaitPublishesOnlySelectedFinalProjection(t *testing.T) {
 					DefaultAssignment: &pricingcatalog.Assignment{MethodID: "air", ProfitPercent: &markup},
 				}}
 				cfg.Canonical.Pricing.Digitalogic = pricingcatalog.DigitalogicConfig{BaseURL: fixture.server.URL + "/wp-json/digitalogic", BearerTokenEnv: excelPricingRemoteSnapshotTestSecretEnv}
+				if mode == "php-magnitude" {
+					cfg.Canonical.Pricing.Static.RoundingPolicy = &pricingcatalog.RoundingPolicy{Tiers: []pricingcatalog.RoundingTier{{ThresholdIRT: "1000", Digits: 1}}, ExtendDecades: true}
+				}
 			})
 			if srv.configWatcher != nil {
 				_ = srv.configWatcher.Close()
@@ -158,10 +161,13 @@ func TestAuthorityWaitPublishesOnlySelectedFinalProjection(t *testing.T) {
 				if response.Code != 200 || products.Code != wantStatus {
 					t.Fatalf("website receipt/current projection: refresh=%d products=%d body=%s", response.Code, products.Code, products.Body.String())
 				}
-				if mode == "php" {
+				if mode == "php" || mode == "php-magnitude" {
 					var published map[string]canonical.Product
 					if json.Unmarshal(products.Body.Bytes(), &published) != nil || published["P-1"].FinalPrice == nil || published["P-1"].RecordHash != owner.Contract.Products[0].RecordHash {
 						t.Fatal("owner product was not published intact")
+					}
+					if mode == "php-magnitude" && (published["P-1"].PriceRoundingPolicy == nil || published["P-1"].PriceRoundingDigits == nil || *published["P-1"].PriceRoundingDigits != 4) {
+						t.Fatal("owner magnitude rounding provenance was lost")
 					}
 				}
 				var completion refreshWaitResponse
