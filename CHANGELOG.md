@@ -5,6 +5,12 @@ All notable changes to Patris Export are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.5] - 2026-10-10
+
+- Support configurable magnitude rounding from exact final IRT totals, including equivalent IRR source amounts and effective per-product rounding provenance.
+- Preserve committed PHP owner publication without starting snapshots, with exact input, catalog, product, and source-hash verification.
+- Retain rounding-policy provenance on unpriced products and explicit null policies so owner hashes remain valid. Formula-mode Excel exports preserve verified owner prices for magnitude-policy rows.
+
 ## [2.0.4] - 2026-09-10
 
 - Preserve PHP receiver timings for SQL commit, option-cache invalidation, report finalization, product-commit dispatch, and report notification through Go and CLI diagnostics. These measurements do not alter delivery acceptance or price calculation.

@@ -13,6 +13,31 @@ func magnitudePolicy() *pricingcatalog.RoundingPolicy {
 	return &pricingcatalog.RoundingPolicy{Tiers: []pricingcatalog.RoundingTier{{ThresholdIRT: "1000", Digits: 1}, {ThresholdIRT: "10000", Digits: 2}, {ThresholdIRT: "100000", Digits: 3}, {ThresholdIRT: "1000000", Digits: 4}, {ThresholdIRT: "10000000", Digits: 5}}, ExtendDecades: true}
 }
 
+func TestUnpricedPolicyPresenceSurvivesOwnerHashVerification(t *testing.T) {
+	for _, value := range []any{magnitudePolicy(), nil} {
+		row := map[string]any{"product_code": "109054", "warnings": []string{}, "price_rounding_policy": value}
+		// Owner hashes include policy provenance even when no usable price exists.
+		raw, _ := json.Marshal(row)
+		row["record_hash"] = hashBytes(raw)
+		encoded, _ := json.Marshal(row)
+		product, err := VerifyProductJSON(encoded)
+		if err != nil {
+			t.Fatal(err)
+		}
+		mapped := product.Map()
+		policy, exists := mapped["price_rounding_policy"]
+		if !exists {
+			t.Fatal("unpriced policy field lost")
+		}
+		if value == nil && policy != nil {
+			t.Fatal("explicit null changed")
+		}
+		if product.FinalPrice != nil {
+			t.Fatal("unpriced row acquired price")
+		}
+	}
+}
+
 func TestMagnitudeRoundingExactBoundariesAndRoutes(t *testing.T) {
 	p := magnitudePolicy()
 	for _, tt := range []struct {

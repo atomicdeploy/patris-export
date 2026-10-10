@@ -957,6 +957,8 @@ func (product Product) Map() map[string]interface{} {
 		putString(row, "price_source_kind", product.PriceSourceKind, product.presence("price_source_kind"))
 		if product.PriceRoundingPolicy != nil {
 			row["price_rounding_policy"] = product.PriceRoundingPolicy
+		} else if product.presence("price_rounding_policy") == fieldNull {
+			row["price_rounding_policy"] = nil
 		}
 		putPointer(row, "price_rounding_digits", pointerIntValueFromInt(product.PriceRoundingDigits), product.presence("price_rounding_digits"))
 		putString(row, "price_rounding_mode", product.PriceRoundingMode, product.presence("price_rounding_mode"))
@@ -1005,7 +1007,7 @@ func (product *Product) UnmarshalJSON(data []byte) error {
 		"shipping_price_per_kg", "shipping_price_per_kg_currency", "markup_percent", "irt_per_cny",
 		"pricing_catalog_revision", "pricing_catalog_status", "currency_effective_date",
 		"price_source_amount", "price_source_currency", "price_source_kind",
-		"price_rounding_digits", "price_rounding_mode", "final_price",
+		"price_rounding_policy", "price_rounding_digits", "price_rounding_mode", "final_price",
 	} {
 		if value, exists := raw[field]; exists {
 			if bytes.Equal(bytes.TrimSpace(value), []byte("null")) {
@@ -1076,7 +1078,7 @@ func (product *Product) UnmarshalJSON(data []byte) error {
 		"shipping_method_id", "shipping_price_per_kg", "shipping_price_per_kg_currency", "markup_percent", "irt_per_cny",
 		"pricing_catalog_revision", "pricing_catalog_status", "currency_effective_date",
 		"price_source_amount", "price_source_currency", "price_source_kind",
-		"price_rounding_digits", "price_rounding_mode", "final_price",
+		"price_rounding_policy", "price_rounding_digits", "price_rounding_mode", "final_price",
 	} {
 		if _, exists := raw[field]; exists {
 			product.integrationActive = true
