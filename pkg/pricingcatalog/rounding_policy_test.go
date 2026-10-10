@@ -40,7 +40,7 @@ func TestCatalogTransportsPolicyAndRejectsMalformedPolicy(t *testing.T) {
 	}
 	p := RoundingPolicy{Tiers: []RoundingTier{{"1000", 1}}, ExtendDecades: true}
 	encoded, _ := json.Marshal(p)
-	if string(encoded) != `{"extend_decades":true,"tiers":[{"digits":1,"threshold_irt":"1000"}]}` {
+	if string(encoded) != `{"tiers":[{"threshold_irt":"1000","digits":1}],"extend_decades":true}` {
 		t.Fatalf("noncanonical policy hash material %s", encoded)
 	}
 }

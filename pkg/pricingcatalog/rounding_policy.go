@@ -20,15 +20,6 @@ type RoundingPolicy struct {
 	ExtendDecades bool           `json:"extend_decades" yaml:"extend_decades" toml:"extend_decades"`
 }
 
-// Match the owner's recursive key ordering so transported record hashes agree.
-func (p RoundingPolicy) MarshalJSON() ([]byte, error) {
-	tiers := make([]map[string]any, 0, len(p.Tiers))
-	for _, t := range p.Tiers {
-		tiers = append(tiers, map[string]any{"threshold_irt": t.ThresholdIRT, "digits": t.Digits})
-	}
-	return json.Marshal(map[string]any{"tiers": tiers, "extend_decades": p.ExtendDecades})
-}
-
 var thresholdPattern = regexp.MustCompile(`^[1-9][0-9]{0,17}$`)
 
 func (p *RoundingPolicy) Validate() error {
