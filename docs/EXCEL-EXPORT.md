@@ -1,5 +1,11 @@
 # Excel export
 
+Products carrying `price_rounding_policy` retain the verified owner `final_price`
+as a value even in formula mode. Their effective rounding digits describe the
+original unrounded total; reusing that quantum after editing inputs could cross
+a magnitude threshold incorrectly. Re-export after owner recalculation to update
+these prices. Fixed-rounding products retain their existing Excel formulas.
+
 Patris Export writes `.xlsx` workbooks from the same transformed rows used by
 JSON, CSV, SQL, REST, WebSocket, and update delivery. It does not add empty
 pricing or shipping fields merely to complete a spreadsheet schema. Fields

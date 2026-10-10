@@ -37,7 +37,7 @@ func validateCalculationDecimal(input string) error {
 // Freight may be quoted in CNY per kilogram or IRR per kilogram; IRR is
 // converted to IRT at ten IRR per IRT. The result is rounded exactly once to
 // the nearest 10^roundingDigits IRT using deterministic half-up ties.
-func LandedPrice(weightGrams, shippingPricePerKg, shippingCurrency, foreignCNY, markupPercent, irtPerCNY string, roundingDigits int) (int64, error) {
+func LandedPrice(weightGrams, shippingPricePerKg, shippingCurrency, foreignCNY, markupPercent, irtPerCNY string, roundingDigits int, policies ...*pricingcatalog.RoundingPolicy) (int64, error) {
 	values := make([]*big.Rat, 0, 5)
 	for _, input := range []string{weightGrams, shippingPricePerKg, foreignCNY, markupPercent, irtPerCNY} {
 		if err := validateCalculationDecimal(input); err != nil {
@@ -66,14 +66,14 @@ func LandedPrice(weightGrams, shippingPricePerKg, shippingCurrency, foreignCNY, 
 	landed := new(big.Rat).Add(goodsCost, shippingCost)
 	markupMultiplier := new(big.Rat).Add(big.NewRat(1, 1), new(big.Rat).Quo(markup, big.NewRat(100, 1)))
 	result := new(big.Rat).Mul(landed, markupMultiplier)
-	return roundPrice(result, roundingDigits)
+	return roundPriceWithPolicy(result, roundingDigits, policies...)
 }
 
 // PartnerPrice evaluates the direct Patris partner-price fallback. The source
 // amount is explicitly IRR, so it is converted to IRT before markup and the
 // same single final rounding operation. Freight and FX are deliberately absent
 // from this path.
-func PartnerPrice(partnerIRR, markupPercent string, roundingDigits int) (int64, error) {
+func PartnerPrice(partnerIRR, markupPercent string, roundingDigits int, policies ...*pricingcatalog.RoundingPolicy) (int64, error) {
 	values := make([]*big.Rat, 0, 2)
 	for _, input := range []string{partnerIRR, markupPercent} {
 		if err := validateCalculationDecimal(input); err != nil {
@@ -88,7 +88,7 @@ func PartnerPrice(partnerIRR, markupPercent string, roundingDigits int) (int64, 
 	partner, markup := values[0], values[1]
 	goodsIRT := new(big.Rat).Quo(partner, big.NewRat(10, 1))
 	markupMultiplier := new(big.Rat).Add(big.NewRat(1, 1), new(big.Rat).Quo(markup, big.NewRat(100, 1)))
-	return roundPrice(new(big.Rat).Mul(goodsIRT, markupMultiplier), roundingDigits)
+	return roundPriceWithPolicy(new(big.Rat).Mul(goodsIRT, markupMultiplier), roundingDigits, policies...)
 }
 
 // DirectSalePrice uses Patris' sale amount without freight, markup, or
@@ -96,7 +96,9 @@ func PartnerPrice(partnerIRR, markupPercent string, roundingDigits int) (int64, 
 // in the contract's IRT local currency, so the only operation is the exact
 // ten-to-one currency-unit conversion. Values that cannot be represented as a
 // whole IRT integer fail closed instead of being rounded.
-func DirectSalePrice(saleIRR string) (int64, error) {
+func DirectSalePrice(saleIRR string) (int64, error) { return DirectSalePriceWithPolicy(saleIRR, nil) }
+
+func DirectSalePriceWithPolicy(saleIRR string, policies ...*pricingcatalog.RoundingPolicy) (int64, error) {
 	if err := validateCalculationDecimal(saleIRR); err != nil {
 		return 0, err
 	}
@@ -105,6 +107,9 @@ func DirectSalePrice(saleIRR string) (int64, error) {
 		return 0, fmt.Errorf("sale_price_direct input must be a finite positive decimal")
 	}
 	value.Quo(value, big.NewRat(10, 1))
+	if len(policies) > 0 && policies[0] != nil {
+		return roundPriceWithPolicy(value, 0, policies...)
+	}
 	if !value.IsInt() || !value.Num().IsInt64() {
 		return 0, fmt.Errorf("sale_price_direct must convert exactly to a whole IRT integer")
 	}
@@ -115,8 +120,8 @@ func roundPrice(result *big.Rat, roundingDigits int) (int64, error) {
 	if result == nil || result.Sign() < 0 {
 		return 0, fmt.Errorf("price result must be a non-negative rational")
 	}
-	if roundingDigits < pricingcatalog.MinimumRoundDigits || roundingDigits > pricingcatalog.MaximumRoundDigits {
-		return 0, fmt.Errorf("price rounding digits must be between %d and %d", pricingcatalog.MinimumRoundDigits, pricingcatalog.MaximumRoundDigits)
+	if roundingDigits < pricingcatalog.MinimumRoundDigits || roundingDigits > pricingcatalog.MaximumPolicyRoundDigits {
+		return 0, fmt.Errorf("price rounding digits must be between %d and %d", pricingcatalog.MinimumRoundDigits, pricingcatalog.MaximumPolicyRoundDigits)
 	}
 	quantum := new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(roundingDigits)), nil)
 	scaled := new(big.Rat).Quo(new(big.Rat).Set(result), new(big.Rat).SetInt(quantum))
@@ -131,4 +136,53 @@ func roundPrice(result *big.Rat, roundingDigits int) (int64, error) {
 		return 0, fmt.Errorf("price result exceeds int64")
 	}
 	return quotient.Int64(), nil
+}
+
+func roundPriceWithPolicy(total *big.Rat, digits int, policies ...*pricingcatalog.RoundingPolicy) (int64, error) {
+	if len(policies) > 0 && policies[0] != nil {
+		var err error
+		digits, err = policies[0].DigitsForIRT(total)
+		if err != nil {
+			return 0, err
+		}
+	} else if digits > pricingcatalog.MaximumRoundDigits {
+		return 0, fmt.Errorf("fixed rounding digits exceed supported range")
+	}
+	return roundPrice(total, digits)
+}
+
+// EffectiveRoundingDigits computes provenance from the unrounded formula, never from the rounded output.
+func EffectiveRoundingDigits(kind string, amount, weight, shipping, currency, markup, fx string, p *pricingcatalog.RoundingPolicy) (int, error) {
+	rat := func(s string) *big.Rat { v, _ := new(big.Rat).SetString(s); return v }
+	value := rat(amount)
+	if value == nil {
+		return 0, fmt.Errorf("missing price amount")
+	}
+	switch kind {
+	case PriceSourceKindForeign:
+		w, s, m, f := rat(weight), rat(shipping), rat(markup), rat(fx)
+		if w == nil || s == nil || m == nil || f == nil {
+			return 0, fmt.Errorf("missing foreign formula input")
+		}
+		freight := new(big.Rat).Quo(new(big.Rat).Mul(w, s), big.NewRat(1000, 1))
+		if currency == pricingcatalog.CurrencyCNY {
+			freight.Mul(freight, f)
+		} else {
+			freight.Quo(freight, big.NewRat(10, 1))
+		}
+		value.Add(value.Mul(value, f), freight)
+		value.Mul(value, new(big.Rat).Add(big.NewRat(1, 1), new(big.Rat).Quo(m, big.NewRat(100, 1))))
+	case PriceSourceKindPartner:
+		m := rat(markup)
+		if m == nil {
+			return 0, fmt.Errorf("missing markup")
+		}
+		value.Quo(value, big.NewRat(10, 1))
+		value.Mul(value, new(big.Rat).Add(big.NewRat(1, 1), new(big.Rat).Quo(m, big.NewRat(100, 1))))
+	case PriceSourceKindSaleDirect:
+		value.Quo(value, big.NewRat(10, 1))
+	default:
+		return 0, fmt.Errorf("unknown price source")
+	}
+	return p.DigitsForIRT(value)
 }
