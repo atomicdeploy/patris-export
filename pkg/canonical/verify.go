@@ -484,6 +484,13 @@ func validateProductIdentity(product Product, index int) error {
 		}
 	}
 
+	maximumDigits := pricingcatalog.MaximumRoundDigits
+	if product.PriceRoundingPolicy != nil {
+		if err := product.PriceRoundingPolicy.Validate(); err != nil {
+			return fmt.Errorf("%s.price_rounding_policy invalid: %w", path, err)
+		}
+		maximumDigits = pricingcatalog.MaximumPolicyRoundDigits
+	}
 	roundingDigitsPresent := product.PriceRoundingDigits != nil || product.presence("price_rounding_digits") != fieldAbsent
 	roundingModePresent := product.PriceRoundingMode != "" || product.presence("price_rounding_mode") != fieldAbsent
 	if product.presence("price_rounding_digits") == fieldNull {
@@ -491,7 +498,7 @@ func validateProductIdentity(product Product, index int) error {
 			return fmt.Errorf("%s.price_rounding_mode must be omitted when price_rounding_digits is null", path)
 		}
 	} else if roundingDigitsPresent {
-		if product.PriceRoundingDigits == nil || *product.PriceRoundingDigits < pricingcatalog.MinimumRoundDigits || *product.PriceRoundingDigits > pricingcatalog.MaximumRoundDigits {
+		if product.PriceRoundingDigits == nil || *product.PriceRoundingDigits < pricingcatalog.MinimumRoundDigits || *product.PriceRoundingDigits > maximumDigits {
 			return fmt.Errorf("%s.price_rounding_digits must be an integer from %d through %d or explicit null", path, pricingcatalog.MinimumRoundDigits, pricingcatalog.MaximumRoundDigits)
 		}
 		if !roundingModePresent || product.PriceRoundingMode != pricingcatalog.RoundingModeHalfUp || product.presence("price_rounding_mode") == fieldNull {
@@ -501,7 +508,7 @@ func validateProductIdentity(product Product, index int) error {
 		return fmt.Errorf("%s.price_rounding_mode requires price_rounding_digits", path)
 	}
 	if product.PriceSourceKind == PriceSourceKindSaleDirect {
-		if roundingDigitsPresent || roundingModePresent || product.MarkupPercent != nil || product.presence("markup_percent") != fieldAbsent {
+		if (product.PriceRoundingPolicy == nil && (roundingDigitsPresent || roundingModePresent)) || product.MarkupPercent != nil || product.presence("markup_percent") != fieldAbsent {
 			return fmt.Errorf("%s sale_price_direct must omit markup and rounding fields", path)
 		}
 	}
@@ -522,9 +529,34 @@ func validateProductIdentity(product Product, index int) error {
 		return fmt.Errorf("%s.final_price requires rounding provenance for calculated sources", path)
 	}
 	if product.FinalPrice != nil && product.PriceSourceKind == PriceSourceKindSaleDirect {
-		expected, err := DirectSalePrice(product.PriceSourceAmount.String())
+		expected, err := DirectSalePriceWithPolicy(product.PriceSourceAmount.String(), product.PriceRoundingPolicy)
 		if err != nil || expected != *product.FinalPrice {
 			return fmt.Errorf("%s.final_price must be the exact unmodified sale_price_direct amount in IRT", path)
+		}
+	}
+
+	if product.PriceRoundingPolicy != nil && product.FinalPrice != nil {
+		decimalText := func(v *pricingcatalog.Decimal) string {
+			if v == nil {
+				return ""
+			}
+			return v.String()
+		}
+		digits, err := EffectiveRoundingDigits(product.PriceSourceKind, decimalText(product.PriceSourceAmount), decimalText(product.WeightGrams), decimalText(product.ShippingPricePerKg), product.ShippingPricePerKgCurrency, decimalText(product.MarkupPercent), decimalText(product.IRTPerCNY), product.PriceRoundingPolicy)
+		if err != nil || product.PriceRoundingDigits == nil || *product.PriceRoundingDigits != digits || product.PriceRoundingMode != pricingcatalog.RoundingModeHalfUp {
+			return fmt.Errorf("%s rounding policy provenance mismatch", path)
+		}
+		var expected int64
+		switch product.PriceSourceKind {
+		case PriceSourceKindForeign:
+			expected, err = LandedPrice(decimalText(product.WeightGrams), decimalText(product.ShippingPricePerKg), product.ShippingPricePerKgCurrency, decimalText(product.PriceSourceAmount), decimalText(product.MarkupPercent), decimalText(product.IRTPerCNY), digits, product.PriceRoundingPolicy)
+		case PriceSourceKindPartner:
+			expected, err = PartnerPrice(decimalText(product.PriceSourceAmount), decimalText(product.MarkupPercent), digits, product.PriceRoundingPolicy)
+		case PriceSourceKindSaleDirect:
+			expected, err = DirectSalePriceWithPolicy(decimalText(product.PriceSourceAmount), product.PriceRoundingPolicy)
+		}
+		if err != nil || expected != *product.FinalPrice {
+			return fmt.Errorf("%s rounded final price mismatch", path)
 		}
 	}
 	if !validSHA256Identity(product.RecordHash) {

@@ -15,6 +15,38 @@ import (
 	"github.com/xuri/excelize/v2"
 )
 
+func TestFormulaXLSXMagnitudePolicyRetainsOwnerFinalValue(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "magnitude.xlsx")
+	rows := []map[string]interface{}{{"product_code": "001", "price_source_amount": 10050, "price_source_currency": "IRR", "price_source_kind": "sale_price_direct", "price_rounding_policy": map[string]interface{}{"extend_decades": true, "tiers": []interface{}{map[string]interface{}{"threshold_irt": "1000", "digits": 1}}}, "price_rounding_digits": 1, "final_price": 1010}}
+	if err := WriteXLSX(path, rows, "product_code", XLSXOptions{Mode: "formula", ColumnLabels: map[string]string{"final_price": "final_price"}}); err != nil {
+		t.Fatal(err)
+	}
+	book, err := excelize.OpenFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer book.Close()
+	values, err := book.GetRows(xlsxRecordsSheet)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for i, header := range values[0] {
+		if header == "Final Price (IRT)" {
+			found = true
+			cell, _ := excelize.CoordinatesToCellName(i+1, 2)
+			formula, _ := book.GetCellFormula(xlsxRecordsSheet, cell)
+			value, _ := book.GetCellValue(xlsxRecordsSheet, cell, excelize.Options{RawCellValue: true})
+			if formula != "" || value != "1010" {
+				t.Fatalf("formula=%q value=%q", formula, value)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("final price column missing")
+	}
+}
+
 func TestNormalizeHumanProductNameStripsOnlyTerminalWooIDMarker(t *testing.T) {
 	tests := []struct {
 		name string

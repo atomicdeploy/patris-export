@@ -6,7 +6,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"strings"
 	"testing"
 	"time"
 
@@ -18,7 +17,7 @@ import (
 )
 
 func TestAuthorityWaitPublishesOnlySelectedFinalProjection(t *testing.T) {
-	for _, mode := range []string{"go", "php", "bad-binding", "missing-authority", "replayed-new-owner"} {
+	for _, mode := range []string{"go", "php", "php-magnitude", "bad-binding", "missing-authority", "replayed-new-owner"} {
 		t.Run(mode, func(t *testing.T) {
 			fixture := newExcelPricingRemoteSnapshotFixture(t, "ready")
 			fixture.acceptAnyID = true
@@ -27,7 +26,7 @@ func TestAuthorityWaitPublishesOnlySelectedFinalProjection(t *testing.T) {
 			if mode == "replayed-new-owner" {
 				authority = "go"
 			}
-			if mode == "bad-binding" {
+			if mode == "bad-binding" || mode == "php-magnitude" {
 				authority = "php"
 			}
 			if mode == "missing-authority" {
@@ -43,6 +42,10 @@ func TestAuthorityWaitPublishesOnlySelectedFinalProjection(t *testing.T) {
 					Methods:           []pricingcatalog.Method{{ID: "air", PricePerKg: &freight, Currency: pricingcatalog.CurrencyCNY}},
 					DefaultAssignment: &pricingcatalog.Assignment{MethodID: "air", ProfitPercent: &markup},
 				}}
+				cfg.Canonical.Pricing.Digitalogic = pricingcatalog.DigitalogicConfig{BaseURL: fixture.server.URL + "/wp-json/digitalogic", BearerTokenEnv: excelPricingRemoteSnapshotTestSecretEnv}
+				if mode == "php-magnitude" {
+					cfg.Canonical.Pricing.Static.RoundingPolicy = &pricingcatalog.RoundingPolicy{Tiers: []pricingcatalog.RoundingTier{{ThresholdIRT: "1000", Digits: 1}}, ExtendDecades: true}
+				}
 			})
 			if srv.configWatcher != nil {
 				_ = srv.configWatcher.Close()
@@ -151,8 +154,21 @@ func TestAuthorityWaitPublishesOnlySelectedFinalProjection(t *testing.T) {
 			products := httptest.NewRecorder()
 			srv.router.ServeHTTP(products, httptest.NewRequest(http.MethodGet, "/api/products", nil))
 			if authority == "php" {
-				if response.Code != 200 || products.Code != 503 || !strings.Contains(products.Body.String(), "snapshot_disabled") {
-					t.Fatalf("website receipt/snapshot disabled: refresh=%d products=%d", response.Code, products.Code)
+				wantStatus := 200
+				if mode == "bad-binding" {
+					wantStatus = 503
+				}
+				if response.Code != 200 || products.Code != wantStatus {
+					t.Fatalf("website receipt/current projection: refresh=%d products=%d body=%s", response.Code, products.Code, products.Body.String())
+				}
+				if mode == "php" || mode == "php-magnitude" {
+					var published map[string]canonical.Product
+					if json.Unmarshal(products.Body.Bytes(), &published) != nil || published["P-1"].FinalPrice == nil || published["P-1"].RecordHash != owner.Contract.Products[0].RecordHash {
+						t.Fatal("owner product was not published intact")
+					}
+					if mode == "php-magnitude" && (published["P-1"].PriceRoundingPolicy == nil || published["P-1"].PriceRoundingDigits == nil || *published["P-1"].PriceRoundingDigits != 4) {
+						t.Fatal("owner magnitude rounding provenance was lost")
+					}
 				}
 				var completion refreshWaitResponse
 				if err := json.Unmarshal(response.Body.Bytes(), &completion); err != nil {
@@ -197,6 +213,41 @@ func TestOwnerProductProjectionRejectsForgedRecordHash(t *testing.T) {
 	remote := &excelPricingRemoteSnapshotResult{Source: input.Source, Rows: []json.RawMessage{json.RawMessage(`{"patris_code":"P-1","canonical_product":{"product_code":"P-1","record_hash":"sha256:bad"}}`)}}
 	if _, err := ownerProductProjection(input, remote, "owner-catalog"); err == nil {
 		t.Fatal("forged record hash accepted")
+	}
+}
+
+func TestOwnerProductProjectionPreservesUnpricedStockAndRejectsIncompleteSource(t *testing.T) {
+	cfg := canonical.DefaultConfig()
+	cfg.Pricing.Mode = pricingcatalog.ModeNone
+	_, input := canonical.Transform(context.Background(), []map[string]interface{}{{"Code": "P-1", "ALLANBAR": 7}}, "kala.db", cfg, nil, time.Now())
+	if input == nil || len(input.Products) != 1 {
+		t.Fatal("missing fixture")
+	}
+	product := input.Products[0]
+	if product.FinalPrice != nil || product.PricingCatalogRevision != "" {
+		t.Fatal("fixture must be unpriced")
+	}
+	body, _ := json.Marshal(map[string]interface{}{"patris_code": product.ProductCode, "canonical_product": product})
+	remote := &excelPricingRemoteSnapshotResult{Source: input.Source, Rows: []json.RawMessage{body}}
+	got, err := ownerProductProjection(input, remote, excelPricingRevisionForTest("current-owner"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Contract.Products[0].FinalPrice != nil || got.Contract.Products[0].TotalStock == nil || *got.Contract.Products[0].TotalStock != 7 {
+		t.Fatal("unpriced stock changed")
+	}
+	remote.Rows = nil
+	if _, err := ownerProductProjection(input, remote, "owner"); err == nil {
+		t.Fatal("incomplete source accepted")
+	}
+	remote.Rows = []json.RawMessage{body, body}
+	if _, err := ownerProductProjection(input, remote, "owner"); err == nil {
+		t.Fatal("duplicate accepted")
+	}
+	remote.Rows = []json.RawMessage{body}
+	remote.Source.Revision = excelPricingRevisionForTest("stale-source")
+	if _, err := ownerProductProjection(input, remote, "owner"); err == nil {
+		t.Fatal("stale source hash accepted")
 	}
 }
 

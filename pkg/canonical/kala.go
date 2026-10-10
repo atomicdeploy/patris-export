@@ -51,39 +51,40 @@ const (
 )
 
 type Product struct {
-	ProductCode                string                  `json:"product_code"`
-	CategoryCode               string                  `json:"category_code"`
-	Name                       string                  `json:"name"`
-	Serial                     string                  `json:"serial"`
-	Unit                       string                  `json:"unit"`
-	SalePriceSource            *float64                `json:"sale_price_source"`
-	PartnerPriceSource         *pricingcatalog.Decimal `json:"partner_price_source"`
-	PurchasePriceSource        *float64                `json:"purchase_price_source"`
-	WarehouseStock             map[string]float64      `json:"warehouse_stock"`
-	TotalStock                 *float64                `json:"total_stock"`
-	MinimumStock               *float64                `json:"minimum_stock"`
-	ForeignCurrency            string                  `json:"foreign_currency"`
-	ForeignPrice               *pricingcatalog.Decimal `json:"foreign_price"`
-	WeightGrams                *pricingcatalog.Decimal `json:"weight_grams"`
-	Location                   string                  `json:"location"`
-	ShippingMethodID           string                  `json:"shipping_method_id,omitempty"`
-	ShippingPricePerKg         *pricingcatalog.Decimal `json:"shipping_price_per_kg,omitempty"`
-	ShippingPricePerKgCurrency string                  `json:"shipping_price_per_kg_currency,omitempty"`
-	MarkupPercent              *pricingcatalog.Decimal `json:"markup_percent"`
-	IRTPerCNY                  *pricingcatalog.Decimal `json:"irt_per_cny"`
-	PricingCatalogRevision     string                  `json:"pricing_catalog_revision"`
-	PricingCatalogStatus       string                  `json:"pricing_catalog_status"`
-	CurrencyEffectiveDate      string                  `json:"currency_effective_date"`
-	PriceSourceAmount          *pricingcatalog.Decimal `json:"price_source_amount"`
-	PriceSourceCurrency        string                  `json:"price_source_currency"`
-	PriceSourceKind            string                  `json:"price_source_kind"`
-	PriceRoundingDigits        *int                    `json:"price_rounding_digits"`
-	PriceRoundingMode          string                  `json:"price_rounding_mode"`
-	FinalPrice                 *int64                  `json:"final_price"`
-	SourceUpdatedAt            string                  `json:"source_updated_at"`
-	Warnings                   []string                `json:"warnings"`
-	RecordHash                 string                  `json:"record_hash,omitempty"`
-	Extensions                 *JSONExtensions         `json:"-"`
+	ProductCode                string                         `json:"product_code"`
+	CategoryCode               string                         `json:"category_code"`
+	Name                       string                         `json:"name"`
+	Serial                     string                         `json:"serial"`
+	Unit                       string                         `json:"unit"`
+	SalePriceSource            *float64                       `json:"sale_price_source"`
+	PartnerPriceSource         *pricingcatalog.Decimal        `json:"partner_price_source"`
+	PurchasePriceSource        *float64                       `json:"purchase_price_source"`
+	WarehouseStock             map[string]float64             `json:"warehouse_stock"`
+	TotalStock                 *float64                       `json:"total_stock"`
+	MinimumStock               *float64                       `json:"minimum_stock"`
+	ForeignCurrency            string                         `json:"foreign_currency"`
+	ForeignPrice               *pricingcatalog.Decimal        `json:"foreign_price"`
+	WeightGrams                *pricingcatalog.Decimal        `json:"weight_grams"`
+	Location                   string                         `json:"location"`
+	ShippingMethodID           string                         `json:"shipping_method_id,omitempty"`
+	ShippingPricePerKg         *pricingcatalog.Decimal        `json:"shipping_price_per_kg,omitempty"`
+	ShippingPricePerKgCurrency string                         `json:"shipping_price_per_kg_currency,omitempty"`
+	MarkupPercent              *pricingcatalog.Decimal        `json:"markup_percent"`
+	IRTPerCNY                  *pricingcatalog.Decimal        `json:"irt_per_cny"`
+	PricingCatalogRevision     string                         `json:"pricing_catalog_revision"`
+	PricingCatalogStatus       string                         `json:"pricing_catalog_status"`
+	CurrencyEffectiveDate      string                         `json:"currency_effective_date"`
+	PriceSourceAmount          *pricingcatalog.Decimal        `json:"price_source_amount"`
+	PriceSourceCurrency        string                         `json:"price_source_currency"`
+	PriceSourceKind            string                         `json:"price_source_kind"`
+	PriceRoundingPolicy        *pricingcatalog.RoundingPolicy `json:"price_rounding_policy,omitempty"`
+	PriceRoundingDigits        *int                           `json:"price_rounding_digits"`
+	PriceRoundingMode          string                         `json:"price_rounding_mode"`
+	FinalPrice                 *int64                         `json:"final_price"`
+	SourceUpdatedAt            string                         `json:"source_updated_at"`
+	Warnings                   []string                       `json:"warnings"`
+	RecordHash                 string                         `json:"record_hash,omitempty"`
+	Extensions                 *JSONExtensions                `json:"-"`
 	fieldPresence              map[string]fieldPresence
 	warehouseNulls             map[string]bool
 	integrationActive          bool
@@ -726,7 +727,7 @@ func parseKalaProduct(ctx context.Context, row map[string]interface{}, provider 
 				weight.String(), resolution.ShippingPricePerKg.String(),
 				resolution.ShippingPricePerKgCurrency, foreignPrice.String(),
 				resolution.MarkupPercent.String(), resolution.IRTPerCNY.String(),
-				*resolution.RoundingDigits,
+				*resolution.RoundingDigits, resolution.RoundingPolicy,
 			)
 			if err != nil {
 				warnings = append(warnings, "landed_price_calculation_failed")
@@ -765,7 +766,7 @@ func parseKalaProduct(ctx context.Context, row map[string]interface{}, provider 
 
 		if priceSourceKind == "" && partnerPositive && decimalStrictlyPositive(weight) &&
 			resolution.MarkupPercent != nil && resolution.RoundingDigits != nil {
-			value, err := PartnerPrice(partnerPrice.String(), resolution.MarkupPercent.String(), *resolution.RoundingDigits)
+			value, err := PartnerPrice(partnerPrice.String(), resolution.MarkupPercent.String(), *resolution.RoundingDigits, resolution.RoundingPolicy)
 			if err != nil {
 				warnings = append(warnings, "partner_price_calculation_failed")
 			} else {
@@ -803,7 +804,7 @@ func parseKalaProduct(ctx context.Context, row map[string]interface{}, provider 
 			}
 		}
 		if priceSourceKind == "" && salePositive && useDirectSale && decimalStrictlyPositive(weight) {
-			value, err := DirectSalePrice(salePrice.String())
+			value, err := DirectSalePriceWithPolicy(salePrice.String(), resolution.RoundingPolicy)
 			if err != nil {
 				warnings = append(warnings, "sale_price_direct_calculation_failed")
 			} else {
@@ -827,6 +828,24 @@ func parseKalaProduct(ctx context.Context, row map[string]interface{}, provider 
 		}
 		if finalPrice == nil {
 			warnings = append(warnings, "final_price_unavailable")
+		}
+	}
+	var roundingPolicy *pricingcatalog.RoundingPolicy
+	if finalPrice != nil && resolution.RoundingPolicy != nil {
+		decimalText := func(v *pricingcatalog.Decimal) string {
+			if v == nil {
+				return ""
+			}
+			return v.String()
+		}
+		digits, err := EffectiveRoundingDigits(priceSourceKind, decimalText(priceSourceAmount), decimalText(weight), decimalText(shippingPricePerKg), shippingCurrency, decimalText(markupPercent), decimalText(irtPerCNY), resolution.RoundingPolicy)
+		if err != nil {
+			finalPrice = nil
+			warnings = append(warnings, "price_rounding_policy_invalid")
+		} else {
+			roundingDigits = &digits
+			roundingMode = pricingcatalog.RoundingModeHalfUp
+			roundingPolicy = pricingcatalog.CloneRoundingPolicy(resolution.RoundingPolicy)
 		}
 	}
 	presence := map[string]fieldPresence{}
@@ -893,6 +912,7 @@ func parseKalaProduct(ctx context.Context, row map[string]interface{}, provider 
 		PriceSourceCurrency:        priceSourceCurrency,
 		PriceSourceKind:            priceSourceKind,
 		PriceRoundingDigits:        roundingDigits,
+		PriceRoundingPolicy:        roundingPolicy,
 		PriceRoundingMode:          roundingMode,
 		FinalPrice:                 finalPrice,
 		SourceUpdatedAt:            normalizeText(firstValue(row, "source_updated_at", "updated_at", "Dates")),
@@ -935,6 +955,11 @@ func (product Product) Map() map[string]interface{} {
 		putPointer(row, "price_source_amount", pointerDecimalValue(product.PriceSourceAmount), product.presence("price_source_amount"))
 		putString(row, "price_source_currency", product.PriceSourceCurrency, product.presence("price_source_currency"))
 		putString(row, "price_source_kind", product.PriceSourceKind, product.presence("price_source_kind"))
+		if product.PriceRoundingPolicy != nil {
+			row["price_rounding_policy"] = product.PriceRoundingPolicy
+		} else if product.presence("price_rounding_policy") == fieldNull {
+			row["price_rounding_policy"] = nil
+		}
 		putPointer(row, "price_rounding_digits", pointerIntValueFromInt(product.PriceRoundingDigits), product.presence("price_rounding_digits"))
 		putString(row, "price_rounding_mode", product.PriceRoundingMode, product.presence("price_rounding_mode"))
 		putPointer(row, "final_price", pointerIntValue(product.FinalPrice), product.presence("final_price"))
@@ -970,7 +995,7 @@ func (product *Product) UnmarshalJSON(data []byte) error {
 		"foreign_currency", "foreign_price", "weight_grams", "location", "shipping_method_id",
 		"shipping_price_per_kg", "shipping_price_per_kg_currency", "markup_percent", "irt_per_cny",
 		"pricing_catalog_revision", "pricing_catalog_status", "currency_effective_date", "price_source_amount",
-		"price_source_currency", "price_source_kind", "price_rounding_digits", "price_rounding_mode",
+		"price_source_currency", "price_source_kind", "price_rounding_policy", "price_rounding_digits", "price_rounding_mode",
 		"final_price", "source_updated_at", "warnings", "record_hash",
 	)
 
@@ -982,7 +1007,7 @@ func (product *Product) UnmarshalJSON(data []byte) error {
 		"shipping_price_per_kg", "shipping_price_per_kg_currency", "markup_percent", "irt_per_cny",
 		"pricing_catalog_revision", "pricing_catalog_status", "currency_effective_date",
 		"price_source_amount", "price_source_currency", "price_source_kind",
-		"price_rounding_digits", "price_rounding_mode", "final_price",
+		"price_rounding_policy", "price_rounding_digits", "price_rounding_mode", "final_price",
 	} {
 		if value, exists := raw[field]; exists {
 			if bytes.Equal(bytes.TrimSpace(value), []byte("null")) {
@@ -1053,7 +1078,7 @@ func (product *Product) UnmarshalJSON(data []byte) error {
 		"shipping_method_id", "shipping_price_per_kg", "shipping_price_per_kg_currency", "markup_percent", "irt_per_cny",
 		"pricing_catalog_revision", "pricing_catalog_status", "currency_effective_date",
 		"price_source_amount", "price_source_currency", "price_source_kind",
-		"price_rounding_digits", "price_rounding_mode", "final_price",
+		"price_rounding_policy", "price_rounding_digits", "price_rounding_mode", "final_price",
 	} {
 		if _, exists := raw[field]; exists {
 			product.integrationActive = true

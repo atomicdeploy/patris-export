@@ -321,7 +321,9 @@ func writeRecordsWorksheet(book *excelize.File, rows []map[string]interface{}, k
 			}
 			value := xlsxColumnValue(row, column)
 			style := 0
-			if options.Mode == XLSXModeFormula && column.Field == "final_price" {
+			// A magnitude policy depends on the exact unrounded total. Preserve the
+			// verified owner value rather than applying a stale per-row quantum.
+			if options.Mode == XLSXModeFormula && column.Field == "final_price" && row["price_rounding_policy"] == nil {
 				if formula, ok := xlsxPriceFormula(rowIndex+2, fieldColumns); ok {
 					err = book.SetCellFormula(xlsxRecordsSheet, cellName, formula)
 					style = styles.integer

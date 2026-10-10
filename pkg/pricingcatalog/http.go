@@ -25,6 +25,7 @@ type catalogSnapshot struct {
 	currencyEffectiveDate string
 	selectedWarehouses    []string
 	irtPerCNY             *Decimal
+	roundingPolicy        *RoundingPolicy
 	roundingDigits        *int
 	methods               map[string]Method
 	explicitNulls         map[string]bool
@@ -531,6 +532,7 @@ func (p *httpProvider) resolve(ctx context.Context, code string, run *prefetchRu
 	resolution.Authority = catalog.authority
 	resolution.AuthorityError = catalog.authorityError
 	resolution.CatalogFetchedAt = catalog.fetchedAt
+	resolution.RoundingPolicy = CloneRoundingPolicy(catalog.roundingPolicy)
 	resolution.CurrencyEffectiveDate = catalog.currencyEffectiveDate
 	resolution.SelectedWarehouses = append([]string(nil), catalog.selectedWarehouses...)
 	resolution.IRTPerCNY = cloneDecimal(catalog.irtPerCNY)
@@ -920,10 +922,11 @@ func (p *httpProvider) fetchCatalog(ctx context.Context) (*catalogSnapshot, erro
 			Warnings      []string `json:"warnings"`
 		} `json:"currency"`
 		Pricing struct {
-			Authority      string `json:"authority"`
-			FormulaID      string `json:"formula_id"`
-			RoundingDigits *int   `json:"rounding_digits"`
-			RoundingMode   string `json:"rounding_mode"`
+			Authority      string          `json:"authority"`
+			FormulaID      string          `json:"formula_id"`
+			RoundingPolicy *RoundingPolicy `json:"rounding_policy"`
+			RoundingDigits *int            `json:"rounding_digits"`
+			RoundingMode   string          `json:"rounding_mode"`
 		} `json:"pricing"`
 		Methods []Method `json:"shipping_methods"`
 	}
@@ -1039,6 +1042,7 @@ func (p *httpProvider) fetchCatalog(ctx context.Context) (*catalogSnapshot, erro
 		selectedWarehouses:    normalizedStrings(wire.SelectedWarehouses),
 		irtPerCNY:             irtPerCNY,
 		roundingDigits:        roundingDigits,
+		roundingPolicy:        CloneRoundingPolicy(wire.Pricing.RoundingPolicy),
 		methods:               methods,
 		explicitNulls:         explicitNulls,
 		methodPriceNulls:      methodPriceNulls,
@@ -1303,6 +1307,18 @@ func (p *httpProvider) getJSON(ctx context.Context, path string, target interfac
 	return p.doJSON(ctx, http.MethodGet, path, nil, target)
 }
 
+// ReadCurrentOwnerProducts uses the catalog read credential and transport for
+// an uncached projection of committed owner products. It never starts a build.
+func ReadCurrentOwnerProducts(ctx context.Context, cfg DigitalogicConfig, query url.Values, target interface{}) error {
+	p := newHTTPProvider(cfg, nil, nil)
+	if p.configError != "" {
+		return errors.New("owner projection configuration invalid")
+	}
+	query.Set("projection", "current-products")
+	_, err := p.getJSON(ctx, p.config.CatalogPath+"?"+query.Encode(), target)
+	return err
+}
+
 func (p *httpProvider) postJSON(ctx context.Context, path string, payload, target interface{}) (json.RawMessage, error) {
 	body, err := json.Marshal(payload)
 	if err != nil {
@@ -1454,6 +1470,7 @@ func cloneCatalog(value *catalogSnapshot) *catalogSnapshot {
 	copy := *value
 	copy.selectedWarehouses = append([]string(nil), value.selectedWarehouses...)
 	copy.irtPerCNY = cloneDecimal(value.irtPerCNY)
+	copy.roundingPolicy = CloneRoundingPolicy(value.roundingPolicy)
 	if value.roundingDigits != nil {
 		digits := *value.roundingDigits
 		copy.roundingDigits = &digits
