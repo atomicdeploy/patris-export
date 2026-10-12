@@ -1576,6 +1576,22 @@ func TestParseExcelPricingSnapshotPageAcceptsVersionlessLiveOwnerProjection(t *t
 	if string(page.state["pricing_state_revision"]) != `"`+page.stateRevision+`"` {
 		t.Fatalf("adapted pricing revision = %s, want %s", page.state["pricing_state_revision"], page.stateRevision)
 	}
+	var adaptedSource struct {
+		ID                     string `json:"id"`
+		Dataset                string `json:"dataset"`
+		CurrentRevision        string `json:"current_revision"`
+		SubmittedRevision      string `json:"submitted_revision"`
+		RevisionMatchesCurrent bool   `json:"revision_matches_current"`
+	}
+	if err := json.Unmarshal(page.state["source"], &adaptedSource); err != nil {
+		t.Fatal(err)
+	}
+	if adaptedSource.ID != ownerSource.ID || adaptedSource.Dataset != ownerSource.Dataset ||
+		adaptedSource.CurrentRevision != ownerSource.Revision ||
+		adaptedSource.SubmittedRevision != ownerSource.Revision ||
+		!adaptedSource.RevisionMatchesCurrent {
+		t.Fatalf("adapted source = %+v, want coherent owner %+v", adaptedSource, ownerSource)
+	}
 	snapshot, err := buildExcelPricingSnapshot(
 		page,
 		page.ownerSource,

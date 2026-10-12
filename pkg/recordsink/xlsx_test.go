@@ -1570,7 +1570,6 @@ func TestDynamicCalculatorVBASourceGuardsLivePricingBeforeMutation(t *testing.T)
 		"productRows = ImportReconciledCatalog(reconciledRows)",
 		"Private Function ImportPricingSnapshotPayload",
 		`mSnapshotValidationStage = "semantic-envelope"`,
-		`snapshotRevision <> expectedSnapshotRevision`,
 		"rawStateDigest = SHA256Revision(rawStateText)",
 		`If rawStateDigest <> SiteText(integrity, "state_digest") Then _`,
 		"Private Function SnapshotRowFieldsMatch",

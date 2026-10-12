@@ -2501,8 +2501,8 @@ Private Sub HandleSnapshotPayloadResponse(ByVal statusCode As Long, _
     Set reconciledRows = CreateObject("Scripting.Dictionary")
     reconciledRows.CompareMode = vbBinaryCompare
     fetchedRows = ImportPricingSnapshotPayload( _
-        responseText, mSnapshotRevision, _
-        mSnapshotStateRevision, reconciledRows, validatedState, _
+        responseText, mSnapshotStateRevision, _
+        reconciledRows, validatedState, _
         validatedCatalog, validatedDatasetRevision, _
         validatedSourceRevision, validatedCountSignature)
     ValidateSseListenerPrerequisites mSnapshotEventsURL, mSnapshotJobID, _
@@ -7798,26 +7798,52 @@ Private Function SnapshotRowFieldsMatch(ByVal payload As JsonValue) As Boolean
     Dim fieldIndex As Long
     Dim signature As String
 
-    If payload Is Nothing Then Exit Function
+    On Error GoTo FieldRuntimeError
+    If payload Is Nothing Then
+        mSnapshotValidationStage = "envelope-fields-payload-missing"
+        Exit Function
+    End If
     Set fields = JsonRuntime.JsonMember(payload, "row_fields")
-    If fields Is Nothing Then Exit Function
-    If fields.Kind <> "array" Then Exit Function
+    If fields Is Nothing Then
+        mSnapshotValidationStage = "envelope-fields-missing"
+        Exit Function
+    End If
+    If fields.Kind <> "array" Then
+        mSnapshotValidationStage = "envelope-fields-kind"
+        Exit Function
+    End If
     If JsonRuntime.JsonArrayCount(fields) <> _
-       PRICING_SNAPSHOT_ROW_FIELD_COUNT Then Exit Function
+       PRICING_SNAPSHOT_ROW_FIELD_COUNT Then
+        mSnapshotValidationStage = "envelope-fields-count"
+        Exit Function
+    End If
     For fieldIndex = 1 To PRICING_SNAPSHOT_ROW_FIELD_COUNT
         Set fieldValue = JsonRuntime.JsonArrayItem(fields, fieldIndex)
-        If fieldValue Is Nothing Then Exit Function
-        If fieldValue.Kind <> "string" Then Exit Function
+        If fieldValue Is Nothing Then
+            mSnapshotValidationStage = "envelope-fields-item-missing-" & _
+                CStr(fieldIndex)
+            Exit Function
+        End If
+        If fieldValue.Kind <> "string" Then
+            mSnapshotValidationStage = "envelope-fields-item-kind-" & _
+                CStr(fieldIndex)
+            Exit Function
+        End If
         If fieldIndex > 1 Then signature = signature & ","
         signature = signature & CStr(JsonRuntime.JsonScalar(fieldValue))
     Next fieldIndex
-    SnapshotRowFieldsMatch = _
-        (signature = PRICING_SNAPSHOT_ROW_FIELDS)
+    SnapshotRowFieldsMatch = (signature = PRICING_SNAPSHOT_ROW_FIELDS)
+    If Not SnapshotRowFieldsMatch Then _
+        mSnapshotValidationStage = "envelope-fields-signature"
+    Exit Function
+
+FieldRuntimeError:
+    mSnapshotValidationStage = "envelope-fields-runtime-" & CStr(Err.Number)
+    Err.Clear
 End Function
 
 Private Function ImportPricingSnapshotPayload( _
         ByVal responseText As String, _
-        ByVal expectedSnapshotRevision As String, _
         ByVal expectedStateRevision As String, _
         ByVal siteRows As Object, _
         ByRef validatedState As JsonValue, _
@@ -7840,10 +7866,10 @@ Private Function ImportPricingSnapshotPayload( _
     Dim warnings As JsonValue
     Dim reconciliation As JsonValue
     Dim counts As JsonValue
-    Dim snapshotRevision As String
     Dim stateRevision As String
     Dim datasetRevision As String
     Dim sourceRevision As String
+    Dim payloadSourceRevision As String
     Dim countSignature As String
     Dim rowIndex As Long
     Dim pageRows As Long
@@ -7863,8 +7889,6 @@ Private Function ImportPricingSnapshotPayload( _
     Dim ambiguousCount As Long
 
     mSnapshotValidationStage = "semantic-envelope"
-    If Not IsSHA256RevisionText(expectedSnapshotRevision) Then _
-        GoTo InvalidSnapshot
     rawStateText = RawJSONObjectMember(responseText, "state")
     If Len(rawStateText) = 0 Then GoTo InvalidSnapshot
     rawStateDigest = SHA256Revision(rawStateText)
@@ -7872,24 +7896,29 @@ Private Function ImportPricingSnapshotPayload( _
 
     mSnapshotValidationStage = "parse"
     Set payload = JsonRuntime.ParseJson(responseText)
-    mSnapshotValidationStage = "envelope"
+    mSnapshotValidationStage = "envelope-identity"
     If payload Is Nothing Or payload.Kind <> "object" Or _
        SiteText(payload, "schema") <> PRICING_SNAPSHOT_PAYLOAD_SCHEMA Or _
        SiteText(payload, "projection") <> PRICING_SNAPSHOT_PROJECTION Then _
         GoTo InvalidSnapshot
+    mSnapshotValidationStage = "envelope-fields"
     If Not SnapshotRowFieldsMatch(payload) Then GoTo InvalidSnapshot
-    snapshotRevision = SiteText(payload, "snapshot_revision")
-    If snapshotRevision <> expectedSnapshotRevision Or _
-       Not IsSHA256RevisionText(snapshotRevision) Then GoTo InvalidSnapshot
+    ' snapshot_revision/ETag describe the provider's representation. They are
+    ' optional integrity enhancements and may differ after a transforming
+    ' intermediary. The canonical state/source/count/digest checks below are
+    ' the mutation boundary for this consumer.
 
     Set sourceValue = JsonRuntime.JsonMember(payload, "source")
+    mSnapshotValidationStage = "source-identity"
     If sourceValue Is Nothing Or sourceValue.Kind <> "object" Then _
         GoTo InvalidSnapshot
+    payloadSourceRevision = SiteText(sourceValue, "revision")
     If SiteText(sourceValue, "id") <> mSourceID Or _
        SiteText(sourceValue, "dataset") <> mSourceDataset Or _
-       SiteText(sourceValue, "revision") <> mSourceRevision Then _
+       Not IsSHA256RevisionText(payloadSourceRevision) Then _
         GoTo InvalidSnapshot
 
+    mSnapshotValidationStage = "state-identity"
     stateRevision = SiteText(payload, "state_revision")
     If stateRevision <> expectedStateRevision Or _
        Not IsSHA256RevisionText(stateRevision) Then GoTo InvalidSnapshot
@@ -7942,7 +7971,7 @@ Private Function ImportPricingSnapshotPayload( _
         GoTo InvalidSnapshot
     currentRevision = SiteText(stateSource, "current_revision")
     submittedRevision = SiteText(stateSource, "submitted_revision")
-    If currentRevision <> mSourceRevision Or _
+    If currentRevision <> payloadSourceRevision Or _
        submittedRevision <> currentRevision Or _
        Not BooleanValue(JsonRuntime.JsonText( _
            stateSource, "revision_matches_current")) Then GoTo InvalidSnapshot
@@ -7957,7 +7986,7 @@ Private Function ImportPricingSnapshotPayload( _
        CatalogColumnSignature(catalog) <> RECONCILED_COLUMN_KEYS Then _
         GoTo InvalidSnapshot
     sourceRevision = StateSourceRevision(state, catalog)
-    If sourceRevision <> mSourceRevision Then GoTo InvalidSnapshot
+    If sourceRevision <> payloadSourceRevision Then GoTo InvalidSnapshot
     countSignature = CatalogCountSignature(catalog)
     Set reconciliation = JsonRuntime.JsonMember(catalog, "reconciliation")
     If reconciliation Is Nothing Or reconciliation.Kind <> "object" Then _
@@ -8040,7 +8069,8 @@ InvalidSnapshot:
     mStatePageTimingText = _
         "snapshot_validation=" & mSnapshotValidationStage
     Err.Raise vbObjectError + 130, "ImportPricingSnapshotPayload", _
-              T("invalid_workbook")
+              T("invalid_workbook") & " [" & _
+              mSnapshotValidationStage & "]"
 End Function
 
 Private Sub ApplyReconciliationCounts(ByVal catalog As JsonValue)

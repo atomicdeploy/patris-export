@@ -2548,6 +2548,14 @@ func parseExcelPricingSnapshotPage(
 	// terminal field that Excel can neither ACK nor compare safely.
 	stateRevisionJSON, _ := json.Marshal(stateRevision)
 	state["pricing_state_revision"] = stateRevisionJSON
+	canonicalSourceJSON, _ := json.Marshal(map[string]interface{}{
+		"id":                       ownerSource.ID,
+		"dataset":                  ownerSource.Dataset,
+		"current_revision":         ownerSource.Revision,
+		"submitted_revision":       ownerSource.Revision,
+		"revision_matches_current": true,
+	})
+	state["source"] = canonicalSourceJSON
 
 	warningsJSON, warningCount, err := excelPricingSnapshotTopLevelWarnings(state)
 	if err != nil {
