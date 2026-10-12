@@ -2095,7 +2095,8 @@ Private Sub HandleOperationTerminal()
             HandleRepairResponse statusCode, responseBody
         Case Else
             Err.Raise vbObjectError + 761, "HandleOperationTerminal", _
-                      T("sync_retry")
+                      T("sync_retry") & " [stage=" & _
+                      IIf(Len(stageName) = 0, "<empty>", stageName) & "]"
     End Select
     Exit Sub
 
@@ -8463,6 +8464,7 @@ Private Sub ApplyGlobalState(ByVal state As JsonValue)
        remoteRoundingMode <> PRICE_ROUNDING_MODE Then
         Err.Raise vbObjectError + 207, "ApplyGlobalState", T("rounding_required")
     End If
+    ApplyPriceRoundingPolicy settings, primarySettings, priceRounding
 
     If (IsEmpty(remoteShipping) Or Len(shippingCurrency) = 0 Or _
         Len(shippingRevision) = 0) And Not shippingState Is Nothing Then
@@ -8523,6 +8525,86 @@ Private Sub ApplyGlobalState(ByVal state As JsonValue)
         remoteUSDDate, remoteProfit, remoteShipping, CLng(remoteRounding)
     CapturePendingPricingConfirmation state
     ReconcilePricingProposalStates
+End Sub
+
+Private Sub ApplyPriceRoundingPolicy(ByVal settings As Worksheet, _
+                                     ByVal primarySettings As JsonValue, _
+                                     ByVal priceRounding As JsonValue)
+    Dim policy As JsonValue
+    Dim tiers As JsonValue
+    Dim tier As JsonValue
+    Dim extendValue As Variant
+    Dim digitValue As Variant
+    Dim thresholdText As String
+    Dim thresholdValue As Double
+    Dim previousThreshold As Double
+    Dim previousDigits As Long
+    Dim tierCount As Long
+    Dim tierIndex As Long
+    Dim thresholds(1 To 32, 1 To 1) As Variant
+    Dim digits(1 To 32, 1 To 1) As Variant
+
+    If Not primarySettings Is Nothing Then
+        Set policy = JsonRuntime.JsonMember( _
+            primarySettings, "price_rounding_policy")
+    End If
+    If policy Is Nothing And Not priceRounding Is Nothing Then
+        Set policy = JsonRuntime.JsonMember( _
+            priceRounding, "price_rounding_policy")
+        If policy Is Nothing Then
+            Set policy = JsonRuntime.JsonMember( _
+                priceRounding, "rounding_policy")
+        End If
+    End If
+    If policy Is Nothing Then
+        settings.Range("H20:H21").ClearContents
+        settings.Range("I58:J89").ClearContents
+        Exit Sub
+    End If
+
+    Set tiers = JsonRuntime.JsonMember(policy, "tiers")
+    If tiers Is Nothing Then GoTo InvalidPolicy
+    tierCount = JsonRuntime.JsonArrayCount(tiers)
+    If tierCount < 1 Or tierCount > 32 Then GoTo InvalidPolicy
+    extendValue = JsonRuntime.JsonScalar( _
+        JsonRuntime.JsonMember(policy, "extend_decades"))
+    If VarType(extendValue) <> vbBoolean Then GoTo InvalidPolicy
+
+    previousThreshold = 0#
+    previousDigits = -1
+    For tierIndex = 1 To tierCount
+        Set tier = JsonRuntime.JsonArrayItem(tiers, tierIndex)
+        thresholdText = Trim$(CStr(BlankIfNull( _
+            JsonRuntime.JsonText(tier, "threshold_irt"))))
+        digitValue = NumericOrBlank( _
+            JsonRuntime.JsonText(tier, "digits"))
+        If Len(thresholdText) = 0 Or Not IsNumeric(thresholdText) Or _
+           IsEmpty(digitValue) Then GoTo InvalidPolicy
+        thresholdValue = CDbl(thresholdText)
+        If thresholdValue <= previousThreshold Or _
+           CDbl(digitValue) <> Fix(CDbl(digitValue)) Or _
+           CLng(digitValue) < previousDigits Or _
+           CLng(digitValue) < 0 Or CLng(digitValue) > 18 Then _
+            GoTo InvalidPolicy
+        thresholds(tierIndex, 1) = thresholdValue
+        digits(tierIndex, 1) = CLng(digitValue)
+        previousThreshold = thresholdValue
+        previousDigits = CLng(digitValue)
+    Next tierIndex
+    For tierIndex = tierCount + 1 To 32
+        thresholds(tierIndex, 1) = 1E+307
+        digits(tierIndex, 1) = previousDigits
+    Next tierIndex
+
+    settings.Range("H20").Value2 = tierCount
+    settings.Range("H21").Value = CBool(extendValue)
+    settings.Range("I58:I89").Value2 = thresholds
+    settings.Range("J58:J89").Value2 = digits
+    Exit Sub
+
+InvalidPolicy:
+    Err.Raise vbObjectError + 208, "ApplyPriceRoundingPolicy", _
+              T("rounding_required")
 End Sub
 
 Private Sub UpdateCurrencyFreshnessUI(ByVal settings As Worksheet, _
@@ -9242,6 +9324,9 @@ Private Sub ApplyProductTableFormulas(ByVal table As ListObject)
     Dim sourceKindFormula As String
     Dim settingsReference As String
     Dim cnyRateFormula As String
+    Dim unroundedBaseFormula As String
+    Dim unroundedProjectedFormula As String
+    Dim unroundedPartnerFormula As String
 
     If table.DataBodyRange Is Nothing Then Exit Sub
     EnsureConfirmedCNYRateName
@@ -9281,8 +9366,8 @@ Private Sub ApplyProductTableFormulas(ByVal table As ListObject)
         ",SyncData,7,FALSE)>0),VLOOKUP(" & lookupExpression & _
         ",SyncData,4,FALSE)=""IRR"",VLOOKUP(" & lookupExpression & _
         ",SyncData,4,FALSE)=""IRT""))"
-    basePriceFormula = _
-        "IFERROR(IF(" & readyFormula & ",ROUND((" & _
+    unroundedBaseFormula = _
+        "(" & _
         "(RC[4]*IF(VLOOKUP(" & lookupExpression & _
         ",SyncData,2,FALSE)=""CNY""," & cnyRateFormula & _
         ",IF(VLOOKUP(" & lookupExpression & _
@@ -9300,7 +9385,10 @@ Private Sub ApplyProductTableFormulas(ByVal table As ListObject)
         lookupExpression & ",SyncData,4,FALSE)=""IRR"",0.1,IF(VLOOKUP(" & _
         lookupExpression & ",SyncData,4,FALSE)=""IRT"",1,NA()))))))" & _
         "*(1+VLOOKUP(" & lookupExpression & _
-        ",SyncData,5,FALSE)/100),-" & settingsReference & "R15C2)," & _
+        ",SyncData,5,FALSE)/100)"
+    basePriceFormula = _
+        "IFERROR(IF(" & readyFormula & "," & _
+        PriceRoundingFormula(unroundedBaseFormula, settingsReference) & "," & _
         fallbackFormula & ")," & fallbackFormula & ")"
     sourceAmountFormula = _
         "VLOOKUP(" & lookupExpression & ",SyncData,21,FALSE)"
@@ -9308,6 +9396,19 @@ Private Sub ApplyProductTableFormulas(ByVal table As ListObject)
         "VLOOKUP(" & lookupExpression & ",SyncData,22,FALSE)"
     sourceKindFormula = _
         "VLOOKUP(" & lookupExpression & ",SyncData,23,FALSE)"
+    unroundedProjectedFormula = _
+        "(" & sourceAmountFormula & _
+        "*" & cnyRateFormula & "+" & _
+        "(RC[1]/1000)*IF(VLOOKUP(" & lookupExpression & _
+        ",SyncData,4,FALSE)=""CNY"",VLOOKUP(" & lookupExpression & _
+        ",SyncData,3,FALSE)*" & cnyRateFormula & _
+        ",VLOOKUP(" & lookupExpression & _
+        ",SyncData,3,FALSE)/10))*(1+VLOOKUP(" & lookupExpression & _
+        ",SyncData,5,FALSE)/100)"
+    unroundedPartnerFormula = _
+        "(" & sourceAmountFormula & _
+        "/10)*(1+VLOOKUP(" & lookupExpression & _
+        ",SyncData,5,FALSE)/100)"
     projectedFormula = _
         "IFERROR(IF(AND(" & eligibleKindFormula & "," & _
         sourceKindFormula & "=""foreign_price""," & _
@@ -9319,22 +9420,15 @@ Private Sub ApplyProductTableFormulas(ByVal table As ListObject)
         ",SyncData,5,FALSE)>=0," & cnyRateFormula & _
         ">0,OR(VLOOKUP(" & lookupExpression & _
         ",SyncData,4,FALSE)=""CNY"",VLOOKUP(" & lookupExpression & _
-        ",SyncData,4,FALSE)=""IRR"")),ROUND((" & sourceAmountFormula & _
-        "*" & cnyRateFormula & "+" & _
-        "(RC[1]/1000)*IF(VLOOKUP(" & lookupExpression & _
-        ",SyncData,4,FALSE)=""CNY"",VLOOKUP(" & lookupExpression & _
-        ",SyncData,3,FALSE)*" & cnyRateFormula & _
-        ",VLOOKUP(" & lookupExpression & _
-        ",SyncData,3,FALSE)/10))*(1+VLOOKUP(" & lookupExpression & _
-        ",SyncData,5,FALSE)/100),-" & settingsReference & "R15C2),"
+        ",SyncData,4,FALSE)=""IRR""))," & _
+        PriceRoundingFormula(unroundedProjectedFormula, settingsReference) & ","
     projectedFormula = projectedFormula & _
         "IF(AND(" & eligibleKindFormula & "," & sourceKindFormula & _
         "=""partner_price""," & sourceCurrencyFormula & "=""IRR""," & _
         sourceAmountFormula & ">0,VLOOKUP(" & lookupExpression & _
         ",SyncData,5,FALSE)<>"""",VLOOKUP(" & lookupExpression & _
-        ",SyncData,5,FALSE)>=0),ROUND((" & sourceAmountFormula & _
-        "/10)*(1+VLOOKUP(" & lookupExpression & _
-        ",SyncData,5,FALSE)/100),-" & settingsReference & "R15C2),"
+        ",SyncData,5,FALSE)>=0)," & _
+        PriceRoundingFormula(unroundedPartnerFormula, settingsReference) & ","
     projectedFormula = projectedFormula & _
         "IF(AND(" & eligibleKindFormula & "," & sourceKindFormula & _
         "=""sale_price_direct""," & sourceCurrencyFormula & _
@@ -9354,6 +9448,31 @@ LegacyFormula:
     Err.Clear
     table.ListColumns(1).DataBodyRange.FormulaR1C1 = priceFormula
 End Sub
+
+Private Function PriceRoundingFormula(ByVal unroundedExpression As String, _
+                                      ByVal settingsReference As String) As String
+    Dim policyCount As String
+    Dim firstThreshold As String
+    Dim lastThreshold As String
+    Dim tierDigits As String
+    Dim roundingDigits As String
+
+    policyCount = settingsReference & "R20C8"
+    firstThreshold = settingsReference & "R58C9"
+    lastThreshold = "INDEX(" & settingsReference & _
+        "R58C9:R89C9," & policyCount & ")"
+    tierDigits = "IF(unroundedPrice<" & firstThreshold & ",0," & _
+        "LOOKUP(unroundedPrice," & settingsReference & _
+        "R58C9:R89C9," & settingsReference & "R58C10:R89C10))"
+    roundingDigits = "IF(AND(ISNUMBER(" & policyCount & ")," & _
+        policyCount & ">=1),MIN(18," & tierDigits & _
+        "+IF(" & settingsReference & "R21C8,MAX(0,INT(LOG10(" & _
+        "unroundedPrice/" & lastThreshold & "))),0))," & _
+        settingsReference & "R15C2)"
+    PriceRoundingFormula = "LET(unroundedPrice," & _
+        unroundedExpression & ",roundingDigits," & roundingDigits & _
+        ",ROUND(unroundedPrice,-roundingDigits))"
+End Function
 
 Private Sub EnsureConfirmedCNYRateName()
     Dim confirmedName As Name

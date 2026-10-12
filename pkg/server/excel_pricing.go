@@ -33,6 +33,7 @@ const (
 	excelPricingRevisionSchema      = "patris.excel-pricing-companion-revision/v1"
 	excelPricingRemoteRequestSchema = "digitalogic.pricing-sync-request/v1"
 	excelPricingStateSchema         = "digitalogic.pricing-sync-state/v1"
+	excelPricingLiveStateSchema     = "digitalogic.pricing-sync-state"
 	excelPricingPreviewSchema       = "digitalogic.pricing-sync-preview/v1"
 	excelPricingApplySchema         = "digitalogic.pricing-sync-apply/v1"
 	excelPricingACKSchema           = "digitalogic.pricing-sync-ack/v1"
@@ -722,13 +723,12 @@ func (s *Server) forwardExcelPricing(
 	if mediaErr != nil || (mediaType != "application/json" && !strings.HasSuffix(mediaType, "+json")) {
 		return excelPricingRemoteResponse{}, errors.New("remote pricing response content type is invalid")
 	}
-	expectedSchema := excelPricingExpectedSchema(operation)
 	var metadata struct {
 		Schema        string `json:"schema"`
 		StateRevision string `json:"state_revision"`
 	}
 	if json.Unmarshal(responseBody, &metadata) != nil ||
-		metadata.Schema != expectedSchema ||
+		!excelPricingResponseSchemaMatches(operation, metadata.Schema) ||
 		!isSHA256Revision(metadata.StateRevision) {
 		return excelPricingRemoteResponse{}, errors.New("remote pricing response contract is invalid")
 	}
@@ -738,6 +738,17 @@ func (s *Server) forwardExcelPricing(
 		schema:        metadata.Schema,
 		stateRevision: metadata.StateRevision,
 	}, nil
+}
+
+func excelPricingResponseSchemaMatches(operation, schema string) bool {
+	if schema == excelPricingExpectedSchema(operation) {
+		return true
+	}
+	// The live state endpoint intentionally publishes its versionless provider
+	// schema. The companion adapts that representation to its stable loopback
+	// contract after semantic validation; version naming is not an integrity
+	// boundary.
+	return operation == "state" && schema == excelPricingLiveStateSchema
 }
 
 func (s *Server) completeExcelPricingApply(
@@ -793,7 +804,8 @@ func (s *Server) completeExcelPricingApply(
 	if err != nil {
 		return err
 	}
-	if state.schema != excelPricingStateSchema || state.stateRevision != applied.stateRevision {
+	if !excelPricingResponseSchemaMatches("state", state.schema) ||
+		state.stateRevision != applied.stateRevision {
 		return errors.New("post-apply pricing state did not match apply readback")
 	}
 	return nil

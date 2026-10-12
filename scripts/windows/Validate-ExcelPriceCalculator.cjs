@@ -224,8 +224,11 @@ function structurallyMatchesDynamicPriceFormula(formula) {
     'SYNCDATA,23,FALSE)',
   ];
   const settingsSheet = '\u062A\u0646\u0638\u06CC\u0645\u0627\u062A';
-  const hasRoundingReference = normalized.includes(`${settingsSheet}!R15C2`)
-    || normalized.includes(`'${settingsSheet}'!R15C2`);
+  const hasRoundingReference = (normalized.includes(`${settingsSheet}!R15C2`)
+    || normalized.includes(`'${settingsSheet}'!R15C2`))
+    && (normalized.includes(`${settingsSheet}!R20C8`)
+      || normalized.includes(`'${settingsSheet}'!R20C8`))
+    && normalized.includes('LOOKUP(UNROUNDEDPRICE');
   return hasRoundingReference
     && requiredTokens.every((token) => normalized.includes(token));
 }
@@ -3219,6 +3222,21 @@ try {
         throw "Workbook_Open did not run exactly once: $($initialWorkbookLifecycle.telemetry)"
     }
 
+    if (-not $runSync) {
+        # Workbook_Open intentionally schedules a live refresh for an empty
+        # release template.  --no-sync is the deterministic local-validator
+        # mode, so cancel that one pending callback before the search/save-copy
+        # fixtures begin.  Without this, the two-second callback can enter an
+        # asynchronous catalog commit while the harness is restoring C3 and
+        # Excel correctly rejects the competing COM write (RPC_E_CALL_REJECTED).
+        # The --sync path and the separate visible cold-open acceptance still
+        # exercise the real refresh lifecycle.
+        Set-ValidatorStage 'cancelling_scheduled_open_refresh'
+        [void]$excel.Run(
+            "'$macroBookName'!ProductCatalogSync.CancelScheduledRefresh"
+        )
+    }
+
     if ($runSync) {
         Set-ValidatorStage 'starting_live_sync'
         [void]$excel.Run(
@@ -5083,9 +5101,9 @@ function main() {
     if (!/Names\.Add\('ConfirmedCNYRate',\s*\$settings\.Range\('G18'\)\)/u.test(buildSource)) {
       throw new Error('ConfirmedCNYRate must bind exactly to the hidden confirmed Settings G18 cell');
     }
-    if (!/Add-ActionButton\s+\$settings\s+'همگام‌سازی اکنون'\s+'ProductCatalogSync\.SyncPricingSettingsNow'[\s\S]*?\$settings\.Range\('A28:F29'\)\.Width/u.test(buildSource)
+    if (!/Add-ActionButton\s+\$settings\s+'به‌روزرسانی'\s+'ProductCatalogSync\.SyncPricingSettingsNow'[\s\S]*?\$settings\.Range\('A28:F29'\)\.Width/u.test(buildSource)
         || /Add-ActionButton\s+\$settings\s+'(?:پیش‌نمایش تغییرات|اعمال تغییرات تأییدشده)'/u.test(buildSource)) {
-      throw new Error('Settings must expose one explicit full-width Sync Now batch action');
+      throw new Error('Settings must expose one explicit full-width Update batch action');
     }
     const priceFormulaSource = /Private Sub ApplyProductTableFormulas\b[\s\S]*?\r?\nEnd Sub/iu.exec(moduleSource)?.[0] || '';
     if (!/cnyRateFormula\s*=\s*_/iu.test(priceFormulaSource)
@@ -5093,6 +5111,11 @@ function main() {
         || !/ConfirmedCNYRate>0/iu.test(priceFormulaSource)
         || /PricingInputCNYRate/iu.test(priceFormulaSource)) {
       throw new Error('Product formulas must use only the confirmed website rate, never the B18 proposal');
+    }
+    if (!/Private Function PriceRoundingFormula\b[\s\S]*?R20C8[\s\S]*?LOOKUP\(unroundedPrice,[\s\S]*?LOG10\(/iu.test(moduleSource)
+        || !/Private Sub ApplyPriceRoundingPolicy\b[\s\S]*?price_rounding_policy[\s\S]*?I58:I89[\s\S]*?J58:J89/iu.test(moduleSource)
+        || !/\$settings\.Columns\('I:J'\)\.Hidden\s*=\s*\$true/u.test(buildSource)) {
+      throw new Error('Workbook must apply and hide the current magnitude-based IRT rounding policy');
     }
     if (!/ROW\(\)=ProjectedPricePreviewRow/iu.test(priceFormulaSource)
         || /ROW\(\)=['"]?[^\r\n]*R30C7/iu.test(priceFormulaSource)) {

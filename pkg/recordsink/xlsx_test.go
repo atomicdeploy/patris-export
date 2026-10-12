@@ -3095,12 +3095,39 @@ func TestDynamicCalculatorBuilderStylesPersianButtonsAndChartText(t *testing.T) 
 		"Set-OfficeTextFont $chart.Legend.Format.TextFrame2.TextRange",
 		"'تعداد رقم گردکردن قیمت'",
 		"'تعداد رقم گردکردن قیمت پیشنهادی'",
-		"'همگام‌سازی اکنون'",
+		"'به‌روزرسانی'",
 		"'ProductCatalogSync.SyncPricingSettingsNow'",
 		"$settings.Range('A28:F29').Width",
+		"$settings.Range('H20').Value2 = 0",
+		"$settings.Range('I58:J89').ClearContents()",
+		"$settings.Columns('I:J').Hidden = $true",
 	} {
 		if !strings.Contains(source, required) {
 			t.Fatalf("canonical builder is missing Persian font/rounding guard: %s", required)
+		}
+	}
+}
+
+func TestDynamicCalculatorAppliesMagnitudeRoundingPolicy(t *testing.T) {
+	path := filepath.Join("..", "..", "docs", "examples", "vba", "ProductCatalogSync.bas")
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := string(content)
+	for _, required := range []string{
+		"Private Sub ApplyPriceRoundingPolicy",
+		`primarySettings, "price_rounding_policy"`,
+		`settings.Range("H20").Value2 = tierCount`,
+		`settings.Range("I58:I89").Value2 = thresholds`,
+		`settings.Range("J58:J89").Value2 = digits`,
+		"Private Function PriceRoundingFormula",
+		`policyCount = settingsReference & "R20C8"`,
+		`"LOOKUP(unroundedPrice,"`,
+		`"unroundedPrice/" & lastThreshold`,
+	} {
+		if !strings.Contains(source, required) {
+			t.Fatalf("canonical VBA is missing magnitude-rounding behavior: %s", required)
 		}
 	}
 }
