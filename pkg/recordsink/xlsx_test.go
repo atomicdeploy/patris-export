@@ -1193,16 +1193,18 @@ func TestDynamicCalculatorVBASourceGuardsLivePricingBeforeMutation(t *testing.T)
 		t.Fatal("a transient OnTime collision must preserve and drain completed requests")
 	}
 	payloadHandler := section("Private Sub HandleSnapshotPayloadResponse", "Private Sub HandlePreviewResponse")
-	rawHashPosition := strings.Index(payloadHandler, "SHA256RevisionBytes(responseBody)")
 	validatePosition := strings.Index(payloadHandler, "ImportPricingSnapshotPayload(")
 	listenerValidatePosition := strings.Index(payloadHandler, "ValidateSseListenerPrerequisites")
 	commitPosition := strings.Index(payloadHandler, "CommitRefreshSnapshot reconciledRows")
 	completePosition := strings.Index(payloadHandler, "CompleteActiveOperation True")
 	sseArmPosition := strings.Index(payloadHandler, "ArmSseListenerAfterCommit")
-	if rawHashPosition < 0 || validatePosition < rawHashPosition ||
-		listenerValidatePosition < validatePosition || commitPosition < listenerValidatePosition ||
+	if validatePosition < 0 || listenerValidatePosition < validatePosition || commitPosition < listenerValidatePosition ||
 		completePosition < commitPosition || sseArmPosition < completePosition {
 		t.Fatal("payload/listener prerequisites must validate before commit, and listener arm must follow successful completion")
+	}
+	if strings.Contains(payloadHandler, "SHA256RevisionBytes(responseBody)") ||
+		strings.Contains(payloadHandler, "StrComp(Trim$(responseETag), Trim$(mSnapshotExpectedETag)") {
+		t.Fatal("snapshot acceptance must not couple canonical semantics to transformed HTTP representation bytes")
 	}
 	listenerArm := section("Private Sub ArmSseListenerAfterCommit", "Private Sub AdoptSseSessionToken")
 	for _, required := range []string{
@@ -1566,10 +1568,8 @@ func TestDynamicCalculatorVBASourceGuardsLivePricingBeforeMutation(t *testing.T)
 		"ApplyGlobalState state",
 		"ApplyReconciliationCounts catalog",
 		"productRows = ImportReconciledCatalog(reconciledRows)",
-		"Private Function SHA256RevisionBytes",
-		"rawDigest = SHA256RevisionBytes(responseBody)",
-		`StrComp(Trim$(responseETag), Trim$(mSnapshotExpectedETag)`,
 		"Private Function ImportPricingSnapshotPayload",
+		`mSnapshotValidationStage = "semantic-envelope"`,
 		"rawStateDigest = SHA256Revision(rawStateText)",
 		`If rawStateDigest <> SiteText(integrity, "state_digest") Then _`,
 		"Private Function SnapshotRowFieldsMatch",
@@ -2127,7 +2127,6 @@ func TestDynamicCalculatorVBASourceGuardsLivePricingBeforeMutation(t *testing.T)
 		t.Fatal("revision fast path must not compare the upstream composite catalog revision with G44's dataset revision")
 	}
 	for _, required := range []string{
-		`StrongETagRevision(revisionETag) <> stateRevision`,
 		`settings.Range("G56").Value2`,
 		`settings.Range("G14").Value2`,
 		`settings.Range("G45").Value2`,
@@ -2138,6 +2137,9 @@ func TestDynamicCalculatorVBASourceGuardsLivePricingBeforeMutation(t *testing.T)
 		if !strings.Contains(revisionFastPath, required) {
 			t.Fatalf("revision fast path lost fail-closed guard %s", required)
 		}
+	}
+	if strings.Contains(revisionFastPath, "StrongETagRevision(revisionETag)") {
+		t.Fatal("revision fast path must rely on canonical revisions, not an optional representation ETag")
 	}
 	transientRetry := section("Private Function RetrySnapshotAfterTransientFailure", "Private Function RefreshWallBudgetExhausted")
 	for _, required := range []string{
@@ -2281,7 +2283,6 @@ func TestDynamicCalculatorVBASourceGuardsLivePricingBeforeMutation(t *testing.T)
 		"Public Sub PrepareLocalSearchOnOpen()",
 		"Private Sub WarmProductSearchIndex()",
 		"Private Sub InvalidateProductSearchIndex()",
-		"If mSearchIndexReady And mSearchIndexRowCount = rowCount",
 		"WarmProductSearchIndex",
 		"InvalidateProductSearchIndex",
 		"ClearPricingDirtyKey",
@@ -2290,6 +2291,9 @@ func TestDynamicCalculatorVBASourceGuardsLivePricingBeforeMutation(t *testing.T)
 		if !strings.Contains(source, required) {
 			t.Fatalf("fast local search index lifecycle is missing: %s", required)
 		}
+	}
+	if strings.Contains(source, "If mSearchIndexReady And mSearchIndexRowCount = rowCount") {
+		t.Fatal("local search must not reuse a positional index after an in-place table sort")
 	}
 
 	writebackStart := strings.Index(source, "Public Sub RunScheduledPricingWriteback")
@@ -3095,12 +3099,39 @@ func TestDynamicCalculatorBuilderStylesPersianButtonsAndChartText(t *testing.T) 
 		"Set-OfficeTextFont $chart.Legend.Format.TextFrame2.TextRange",
 		"'تعداد رقم گردکردن قیمت'",
 		"'تعداد رقم گردکردن قیمت پیشنهادی'",
-		"'همگام‌سازی اکنون'",
+		"'به‌روزرسانی'",
 		"'ProductCatalogSync.SyncPricingSettingsNow'",
 		"$settings.Range('A28:F29').Width",
+		"$settings.Range('H20').Value2 = 0",
+		"$settings.Range('I58:J89').ClearContents()",
+		"$settings.Columns('I:J').Hidden = $true",
 	} {
 		if !strings.Contains(source, required) {
 			t.Fatalf("canonical builder is missing Persian font/rounding guard: %s", required)
+		}
+	}
+}
+
+func TestDynamicCalculatorAppliesMagnitudeRoundingPolicy(t *testing.T) {
+	path := filepath.Join("..", "..", "docs", "examples", "vba", "ProductCatalogSync.bas")
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := string(content)
+	for _, required := range []string{
+		"Private Sub ApplyPriceRoundingPolicy",
+		`primarySettings, "price_rounding_policy"`,
+		`settings.Range("H20").Value2 = tierCount`,
+		`settings.Range("I58:I89").Value2 = thresholds`,
+		`settings.Range("J58:J89").Value2 = digits`,
+		"Private Function PriceRoundingFormula",
+		`policyCount = settingsReference & "R20C8"`,
+		`"LOOKUP(unroundedPrice,"`,
+		`"unroundedPrice/" & lastThreshold`,
+	} {
+		if !strings.Contains(source, required) {
+			t.Fatalf("canonical VBA is missing magnitude-rounding behavior: %s", required)
 		}
 	}
 }

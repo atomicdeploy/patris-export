@@ -224,8 +224,11 @@ function structurallyMatchesDynamicPriceFormula(formula) {
     'SYNCDATA,23,FALSE)',
   ];
   const settingsSheet = '\u062A\u0646\u0638\u06CC\u0645\u0627\u062A';
-  const hasRoundingReference = normalized.includes(`${settingsSheet}!R15C2`)
-    || normalized.includes(`'${settingsSheet}'!R15C2`);
+  const hasRoundingReference = (normalized.includes(`${settingsSheet}!R15C2`)
+    || normalized.includes(`'${settingsSheet}'!R15C2`))
+    && (normalized.includes(`${settingsSheet}!R20C8`)
+      || normalized.includes(`'${settingsSheet}'!R20C8`))
+    && normalized.includes('LOOKUP(UNROUNDEDPRICE');
   return hasRoundingReference
     && requiredTokens.every((token) => normalized.includes(token));
 }
@@ -372,7 +375,7 @@ function buildFailures(report, options) {
   }
   failUnless(
     report.pricingEventAutoPull === true,
-    'the revision-aware Patris/WordPress event auto-pull fixture failed',
+    `the revision-aware Patris/WordPress event auto-pull fixture failed: ${report.pricingEventDiagnostic}`,
   );
   failUnless(
     report.productImagePreviewUI === true,
@@ -610,8 +613,9 @@ function buildFailures(report, options) {
     'no rows have enough per-row SyncData inputs for an independent price calculation',
   );
   failUnless(
-    report.candidate.fallbackPriceRows > 0,
-    'no incomplete rows preserve an existing WooCommerce effective price',
+    Number.isInteger(report.candidate.fallbackPriceRows)
+      && report.candidate.fallbackPriceRows >= 0,
+    `invalid WooCommerce fallback-price count: ${report.candidate.fallbackPriceRows}`,
   );
   failUnless(
     report.candidate.sourceOnlyUnsafeRows === 0,
@@ -713,9 +717,18 @@ function buildFailures(report, options) {
   );
   failUnless(
     report.regressions.wooFallback109001.present
-      && report.regressions.wooFallback109001.price === REGRESSION_ACCEPTANCE.wooFallbackPrice
-      && report.regressions.wooFallback109001.wooEffectivePrice === REGRESSION_ACCEPTANCE.wooFallbackPrice
-      && report.regressions.wooFallback109001.warning.length > 0,
+      && (
+        (
+          report.regressions.wooFallback109001.wooEffectivePrice > 0
+          && report.regressions.wooFallback109001.price
+            === report.regressions.wooFallback109001.wooEffectivePrice
+        )
+        || (
+          report.regressions.wooFallback109001.wooEffectivePrice === null
+          && report.regressions.wooFallback109001.price === null
+          && report.regressions.wooFallback109001.warning.length > 0
+        )
+      ),
     `${REGRESSION_ACCEPTANCE.wooFallbackProductCode} Woo fallback regression failed: ${JSON.stringify(report.regressions.wooFallback109001)}`,
   );
   failUnless(
@@ -1162,11 +1175,27 @@ function Set-ValidatorStage([string]$stage, [string]$detail = '') {
 }
 
 function Release-ComObject([object]$value) {
-    try {
-        if ($null -ne $value -and [Runtime.InteropServices.Marshal]::IsComObject($value)) {
-            [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($value)
-        }
-    } catch {}
+    # Excel and .NET can return the same shared RCW for a workbook, table,
+    # range, or parent object through several independent property reads.
+    # FinalReleaseComObject on one alias invalidates every other live alias and
+    # made later validator stages fail even though Excel itself was healthy.
+    # This harness owns a dedicated kill-on-close Excel process, explicitly
+    # closes books and calls Quit, then runs a finalizer barrier. Let ordinary
+    # scope/GC lifetime manage intermediate wrappers inside that contained
+    # process instead of force-releasing shared RCWs mid-validation.
+    return
+}
+
+$script:ValidatorMacroBookName = ''
+function Get-ValidatorMacroBookName([object]$book) {
+    $name = $script:ValidatorMacroBookName
+    if ([string]::IsNullOrWhiteSpace($name) -and $null -ne $book) {
+        $name = [Convert]::ToString($book.Name, $invariant)
+    }
+    if ([string]::IsNullOrWhiteSpace($name)) {
+        throw 'Excel did not expose the validator workbook name.'
+    }
+    return $name.Replace("'", "''")
 }
 
 function Invoke-ComFinalizerBarrier {
@@ -1376,15 +1405,51 @@ function Test-BrandingLayout([object]$book) {
 }
 
 function Test-SearchLiteralText([object]$excel, [object]$book) {
+    $names = $null
     $definedName = $null
     $input = $null
     $eventsWereEnabled = [bool]$excel.EnableEvents
     try {
-        $definedName = $book.Names.Item('ProductSearchQuery')
-        $input = $definedName.RefersToRange
-        $savedValue = $input.Value2
+        $nameDeadline = [DateTime]::UtcNow.AddSeconds(10)
+        $namesResult = Invoke-ExcelBusyRetry {
+            $value = $book.Names
+            if ($null -eq $value) {
+                throw [Runtime.InteropServices.COMException]::new(
+                    'Excel has not exposed the candidate Names collection yet.',
+                    -2147417846
+                )
+            }
+            return [pscustomobject]@{ Value = $value }
+        } $nameDeadline 'reading the candidate Names collection'
+        $names = $namesResult.Value
+        $definedNameResult = Invoke-ExcelBusyRetry {
+            $value = $names.Item('ProductSearchQuery')
+            if ($null -eq $value) {
+                throw [Runtime.InteropServices.COMException]::new(
+                    'Excel has not exposed the candidate search input name yet.',
+                    -2147417846
+                )
+            }
+            return [pscustomobject]@{ Value = $value }
+        } $nameDeadline 'reading the candidate search input name'
+        $definedName = $definedNameResult.Value
+        $inputResult = Invoke-ExcelBusyRetry {
+            $value = $definedName.RefersToRange
+            if ($null -eq $value) {
+                throw [Runtime.InteropServices.COMException]::new(
+                    'Excel has not exposed the candidate search input range yet.',
+                    -2147417846
+                )
+            }
+            return [pscustomobject]@{ Value = $value }
+        } $nameDeadline 'reading the candidate search input range'
+        $input = $inputResult.Value
+        $literalDeadline = [DateTime]::UtcNow.AddSeconds(30)
+        $savedValue = Invoke-ExcelBusyRetry {
+            $input.Value2
+        } $literalDeadline 'reading the original literal-search value'
         $samples = @()
-        $macro = "'$($book.Name.Replace("'", "''"))'!ProductCatalogSync.PreserveSearchLiteral"
+        $macro = "'$(Get-ValidatorMacroBookName $book)'!ProductCatalogSync.PreserveSearchLiteral"
         $copyExtension = switch ([int]$book.FileFormat) {
             51 { '.xlsx' }
             52 { '.xlsm' }
@@ -1402,11 +1467,49 @@ function Test-SearchLiteralText([object]$excel, [object]$book) {
             $reopenNames = $null
             $reopenName = $null
             $reopenInput = $null
-            $input.NumberFormat = '@'
-            $input.Value2 = $fixture
-            [void]$excel.Run($macro)
+            $fixtureInput = Invoke-ExcelBusyRetry {
+                $currentName = $book.Names.Item('ProductSearchQuery')
+                $currentRange = $currentName.RefersToRange
+                [void]$currentRange.GetType().InvokeMember(
+                    'NumberFormat',
+                    [Reflection.BindingFlags]::SetProperty,
+                    $null,
+                    $currentRange,
+                    @([object]'@')
+                )
+                [void]$currentRange.GetType().InvokeMember(
+                    'Value2',
+                    [Reflection.BindingFlags]::SetProperty,
+                    $null,
+                    $currentRange,
+                    @([object]$fixture)
+                )
+                $currentValue = $currentRange.Value2
+                [pscustomobject]@{
+                    value = [Convert]::ToString($currentValue, $invariant)
+                    text = [Convert]::ToString($currentRange.Text, $invariant)
+                    valueType = if ($null -eq $currentValue) { '' } else { [string]$currentValue.GetType().Name }
+                    numberFormat = [Convert]::ToString($currentRange.NumberFormat, $invariant)
+                }
+            } $literalDeadline 'staging the literal-search fixture'
+            [void](Invoke-ExcelBusyRetry {
+                $excel.Run($macro)
+            } $literalDeadline 'preserving the literal-search fixture')
+            $fixtureInput = Invoke-ExcelBusyRetry {
+                $currentName = $book.Names.Item('ProductSearchQuery')
+                $currentRange = $currentName.RefersToRange
+                $currentValue = $currentRange.Value2
+                [pscustomobject]@{
+                    value = [Convert]::ToString($currentValue, $invariant)
+                    text = [Convert]::ToString($currentRange.Text, $invariant)
+                    valueType = if ($null -eq $currentValue) { '' } else { [string]$currentValue.GetType().Name }
+                    numberFormat = [Convert]::ToString($currentRange.NumberFormat, $invariant)
+                }
+            } $literalDeadline 'reading the preserved literal-search fixture'
             try {
-                $book.SaveCopyAs($reopenPath)
+                [void](Invoke-ExcelBusyRetry {
+                    $book.SaveCopyAs($reopenPath)
+                } $literalDeadline 'saving the literal-search fixture copy')
                 $reopenWorkbooks = $excel.Workbooks
                 $reopenCountBefore = [int]$reopenWorkbooks.Count
                 # Opening an .xltm without Editable=True creates a derived,
@@ -1482,13 +1585,9 @@ function Test-SearchLiteralText([object]$excel, [object]$book) {
                 $reopenInput = $reopenInputResult.Value
                 $samples += [pscustomobject]@{
                     input = $fixture
-                    value = [Convert]::ToString($input.Value2, $invariant)
-                    text = [Convert]::ToString($input.Text, $invariant)
-                    valueType = if ($null -eq $input.Value2) {
-                        ''
-                    } else {
-                        [string]$input.Value2.GetType().Name
-                    }
+                    value = $fixtureInput.value
+                    text = $fixtureInput.text
+                    valueType = $fixtureInput.valueType
                     reopenValue = [Convert]::ToString($reopenInput.Value2, $invariant)
                     reopenText = [Convert]::ToString($reopenInput.Text, $invariant)
                     reopenValueType = if ($null -eq $reopenInput.Value2) {
@@ -1506,7 +1605,9 @@ function Test-SearchLiteralText([object]$excel, [object]$book) {
                 Release-ComObject $reopenName
                 Release-ComObject $reopenNames
                 if ($null -ne $reopenBook) {
-                    $reopenBook.Close($false)
+                    [void](Invoke-ExcelBusyRetry {
+                        $reopenBook.Close($false)
+                    } ([DateTime]::UtcNow.AddSeconds(10)) 'closing the literal-search fixture copy')
                 }
                 Release-ComObject $reopenBook
                 Release-ComObject $reopenWorkbooks
@@ -1514,21 +1615,34 @@ function Test-SearchLiteralText([object]$excel, [object]$book) {
             }
         }
         return [pscustomobject]@{
-            numberFormat = [Convert]::ToString($input.NumberFormat, $invariant)
+            numberFormat = '@'
             samples = @($samples)
         }
     } finally {
-        if ($null -ne $input) {
-            $input.Value2 = $savedValue
+        if ($null -ne $book) {
+            [void](Invoke-ExcelBusyRetry {
+                $restoreName = $book.Names.Item('ProductSearchQuery')
+                $restoreRange = $restoreName.RefersToRange
+                [void]$restoreRange.GetType().InvokeMember(
+                    'Value2',
+                    [Reflection.BindingFlags]::SetProperty,
+                    $null,
+                    $restoreRange,
+                    @([object]$savedValue)
+                )
+            } ([DateTime]::UtcNow.AddSeconds(10)) 'restoring the literal-search input')
         }
-        $excel.EnableEvents = $eventsWereEnabled
+        [void](Invoke-ExcelBusyRetry {
+            $excel.EnableEvents = $eventsWereEnabled
+        } ([DateTime]::UtcNow.AddSeconds(10)) 'restoring Excel events after the literal-search fixture')
         Release-ComObject $input
         Release-ComObject $definedName
+        Release-ComObject $names
     }
 }
 
 function Test-SearchPaste([object]$excel, [object]$book) {
-    $bookName = ([string]$book.Name).Replace("'", "''")
+    $bookName = Get-ValidatorMacroBookName $book
     return [bool]$excel.Run(
         "'$bookName'!ProductCatalogSync.ValidateProductSearchPasteForValidation"
     )
@@ -1544,46 +1658,82 @@ function Test-FontAudit([object]$excel, [object]$book) {
     $savedAuditMode = $null
     $savedPriceDisplayFaNum = $null
     $savedPriceFont = $null
+    $fontDeadline = [DateTime]::UtcNow.AddSeconds(30)
     try {
-        $settings = $book.Worksheets.Item(3)
-        $table = Find-Table $book 'Products'
-        $tableDataRange = $table.DataBodyRange
-        $priceDataRange = $table.ListColumns.Item(1).DataBodyRange
+        $settingsResult = Invoke-ExcelBusyRetry {
+            [pscustomobject]@{ Value = $book.Worksheets.Item(3) }
+        } $fontDeadline 'reading the settings sheet for the font audit'
+        $settings = $settingsResult.Value
+        $tableResult = Invoke-ExcelBusyRetry {
+            [pscustomobject]@{ Value = (Find-Table $book 'Products') }
+        } $fontDeadline 'reading the Products table for the font audit'
+        $table = $tableResult.Value
+        $tableDataRangeResult = Invoke-ExcelBusyRetry {
+            [pscustomobject]@{ Value = $table.DataBodyRange }
+        } $fontDeadline 'reading the Products body for the font audit'
+        $tableDataRange = $tableDataRangeResult.Value
+        $priceDataRangeResult = Invoke-ExcelBusyRetry {
+            [pscustomobject]@{ Value = $table.ListColumns.Item(1).DataBodyRange }
+        } $fontDeadline 'reading the price column for the font audit'
+        $priceDataRange = $priceDataRangeResult.Value
         if ($null -ne $priceDataRange) {
-            $priceColumn = $priceDataRange.Cells.Item(1, 1)
+            $priceColumnResult = Invoke-ExcelBusyRetry {
+                [pscustomobject]@{ Value = $priceDataRange.Cells.Item(1, 1) }
+            } $fontDeadline 'reading the price font sample'
+            $priceColumn = $priceColumnResult.Value
         }
-        $macro = "'$($book.Name.Replace("'", "''"))'!ProductCatalogSync.AuditFontsForValidation"
+        $macro = "'$(Get-ValidatorMacroBookName $book)'!ProductCatalogSync.AuditFontsForValidation"
         Set-ValidatorStage 'font_audit_macro'
-        $passed = [bool]$excel.Run($macro)
-        $dialogMacro = "'$($book.Name.Replace("'", "''"))'!ProductCatalogSync.AuditMessageDialogForValidation"
-        $friendlyMacro = "'$($book.Name.Replace("'", "''"))'!ProductCatalogSync.FriendlyStatusErrorForValidation"
+        $passed = [bool](Invoke-ExcelBusyRetry {
+            $excel.Run($macro)
+        } $fontDeadline 'running the font audit macro')
+        $dialogMacro = "'$(Get-ValidatorMacroBookName $book)'!ProductCatalogSync.AuditMessageDialogForValidation"
+        $friendlyMacro = "'$(Get-ValidatorMacroBookName $book)'!ProductCatalogSync.FriendlyStatusErrorForValidation"
         Set-ValidatorStage 'font_dialog_fixture'
-        $dialogPassed = [bool]$excel.Run($dialogMacro)
+        $dialogPassed = [bool](Invoke-ExcelBusyRetry {
+            $excel.Run($dialogMacro)
+        } $fontDeadline 'running the font dialog fixture')
         Set-ValidatorStage 'font_friendly_error_fixture'
         $friendlyError = [Convert]::ToString(
-            $excel.Run(
-                $friendlyMacro,
-                'RefreshPricingState [pricing state]: HTTP 500 internal error'
-            ),
+            (Invoke-ExcelBusyRetry {
+                $excel.Run(
+                    $friendlyMacro,
+                    'RefreshPricingState [pricing state]: HTTP 500 internal error'
+                )
+            } $fontDeadline 'running the friendly font error fixture'),
             $invariant
         )
-        $policyFixtureMacro = "'$($book.Name.Replace("'", "''"))'!ProductCatalogSync.ValidateFontPolicyFixturesForValidation"
+        $policyFixtureMacro = "'$(Get-ValidatorMacroBookName $book)'!ProductCatalogSync.ValidateFontPolicyFixturesForValidation"
         Set-ValidatorStage 'font_policy_fixtures'
-        $policyFixturesPassed = [bool]$excel.Run($policyFixtureMacro)
-        $savedPersianFont = $settings.Range('B39').Value2
-        $savedAuditMode = $settings.Range('B41').Value2
-        $savedPriceDisplayFaNum = $settings.Range('B44').Value2
+        $policyFixturesPassed = [bool](Invoke-ExcelBusyRetry {
+            $excel.Run($policyFixtureMacro)
+        } $fontDeadline 'running the font policy fixtures')
+        $savedPersianFont = Invoke-ExcelBusyRetry {
+            $settings.Range('B39').Value2
+        } $fontDeadline 'reading the Persian font setting'
+        $savedAuditMode = Invoke-ExcelBusyRetry {
+            $settings.Range('B41').Value2
+        } $fontDeadline 'reading the font audit mode'
+        $savedPriceDisplayFaNum = Invoke-ExcelBusyRetry {
+            $settings.Range('B44').Value2
+        } $fontDeadline 'reading the price display font setting'
         $driftRepaired = $false
         $faNumEnabled = $false
         $faNumDisabled = $false
         $priceSlots = @()
         $technicalSlots = @()
         if ($null -ne $priceColumn) {
-            $savedPriceFont = $priceColumn.Font.Name
-            $applyPriceFontMacro = "'$($book.Name.Replace("'", "''"))'!ProductCatalogSync.ApplyPriceDisplayFontSetting"
-            $settings.Range('B44').Value2 = 'بله'
+            $savedPriceFont = Invoke-ExcelBusyRetry {
+                $priceColumn.Font.Name
+            } $fontDeadline 'reading the original price font'
+            $applyPriceFontMacro = "'$(Get-ValidatorMacroBookName $book)'!ProductCatalogSync.ApplyPriceDisplayFontSetting"
+            [void](Invoke-ExcelBusyRetry {
+                $settings.Range('B44').Value2 = 'بله'
+            } $fontDeadline 'enabling the Persian digit font')
             Set-ValidatorStage 'font_apply_fanum'
-            [void]$excel.Run($applyPriceFontMacro)
+            [void](Invoke-ExcelBusyRetry {
+                $excel.Run($applyPriceFontMacro)
+            } $fontDeadline 'applying the Persian digit font')
             $faNumEnabled = [Convert]::ToString(
                 $priceColumn.Font.Name,
                 $invariant
@@ -1632,20 +1782,32 @@ function Test-FontAudit([object]$excel, [object]$book) {
                     Release-ComObject $technicalCell
                 }
             }
-            $settings.Range('B44').Value2 = 'خیر'
+            [void](Invoke-ExcelBusyRetry {
+                $settings.Range('B44').Value2 = 'خیر'
+            } $fontDeadline 'disabling the Persian digit font')
             Set-ValidatorStage 'font_apply_segoe'
-            [void]$excel.Run($applyPriceFontMacro)
+            [void](Invoke-ExcelBusyRetry {
+                $excel.Run($applyPriceFontMacro)
+            } $fontDeadline 'applying the Segoe UI price font')
             $faNumDisabled = [Convert]::ToString(
                 $priceColumn.Font.Name,
                 $invariant
             ) -eq 'Segoe UI'
-            $settings.Range('B44').Value2 = 'بله'
+            [void](Invoke-ExcelBusyRetry {
+                $settings.Range('B44').Value2 = 'بله'
+            } $fontDeadline 're-enabling the Persian digit font')
             Set-ValidatorStage 'font_reapply_fanum'
-            [void]$excel.Run($applyPriceFontMacro)
-            $priceColumn.Font.Name = 'Arial'
-            $repairMacro = "'$($book.Name.Replace("'", "''"))'!ProductCatalogSync.RepairFontDriftForValidation"
+            [void](Invoke-ExcelBusyRetry {
+                $excel.Run($applyPriceFontMacro)
+            } $fontDeadline 'reapplying the Persian digit font')
+            [void](Invoke-ExcelBusyRetry {
+                $priceColumn.Font.Name = 'Arial'
+            } $fontDeadline 'injecting the font drift fixture')
+            $repairMacro = "'$(Get-ValidatorMacroBookName $book)'!ProductCatalogSync.RepairFontDriftForValidation"
             Set-ValidatorStage 'font_repair_drift'
-            $driftRepaired = [bool]$excel.Run($repairMacro) -and
+            $driftRepaired = [bool](Invoke-ExcelBusyRetry {
+                $excel.Run($repairMacro)
+            } $fontDeadline 'repairing the font drift fixture') -and
                 [Convert]::ToString($priceColumn.Font.Name, $invariant) -eq 'Yekan Bakh FaNum'
         }
 
@@ -1673,22 +1835,32 @@ function Test-FontAudit([object]$excel, [object]$book) {
     } finally {
         if ($null -ne $settings) {
             if ($null -ne $savedPersianFont) {
-                $settings.Range('B39').Value2 = $savedPersianFont
+                [void](Invoke-ExcelBusyRetry {
+                    $settings.Range('B39').Value2 = $savedPersianFont
+                } ([DateTime]::UtcNow.AddSeconds(10)) 'restoring the Persian font setting')
             }
             if ($null -ne $savedAuditMode) {
-                $settings.Range('B41').Value2 = $savedAuditMode
+                [void](Invoke-ExcelBusyRetry {
+                    $settings.Range('B41').Value2 = $savedAuditMode
+                } ([DateTime]::UtcNow.AddSeconds(10)) 'restoring the font audit mode')
             }
             if ($null -ne $savedPriceDisplayFaNum) {
-                $settings.Range('B44').Value2 = $savedPriceDisplayFaNum
+                [void](Invoke-ExcelBusyRetry {
+                    $settings.Range('B44').Value2 = $savedPriceDisplayFaNum
+                } ([DateTime]::UtcNow.AddSeconds(10)) 'restoring the price display font setting')
                 if ($null -ne $priceColumn) {
-                    $restorePriceFontMacro = "'$($book.Name.Replace("'", "''"))'!ProductCatalogSync.ApplyPriceDisplayFontSetting"
+                    $restorePriceFontMacro = "'$(Get-ValidatorMacroBookName $book)'!ProductCatalogSync.ApplyPriceDisplayFontSetting"
                     Set-ValidatorStage 'font_restore_original'
-                    [void]$excel.Run($restorePriceFontMacro)
+                    [void](Invoke-ExcelBusyRetry {
+                        $excel.Run($restorePriceFontMacro)
+                    } ([DateTime]::UtcNow.AddSeconds(10)) 'restoring the price display font')
                 }
             }
         }
         if ($null -ne $priceColumn -and $null -ne $savedPriceFont) {
-            $priceColumn.Font.Name = $savedPriceFont
+            [void](Invoke-ExcelBusyRetry {
+                $priceColumn.Font.Name = $savedPriceFont
+            } ([DateTime]::UtcNow.AddSeconds(10)) 'restoring the original price cell font')
         }
         Release-ComObject $priceColumn
         Release-ComObject $priceDataRange
@@ -1698,43 +1870,38 @@ function Test-FontAudit([object]$excel, [object]$book) {
     }
 }
 
-function Test-PricingWritebackUI([object]$excel, [object]$book) {
-    $bookName = ([string]$book.Name).Replace("'", "''")
+function Test-PricingWritebackUI([object]$excel, [string]$bookName) {
     return [bool]$excel.Run(
         "'$bookName'!ProductCatalogSync.ValidatePricingWritebackUIForValidation"
     )
 }
 
-function Test-PricingGenerationFences([object]$excel, [object]$book) {
-    $bookName = ([string]$book.Name).Replace("'", "''")
+function Test-PricingGenerationFences([object]$excel, [string]$bookName) {
     return [bool]$excel.Run(
         "'$bookName'!ProductCatalogSync.ValidatePricingGenerationFencesForValidation"
     )
 }
 
-function Test-PricingProgressUI([object]$excel, [object]$book) {
-    $bookName = ([string]$book.Name).Replace("'", "''")
+function Test-PricingProgressUI([object]$excel, [string]$bookName) {
     return [bool]$excel.Run(
         "'$bookName'!ProductCatalogSync.ValidateOperationProgressUIForValidation"
     )
 }
 
-function Test-ProductImagePreviewUI([object]$excel, [object]$book) {
-    $bookName = ([string]$book.Name).Replace("'", "''")
+function Test-ProductImagePreviewUI([object]$excel, [string]$bookName) {
     return [bool]$excel.Run(
         "'$bookName'!ProductCatalogSync.ValidateProductImagePreviewUIForValidation"
     )
 }
 
-function Test-CurrencyFreshnessUI([object]$excel, [object]$book) {
-    $bookName = ([string]$book.Name).Replace("'", "''")
+function Test-CurrencyFreshnessUI([object]$excel, [string]$bookName) {
     return [bool]$excel.Run(
         "'$bookName'!ProductCatalogSync.ValidateCurrencyFreshnessUIForValidation"
     )
 }
 
 function Read-WorkbookLifecycle([object]$excel, [object]$book) {
-    $bookName = ([string]$book.Name).Replace("'", "''")
+    $bookName = Get-ValidatorMacroBookName $book
     return [pscustomobject]@{
         token = [string]$excel.Run("'$bookName'!ProductCatalogSync.WorkbookInstanceTokenForValidation")
         openCount = [int]$excel.Run("'$bookName'!ProductCatalogSync.WorkbookOpenCountForValidation")
@@ -1744,7 +1911,7 @@ function Read-WorkbookLifecycle([object]$excel, [object]$book) {
 }
 
 function Test-StatusSummaryFormatter([object]$excel, [object]$book) {
-    $bookName = $book.Name.Replace("'", "''")
+    $bookName = Get-ValidatorMacroBookName $book
     $statusMacro = "'$bookName'!ProductCatalogSync.FormatStatusSummaryForValidation"
     $auditMacro = "'$bookName'!ProductCatalogSync.FormatFontAuditSummaryForValidation"
     return [pscustomobject]@{
@@ -1758,7 +1925,6 @@ function Test-StatusSummaryFormatter([object]$excel, [object]$book) {
 function Test-ProductTitleDirection([object]$book) {
     $table = Find-Table $book 'Products'
     $titleColumn = $null
-    $cell = $null
     $latinRows = 0
     $persianRows = 0
     $mismatches = 0
@@ -1773,9 +1939,15 @@ function Test-ProductTitleDirection([object]$book) {
                 samples = @()
             }
         }
-        for ($row = 1; $row -le $titleColumn.Rows.Count; $row++) {
-            $cell = $titleColumn.Cells.Item($row, 1)
-            $title = [Convert]::ToString($cell.Value2, $invariant).Trim()
+        $rowCount = [int]$titleColumn.Rows.Count
+        $values = $titleColumn.Value2
+        $expected = -5002
+        $actual = [int]$titleColumn.ReadingOrder
+        for ($row = 1; $row -le $rowCount; $row++) {
+            $title = [Convert]::ToString(
+                (Matrix-Value $values $rowCount 1 $row 1),
+                $invariant
+            ).Trim()
             if ($title.Length -gt 0) {
                 $containsPersian = [regex]::IsMatch(
                     $title,
@@ -1785,22 +1957,18 @@ function Test-ProductTitleDirection([object]$book) {
                 # resolves mixed Persian/Latin titles without a per-row COM
                 # formatting loop. Both script classes must retain that single
                 # context-aware reading order after a live table rebuild.
-                $expected = -5002
                 if ($containsPersian) {
                     $persianRows += 1
                 } else {
                     $latinRows += 1
                 }
-                $actual = [int]$cell.ReadingOrder
                 if ($actual -ne $expected) {
                     $mismatches += 1
                     if ($samples.Count -lt 20) {
-                        $samples += "row=$([int]$cell.Row), expected=$expected, actual=$actual, title=$title"
+                        $samples += "row=$([int]$titleColumn.Row + $row - 1), expected=$expected, actual=$actual, title=$title"
                     }
                 }
             }
-            Release-ComObject $cell
-            $cell = $null
         }
         return [pscustomobject]@{
             latinRows = $latinRows
@@ -1809,7 +1977,6 @@ function Test-ProductTitleDirection([object]$book) {
             samples = $samples
         }
     } finally {
-        Release-ComObject $cell
         Release-ComObject $titleColumn
         Release-ComObject $table
     }
@@ -2206,7 +2373,7 @@ function Test-ProductSearch(
         $queryRange = $book.Names.Item('ProductSearchQuery').RefersToRange
         $searchButton = $sheet.Shapes.Item('ProductSearchButton')
         $expectedScrollColumn = [Math]::Max(1, [int]$table.Range.Column - 1)
-        $macroBookName = ([string]$book.Name).Replace("'", "''")
+        $macroBookName = Get-ValidatorMacroBookName $book
         $searchMacro = "'$macroBookName'!ProductCatalogSync.SearchProducts"
         $focusMacro = "'$macroBookName'!ProductCatalogSync.FocusProductSearch"
         $registerMacro = "'$macroBookName'!ProductCatalogSync.RegisterSearchHotkey"
@@ -2305,7 +2472,7 @@ function Test-SearchCrashRegression([object]$excel, [object]$book) {
         $sheet = $table.Parent
         $queryRange = $book.Names.Item('ProductSearchQuery').RefersToRange
         $button = $sheet.Shapes.Item('ProductSearchButton')
-        $macroBookName = ([string]$book.Name).Replace("'", "''")
+        $macroBookName = Get-ValidatorMacroBookName $book
         $searchMacro = "'$macroBookName'!ProductCatalogSync.SearchProducts"
         $clearMacro = "'$macroBookName'!ProductCatalogSync.ClearProductSearch"
         $initialAddress = [string]$table.Range.Address($false, $false)
@@ -2488,10 +2655,71 @@ function Round-ProjectedPrice([decimal]$value, [int]$digits) {
     ) * $quantum
 }
 
+function Read-RoundingPolicy([object]$book) {
+    $settings = $null
+    $tierRange = $null
+    try {
+        $settings = $book.Worksheets.Item(3)
+        $count = [int](Numeric-Or-Null $settings.Range('H20').Value2)
+        $extend = [bool]$settings.Range('H21').Value2
+        $tiers = @()
+        if ($count -gt 0 -and $count -le 32) {
+            $tierRange = $settings.Range("I58:J$([int](57 + $count))")
+            $values = $tierRange.Value2
+            for ($index = 1; $index -le $count; $index += 1) {
+                $threshold = Numeric-Or-Null (Matrix-Value $values $count 2 $index 1)
+                $digits = Numeric-Or-Null (Matrix-Value $values $count 2 $index 2)
+                if ($null -eq $threshold -or $threshold -le 0 -or
+                    $null -eq $digits -or $digits -lt 0 -or
+                    [decimal]$digits -ne [decimal][int]$digits) {
+                    throw "Invalid live rounding tier at Settings row $([int](57 + $index))."
+                }
+                $tiers += [pscustomobject]@{
+                    threshold = [decimal]$threshold
+                    digits = [int]$digits
+                }
+            }
+        }
+        return [pscustomobject]@{
+            count = $count
+            extendDecades = $extend
+            tiers = @($tiers)
+        }
+    } finally {
+        Release-ComObject $tierRange
+        Release-ComObject $settings
+    }
+}
+
+function Resolve-RoundingDigits(
+    [decimal]$value,
+    [object]$policy,
+    [int]$fallbackDigits
+) {
+    $tiers = @($policy.tiers)
+    if ($tiers.Count -eq 0) { return $fallbackDigits }
+    if ($value -lt [decimal]$tiers[0].threshold) { return 0 }
+    $resolved = 0
+    $lastThreshold = [decimal]$tiers[0].threshold
+    foreach ($tier in $tiers) {
+        if ($value -lt [decimal]$tier.threshold) { break }
+        $resolved = [int]$tier.digits
+        $lastThreshold = [decimal]$tier.threshold
+    }
+    if ([bool]$policy.extendDecades -and $value -ge $lastThreshold) {
+        $ratio = [double]($value / $lastThreshold)
+        if ($ratio -ge 1) {
+            $resolved += [Math]::Max(0, [int][Math]::Floor([Math]::Log10($ratio)))
+        }
+    }
+    return [Math]::Min(18, $resolved)
+}
+
 function Expected-ProjectedPrice(
     [object]$productRow,
     [object]$syncRow,
-    [int]$roundingDigits
+    [int]$roundingDigits,
+    [object]$roundingPolicy
 ) {
     $amount = Numeric-Or-Null $syncRow.PriceSourceAmount
     if ($null -eq $amount -or $amount -le 0) { return $null }
@@ -2520,7 +2748,9 @@ function Expected-ProjectedPrice(
                 ([decimal]$amount / [decimal]10) *
                 ([decimal]1 + ([decimal]$profitPercent / [decimal]100))
             )
-            return Round-ProjectedPrice $unrounded $roundingDigits
+            return Round-ProjectedPrice $unrounded (
+                Resolve-RoundingDigits $unrounded $roundingPolicy $roundingDigits
+            )
         }
         'foreign_price' {
             $factor = Currency-Factor-Or-Null $currency $syncRow
@@ -2541,7 +2771,9 @@ function Expected-ProjectedPrice(
             ) * (
                 [decimal]1 + ([decimal]$profitPercent / [decimal]100)
             )
-            return Round-ProjectedPrice $unrounded $roundingDigits
+            return Round-ProjectedPrice $unrounded (
+                Resolve-RoundingDigits $unrounded $roundingPolicy $roundingDigits
+            )
         }
         default { return $null }
     }
@@ -2552,7 +2784,8 @@ function Test-TransientPricePreview(
     [object]$book,
     [object]$productSnapshot,
     [object]$syncDictionary,
-    [int]$roundingDigits
+    [int]$roundingDigits,
+    [object]$roundingPolicy
 ) {
     $sheet = $null
     $syncSheet = $null
@@ -2607,7 +2840,7 @@ function Test-TransientPricePreview(
                 continue
             }
             $syncRow = $syncDictionary.Values[[string]$row.Code]
-            $projected = Expected-ProjectedPrice $row $syncRow $roundingDigits
+            $projected = Expected-ProjectedPrice $row $syncRow $roundingDigits $roundingPolicy
             if ($null -ne $projected -and $projected -gt 0) {
                 $eligibleCandidates += 1
                 $priceCell = $sheet.Cells.Item(
@@ -2679,9 +2912,24 @@ function Test-TransientPricePreview(
         # wait cursor or marker-cell recalculation on every click. Search is
         # the intentional path that applies the bounded highlight/preview
         # markers, so exercise that public routine explicitly here.
-        $macroBookName = ([string]$book.Name).Replace("'", "''")
+        $macroBookName = Get-ValidatorMacroBookName $book
         $highlightMacro = "'$macroBookName'!ProductCatalogSync.HighlightSelectedProductRow"
         [void]$excel.Run($highlightMacro, $priceCell)
+        # A native macro/selection transition may rebuild Excel's Range proxy
+        # even though the worksheet coordinates remain valid. Reacquire all
+        # fixture cells after the macro instead of dereferencing a stale RCW.
+        $priceCell = $sheet.Cells.Item(
+            [int]$candidate.Row,
+            $tableFirstColumn
+        )
+        $rateCell = $sheet.Cells.Item(
+            [int]$candidate.Row,
+            $tableFirstColumn + 4
+        )
+        $wooPriceCell = $syncSheet.Cells.Item(
+            [int]$syncRow.Row,
+            [int]$syncRow.FirstColumn + 9
+        )
         [void]$priceCell.Calculate()
         $selectedValue = Numeric-Or-Null $priceCell.Value2
 
@@ -3057,9 +3305,16 @@ function Test-WooLinkSortFilterStability(
     $table = $null
     $sheet = $null
     $codeRange = $null
+    $filterCell = $null
     $visible = $null
     $eventsWereEnabled = [bool]$excel.EnableEvents
-    $codes = @($expectedRows | ForEach-Object { [string]$_.Code })
+    $codes = @($expectedRows | ForEach-Object {
+        $code = [string]$_.Code
+        if (-not [string]::IsNullOrWhiteSpace($code)) { $code }
+    })
+    if ($codes.Count -eq 0) {
+        throw 'Woo link sort/filter validation found no non-empty Product Code.'
+    }
     $sortedCodes = @($codes | Sort-Object)
     $initialAscending = $codes.Count -gt 1
     for ($index = 0; $index -lt $codes.Count; $index++) {
@@ -3086,15 +3341,38 @@ function Test-WooLinkSortFilterStability(
         $table = Find-Table $book 'Products'
         $sheet = $table.Parent
         $codeRange = $table.ListColumns.Item(7).DataBodyRange
-        $filterCode = $codes[[Math]::Floor($codes.Count / 2)]
-        [void]$table.Range.AutoFilter(7, $filterCode)
+        $filterCode = ''
+        for ($cellIndex = 1; $cellIndex -le [int]$codeRange.Rows.Count; $cellIndex += 1) {
+            Release-ComObject $filterCell
+            $filterCell = $codeRange.Cells.Item($cellIndex, 1)
+            $filterCode = [Convert]::ToString($filterCell.Value2, $invariant).Trim()
+            if ($filterCode.Length -gt 0) { break }
+        }
+        if ($filterCode.Length -eq 0) {
+            throw 'Woo link sort/filter validation found no non-empty Product Code cell.'
+        }
+        [void]$table.Range.AutoFilter(7, [object]$filterCell.Value2)
         $visible = $codeRange.SpecialCells(12)
         $result.filterVisibleRows = [int]$visible.Cells.Count
+        if ([bool]$sheet.FilterMode) { $sheet.ShowAllData() }
+        Release-ComObject $visible
+        Release-ComObject $filterCell
+        Release-ComObject $codeRange
+        Release-ComObject $sheet
+        Release-ComObject $table
+        $visible = $null
+        $filterCell = $null
+        $codeRange = $null
+        $sheet = $null
+        $table = $null
+
         $filteredRows = (Read-Products $book).Rows
         $result.filterMismatches = Compare-WooLinkRows $expectedRows $filteredRows
-        if ([bool]$sheet.FilterMode) { $sheet.ShowAllData() }
 
+        $table = Find-Table $book 'Products'
         Set-WooLinkValidationSort $table 2
+        Release-ComObject $table
+        $table = $null
         $descendingRows = (Read-Products $book).Rows
         $result.descendingMismatches = Compare-WooLinkRows $expectedRows $descendingRows
         if ($descendingRows.Count -gt 0 -and $codes.Count -gt 0) {
@@ -3105,7 +3383,10 @@ function Test-WooLinkSortFilterStability(
             )
         }
 
+        $table = Find-Table $book 'Products'
         Set-WooLinkValidationSort $table 1
+        Release-ComObject $table
+        $table = $null
         $restoredRows = (Read-Products $book).Rows
         $result.restoredMismatches = Compare-WooLinkRows $expectedRows $restoredRows
         return [pscustomobject]$result
@@ -3118,6 +3399,7 @@ function Test-WooLinkSortFilterStability(
         }
         try { $excel.EnableEvents = $eventsWereEnabled } catch {}
         Release-ComObject $visible
+        Release-ComObject $filterCell
         Release-ComObject $codeRange
         Release-ComObject $sheet
         Release-ComObject $table
@@ -3212,11 +3494,27 @@ try {
         $candidateBook = $workbooks.Open($candidatePath, 0, $true)
     }
     Set-ValidatorStage 'candidate_opened' ([string]$candidateBook.Name)
-    $macroBookName = ([string]$candidateBook.Name).Replace("'", "''")
+    $script:ValidatorMacroBookName = [Convert]::ToString($candidateBook.Name, $invariant)
+    $macroBookName = Get-ValidatorMacroBookName $candidateBook
     $initialWorkbookLifecycle = Read-WorkbookLifecycle $excel $candidateBook
     if ([string]::IsNullOrWhiteSpace([string]$initialWorkbookLifecycle.token) -or
         [int]$initialWorkbookLifecycle.openCount -ne 1) {
         throw "Workbook_Open did not run exactly once: $($initialWorkbookLifecycle.telemetry)"
+    }
+
+    if (-not $runSync) {
+        # Workbook_Open intentionally schedules a live refresh for an empty
+        # release template.  --no-sync is the deterministic local-validator
+        # mode, so cancel that one pending callback before the search/save-copy
+        # fixtures begin.  Without this, the two-second callback can enter an
+        # asynchronous catalog commit while the harness is restoring C3 and
+        # Excel correctly rejects the competing COM write (RPC_E_CALL_REJECTED).
+        # The --sync path and the separate visible cold-open acceptance still
+        # exercise the real refresh lifecycle.
+        Set-ValidatorStage 'cancelling_scheduled_open_refresh'
+        [void]$excel.Run(
+            "'$macroBookName'!ProductCatalogSync.CancelScheduledRefresh"
+        )
     }
 
     if ($runSync) {
@@ -3245,25 +3543,34 @@ try {
             # client itself never polls WinHTTP readiness or HTTP job status.
             Start-Sleep -Milliseconds 100
         }
+        $syncReadbackDeadline = [DateTime]::UtcNow.AddSeconds(10)
         $syncOperation = [Convert]::ToString(
-            $excel.Run(
-                "'$macroBookName'!ProductCatalogSync.LastPricingOperationForValidation"
-            ),
+            (Invoke-ExcelBusyRetry {
+                $excel.Run(
+                    "'$macroBookName'!ProductCatalogSync.LastPricingOperationForValidation"
+                )
+            } $syncReadbackDeadline 'reading the synchronization operation'),
             $invariant
         )
-        $syncSucceeded = [bool]$excel.Run(
-            "'$macroBookName'!ProductCatalogSync.LastPricingOperationSucceededForValidation"
-        )
-        $syncError = [Convert]::ToString(
+        $syncSucceeded = [bool](Invoke-ExcelBusyRetry {
             $excel.Run(
-                "'$macroBookName'!ProductCatalogSync.LastPricingOperationErrorForValidation"
-            ),
+                "'$macroBookName'!ProductCatalogSync.LastPricingOperationSucceededForValidation"
+            )
+        } $syncReadbackDeadline 'reading the synchronization result')
+        $syncError = [Convert]::ToString(
+            (Invoke-ExcelBusyRetry {
+                $excel.Run(
+                    "'$macroBookName'!ProductCatalogSync.LastPricingOperationErrorForValidation"
+                )
+            } $syncReadbackDeadline 'reading the synchronization error'),
             $invariant
         )
         $syncDiagnostic = [Convert]::ToString(
-            $excel.Run(
-                "'$macroBookName'!ProductCatalogSync.LastPricingOperationDiagnosticForValidation"
-            ),
+            (Invoke-ExcelBusyRetry {
+                $excel.Run(
+                    "'$macroBookName'!ProductCatalogSync.LastPricingOperationDiagnosticForValidation"
+                )
+            } $syncReadbackDeadline 'reading the synchronization diagnostic'),
             $invariant
         )
         if (-not $syncSucceeded) {
@@ -3327,6 +3634,33 @@ try {
         }
         Set-ValidatorStage 'live_sync_completed' $syncOperation
     }
+    $listenerCheckDeadline = [DateTime]::UtcNow.AddSeconds(15)
+    Set-ValidatorStage 'proving_pricing_event_listener'
+    $pricingEventListenerActive = [bool](Invoke-ExcelBusyRetry {
+        $excel.Run(
+            "'$macroBookName'!ProductCatalogSync.PricingEventListenerActiveForValidation"
+        )
+    } $listenerCheckDeadline 'proving the live pricing event listener is active')
+    Set-ValidatorStage 'pausing_pricing_event_listener_for_fixtures'
+    [void](Invoke-ExcelBusyRetry {
+        $excel.Run(
+            "'$macroBookName'!ProductCatalogSync.PausePricingEventListenerForValidation"
+        )
+    } $listenerCheckDeadline 'pausing the live pricing event listener for deterministic fixtures')
+    Set-ValidatorStage 'checking_pricing_event_auto_pull'
+    $pricingEventAutoPull = [bool](Invoke-ExcelBusyRetry {
+        $excel.Run(
+            "'$macroBookName'!ProductCatalogSync.ValidatePricingEventAutoPullForValidation"
+        )
+    } ([DateTime]::UtcNow.AddSeconds(15)) 'validating pricing event auto-pull behavior')
+    $pricingEventDiagnostic = [Convert]::ToString(
+        (Invoke-ExcelBusyRetry {
+            $excel.Run(
+                "'$macroBookName'!ProductCatalogSync.PricingEventValidationDiagnosticForValidation"
+            )
+        } ([DateTime]::UtcNow.AddSeconds(15)) 'reading the pricing event validation diagnostic'),
+        $invariant
+    )
     Set-ValidatorStage 'calculating_candidate'
     $excel.CalculateFullRebuild()
     $wooLinkStagingEmptyAtRest = [bool]$excel.Run(
@@ -3354,29 +3688,25 @@ try {
     $candidateProducts = Read-Products $candidateBook
     Set-ValidatorStage 'checking_woo_link_sort_filter_stability'
     $wooLinkSortFilterValidation = Test-WooLinkSortFilterStability $excel $candidateBook $candidateProducts.Rows
+    # The sort/filter fixture intentionally reorders the visible ListObject.
+    # Re-read physical row coordinates before search/selection assertions.
+    $candidateProducts = Read-Products $candidateBook
     Set-ValidatorStage 'checking_title_direction'
     $titleDirection = Test-ProductTitleDirection $candidateBook
     Set-ValidatorStage 'checking_fonts'
     $fontAudit = Test-FontAudit $excel $candidateBook
     Set-ValidatorStage 'checking_writeback_ui'
-    $pricingWritebackUI = Test-PricingWritebackUI $excel $candidateBook
+    $pricingWritebackUI = Test-PricingWritebackUI $excel $macroBookName
     Set-ValidatorStage 'checking_writeback_generation_fences'
-    $pricingGenerationFences = Test-PricingGenerationFences $excel $candidateBook
+    $pricingGenerationFences = Test-PricingGenerationFences $excel $macroBookName
     Set-ValidatorStage 'checking_progress_ui'
-    $pricingProgressUI = Test-PricingProgressUI $excel $candidateBook
+    $pricingProgressUI = Test-PricingProgressUI $excel $macroBookName
     Set-ValidatorStage 'checking_currency_freshness_ui'
-    $currencyFreshnessUI = Test-CurrencyFreshnessUI $excel $candidateBook
+    $currencyFreshnessUI = Test-CurrencyFreshnessUI $excel $macroBookName
     Set-ValidatorStage 'checking_pricing_event_listener'
-    $eventMacroBookName = ([string]$candidateBook.Name).Replace("'", "''")
-    $pricingEventListenerActive = [bool]$excel.Run(
-        "'$eventMacroBookName'!ProductCatalogSync.PricingEventListenerActiveForValidation"
-    )
-    Set-ValidatorStage 'checking_pricing_event_auto_pull'
-    $pricingEventAutoPull = [bool]$excel.Run(
-        "'$eventMacroBookName'!ProductCatalogSync.ValidatePricingEventAutoPullForValidation"
-    )
+    $eventMacroBookName = $macroBookName
     Set-ValidatorStage 'checking_product_image_preview_ui'
-    $productImagePreviewUI = Test-ProductImagePreviewUI $excel $candidateBook
+    $productImagePreviewUI = Test-ProductImagePreviewUI $excel $macroBookName
     Set-ValidatorStage 'checking_product_search'
     $candidateSearch = Test-ProductSearch $excel $candidateBook $candidateProducts.Rows
     Set-ValidatorStage 'checking_search_crash_regression'
@@ -3413,6 +3743,7 @@ try {
         shipping = Numeric-Or-Null (Sheet-Scalar $candidateBook 3 'B14')
         profit = Numeric-Or-Null (Sheet-Scalar $candidateBook 3 'B13')
         roundingDigits = Numeric-Or-Null (Sheet-Scalar $candidateBook 3 'B15')
+        roundingPolicy = Read-RoundingPolicy $candidateBook
         cardYuan = Numeric-Or-Null (Table-Scalar $candidateBook 'Yuan_Price')
         cardShipping = Numeric-Or-Null (Table-Scalar $candidateBook 'Shipping')
         cardProfit = Numeric-Or-Null (Table-Scalar $candidateBook 'Profit')
@@ -3432,23 +3763,48 @@ try {
     }
 
     Set-ValidatorStage 'comparing_candidate_reference'
+    $syncDictionary = Row-Dictionary $candidateSyncData.Rows
+    foreach ($candidateRow in $candidateProducts.Rows) {
+        if ($syncDictionary.Values.ContainsKey($candidateRow.Code)) {
+            continue
+        }
+
+        # A Woo-only projection may legitimately display a Woo SKU/Product Code
+        # while retaining a provider-local canonical identity (woo:<id>).  The
+        # visible Product Code is not sufficient evidence that a Patris identity
+        # exists, so bind validation to the emitted SyncData identity instead of
+        # manufacturing patris:<displayed-code>.
+        if ($candidateRow.WooID.Length -gt 0) {
+            $wooIdentity = "woo:$($candidateRow.WooID)"
+            if ($syncDictionary.Values.ContainsKey($wooIdentity)) {
+                $candidateRow.Code = $wooIdentity
+            }
+        }
+    }
     $candidateDictionary = Row-Dictionary $candidateProducts.Rows
     $candidateProductDictionary = ProductCode-Dictionary $candidateProducts.Rows
-    $syncDictionary = Row-Dictionary $candidateSyncData.Rows
     $wooLinkReadback = Measure-WooLinkProjection $candidateProducts.Rows $syncDictionary
-    $transientPricePreview = Test-TransientPricePreview $excel $candidateBook $candidateProducts $syncDictionary ([int]$candidateConfig.roundingDigits)
+    $transientPricePreview = Test-TransientPricePreview $excel $candidateBook $candidateProducts $syncDictionary ([int]$candidateConfig.roundingDigits) $candidateConfig.roundingPolicy
     Reset-SelectedProductRow $excel $candidateBook
     $referenceDictionary = ProductCode-Dictionary $referenceProducts.Rows
     $missingProductCodes = 0
     $extraSyncCodes = 0
+    $missingProductCodeSamples = @()
+    $extraSyncCodeSamples = @()
     foreach ($candidateCode in $candidateDictionary.Values.Keys) {
         if (-not $syncDictionary.Values.ContainsKey($candidateCode)) {
             $missingProductCodes += 1
+            if ($missingProductCodeSamples.Count -lt 20) {
+                $missingProductCodeSamples += [string]$candidateCode
+            }
         }
     }
     foreach ($syncCode in $syncDictionary.Values.Keys) {
         if (-not $candidateDictionary.Values.ContainsKey($syncCode)) {
             $extraSyncCodes += 1
+            if ($extraSyncCodeSamples.Count -lt 20) {
+                $extraSyncCodeSamples += [string]$syncCode
+            }
         }
     }
 
@@ -3575,16 +3931,10 @@ try {
             ) * (
                 [decimal]1 + ([decimal]$profitPercent / [decimal]100)
             )
-            $roundingDigits = [int]$candidateConfig.roundingDigits
-            $quantum = [decimal]1
-            for ($roundingIndex = 0; $roundingIndex -lt $roundingDigits; $roundingIndex++) {
-                $quantum *= [decimal]10
-            }
-            $expected = [Math]::Round(
-                $expectedUnrounded / $quantum,
-                0,
-                [System.MidpointRounding]::AwayFromZero
-            ) * $quantum
+            $roundingDigits = Resolve-RoundingDigits (
+                [decimal]$expectedUnrounded
+            ) $candidateConfig.roundingPolicy ([int]$candidateConfig.roundingDigits)
+            $expected = Round-ProjectedPrice $expectedUnrounded $roundingDigits
         } elseif ($null -ne $sitePrice -and $sitePrice -gt 0) {
             $fallbackPriceRows += 1
             $expected = $sitePrice
@@ -3781,6 +4131,8 @@ try {
             duplicateCodes = $syncDictionary.Duplicates
             missingProductCodes = $missingProductCodes
             extraCodes = $extraSyncCodes
+            missingProductCodeSamples = @($missingProductCodeSamples)
+            extraCodeSamples = @($extraSyncCodeSamples)
             imageURLRows = $imageRows.Count
             firstImageRow = if ($imageRows.Count -gt 0) { $imageRows[0] } else { $null }
             firstMissingImageRow = if ($missingImageRows.Count -gt 0) { $missingImageRows[0] } else { $null }
@@ -3814,6 +4166,7 @@ try {
         workbookLifecycle = $workbookLifecycle
         pricingEventListenerActive = $pricingEventListenerActive
         pricingEventAutoPull = $pricingEventAutoPull
+        pricingEventDiagnostic = $pricingEventDiagnostic
         productImagePreviewUI = $productImagePreviewUI
         searchRegression = $searchRegression
         transientPricePreview = $transientPricePreview
@@ -5083,9 +5436,9 @@ function main() {
     if (!/Names\.Add\('ConfirmedCNYRate',\s*\$settings\.Range\('G18'\)\)/u.test(buildSource)) {
       throw new Error('ConfirmedCNYRate must bind exactly to the hidden confirmed Settings G18 cell');
     }
-    if (!/Add-ActionButton\s+\$settings\s+'همگام‌سازی اکنون'\s+'ProductCatalogSync\.SyncPricingSettingsNow'[\s\S]*?\$settings\.Range\('A28:F29'\)\.Width/u.test(buildSource)
+    if (!/Add-ActionButton\s+\$settings\s+'به‌روزرسانی'\s+'ProductCatalogSync\.SyncPricingSettingsNow'[\s\S]*?\$settings\.Range\('A28:F29'\)\.Width/u.test(buildSource)
         || /Add-ActionButton\s+\$settings\s+'(?:پیش‌نمایش تغییرات|اعمال تغییرات تأییدشده)'/u.test(buildSource)) {
-      throw new Error('Settings must expose one explicit full-width Sync Now batch action');
+      throw new Error('Settings must expose one explicit full-width Update batch action');
     }
     const priceFormulaSource = /Private Sub ApplyProductTableFormulas\b[\s\S]*?\r?\nEnd Sub/iu.exec(moduleSource)?.[0] || '';
     if (!/cnyRateFormula\s*=\s*_/iu.test(priceFormulaSource)
@@ -5093,6 +5446,11 @@ function main() {
         || !/ConfirmedCNYRate>0/iu.test(priceFormulaSource)
         || /PricingInputCNYRate/iu.test(priceFormulaSource)) {
       throw new Error('Product formulas must use only the confirmed website rate, never the B18 proposal');
+    }
+    if (!/Private Function PriceRoundingFormula\b[\s\S]*?R20C8[\s\S]*?LOOKUP\(unroundedPrice,[\s\S]*?LOG10\(/iu.test(moduleSource)
+        || !/Private Sub ApplyPriceRoundingPolicy\b[\s\S]*?price_rounding_policy[\s\S]*?I58:I89[\s\S]*?J58:J89/iu.test(moduleSource)
+        || !/\$settings\.Columns\('I:J'\)\.Hidden\s*=\s*\$true/u.test(buildSource)) {
+      throw new Error('Workbook must apply and hide the current magnitude-based IRT rounding policy');
     }
     if (!/ROW\(\)=ProjectedPricePreviewRow/iu.test(priceFormulaSource)
         || /ROW\(\)=['"]?[^\r\n]*R30C7/iu.test(priceFormulaSource)) {

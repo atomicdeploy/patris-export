@@ -314,10 +314,10 @@ func (s *Server) setupRoutes() {
 	s.router.HandleFunc("/api/pricing-sync/writebacks/{job_id}/ack", s.handlePostExcelPricingWritebackACK).Methods("POST")
 	s.router.HandleFunc("/api/pricing-sync/writebacks/{job_id}/observe", s.handlePostCurrencyWritebackObserve).Methods("POST")
 	s.router.HandleFunc("/api/pricing-sync/confirmations", s.handlePostExcelPricingConfirmation).Methods("POST")
-	s.router.HandleFunc("/api/pricing-sync/snapshots", s.handleSnapshotDisabled).Methods("POST")
+	s.router.HandleFunc("/api/pricing-sync/snapshots", s.handlePostExcelPricingSnapshot).Methods("POST")
 	s.router.HandleFunc("/api/pricing-sync/events", s.handleGetExcelPricingEvents).Methods("GET")
-	s.router.HandleFunc("/api/pricing-sync/snapshots/{job_id}", s.handleSnapshotDisabled).Methods("GET")
-	s.router.HandleFunc("/api/pricing-sync/snapshots/{job_id}/payload", s.handleSnapshotDisabled).Methods("GET")
+	s.router.HandleFunc("/api/pricing-sync/snapshots/{job_id}", s.handleGetExcelPricingSnapshot).Methods("GET")
+	s.router.HandleFunc("/api/pricing-sync/snapshots/{job_id}/payload", s.handleGetExcelPricingSnapshotPayload).Methods("GET")
 	s.router.HandleFunc("/api/pricing-sync/snapshots/{job_id}", s.handleDeleteExcelPricingSnapshot).Methods("DELETE")
 	s.router.HandleFunc("/api/info", s.handleGetInfo).Methods("GET")
 	s.router.HandleFunc("/api/app", s.handleGetApp).Methods("GET")
@@ -1844,15 +1844,6 @@ func (s *Server) handlePostRefreshWait(w http.ResponseWriter, r *http.Request, s
 		response.InputScope = "fresh_patris_source"
 	}
 	writeJSON(w, response)
-}
-
-func (s *Server) handleSnapshotDisabled(w http.ResponseWriter, r *http.Request) {
-	setExcelPricingResponseHeaders(w)
-	if _, ok := s.authorizeExcelPricingSnapshotRequest(r); !ok {
-		writeExcelPricingError(w, http.StatusForbidden, "local_session_required")
-		return
-	}
-	writeExcelPricingError(w, http.StatusServiceUnavailable, "snapshot_disabled")
 }
 
 func writeRefreshWaitError(w http.ResponseWriter, status int, refreshed bool, sourceRevision, code string) {
