@@ -55,13 +55,13 @@ jobs:
           fetch-depth: 0
 
       - name: Download Linux source build
-        uses: actions/download-artifact@v8.0.1
+        uses: actions/download-artifact@v8.0.2
         with:
           name: patris-export-linux-amd64
           path: release-input/linux
 
       - name: Download canonical native Windows source build
-        uses: actions/download-artifact@v8.0.1
+        uses: actions/download-artifact@v8.0.2
         with:
           name: patris-export-windows-mingw-amd64
           path: release-input/windows
@@ -121,7 +121,7 @@ jobs:
           "$smoke_dir/patris-export-linux-amd64/run-patris-export.sh" info testdata/kala.db
 
       - name: Upload complete release package
-        uses: actions/upload-artifact@v7.0.1
+        uses: actions/upload-artifact@v7.0.2
         with:
           name: ${{ steps.metadata.outputs.artifact_name }}
           path: |
@@ -172,7 +172,7 @@ jobs:
           python-version: "3.13"
 
       - name: Download complete candidate package
-        uses: actions/download-artifact@v8.0.1
+        uses: actions/download-artifact@v8.0.2
         with:
           name: ${{ needs.package.outputs.artifact_name }}
           path: release-package
@@ -402,7 +402,7 @@ jobs:
           }
 
       - name: Upload installer-verified release package
-        uses: actions/upload-artifact@v7.0.1
+        uses: actions/upload-artifact@v7.0.2
         with:
           name: ${{ needs.package.outputs.artifact_name }}-verified
           path: |
@@ -449,7 +449,7 @@ jobs:
           fetch-depth: 0
 
       - name: Download verified release package
-        uses: actions/download-artifact@v8.0.1
+        uses: actions/download-artifact@v8.0.2
         with:
           name: ${{ needs.verify_windows_package.outputs.artifact_name }}
           path: release-package

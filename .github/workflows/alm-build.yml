@@ -69,7 +69,7 @@ jobs:
           cache: false
 
       - name: Set up Node.js
-        uses: actions/setup-node@v7.0.0
+        uses: actions/setup-node@v7.1.0
         with:
           node-version: "24"
 
@@ -126,7 +126,7 @@ jobs:
             -PythonPath (Get-Command python).Source
 
       - name: Upload unsigned optional ALM candidate
-        uses: actions/upload-artifact@v7.0.1
+        uses: actions/upload-artifact@v7.0.2
         with:
           name: ${{ env.ALM_ARTIFACT_NAME }}
           path: build/alm-candidate/*
