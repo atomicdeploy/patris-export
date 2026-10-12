@@ -335,6 +335,7 @@ Private mPricingEventValidationRefreshScheduled As Boolean
 Private mPricingEventValidationConfirmationQueued As Boolean
 Private mPricingEventValidationRefreshCount As Long
 Private mPricingEventValidationAppliedCount As Long
+Private mPricingEventValidationDiagnostic As String
 Private mWorkbookClosing As Boolean
 Private mResumeRefreshAfterCancelledClose As Boolean
 Private mCatalogCommitInProgress As Boolean
@@ -2994,6 +2995,14 @@ Public Function PricingEventListenerActiveForValidation() As Boolean
          (Not mSseSessionRequest Is Nothing) Or mSseReconnectScheduled)
 End Function
 
+Public Sub PausePricingEventListenerForValidation()
+    ' The isolated validator first proves the live listener is active, then
+    ' pauses its asynchronous callbacks so deterministic COM fixtures cannot
+    ' race a real SSE dispatch. A normal workbook never calls this routine;
+    ' Workbook_Open always starts the listener through the production path.
+    StopSseListener True
+End Sub
+
 Private Sub EnsureSseListener(ByVal eventsURL As String, _
                               ByVal jobID As String, _
                               ByVal csrfToken As String)
@@ -3850,6 +3859,7 @@ Public Function ValidatePricingEventAutoPullForValidation() As Boolean
     Dim originalRefreshAfterConfirmation As Boolean
     Dim originalValidationRefreshActive As Boolean
     Dim originalInternalRefresh As Boolean
+    Dim originalManualStop As Boolean
     Dim originalEvents As Boolean
     Dim originalSaved As Boolean
     Dim runtimeStateCaptured As Boolean
@@ -3862,9 +3872,15 @@ Public Function ValidatePricingEventAutoPullForValidation() As Boolean
     Dim nextPricingRevision As String
 
     On Error GoTo ValidationFailed
+    mPricingEventValidationDiagnostic = "entry"
     If Len(mOperationKind) > 0 Or mRefreshInProgress Or _
-       mPricingActionInProgress Or mPricingEventValidationMode Then _
+       mPricingActionInProgress Or mPricingEventValidationMode Then
+        mPricingEventValidationDiagnostic = "entry:operation=" & _
+            mOperationKind & ";refresh=" & CStr(mRefreshInProgress) & _
+            ";pricing=" & CStr(mPricingActionInProgress) & _
+            ";validation=" & CStr(mPricingEventValidationMode)
         Exit Function
+    End If
 
     originalLastEventID = mSseLastEventID
     originalSseJobID = mSseJobID
@@ -3875,6 +3891,7 @@ Public Function ValidatePricingEventAutoPullForValidation() As Boolean
     originalValidationRefreshActive = _
         mPricingEventValidationRefreshActive
     originalInternalRefresh = mInternalPricingRefresh
+    originalManualStop = mSseManualStop
     originalEvents = Application.EnableEvents
     originalSaved = ThisWorkbook.Saved
     runtimeStateCaptured = True
@@ -3897,6 +3914,10 @@ Public Function ValidatePricingEventAutoPullForValidation() As Boolean
     settings.Range("G14").Value2 = currentPricingRevision
 
     mPricingEventValidationMode = True
+    ' The deterministic validator pauses the real network listener before
+    ' invoking this fixture. Exercise the event scheduler as an active listener
+    ' without opening a socket, then restore the paused runtime state below.
+    mSseManualStop = False
     mPricingEventValidationRefreshActive = False
     ' Model the one refresh already scheduled by Workbook_Open. The event
     ' fixtures below must not add a second load for completion or the revision
@@ -3911,10 +3932,12 @@ Public Function ValidatePricingEventAutoPullForValidation() As Boolean
     mSseLastEventID = "100"
     mSseJobID = "job_cold_open"
 
+    mPricingEventValidationDiagnostic = "cold-open-coalescing"
     Set eventValue = PricingEventFixtureForValidation( _
         101, "source_changed", nextStateRevision, vbNullString, _
         True, True, "job_cold_open")
     HandlePricingSseEvent eventValue
+    mPricingEventValidationDiagnostic = "fresh-revision-scheduling"
     Set eventValue = PricingEventFixtureForValidation( _
         102, "snapshot_ready", nextStateRevision, _
         currentPricingRevision, False, True, "job_cold_open")
@@ -3956,6 +3979,7 @@ Public Function ValidatePricingEventAutoPullForValidation() As Boolean
     ' A semantic event received while a refresh is active is retained, not
     ' allowed to abort that request. If the terminal commit contains the same
     ' composite revision, re-evaluation clears it without a successor.
+    mPricingEventValidationDiagnostic = "active-refresh-same-revision"
     mPricingEventValidationRefreshActive = True
     Set eventValue = PricingEventFixtureForValidation( _
         108, "source_changed", thirdStateRevision, vbNullString)
@@ -3981,6 +4005,7 @@ Public Function ValidatePricingEventAutoPullForValidation() As Boolean
     ' pre-refresh revision to a new revision and then rolls back, retain the
     ' rollback even though it still equals G56 before the active commit. After
     ' that commit moves G56 forward, exactly one successor applies the rollback.
+    mPricingEventValidationDiagnostic = "active-refresh-rollback"
     mPricingEventValidationRefreshActive = True
     Set eventValue = PricingEventFixtureForValidation( _
         110, "catalog_changed", fourthStateRevision, vbNullString)
@@ -4006,6 +4031,7 @@ Public Function ValidatePricingEventAutoPullForValidation() As Boolean
     If mPricingEventValidationAppliedCount <> 3 Or _
        mSseRefreshRequired Then GoTo ValidationFailed
 
+    mPricingEventValidationDiagnostic = "pricing-confirmation"
     Set eventValue = PricingEventFixtureForValidation( _
         113, "pricing_state_changed", thirdStateRevision, _
         currentPricingRevision)
@@ -4021,6 +4047,7 @@ Public Function ValidatePricingEventAutoPullForValidation() As Boolean
        mPricingEventValidationRefreshScheduled Then _
         GoTo ValidationFailed
 
+    mPricingEventValidationDiagnostic = "pricing-invalidation"
     Set eventValue = PricingEventFixtureForValidation( _
         115, "pricing_state_invalidated", nextPricingRevision, _
         vbNullString)
@@ -4036,6 +4063,7 @@ Public Function ValidatePricingEventAutoPullForValidation() As Boolean
         GoTo ValidationFailed
 
     ValidatePricingEventAutoPullForValidation = True
+    mPricingEventValidationDiagnostic = "ok"
     GoTo ValidationExit
 
 ValidationFailed:
@@ -4052,6 +4080,7 @@ ValidationExit:
     End If
     If runtimeStateCaptured Then
         mInternalPricingRefresh = originalInternalRefresh
+        mSseManualStop = originalManualStop
         Application.EnableEvents = originalEvents
         mSseLastEventID = originalLastEventID
         mSseJobID = originalSseJobID
@@ -4068,6 +4097,11 @@ ValidationExit:
     mPricingEventValidationAppliedCount = 0
     If runtimeStateCaptured And originalSaved Then ThisWorkbook.Saved = True
     On Error GoTo 0
+End Function
+
+Public Function PricingEventValidationDiagnosticForValidation() As String
+    PricingEventValidationDiagnosticForValidation = _
+        mPricingEventValidationDiagnostic
 End Function
 
 Public Sub RegisterSearchHotkey()
@@ -4635,9 +4669,11 @@ Private Sub EnsureProductSearchIndex(ByVal table As ListObject)
     End If
     rowCount = table.DataBodyRange.Rows.Count
     revision = Trim$(CStr(ConfigSheet().Range("G44").Value2))
-    If mSearchIndexReady And mSearchIndexRowCount = rowCount And _
-       mSearchIndexRevision = revision Then Exit Sub
-
+    ' A user can sort the visible table without changing its row count or the
+    ' catalog revision. Reusing the old row-position index after that sort
+    ' selects the wrong physical row. Three bulk column reads plus an in-memory
+    ' 1,000-row normalization pass are fast enough for interactive local
+    ' search, so rebuild the positional index for every explicit search.
     InvalidateProductSearchIndex
     productCodes = table.DataBodyRange.Columns(7).Value2
     productNames = table.DataBodyRange.Columns(8).Value2
@@ -7962,11 +7998,20 @@ Private Function ImportPricingSnapshotPayload( _
 
     mSnapshotValidationStage = "state-contract"
     Set state = JsonRuntime.JsonMember(payload, "state")
-    If state Is Nothing Or state.Kind <> "object" Or _
-       SiteText(state, "schema") <> PRICING_STATE_SCHEMA Or _
-       SiteText(state, "state_revision") <> stateRevision Then _
+    If state Is Nothing Or state.Kind <> "object" Then
+        mSnapshotValidationStage = "state-contract-missing"
         GoTo InvalidSnapshot
+    End If
+    If SiteText(state, "schema") <> PRICING_STATE_SCHEMA Then
+        mSnapshotValidationStage = "state-contract-schema"
+        GoTo InvalidSnapshot
+    End If
+    If SiteText(state, "state_revision") <> stateRevision Then
+        mSnapshotValidationStage = "state-contract-revision"
+        GoTo InvalidSnapshot
+    End If
     Set stateSource = JsonRuntime.JsonMember(state, "source")
+    mSnapshotValidationStage = "state-source"
     If stateSource Is Nothing Or stateSource.Kind <> "object" Then _
         GoTo InvalidSnapshot
     currentRevision = SiteText(stateSource, "current_revision")
@@ -7975,22 +8020,28 @@ Private Function ImportPricingSnapshotPayload( _
        submittedRevision <> currentRevision Or _
        Not BooleanValue(JsonRuntime.JsonText( _
            stateSource, "revision_matches_current")) Then GoTo InvalidSnapshot
+    mSnapshotValidationStage = "state-warnings"
     RejectProjectionIntegrityWarnings state
+    mSnapshotValidationStage = "catalog-contract"
     Set catalog = JsonRuntime.JsonMember(state, "catalog")
     If catalog Is Nothing Or catalog.Kind <> "object" Or _
        SiteText(catalog, "dataset") <> "reconciled_products" Then _
         GoTo InvalidSnapshot
+    mSnapshotValidationStage = "catalog-dataset"
     datasetRevision = SiteText(catalog, "dataset_revision")
     If Not IsSHA256RevisionText(datasetRevision) Or _
        datasetRevision <> SiteText(integrity, "dataset_revision") Or _
        CatalogColumnSignature(catalog) <> RECONCILED_COLUMN_KEYS Then _
         GoTo InvalidSnapshot
+    mSnapshotValidationStage = "catalog-source"
     sourceRevision = StateSourceRevision(state, catalog)
     If sourceRevision <> payloadSourceRevision Then GoTo InvalidSnapshot
+    mSnapshotValidationStage = "catalog-count-signature"
     countSignature = CatalogCountSignature(catalog)
     Set reconciliation = JsonRuntime.JsonMember(catalog, "reconciliation")
     If reconciliation Is Nothing Or reconciliation.Kind <> "object" Then _
         GoTo InvalidSnapshot
+    mSnapshotValidationStage = "catalog-counts"
     Set counts = JsonRuntime.JsonMember(reconciliation, "counts")
     If counts Is Nothing Or counts.Kind <> "object" Then GoTo InvalidSnapshot
     matchedCount = RequiredWholeNumber(counts, "matched")
@@ -8001,6 +8052,7 @@ Private Function ImportPricingSnapshotPayload( _
 
     Set rowsValue = JsonRuntime.JsonMember(catalog, "rows")
     Set pagination = JsonRuntime.JsonMember(catalog, "pagination")
+    mSnapshotValidationStage = "catalog-pagination"
     If rowsValue Is Nothing Or rowsValue.Kind <> "array" Or _
        pagination Is Nothing Or pagination.Kind <> "object" Then _
         GoTo InvalidSnapshot
@@ -8017,6 +8069,7 @@ Private Function ImportPricingSnapshotPayload( _
        matchedCount + patrisOnlyCount + wooOnlyCount <> unionCount Or _
        unionCount <> paginationTotal Then GoTo InvalidSnapshot
 
+    mSnapshotValidationStage = "catalog-integrity"
     integrityPageCount = RequiredWholeNumber(integrity, "page_count")
     If integrityPageCount < 1 Or integrityPageCount > MAX_STATE_PAGES Or _
        RequiredWholeNumber(integrity, "remote_total") <> paginationTotal Or _
@@ -8154,8 +8207,11 @@ Private Function StateSourceRevision(ByVal state As JsonValue, _
     If Len(currentRevision) = 0 Then
         currentRevision = SiteText(sourceValue, "revision")
     End If
-    If Not IsSHA256RevisionText(currentRevision) Or _
-       currentRevision <> mSourceRevision Then Exit Function
+    ' The contract request starts from the live Patris input revision, while
+    ' the reconciled snapshot is owned by the current website projection and
+    ' therefore carries its own later source revision. Validate that owner
+    ' revision internally here; the caller binds it to the payload source.
+    If Not IsSHA256RevisionText(currentRevision) Then Exit Function
     If Len(submittedRevision) > 0 And _
        submittedRevision <> currentRevision Then Exit Function
     If Len(reconciledRevision) > 0 And _

@@ -2283,7 +2283,6 @@ func TestDynamicCalculatorVBASourceGuardsLivePricingBeforeMutation(t *testing.T)
 		"Public Sub PrepareLocalSearchOnOpen()",
 		"Private Sub WarmProductSearchIndex()",
 		"Private Sub InvalidateProductSearchIndex()",
-		"If mSearchIndexReady And mSearchIndexRowCount = rowCount",
 		"WarmProductSearchIndex",
 		"InvalidateProductSearchIndex",
 		"ClearPricingDirtyKey",
@@ -2292,6 +2291,9 @@ func TestDynamicCalculatorVBASourceGuardsLivePricingBeforeMutation(t *testing.T)
 		if !strings.Contains(source, required) {
 			t.Fatalf("fast local search index lifecycle is missing: %s", required)
 		}
+	}
+	if strings.Contains(source, "If mSearchIndexReady And mSearchIndexRowCount = rowCount") {
+		t.Fatal("local search must not reuse a positional index after an in-place table sort")
 	}
 
 	writebackStart := strings.Index(source, "Public Sub RunScheduledPricingWriteback")
