@@ -2542,6 +2542,12 @@ func parseExcelPricingSnapshotPage(
 		return nil, errors.New("snapshot source identity changed")
 	}
 	state["schema"] = json.RawMessage(`"` + excelPricingStateSchema + `"`)
+	// The current versionless provider exposes one canonical composite state
+	// revision rather than a second pricing-only revision. Adapt that capability
+	// explicitly for the loopback workbook contract instead of emitting an empty
+	// terminal field that Excel can neither ACK nor compare safely.
+	stateRevisionJSON, _ := json.Marshal(stateRevision)
+	state["pricing_state_revision"] = stateRevisionJSON
 
 	warningsJSON, warningCount, err := excelPricingSnapshotTopLevelWarnings(state)
 	if err != nil {
@@ -3122,13 +3128,14 @@ func buildExcelPricingSnapshot(
 		return nil, err
 	}
 	return &excelPricingSnapshot{
-		revision:      snapshotRevision,
-		etagRevision:  excelPricingSnapshotDigest(body),
-		stateRevision: first.stateRevision,
-		createdAt:     now,
-		expiresAt:     expiresAt,
-		integrity:     integrity,
-		body:          body,
+		revision:             snapshotRevision,
+		etagRevision:         excelPricingSnapshotDigest(body),
+		stateRevision:        first.stateRevision,
+		pricingStateRevision: first.stateRevision,
+		createdAt:            now,
+		expiresAt:            expiresAt,
+		integrity:            integrity,
+		body:                 body,
 	}, nil
 }
 

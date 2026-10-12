@@ -1573,6 +1573,23 @@ func TestParseExcelPricingSnapshotPageAcceptsVersionlessLiveOwnerProjection(t *t
 	if string(page.state["schema"]) != `"`+excelPricingStateSchema+`"` {
 		t.Fatalf("adapted schema = %s", page.state["schema"])
 	}
+	if string(page.state["pricing_state_revision"]) != `"`+page.stateRevision+`"` {
+		t.Fatalf("adapted pricing revision = %s, want %s", page.state["pricing_state_revision"], page.stateRevision)
+	}
+	snapshot, err := buildExcelPricingSnapshot(
+		page,
+		page.ownerSource,
+		page.rows,
+		[]string{page.pageRevision},
+		excelPricingSnapshotProjectionExcelV1,
+		time.Date(2026, 10, 12, 0, 0, 0, 0, time.UTC),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.pricingStateRevision != page.stateRevision {
+		t.Fatalf("snapshot pricing revision = %s, want %s", snapshot.pricingStateRevision, page.stateRevision)
+	}
 }
 
 func TestExcelPricingSnapshotExcelV1RejectsInvalidLeanRows(t *testing.T) {

@@ -1193,16 +1193,18 @@ func TestDynamicCalculatorVBASourceGuardsLivePricingBeforeMutation(t *testing.T)
 		t.Fatal("a transient OnTime collision must preserve and drain completed requests")
 	}
 	payloadHandler := section("Private Sub HandleSnapshotPayloadResponse", "Private Sub HandlePreviewResponse")
-	rawHashPosition := strings.Index(payloadHandler, "SHA256RevisionBytes(responseBody)")
 	validatePosition := strings.Index(payloadHandler, "ImportPricingSnapshotPayload(")
 	listenerValidatePosition := strings.Index(payloadHandler, "ValidateSseListenerPrerequisites")
 	commitPosition := strings.Index(payloadHandler, "CommitRefreshSnapshot reconciledRows")
 	completePosition := strings.Index(payloadHandler, "CompleteActiveOperation True")
 	sseArmPosition := strings.Index(payloadHandler, "ArmSseListenerAfterCommit")
-	if rawHashPosition < 0 || validatePosition < rawHashPosition ||
-		listenerValidatePosition < validatePosition || commitPosition < listenerValidatePosition ||
+	if validatePosition < 0 || listenerValidatePosition < validatePosition || commitPosition < listenerValidatePosition ||
 		completePosition < commitPosition || sseArmPosition < completePosition {
 		t.Fatal("payload/listener prerequisites must validate before commit, and listener arm must follow successful completion")
+	}
+	if strings.Contains(payloadHandler, "SHA256RevisionBytes(responseBody)") ||
+		strings.Contains(payloadHandler, "StrComp(Trim$(responseETag), Trim$(mSnapshotExpectedETag)") {
+		t.Fatal("snapshot acceptance must not couple canonical semantics to transformed HTTP representation bytes")
 	}
 	listenerArm := section("Private Sub ArmSseListenerAfterCommit", "Private Sub AdoptSseSessionToken")
 	for _, required := range []string{
@@ -1566,10 +1568,9 @@ func TestDynamicCalculatorVBASourceGuardsLivePricingBeforeMutation(t *testing.T)
 		"ApplyGlobalState state",
 		"ApplyReconciliationCounts catalog",
 		"productRows = ImportReconciledCatalog(reconciledRows)",
-		"Private Function SHA256RevisionBytes",
-		"rawDigest = SHA256RevisionBytes(responseBody)",
-		`StrComp(Trim$(responseETag), Trim$(mSnapshotExpectedETag)`,
 		"Private Function ImportPricingSnapshotPayload",
+		`mSnapshotValidationStage = "semantic-envelope"`,
+		`snapshotRevision <> expectedSnapshotRevision`,
 		"rawStateDigest = SHA256Revision(rawStateText)",
 		`If rawStateDigest <> SiteText(integrity, "state_digest") Then _`,
 		"Private Function SnapshotRowFieldsMatch",
@@ -2127,7 +2128,6 @@ func TestDynamicCalculatorVBASourceGuardsLivePricingBeforeMutation(t *testing.T)
 		t.Fatal("revision fast path must not compare the upstream composite catalog revision with G44's dataset revision")
 	}
 	for _, required := range []string{
-		`StrongETagRevision(revisionETag) <> stateRevision`,
 		`settings.Range("G56").Value2`,
 		`settings.Range("G14").Value2`,
 		`settings.Range("G45").Value2`,
@@ -2138,6 +2138,9 @@ func TestDynamicCalculatorVBASourceGuardsLivePricingBeforeMutation(t *testing.T)
 		if !strings.Contains(revisionFastPath, required) {
 			t.Fatalf("revision fast path lost fail-closed guard %s", required)
 		}
+	}
+	if strings.Contains(revisionFastPath, "StrongETagRevision(revisionETag)") {
+		t.Fatal("revision fast path must rely on canonical revisions, not an optional representation ETag")
 	}
 	transientRetry := section("Private Function RetrySnapshotAfterTransientFailure", "Private Function RefreshWallBudgetExhausted")
 	for _, required := range []string{

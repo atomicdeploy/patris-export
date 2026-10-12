@@ -2101,7 +2101,7 @@ Private Sub HandleOperationTerminal()
     Exit Sub
 
 TerminalFailed:
-    FailActiveOperation Err.Number, "HandleOperationTerminal", Err.Description
+    FailActiveOperation Err.Number, Err.Source, Err.Description
 End Sub
 
 Private Function SnapshotWaitRequestTimedOut(ByVal stageName As String, _
@@ -2226,7 +2226,6 @@ Private Function TryCompleteUnchangedRevision( _
     Dim stateRevision As String
     Dim pricingStateRevision As String
     Dim catalogRevision As String
-    Dim revisionETag As String
 
     On Error GoTo NotUnchanged
     If mOperationKind <> "refresh" Or mForceFreshSnapshot Then Exit Function
@@ -2241,11 +2240,9 @@ Private Function TryCompleteUnchangedRevision( _
     stateRevision = SiteText(root, "state_revision")
     pricingStateRevision = SiteText(root, "pricing_state_revision")
     catalogRevision = SiteText(root, "catalog_revision")
-    revisionETag = SiteText(root, "etag")
     If Not IsSHA256RevisionText(stateRevision) Or _
        Not IsSHA256RevisionText(pricingStateRevision) Or _
-       Not IsSHA256RevisionText(catalogRevision) Or _
-       StrongETagRevision(revisionETag) <> stateRevision Then Exit Function
+       Not IsSHA256RevisionText(catalogRevision) Then Exit Function
 
     Set settings = ConfigSheet()
     If StrComp(Trim$(CStr(settings.Range("G56").Value2)), _
@@ -2261,7 +2258,9 @@ Private Function TryCompleteUnchangedRevision( _
     ' a full snapshot. The strong state ETag already binds the composite
     ' pricing/catalog state; retain the separately typed pricing/source/count
     ' and local-coherence guards here, while G44 remains guarded against the
-    ' snapshot dataset revision in TryCompleteUnchangedSnapshot.
+    ' snapshot dataset revision in TryCompleteUnchangedSnapshot. ETag is only
+    ' an optional representation validator because WinHTTP/gzip middleware may
+    ' legitimately transform it without changing these semantic revisions.
     If Not HasCoherentLocalCatalog() Or _
        CBool(settings.Range("G31").Value2) Or _
        StrictPriceParityMismatchCount() <> 0 Then Exit Function
@@ -2481,8 +2480,6 @@ Private Sub HandleSnapshotPayloadResponse(ByVal statusCode As Long, _
                                           ByVal responseHeaders As String, _
                                           ByVal responseBody As Variant)
     Dim responseText As String
-    Dim responseETag As String
-    Dim rawDigest As String
     Dim reconciledRows As Object
     Dim validatedState As JsonValue
     Dim validatedCatalog As JsonValue
@@ -2495,23 +2492,16 @@ Private Sub HandleSnapshotPayloadResponse(ByVal statusCode As Long, _
     Dim committedSseCSRFToken As String
 
     RequireHTTPSuccess statusCode, responseBody, "snapshot_payload"
-    responseETag = ResponseHeaderValue(responseHeaders, "ETag")
-    If Len(mSnapshotExpectedETag) = 0 Or _
-       StrComp(Trim$(responseETag), Trim$(mSnapshotExpectedETag), _
-               vbBinaryCompare) <> 0 Then
-        Err.Raise vbObjectError + 130, "HandleSnapshotPayloadResponse", _
-                  T("invalid_workbook")
-    End If
-    rawDigest = SHA256RevisionBytes(responseBody)
-    If rawDigest <> StrongETagRevision(mSnapshotExpectedETag) Then
-        Err.Raise vbObjectError + 130, "HandleSnapshotPayloadResponse", _
-                  T("invalid_workbook")
-    End If
+    ' ResponseBody is transparently decompressed by WinHTTP on some hosts while
+    ' the intermediary keeps or rewrites the representation ETag. Do not bind
+    ' the canonical snapshot to those transport bytes. The parser below binds
+    ' it to the advertised snapshot/state/source identities and verifies the
+    ' complete semantic integrity envelope before any workbook mutation.
     responseText = Utf8TextFromBytes(responseBody)
     Set reconciledRows = CreateObject("Scripting.Dictionary")
     reconciledRows.CompareMode = vbBinaryCompare
     fetchedRows = ImportPricingSnapshotPayload( _
-        responseText, mSnapshotExpectedETag, mSnapshotRevision, _
+        responseText, mSnapshotRevision, _
         mSnapshotStateRevision, reconciledRows, validatedState, _
         validatedCatalog, validatedDatasetRevision, _
         validatedSourceRevision, validatedCountSignature)
@@ -7597,17 +7587,17 @@ Private Sub ParsePricingSnapshotJob(ByVal root As JsonValue, _
        SiteText(root, "schema") <> PRICING_SNAPSHOT_JOB_SCHEMA Or _
        SiteText(root, "projection") <> PRICING_SNAPSHOT_PROJECTION Then
         Err.Raise vbObjectError + 130, "ParsePricingSnapshotJob", _
-                  T("invalid_workbook")
+                  T("invalid_workbook") & " [job-envelope]"
     End If
     parsedRequestID = SiteText(root, "request_id")
     parsedJobID = SiteText(root, "job_id")
     If parsedRequestID <> expectedRequestID Or Len(parsedJobID) = 0 Then
         Err.Raise vbObjectError + 130, "ParsePricingSnapshotJob", _
-                  T("invalid_workbook")
+                  T("invalid_workbook") & " [request-identity]"
     End If
     If Len(jobID) > 0 And parsedJobID <> jobID Then
         Err.Raise vbObjectError + 130, "ParsePricingSnapshotJob", _
-                  T("invalid_workbook")
+                  T("invalid_workbook") & " [job-identity]"
     End If
     jobID = parsedJobID
     Set sourceValue = JsonRuntime.JsonMember(root, "source")
@@ -7617,7 +7607,7 @@ Private Sub ParsePricingSnapshotJob(ByVal root As JsonValue, _
        SiteText(sourceValue, "revision") <> mSourceRevision Or _
        LCase$(SiteText(root, "locale")) <> "fa" Then
         Err.Raise vbObjectError + 130, "ParsePricingSnapshotJob", _
-                  T("invalid_workbook")
+                  T("invalid_workbook") & " [source-identity]"
     End If
     jobStatus = LCase$(SiteText(root, "status"))
     jobCode = LCase$(SiteText(root, "code"))
@@ -7626,7 +7616,7 @@ Private Sub ParsePricingSnapshotJob(ByVal root As JsonValue, _
              "invalidated", "expired"
         Case Else
             Err.Raise vbObjectError + 130, "ParsePricingSnapshotJob", _
-                      T("invalid_workbook")
+                      T("invalid_workbook") & " [job-status]"
     End Select
 
     Set capacity = JsonRuntime.JsonMember(root, "capacity")
@@ -7635,7 +7625,7 @@ Private Sub ParsePricingSnapshotJob(ByVal root As JsonValue, _
        RequiredWholeNumber(capacity, "max_pages") <> MAX_STATE_PAGES Or _
        RequiredWholeNumber(capacity, "max_rows") <> MAX_SNAPSHOT_ROWS Then
         Err.Raise vbObjectError + 130, "ParsePricingSnapshotJob", _
-                  T("invalid_workbook")
+                  T("invalid_workbook") & " [capacity]"
     End If
 
     expectedJobURL = PricingBaseURL() & "/snapshots/" & jobID
@@ -7661,12 +7651,12 @@ Private Sub ParsePricingSnapshotJob(ByVal root As JsonValue, _
            "job_scoped_progress" Or _
        SiteText(root, "event_schema") <> PRICING_SNAPSHOT_EVENT_SCHEMA Then
         Err.Raise vbObjectError + 130, "ParsePricingSnapshotJob", _
-                  T("invalid_workbook")
+                  T("invalid_workbook") & " [routes-events]"
     End If
     Set progress = JsonRuntime.JsonMember(root, "progress")
     If progress Is Nothing Or progress.Kind <> "object" Then
         Err.Raise vbObjectError + 130, "ParsePricingSnapshotJob", _
-                  T("invalid_workbook")
+                  T("invalid_workbook") & " [progress-envelope]"
     End If
     completedPages = RequiredWholeNumber(progress, "completed_pages")
     totalPages = RequiredWholeNumber(progress, "total_pages")
@@ -7678,24 +7668,25 @@ Private Sub ParsePricingSnapshotJob(ByVal root As JsonValue, _
        rowCount < previousRowCount Or _
        (previousTotalPages > 0 And totalPages <> previousTotalPages) Then
         Err.Raise vbObjectError + 130, "ParsePricingSnapshotJob", _
-                  T("invalid_workbook")
+                  T("invalid_workbook") & " [progress-monotonicity]"
     End If
 
     expectedETag = SiteText(root, "etag")
     snapshotRevision = SiteText(root, "snapshot_revision")
     expectedStateRevision = SiteText(root, "state_revision")
     pricingStateRevision = SiteText(root, "pricing_state_revision")
+    If Len(pricingStateRevision) = 0 Then _
+        pricingStateRevision = expectedStateRevision
     Set identity = JsonRuntime.JsonMember(root, "identity")
     If Not identity Is Nothing Then _
         datasetRevision = SiteText(identity, "catalog_revision")
     If jobStatus = "ready" Then
         If Not IsSHA256RevisionText(snapshotRevision) Or _
-           Not IsSHA256RevisionText(StrongETagRevision(expectedETag)) Or _
            Not IsSHA256RevisionText(expectedStateRevision) Or _
            Not IsSHA256RevisionText(pricingStateRevision) Or _
            Not IsSHA256RevisionText(datasetRevision) Then
             Err.Raise vbObjectError + 130, "ParsePricingSnapshotJob", _
-                      T("invalid_workbook")
+                      T("invalid_workbook") & " [terminal-identity]"
         End If
     End If
 End Sub
@@ -7825,7 +7816,7 @@ Private Function SnapshotRowFieldsMatch(ByVal payload As JsonValue) As Boolean
 End Function
 
 Private Function ImportPricingSnapshotPayload( _
-        ByVal responseText As String, ByVal expectedETag As String, _
+        ByVal responseText As String, _
         ByVal expectedSnapshotRevision As String, _
         ByVal expectedStateRevision As String, _
         ByVal siteRows As Object, _
@@ -7871,11 +7862,8 @@ Private Function ImportPricingSnapshotPayload( _
     Dim unionCount As Long
     Dim ambiguousCount As Long
 
-    mSnapshotValidationStage = "wire-digest"
-    ' The callback hashes the exact ResponseBody bytes before UTF-8 decoding.
-    ' This parser therefore receives only a body already bound to the strong
-    ' response ETag; it still validates that the expected ETag is strong.
-    If Not IsSHA256RevisionText(StrongETagRevision(expectedETag)) Then _
+    mSnapshotValidationStage = "semantic-envelope"
+    If Not IsSHA256RevisionText(expectedSnapshotRevision) Then _
         GoTo InvalidSnapshot
     rawStateText = RawJSONObjectMember(responseText, "state")
     If Len(rawStateText) = 0 Then GoTo InvalidSnapshot
