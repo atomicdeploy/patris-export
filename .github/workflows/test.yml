@@ -58,6 +58,11 @@ jobs:
     - name: Test remote delivery examples
       run: node --test scripts/examples/patris-delivery-adapter.test.cjs
 
+    - name: Verify API compatibility boundary inventory
+      run: |
+        node --test scripts/check-api-compatibility.test.cjs
+        node scripts/check-api-compatibility.cjs --check
+
     - name: Test JavaScript host adapters
       run: |
         npm --prefix integrations/javascript run check
