@@ -18,15 +18,29 @@ import (
 )
 
 const (
-	sourceDeliveryReceiptSchema     = "digitalogic.product-sync-receipt.v2"
-	sourceDeliveryReceiptApplied    = "applied"
-	sourceDeliveryReceiptPending    = "pending"
-	sourceDeliveryReceiptSuperseded = "superseded"
-	sourceDeliveryReceiptNotFound   = "not_found"
-	sourceDeliveryReceiptMaxBytes   = 32 << 10
+	sourceDeliveryReceiptSchema            = "digitalogic.product-sync-receipt.v2"
+	sourceDeliveryReceiptApplied           = "applied"
+	sourceDeliveryReceiptPending           = "pending"
+	sourceDeliveryReceiptSuperseded        = "superseded"
+	sourceDeliveryReceiptNotFound          = "not_found"
+	sourceDeliveryReceiptMaxBytes          = 32 << 10
+	receiverReceiptHistoryInconclusiveCode = "digitalogic_product_sync_receipt_history_inconclusive"
 )
 
 var errSourceDeliveryReceiptProbe = errors.New("source_delivery_receipt_probe_failed")
+
+type sourceDeliveryReceiptProbeError struct {
+	code       string
+	httpStatus int
+}
+
+func (err *sourceDeliveryReceiptProbeError) Error() string {
+	return errSourceDeliveryReceiptProbe.Error()
+}
+
+func (err *sourceDeliveryReceiptProbeError) Unwrap() error {
+	return errSourceDeliveryReceiptProbe
+}
 
 type sourceDeliveryReceiptProbe struct {
 	Schema           string           `json:"schema"`
@@ -96,7 +110,7 @@ func probeSourceDeliveryReceipt(ctx context.Context, cfg appconfig.Config, input
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
-		return sourceDeliveryReceiptProbe{}, errSourceDeliveryReceiptProbe
+		return sourceDeliveryReceiptProbe{}, sourceDeliveryReceiptProbeResponseError(response.StatusCode, response.Body)
 	}
 	responseBody, err := io.ReadAll(io.LimitReader(response.Body, sourceDeliveryReceiptMaxBytes+1))
 	if err != nil || len(responseBody) > sourceDeliveryReceiptMaxBytes {
@@ -113,6 +127,31 @@ func probeSourceDeliveryReceipt(ctx context.Context, cfg appconfig.Config, input
 		return sourceDeliveryReceiptProbe{}, errSourceDeliveryReceiptProbe
 	}
 	return receipt, nil
+}
+
+func sourceDeliveryReceiptProbeResponseError(status int, body io.Reader) error {
+	if status != http.StatusServiceUnavailable || body == nil {
+		return errSourceDeliveryReceiptProbe
+	}
+	data, err := io.ReadAll(io.LimitReader(body, sourceDeliveryReceiptMaxBytes+1))
+	if err != nil || len(data) > sourceDeliveryReceiptMaxBytes {
+		return errSourceDeliveryReceiptProbe
+	}
+	var payload struct {
+		Code string `json:"code"`
+	}
+	if json.Unmarshal(data, &payload) != nil || payload.Code != receiverReceiptHistoryInconclusiveCode {
+		return errSourceDeliveryReceiptProbe
+	}
+	return &sourceDeliveryReceiptProbeError{code: "receipt_history_inconclusive", httpStatus: status}
+}
+
+func sourceDeliveryReceiptProbeFailureCode(err error) string {
+	var probeErr *sourceDeliveryReceiptProbeError
+	if errors.As(err, &probeErr) && probeErr.code == "receipt_history_inconclusive" && probeErr.httpStatus == http.StatusServiceUnavailable {
+		return probeErr.code
+	}
+	return "receipt_probe_failed"
 }
 
 func sourceDeliveryReceiptProbeURL(destination string) (string, error) {
