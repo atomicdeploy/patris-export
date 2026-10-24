@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -461,6 +462,44 @@ func TestSourceDeliveryReceiptProbeFailsClosedOnInconclusiveHistory(t *testing.T
 	cfg.SendUpdates = updateout.Config{Enabled: true, URL: receiver.URL + "/wp-json/digitalogic/patris/product-sync", Method: "POST", Format: "json", Timeout: "1s", RetryAttempts: 1, ProductSyncSecretEnv: sourceDeliveryOutboxTestSecretEnv}
 	if _, err := probeSourceDeliveryReceipt(context.Background(), cfg, input); !errors.Is(err, errSourceDeliveryReceiptProbe) {
 		t.Fatalf("503 receipt history was not inconclusive: %v", err)
+	} else if code := sourceDeliveryReceiptProbeFailureCode(err); code != "receipt_history_inconclusive" {
+		t.Fatalf("503 receipt history code=%q, want receipt_history_inconclusive", code)
+	}
+}
+
+func TestSourceDeliveryReceiptProbeDoesNotReflectUnknownReceiverCode(t *testing.T) {
+	t.Setenv(sourceDeliveryOutboxTestSecretEnv, "test-product-sync-secret")
+	input := freshAckSnapshot(t, []canonical.Product{{ProductCode: "A", Name: "one"}}, "patris-office")
+	receiver := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, `{"code":"receiver_private_context"}`, http.StatusServiceUnavailable)
+	}))
+	defer receiver.Close()
+	cfg := appconfig.Default()
+	cfg.SendUpdates = updateout.Config{Enabled: true, URL: receiver.URL + "/wp-json/digitalogic/patris/product-sync", Method: "POST", Format: "json", Timeout: "1s", RetryAttempts: 1, ProductSyncSecretEnv: sourceDeliveryOutboxTestSecretEnv}
+	if _, err := probeSourceDeliveryReceipt(context.Background(), cfg, input); !errors.Is(err, errSourceDeliveryReceiptProbe) {
+		t.Fatalf("unknown receiver code was not rejected: %v", err)
+	} else if code := sourceDeliveryReceiptProbeFailureCode(err); code != "receipt_probe_failed" {
+		t.Fatalf("unknown receiver code escaped as %q", code)
+	}
+}
+
+func TestSourceDeliveryReceiptProbeAcceptsExactSupersededReceipt(t *testing.T) {
+	t.Setenv(sourceDeliveryOutboxTestSecretEnv, "test-product-sync-secret")
+	input := freshAckSnapshot(t, []canonical.Product{{ProductCode: "A", Name: "one"}}, "patris-office")
+	receiver := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(sourceDeliveryReceiptResponse{Success: true, Data: sourceDeliveryReceiptProbe{
+			Schema: sourceDeliveryReceiptSchema, Status: sourceDeliveryReceiptSuperseded,
+			EventID: input.EventID, GeneratedAt: input.GeneratedAt, Source: input.Source,
+			ObservedAt: time.Now().UTC().Format(time.RFC3339),
+		}})
+	}))
+	defer receiver.Close()
+	cfg := appconfig.Default()
+	cfg.SendUpdates = updateout.Config{Enabled: true, URL: receiver.URL + "/wp-json/digitalogic/patris/product-sync", Method: "POST", Format: "json", Timeout: "1s", RetryAttempts: 1, ProductSyncSecretEnv: sourceDeliveryOutboxTestSecretEnv}
+	receipt, err := probeSourceDeliveryReceipt(context.Background(), cfg, input)
+	if err != nil || receipt.Status != sourceDeliveryReceiptSuperseded {
+		t.Fatalf("receipt=%#v err=%v", receipt, err)
 	}
 }
 
@@ -499,5 +538,39 @@ func TestSourceDeliveryStatusDeclaresEventDrivenWithoutSchedule(t *testing.T) {
 	}
 	if _, exists := outbox["reconcile_interval"]; exists {
 		t.Fatalf("removed reconciliation interval remains exposed: %#v", outbox)
+	}
+}
+
+func TestSourceDeliveryOutboxStatusExposesCoalescedIdentityWithoutPayload(t *testing.T) {
+	_, outbox, cfg := sourceDeliveryOutboxTestServer(t, filepath.Join(t.TempDir(), "outbox.json"))
+	active := sourceDeliveryOutboxTestEvent(t, []canonical.Product{{ProductCode: "A", Name: "active-product"}})
+	latest := sourceDeliveryOutboxTestEvent(t, []canonical.Product{{ProductCode: "A", Name: "latest-product"}, {ProductCode: "B", Name: "new-product"}})
+	enqueueSourceDeliveryOutboxTestEvent(t, outbox, cfg, active)
+	enqueueSourceDeliveryOutboxTestEvent(t, outbox, cfg, latest)
+	extensions := canonical.JSONExtensions{"private-extension": json.RawMessage(`{"product":"extension-product"}`)}
+	outbox.mu.Lock()
+	outbox.state.Latest.Event.SnapshotContract.Source.Extensions = &extensions
+	outbox.mu.Unlock()
+
+	status := outbox.status()
+	queued, ok := status["coalesced_latest"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("coalesced identity is absent: %#v", status)
+	}
+	if queued["event_id"] != latest.SnapshotContract.EventID || queued["generated_at"] != latest.SnapshotContract.GeneratedAt {
+		t.Fatalf("coalesced identity=%#v, want event %s generated %s", queued, latest.SnapshotContract.EventID, latest.SnapshotContract.GeneratedAt)
+	}
+	source, ok := queued["source"].(canonical.Source)
+	if !ok || !source.SameIdentity(latest.SnapshotContract.Source) {
+		t.Fatalf("coalesced source=%#v, want %#v", queued["source"], latest.SnapshotContract.Source)
+	}
+	encoded, err := json.Marshal(queued)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, forbidden := range []string{"active-product", "latest-product", "new-product", "private-extension", "extension-product", `"products"`, `"contract"`} {
+		if strings.Contains(string(encoded), forbidden) {
+			t.Fatalf("coalesced status leaked payload %q: %s", forbidden, encoded)
+		}
 	}
 }

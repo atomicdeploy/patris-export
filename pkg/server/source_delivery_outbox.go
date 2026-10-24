@@ -344,7 +344,7 @@ func (outbox *sourceDeliveryOutbox) processOnce() (bool, time.Duration) {
 		if probeErr != nil {
 			active.State = "receipt_probe_inconclusive"
 			active.OutcomeUnknown = true
-			active.FailureCode = "receipt_probe_failed"
+			active.FailureCode = sourceDeliveryReceiptProbeFailureCode(probeErr)
 			_ = outbox.persistLocked()
 			attempts := active.ProbeAttempts
 			outbox.mu.Unlock()
@@ -542,16 +542,32 @@ func (outbox *sourceDeliveryOutbox) status() map[string]interface{} {
 		"coalesced": outbox.state.Latest != nil,
 	}
 	if active := outbox.state.Active; active != nil {
-		result["state"] = active.State
-		result["attempts"] = active.Attempts
-		result["probe_attempts"] = active.ProbeAttempts
-		result["failure_code"] = active.FailureCode
-		result["outcome_unknown"] = active.OutcomeUnknown
-		if transmitted := sourceDeliveryEntryContract(active); transmitted != nil {
-			result["event_id"] = transmitted.EventID
-			result["source"] = transmitted.Source
-			result["generated_at"] = transmitted.GeneratedAt
+		for key, value := range sourceDeliveryStatusEntry(active) {
+			result[key] = value
 		}
+	}
+	if latest := outbox.state.Latest; latest != nil {
+		result["coalesced_latest"] = sourceDeliveryStatusEntry(latest)
+	}
+	return result
+}
+
+func sourceDeliveryStatusEntry(entry *sourceDeliveryOutboxEntry) map[string]interface{} {
+	result := map[string]interface{}{
+		"state":           entry.State,
+		"attempts":        entry.Attempts,
+		"probe_attempts":  entry.ProbeAttempts,
+		"failure_code":    entry.FailureCode,
+		"outcome_unknown": entry.OutcomeUnknown,
+	}
+	if transmitted := sourceDeliveryEntryContract(entry); transmitted != nil {
+		result["event_id"] = transmitted.EventID
+		result["source"] = canonical.Source{
+			ID:       transmitted.Source.ID,
+			Dataset:  transmitted.Source.Dataset,
+			Revision: transmitted.Source.Revision,
+		}
+		result["generated_at"] = transmitted.GeneratedAt
 	}
 	return result
 }
