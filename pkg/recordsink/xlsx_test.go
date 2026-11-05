@@ -2599,7 +2599,8 @@ func TestDynamicCalculatorValidatorHandlesEmptyProductTable(t *testing.T) {
 	// safety verdict.
 	source := strings.ReplaceAll(string(content), "\r\n", "\n")
 	for _, required := range []string{
-		`$priceDataRange = $table.ListColumns.Item(1).DataBodyRange`,
+		`[pscustomobject]@{ Value = $table.ListColumns.Item(1).DataBodyRange }`,
+		`$priceDataRange = $priceDataRangeResult.Value`,
 		`if ($null -ne $priceDataRange) {`,
 		`if ($null -eq $titleColumn) {`,
 		`priceSlots = $priceSlots`,
