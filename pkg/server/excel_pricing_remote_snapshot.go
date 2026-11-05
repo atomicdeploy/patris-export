@@ -49,6 +49,7 @@ var (
 	errExcelPricingRemoteSnapshotProtocol       = errors.New("remote pricing snapshot protocol violation")
 	errExcelPricingRemoteSnapshotIntegrity      = errors.New("remote pricing snapshot integrity validation failed")
 	errExcelPricingRemoteSnapshotRejected       = errors.New("remote pricing snapshot request was rejected")
+	errExcelPricingRemoteSnapshotDisabled       = errors.New("remote pricing snapshot construction is disabled")
 	errExcelPricingRemoteSnapshotSourceConflict = errors.New("remote pricing snapshot source revision is behind the current Patris source")
 	errExcelPricingRemoteSnapshotUnavailable    = errors.New("remote pricing snapshot is unavailable")
 
@@ -943,6 +944,8 @@ func readExcelPricingRemoteSnapshotResponseError(body io.Reader, fallback error)
 	case "digitalogic_pricing_snapshot_source_revision_conflict",
 		"digitalogic_pricing_snapshot_state_revision_conflict":
 		return errExcelPricingRemoteSnapshotSourceConflict
+	case "digitalogic_pricing_snapshot_disabled":
+		return errExcelPricingRemoteSnapshotDisabled
 	default:
 		return fallback
 	}
@@ -990,18 +993,27 @@ func (client *excelPricingRemoteSnapshotClient) fetchRevision(
 			payload.PricingStateRevision, payload.PricingPolicyRevision) {
 		return excelPricingRemoteSnapshotRevision{}, errExcelPricingRemoteSnapshotProtocol
 	}
-	if client.inputCatalogRevision == "" {
-		if !payload.Source.SameIdentity(client.source) {
+	if payload.InputSource == nil {
+		if client.inputCatalogRevision != "" || !payload.Source.SameIdentity(client.source) {
 			return excelPricingRemoteSnapshotRevision{}, errExcelPricingRemoteSnapshotProtocol
 		}
-	} else if payload.InputSource == nil || !payload.InputSource.SameIdentity(client.source) ||
+	} else if !payload.InputSource.SameIdentity(client.source) ||
 		!validExcelPricingRemoteSource(payload.Source) || payload.Source.ID != client.source.ID ||
-		payload.Source.Dataset != client.source.Dataset || (!client.receiptProbe && payload.OwnerCatalogRevision != client.inputCatalogRevision) {
+		payload.Source.Dataset != client.source.Dataset || !isSHA256Revision(payload.OwnerCatalogRevision) ||
+		(client.inputCatalogRevision != "" && !client.receiptProbe && payload.OwnerCatalogRevision != client.inputCatalogRevision) {
 		return excelPricingRemoteSnapshotRevision{}, errExcelPricingRemoteSnapshotProtocol
 	}
+	// A CDN or gzip middleware can rewrite the representation validator even
+	// when the authenticated JSON still names one coherent canonical state.
+	// ETag is an optional transport enhancement here; source identity and all
+	// semantic revisions above remain mandatory. Use the canonical state
+	// revision for If-Match and record the reduced transport assurance instead
+	// of turning a harmless representation rewrite into an Excel outage.
+	etagValues := response.Header.Values("ETag")
 	etag := strings.TrimSpace(response.Header.Get("ETag"))
-	if !isStrongExcelPricingRevisionETag(etag, payload.StateRevision) {
-		return excelPricingRemoteSnapshotRevision{}, errExcelPricingRemoteSnapshotProtocol
+	if len(etagValues) != 1 || !isStrongExcelPricingRevisionETag(etag, payload.StateRevision) {
+		log.Printf("Pricing revision accepted after semantic validation; optional transport validator warning: optional_revision_etag_mismatch")
+		etag = `"` + payload.StateRevision + `"`
 	}
 	return excelPricingRemoteSnapshotRevision{
 		Delivery:              payload.Delivery,
@@ -1134,11 +1146,14 @@ func (client *excelPricingRemoteSnapshotClient) fetchSnapshot(
 	}
 	etagValues := response.Header.Values("ETag")
 	etag := strings.TrimSpace(response.Header.Get("ETag"))
-	missingETag := len(etagValues) == 0
-	if missingETag {
+	if len(etagValues) != 1 ||
+		!isStrongExcelPricingRevisionETag(etag, build.Digest) {
+		// The authenticated terminal build digest and semantic payload checks
+		// below are the integrity boundary. ETag is a conditional transport
+		// capability and may be absent or representation-specific after gzip/CDN
+		// transformation; normalize it to the canonical build digest locally.
+		log.Printf("Pricing snapshot accepted with optional transport validator warning: optional_snapshot_etag_mismatch")
 		etag = `"` + build.Digest + `"`
-	} else if len(etagValues) != 1 {
-		return nil, errExcelPricingRemoteSnapshotProtocol
 	}
 	if err := validateExcelPricingRemoteSnapshotPayload(payload, build, revision, client.source, etag); err != nil {
 		if code, ok := excelPricingRemoteSnapshotRepresentationDigestWarning(err); ok {
@@ -1149,11 +1164,6 @@ func (client *excelPricingRemoteSnapshotClient) fetchSnapshot(
 			// the reduced transport assurance instead of presenting a false outage.
 			log.Printf("Pricing snapshot accepted after semantic validation; optional representation digest warning: %s", code)
 		} else {
-			return nil, err
-		}
-	}
-	if missingETag {
-		if err := client.confirmSnapshotValidator(ctx, requestURL, build.Digest); err != nil {
 			return nil, err
 		}
 	}

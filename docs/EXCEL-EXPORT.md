@@ -163,7 +163,7 @@ record and never fall back to a Patris category code.
 
 `داشبورد` contains formula-backed catalog and publication summaries.
 `تنظیمات` contains the live site values, proposed edits, warnings, and one
-guarded settings **همگام‌سازی اکنون** control. Product search and clear buttons live directly
+guarded settings **به‌روزرسانی** control. Product search and clear buttons live directly
 on `محصولات`; selecting a product highlights its complete table row. Technical
 join and audit data is stored only in the `xlSheetVeryHidden` sheet
 `داده‌های همگام‌سازی`.
@@ -188,7 +188,7 @@ Excel. Its optional synchronized output is an `.xlsm` working copy only;
 saving a live-populated validation instance back as `.xltm` is rejected so a
 runtime catalog cannot be mistaken for the distributable template.
 
-The deferred refresh-on-open and **همگام‌سازی اکنون** use only the local
+The deferred refresh-on-open and **به‌روزرسانی** use only the local
 Patris companion. A pristine template defaults refresh-on-open to on; its
 asynchronous network phase keeps Excel interactive and populates the workbook
 automatically:
@@ -340,7 +340,7 @@ above seven percent is reported in Persian and is never silently selected.
 The price cards, hidden calculation inputs, and final-price formulas use only
 the live site-confirmed values. Editing a proposal cell invalidates every older
 preview, records only a local pending generation, and colors that field amber;
-it starts no network or mutation work. The one settings **همگام‌سازی اکنون**
+it starts no network or mutation work. The one settings **به‌روزرسانی**
 button sends exactly the changed keys with their prior confirmed values and a
 fully validated immutable settings document. The companion performs preview,
 apply, bounded retry, website readback, and ACK in its background queue. Excel

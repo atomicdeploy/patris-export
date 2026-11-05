@@ -1523,6 +1523,91 @@ func TestExcelPricingSnapshotExcelV1PayloadSizeForRepresentativeCatalog(t *testi
 	}
 }
 
+func TestParseExcelPricingSnapshotPageAcceptsVersionlessLiveOwnerProjection(t *testing.T) {
+	inputSource := excelPricingStateSourceForTest()
+	ownerSource := inputSource
+	ownerSource.Revision = excelPricingRevisionForTest("live-owner")
+	rows := []map[string]interface{}{excelPricingSnapshotFullRowForTest(1)}
+	recorder := httptest.NewRecorder()
+	writeExcelPricingSnapshotRemotePage(
+		t,
+		recorder,
+		inputSource,
+		excelPricingRevisionForTest("live-state"),
+		excelPricingRevisionForTest("live-dataset"),
+		1,
+		1,
+		rows,
+		rows,
+	)
+	var response map[string]interface{}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	response["schema"] = excelPricingLiveStateSchema
+	response["source"] = map[string]interface{}{
+		"id":                       inputSource.ID,
+		"dataset":                  inputSource.Dataset,
+		"submitted_revision":       inputSource.Revision,
+		"current_revision":         ownerSource.Revision,
+		"revision_matches_current": false,
+	}
+	catalog := response["catalog"].(map[string]interface{})
+	reconciliation := catalog["reconciliation"].(map[string]interface{})
+	reconciliation["source"] = map[string]interface{}{
+		"id":       ownerSource.ID,
+		"dataset":  ownerSource.Dataset,
+		"revision": ownerSource.Revision,
+	}
+	body, err := json.Marshal(response)
+	if err != nil {
+		t.Fatal(err)
+	}
+	page, err := parseExcelPricingSnapshotPage(body, inputSource, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !page.ownerSource.SameIdentity(ownerSource) {
+		t.Fatalf("owner source = %+v, want %+v", page.ownerSource, ownerSource)
+	}
+	if string(page.state["schema"]) != `"`+excelPricingStateSchema+`"` {
+		t.Fatalf("adapted schema = %s", page.state["schema"])
+	}
+	if string(page.state["pricing_state_revision"]) != `"`+page.stateRevision+`"` {
+		t.Fatalf("adapted pricing revision = %s, want %s", page.state["pricing_state_revision"], page.stateRevision)
+	}
+	var adaptedSource struct {
+		ID                     string `json:"id"`
+		Dataset                string `json:"dataset"`
+		CurrentRevision        string `json:"current_revision"`
+		SubmittedRevision      string `json:"submitted_revision"`
+		RevisionMatchesCurrent bool   `json:"revision_matches_current"`
+	}
+	if err := json.Unmarshal(page.state["source"], &adaptedSource); err != nil {
+		t.Fatal(err)
+	}
+	if adaptedSource.ID != ownerSource.ID || adaptedSource.Dataset != ownerSource.Dataset ||
+		adaptedSource.CurrentRevision != ownerSource.Revision ||
+		adaptedSource.SubmittedRevision != ownerSource.Revision ||
+		!adaptedSource.RevisionMatchesCurrent {
+		t.Fatalf("adapted source = %+v, want coherent owner %+v", adaptedSource, ownerSource)
+	}
+	snapshot, err := buildExcelPricingSnapshot(
+		page,
+		page.ownerSource,
+		page.rows,
+		[]string{page.pageRevision},
+		excelPricingSnapshotProjectionExcelV1,
+		time.Date(2026, 10, 12, 0, 0, 0, 0, time.UTC),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.pricingStateRevision != page.stateRevision {
+		t.Fatalf("snapshot pricing revision = %s, want %s", snapshot.pricingStateRevision, page.stateRevision)
+	}
+}
+
 func TestExcelPricingSnapshotExcelV1RejectsInvalidLeanRows(t *testing.T) {
 	base := excelPricingSnapshotFullRowForTest(1)
 	tests := map[string]func(map[string]interface{}){
@@ -3428,8 +3513,8 @@ func TestExcelPricingSnapshotNormalizesRemoteSnapshotDrift(t *testing.T) {
 	}
 }
 
-// These retained-handler tests cover dormant implementation algorithms, not
-// deployed snapshot endpoint acceptance. The production router stays disabled.
+// This helper keeps focused handler tests isolated from unrelated production
+// routes while exercising the same authenticated snapshot implementation.
 func newDormantSnapshotImplementationTestServer(t *testing.T, productSyncURL string) *Server {
 	t.Helper()
 	server := newExcelPricingTestServer(t, productSyncURL)
@@ -3443,11 +3528,11 @@ func newDormantSnapshotImplementationTestServer(t *testing.T, productSyncURL str
 	return server
 }
 
-func TestExcelPricingSnapshotProductionRoutesAreDisabledAndAuthenticated(t *testing.T) {
+func TestExcelPricingSnapshotProductionRoutesAreEnabledAndAuthenticated(t *testing.T) {
 	server := newExcelPricingTestServer(t, "http://127.0.0.1:1/product-sync")
 	token := openExcelPricingSession(t, server)
 	server.excelPricing.snapshotCollector = func(context.Context, string, excelPricingSnapshotStartRequest, updateout.Config) (*excelPricingSnapshot, string) {
-		t.Error("disabled production endpoint started snapshot work")
+		t.Error("invalid request unexpectedly started snapshot work")
 		return nil, "unexpected_collection"
 	}
 	for _, route := range []struct{ method, path string }{
@@ -3463,14 +3548,16 @@ func TestExcelPricingSnapshotProductionRoutesAreDisabledAndAuthenticated(t *test
 			response := httptest.NewRecorder()
 			server.router.ServeHTTP(response, request)
 			want := http.StatusForbidden
-			if authorized {
-				want = http.StatusServiceUnavailable
+			if authorized && route.method == http.MethodPost {
+				want = http.StatusBadRequest
+			} else if authorized {
+				want = http.StatusNotFound
 			}
 			if response.Code != want {
 				t.Fatalf("%s %s auth=%v: %d %s", route.method, route.path, authorized, response.Code, response.Body.String())
 			}
-			if authorized && !strings.Contains(response.Body.String(), "snapshot_disabled") {
-				t.Fatal(response.Body.String())
+			if strings.Contains(response.Body.String(), "snapshot_disabled") {
+				t.Fatalf("production route is still disabled: %s", response.Body.String())
 			}
 		}
 	}
