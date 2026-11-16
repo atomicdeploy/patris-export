@@ -3609,23 +3609,34 @@ try {
             nativeAcceptanceLimitExclusiveSeconds = 10.0
         }
         if ($changedSnapshot) {
+            $wooLinkReadbackDeadline = [DateTime]::UtcNow.AddSeconds(30)
             $wooLinkRuntimeValidation = [pscustomobject]@{
                 required = $true
-                validated = [bool]$excel.Run(
-                    "'$macroBookName'!ProductCatalogSync.ValidateWooLinkProjectionForValidation"
-                )
-                rows = [int]$excel.Run(
-                    "'$macroBookName'!ProductCatalogSync.WooLinkProjectionRowsForValidation"
-                )
-                expectedDistinctNames = [int]$excel.Run(
-                    "'$macroBookName'!ProductCatalogSync.WooLinkExpectedDistinctNamesForValidation"
-                )
-                actualDistinctNames = [int]$excel.Run(
-                    "'$macroBookName'!ProductCatalogSync.WooLinkActualDistinctNamesForValidation"
-                )
-                stagingEmpty = [bool]$excel.Run(
-                    "'$macroBookName'!ProductCatalogSync.WooLinkStagingEmptyForValidation"
-                )
+                validated = [bool](Invoke-ExcelBusyRetry {
+                    $excel.Run(
+                        "'$macroBookName'!ProductCatalogSync.ValidateWooLinkProjectionForValidation"
+                    )
+                } $wooLinkReadbackDeadline 'validating the live Woo link projection')
+                rows = [int](Invoke-ExcelBusyRetry {
+                    $excel.Run(
+                        "'$macroBookName'!ProductCatalogSync.WooLinkProjectionRowsForValidation"
+                    )
+                } $wooLinkReadbackDeadline 'reading the live Woo link row count')
+                expectedDistinctNames = [int](Invoke-ExcelBusyRetry {
+                    $excel.Run(
+                        "'$macroBookName'!ProductCatalogSync.WooLinkExpectedDistinctNamesForValidation"
+                    )
+                } $wooLinkReadbackDeadline 'reading the expected Woo link title count')
+                actualDistinctNames = [int](Invoke-ExcelBusyRetry {
+                    $excel.Run(
+                        "'$macroBookName'!ProductCatalogSync.WooLinkActualDistinctNamesForValidation"
+                    )
+                } $wooLinkReadbackDeadline 'reading the actual Woo link title count')
+                stagingEmpty = [bool](Invoke-ExcelBusyRetry {
+                    $excel.Run(
+                        "'$macroBookName'!ProductCatalogSync.WooLinkStagingEmptyForValidation"
+                    )
+                } $wooLinkReadbackDeadline 'checking the live Woo link staging range')
             }
         }
         if ($changedSnapshot -and $rowCount -eq 1131 -and

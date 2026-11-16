@@ -2624,6 +2624,12 @@ func TestDynamicCalculatorValidatorHandlesEmptyProductTable(t *testing.T) {
 		`RPC_E_SERVERCALL_RETRYLATER`,
 		`Invoke-ExcelBusyRetry`,
 		`Start-Sleep -Milliseconds 100`,
+		`$wooLinkReadbackDeadline = [DateTime]::UtcNow.AddSeconds(30)`,
+		`validating the live Woo link projection`,
+		`reading the live Woo link row count`,
+		`reading the expected Woo link title count`,
+		`reading the actual Woo link title count`,
+		`checking the live Woo link staging range`,
 		`closing the validator Excel process`,
 		`public const uint JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`,
 		`AssignProcessToJobObject`,
@@ -2686,6 +2692,32 @@ func TestDynamicCalculatorValidatorHandlesEmptyProductTable(t *testing.T) {
 	} {
 		if !strings.Contains(source, required) {
 			t.Fatalf("native validator is missing the empty-table guard: %s", required)
+		}
+	}
+	wooLinkReadbackStart := strings.Index(source,
+		`$wooLinkReadbackDeadline = [DateTime]::UtcNow.AddSeconds(30)`)
+	wooLinkReadbackEndRelative := -1
+	if wooLinkReadbackStart >= 0 {
+		wooLinkReadbackEndRelative = strings.Index(source[wooLinkReadbackStart:],
+			`if ($changedSnapshot -and $rowCount -eq 1131`)
+	}
+	if wooLinkReadbackStart < 0 || wooLinkReadbackEndRelative < 0 {
+		t.Fatal("native validator is missing the bounded Woo-link readback block")
+	}
+	wooLinkReadback := source[wooLinkReadbackStart : wooLinkReadbackStart+wooLinkReadbackEndRelative]
+	if strings.Count(wooLinkReadback, `Invoke-ExcelBusyRetry {`) != 5 ||
+		strings.Count(wooLinkReadback, `$excel.Run(`) != 5 {
+		t.Fatal("all five Woo-link runtime readbacks must use the shared bounded Excel busy retry")
+	}
+	for _, macro := range []string{
+		`ProductCatalogSync.ValidateWooLinkProjectionForValidation`,
+		`ProductCatalogSync.WooLinkProjectionRowsForValidation`,
+		`ProductCatalogSync.WooLinkExpectedDistinctNamesForValidation`,
+		`ProductCatalogSync.WooLinkActualDistinctNamesForValidation`,
+		`ProductCatalogSync.WooLinkStagingEmptyForValidation`,
+	} {
+		if strings.Count(wooLinkReadback, macro) != 1 {
+			t.Fatalf("bounded Woo-link readback block must invoke %s exactly once", macro)
 		}
 	}
 	if strings.Contains(source, `[void]$priceCell.Select()`) {
