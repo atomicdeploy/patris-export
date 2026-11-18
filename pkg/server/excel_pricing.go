@@ -741,14 +741,19 @@ func (s *Server) forwardExcelPricing(
 }
 
 func excelPricingResponseSchemaMatches(operation, schema string) bool {
-	if schema == excelPricingExpectedSchema(operation) {
-		return true
+	return excelPricingProviderSchemaMatches(schema, excelPricingExpectedSchema(operation))
+}
+
+func excelPricingProviderSchemaMatches(schema, expected string) bool {
+	// WordPress publishes these known provider schemas without a version suffix.
+	// Match only the exact operation's two supported representations. Revision,
+	// source, idempotency and acknowledgement bindings remain separate checks.
+	switch expected {
+	case excelPricingStateSchema, excelPricingPreviewSchema, excelPricingApplySchema, excelPricingConfirmationSchema:
+		return schema == expected || schema == strings.TrimSuffix(expected, "/v1")
+	default:
+		return false
 	}
-	// The live state endpoint intentionally publishes its versionless provider
-	// schema. The companion adapts that representation to its stable loopback
-	// contract after semantic validation; version naming is not an integrity
-	// boundary.
-	return operation == "state" && schema == excelPricingLiveStateSchema
 }
 
 func (s *Server) completeExcelPricingApply(
@@ -1050,7 +1055,7 @@ func (s *Server) forwardExcelPricingACK(
 		return excelPricingACKResponse{}, safeExcelPricingRemoteError(response.StatusCode, responseBody)
 	}
 	var result excelPricingACKResponse
-	if json.Unmarshal(responseBody, &result) != nil || result.Schema != excelPricingConfirmationSchema ||
+	if json.Unmarshal(responseBody, &result) != nil || !excelPricingProviderSchemaMatches(result.Schema, excelPricingConfirmationSchema) ||
 		result.TransactionID != job.TransactionID ||
 		(result.Status != "acknowledged" && result.Status != "replayed") {
 		return excelPricingACKResponse{}, errors.New("remote pricing acknowledgement contract is invalid")
