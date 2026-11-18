@@ -808,7 +808,7 @@ func (queue *excelPricingWritebackQueue) readbackDocument(ctx context.Context, j
 
 func excelPricingStateDocumentFromBody(body []byte, expectedSchema string) (excelPricingStateDocument, error) {
 	var document excelPricingStateDocument
-	if json.Unmarshal(body, &document) != nil || document.Schema != expectedSchema ||
+	if json.Unmarshal(body, &document) != nil || !excelPricingProviderSchemaMatches(document.Schema, expectedSchema) ||
 		!isSHA256Revision(document.StateRevision) || validateExcelPricingSettings(document.Settings) != nil {
 		return excelPricingStateDocument{}, errors.New("invalid pricing state document")
 	}
