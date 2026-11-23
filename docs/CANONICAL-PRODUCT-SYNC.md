@@ -268,6 +268,9 @@ exact event, source identity, and canonical `generated_at`. Receipt schema
 `digitalogic.product-sync-receipt.v2` echoes all three values exactly.
 `applied` and `superseded` acknowledge the event, `pending` continues receipt
 polling, and only an exact `not_found` authorizes one controlled write. For a
+safely inferred `superseded` result, the receiver must have durable proof that
+a strictly newer complete snapshot for the same source and dataset was accepted;
+sender-local time comparison or an unrelated high-water mark is not proof. For a
 saturated receiver history, `not_found` is authoritative only when the
 requested `generated_at` is strictly newer than the receiver's durable
 per-source accepted high-water. Equal, older, unreasonably future-dated,
@@ -295,8 +298,16 @@ in the durable outbox. `GET /api/status` exposes
 `source_delivery_outbox.delivery_mode: event_driven`,
 `scheduled_reconciliation: false`, pending/coalesced state, the current event
 identity/state, and probe and delivery attempt counts. A healthy steady state is
-`pending: false`; receiver-side catalog/materialization checks remain the
-downstream acceptance proof.
+`pending: false`. While an active event blocks a coalesced newer snapshot,
+`source_delivery_outbox.coalesced_latest` exposes only that queued event's
+state, attempts, exact event/source/generated identity, and no product payload.
+It is diagnostic evidence, not authorization to replay or discard an event.
+The allowlisted receiver response
+`digitalogic_product_sync_receipt_history_inconclusive` is reported as the safe
+`failure_code: receipt_history_inconclusive`; other HTTP bodies remain the
+generic `receipt_probe_failed` and are never reflected into status.
+Receiver-side catalog/materialization checks remain the downstream acceptance
+proof.
 
 Transport completion is separate from catalog completeness. Digitalogic must
 still assign a shipping method to the intended product rows and configure a
