@@ -26,13 +26,13 @@ jobs:
       run: echo "BUILD_DATE=$(git show -s --format=%cI HEAD)" >> "$GITHUB_ENV"
       
     - name: Set up Go
-      uses: actions/setup-go@v7.0.0
+      uses: actions/setup-go@v7.1.0
       with:
         go-version-file: go.mod
         cache: false
     
     - name: Set up Node.js
-      uses: actions/setup-node@v7.0.0
+      uses: actions/setup-node@v7.1.0
       with:
         node-version: '24'
         
@@ -92,7 +92,7 @@ jobs:
         LD_LIBRARY_PATH="$GITHUB_WORKSPACE/build:${LD_LIBRARY_PATH:-}" ./build/patris-export-linux-amd64 info testdata/kala.db
       
     - name: Upload Linux artifact
-      uses: actions/upload-artifact@v7.0.1
+      uses: actions/upload-artifact@v7.0.2
       with:
         name: patris-export-linux-amd64
         path: |
@@ -133,13 +133,13 @@ jobs:
       run: echo "BUILD_DATE=$(git show -s --format=%cI HEAD)" >> "$GITHUB_ENV"
       
     - name: Set up Go
-      uses: actions/setup-go@v7.0.0
+      uses: actions/setup-go@v7.1.0
       with:
         go-version-file: go.mod
         cache: false
     
     - name: Set up Node.js
-      uses: actions/setup-node@v7.0.0
+      uses: actions/setup-node@v7.1.0
       with:
         node-version: '24'
         
@@ -187,7 +187,7 @@ jobs:
         fi
         
     - name: Upload Windows artifact
-      uses: actions/upload-artifact@v7.0.1
+      uses: actions/upload-artifact@v7.0.2
       with:
         name: patris-export-windows-mingw-cross-amd64
         path: |
