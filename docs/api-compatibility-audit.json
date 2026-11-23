@@ -1,0 +1,1844 @@
+{
+  "generated_from": "tracked and unignored repository text; no production data",
+  "policy": {
+    "general_collections": [
+      "categories",
+      "products",
+      "records"
+    ],
+    "general_collection_rule": "unversioned routes with capability negotiation, optional fields, and preserved extensions",
+    "product_sync_rule": "schema identity retained for replication semantics; schema_version forbidden"
+  },
+  "summary": {
+    "routes": 41,
+    "dotted_route_suffixes": 4,
+    "representation_route_suffixes": 1,
+    "versioned_routes": 0,
+    "findings": 174,
+    "schema_version_findings": 21,
+    "schema_identity_findings": 140,
+    "strict_decoder_findings": 15,
+    "version_or_schema_guard_findings": 8
+  },
+  "routes": [
+    {
+      "path": "/",
+      "methods": [
+        "GET"
+      ],
+      "handler": "s.handleWelcome",
+      "file": "pkg/server/server.go",
+      "line": 217,
+      "suffix_kind": null
+    },
+    {
+      "path": "/api/app",
+      "methods": [
+        "GET"
+      ],
+      "handler": "s.handleGetApp",
+      "file": "pkg/server/server.go",
+      "line": 232,
+      "suffix_kind": null
+    },
+    {
+      "path": "/api/categories",
+      "methods": [
+        "GET"
+      ],
+      "handler": "s.handleGetCategories",
+      "file": "pkg/server/server.go",
+      "line": 224,
+      "suffix_kind": null
+    },
+    {
+      "path": "/api/charmap",
+      "methods": [
+        "GET"
+      ],
+      "handler": "s.handleGetCharmap",
+      "file": "pkg/server/server.go",
+      "line": 233,
+      "suffix_kind": null
+    },
+    {
+      "path": "/api/charmap/preview",
+      "methods": [
+        "POST"
+      ],
+      "handler": "s.handlePostCharmapPreview",
+      "file": "pkg/server/server.go",
+      "line": 234,
+      "suffix_kind": null
+    },
+    {
+      "path": "/api/config",
+      "methods": [
+        "GET"
+      ],
+      "handler": "s.handleGetConfig",
+      "file": "pkg/server/server.go",
+      "line": 235,
+      "suffix_kind": null
+    },
+    {
+      "path": "/api/config",
+      "methods": [
+        "PUT"
+      ],
+      "handler": "s.handlePutConfig",
+      "file": "pkg/server/server.go",
+      "line": 236,
+      "suffix_kind": null
+    },
+    {
+      "path": "/api/edge/upload",
+      "methods": [
+        "POST"
+      ],
+      "handler": "s.handlePostEdgeUpload",
+      "file": "pkg/server/server.go",
+      "line": 240,
+      "suffix_kind": null
+    },
+    {
+      "path": "/api/excel/pricing-sync/apply",
+      "methods": [
+        "POST"
+      ],
+      "handler": "s.handlePostExcelPricingApply",
+      "file": "pkg/server/server.go",
+      "line": 230,
+      "suffix_kind": null
+    },
+    {
+      "path": "/api/excel/pricing-sync/preview",
+      "methods": [
+        "POST"
+      ],
+      "handler": "s.handlePostExcelPricingPreview",
+      "file": "pkg/server/server.go",
+      "line": 229,
+      "suffix_kind": null
+    },
+    {
+      "path": "/api/excel/pricing-sync/session",
+      "methods": [
+        "POST"
+      ],
+      "handler": "s.handlePostExcelPricingSession",
+      "file": "pkg/server/server.go",
+      "line": 227,
+      "suffix_kind": null
+    },
+    {
+      "path": "/api/excel/pricing-sync/state",
+      "methods": [
+        "POST"
+      ],
+      "handler": "s.handlePostExcelPricingState",
+      "file": "pkg/server/server.go",
+      "line": 228,
+      "suffix_kind": null
+    },
+    {
+      "path": "/api/info",
+      "methods": [
+        "GET"
+      ],
+      "handler": "s.handleGetInfo",
+      "file": "pkg/server/server.go",
+      "line": 231,
+      "suffix_kind": null
+    },
+    {
+      "path": "/api/processes/file",
+      "methods": [
+        "GET"
+      ],
+      "handler": "s.handleGetFileProcesses",
+      "file": "pkg/server/server.go",
+      "line": 246,
+      "suffix_kind": null
+    },
+    {
+      "path": "/api/processes/patris81",
+      "methods": [
+        "GET"
+      ],
+      "handler": "s.handleGetPatris81Processes",
+      "file": "pkg/server/server.go",
+      "line": 245,
+      "suffix_kind": null
+    },
+    {
+      "path": "/api/product-sync",
+      "methods": [
+        "GET"
+      ],
+      "handler": "s.handleGetProductSyncContract",
+      "file": "pkg/server/server.go",
+      "line": 225,
+      "suffix_kind": null
+    },
+    {
+      "path": "/api/recent-sales",
+      "methods": [
+        "GET"
+      ],
+      "handler": "s.handleGetRecentSales",
+      "file": "pkg/server/server.go",
+      "line": 226,
+      "suffix_kind": null
+    },
+    {
+      "path": "/api/records",
+      "methods": [
+        "GET"
+      ],
+      "handler": "s.handleGetRecords",
+      "file": "pkg/server/server.go",
+      "line": 222,
+      "suffix_kind": null
+    },
+    {
+      "path": "/api/records.{format:json|csv|xlsx}",
+      "methods": [
+        "GET"
+      ],
+      "handler": "s.handleGetRecords",
+      "file": "pkg/server/server.go",
+      "line": 223,
+      "suffix_kind": "representation"
+    },
+    {
+      "path": "/api/refresh",
+      "methods": [
+        "POST"
+      ],
+      "handler": "s.handlePostRefresh",
+      "file": "pkg/server/server.go",
+      "line": 238,
+      "suffix_kind": null
+    },
+    {
+      "path": "/api/source/file",
+      "methods": [
+        "GET",
+        "HEAD"
+      ],
+      "handler": "s.handleGetSourceFile",
+      "file": "pkg/server/server.go",
+      "line": 242,
+      "suffix_kind": null
+    },
+    {
+      "path": "/api/source/manifest",
+      "methods": [
+        "GET"
+      ],
+      "handler": "s.handleGetSourceManifest",
+      "file": "pkg/server/server.go",
+      "line": 241,
+      "suffix_kind": null
+    },
+    {
+      "path": "/api/sql-target/last-result",
+      "methods": [
+        "GET"
+      ],
+      "handler": "s.handleGetSQLTargetLastResult",
+      "file": "pkg/server/server.go",
+      "line": 253,
+      "suffix_kind": null
+    },
+    {
+      "path": "/api/sql-target/preview",
+      "methods": [
+        "POST"
+      ],
+      "handler": "s.handlePostSQLTargetPreview",
+      "file": "pkg/server/server.go",
+      "line": 251,
+      "suffix_kind": null
+    },
+    {
+      "path": "/api/sql-target/session",
+      "methods": [
+        "POST"
+      ],
+      "handler": "s.handlePostSQLTargetSession",
+      "file": "pkg/server/server.go",
+      "line": 247,
+      "suffix_kind": null
+    },
+    {
+      "path": "/api/sql-target/session",
+      "methods": [
+        "DELETE"
+      ],
+      "handler": "s.handleDeleteSQLTargetSession",
+      "file": "pkg/server/server.go",
+      "line": 248,
+      "suffix_kind": null
+    },
+    {
+      "path": "/api/sql-target/status",
+      "methods": [
+        "GET"
+      ],
+      "handler": "s.handleGetSQLTargetStatus",
+      "file": "pkg/server/server.go",
+      "line": 249,
+      "suffix_kind": null
+    },
+    {
+      "path": "/api/sql-target/sync",
+      "methods": [
+        "POST"
+      ],
+      "handler": "s.handlePostSQLTargetSync",
+      "file": "pkg/server/server.go",
+      "line": 252,
+      "suffix_kind": null
+    },
+    {
+      "path": "/api/sql-target/test",
+      "methods": [
+        "POST"
+      ],
+      "handler": "s.handlePostSQLTargetTest",
+      "file": "pkg/server/server.go",
+      "line": 250,
+      "suffix_kind": null
+    },
+    {
+      "path": "/api/status",
+      "methods": [
+        "GET"
+      ],
+      "handler": "s.handleGetStatus",
+      "file": "pkg/server/server.go",
+      "line": 237,
+      "suffix_kind": null
+    },
+    {
+      "path": "/api/toast",
+      "methods": [
+        "POST"
+      ],
+      "handler": "s.handlePostToast",
+      "file": "pkg/server/server.go",
+      "line": 239,
+      "suffix_kind": null
+    },
+    {
+      "path": "/api/update/executable",
+      "methods": [
+        "GET",
+        "HEAD"
+      ],
+      "handler": "s.handleGetExecutable",
+      "file": "pkg/server/server.go",
+      "line": 244,
+      "suffix_kind": null
+    },
+    {
+      "path": "/api/update/manifest",
+      "methods": [
+        "GET"
+      ],
+      "handler": "s.handleGetUpdateManifest",
+      "file": "pkg/server/server.go",
+      "line": 243,
+      "suffix_kind": null
+    },
+    {
+      "path": "/debug/charmap",
+      "methods": [
+        "GET"
+      ],
+      "handler": "s.handleCharmapViewer",
+      "file": "pkg/server/server.go",
+      "line": 219,
+      "suffix_kind": null
+    },
+    {
+      "path": "/favicon.ico",
+      "methods": [
+        "GET",
+        "HEAD"
+      ],
+      "handler": "s.handleFavicon",
+      "file": "pkg/server/server.go",
+      "line": 256,
+      "suffix_kind": "asset"
+    },
+    {
+      "path": "/partials/charmap",
+      "methods": [
+        "GET"
+      ],
+      "handler": "s.handleCharmapPartial",
+      "file": "pkg/server/server.go",
+      "line": 221,
+      "suffix_kind": null
+    },
+    {
+      "path": "/partials/welcome",
+      "methods": [
+        "GET"
+      ],
+      "handler": "s.handleWelcomePartial",
+      "file": "pkg/server/server.go",
+      "line": 220,
+      "suffix_kind": null
+    },
+    {
+      "path": "/static/notification.ogg",
+      "methods": [
+        "GET",
+        "HEAD"
+      ],
+      "handler": "s.handleNotificationAudio",
+      "file": "pkg/server/server.go",
+      "line": 254,
+      "suffix_kind": "asset"
+    },
+    {
+      "path": "/static/patris-api-icon.png",
+      "methods": [
+        "GET",
+        "HEAD"
+      ],
+      "handler": "s.handleAppIcon",
+      "file": "pkg/server/server.go",
+      "line": 255,
+      "suffix_kind": "asset"
+    },
+    {
+      "path": "/viewer",
+      "methods": [
+        "GET"
+      ],
+      "handler": "s.handleViewer",
+      "file": "pkg/server/server.go",
+      "line": 218,
+      "suffix_kind": null
+    },
+    {
+      "path": "/ws",
+      "methods": [
+        "ANY"
+      ],
+      "handler": "s.handleWebSocket",
+      "file": "pkg/server/server.go",
+      "line": 257,
+      "suffix_kind": null
+    }
+  ],
+  "findings": [
+    {
+      "file": "docs/CANONICAL-PRODUCT-SYNC.md",
+      "line": 323,
+      "kinds": [
+        "schema_identity"
+      ],
+      "excerpt": "\"schema\": \"patris.product-sync\","
+    },
+    {
+      "file": "docs/examples/vba/ProductCatalogSync.bas",
+      "line": 798,
+      "kinds": [
+        "schema_version"
+      ],
+      "excerpt": "\"\"\"schema_version\"\":1,\" & _"
+    },
+    {
+      "file": "docs/examples/vba/ProductCatalogSync.bas",
+      "line": 822,
+      "kinds": [
+        "schema_version"
+      ],
+      "excerpt": "\"\"\"schema_version\"\":1,\" & _"
+    },
+    {
+      "file": "docs/EXCEL-PRICING-SYNC.md",
+      "line": 24,
+      "kinds": [
+        "schema_identity"
+      ],
+      "excerpt": "\"schema\": \"patris.excel-pricing-companion-session/v1\","
+    },
+    {
+      "file": "docs/EXCEL-PRICING-SYNC.md",
+      "line": 48,
+      "kinds": [
+        "schema_identity"
+      ],
+      "excerpt": "\"schema\": \"patris.excel-pricing-companion-request/v1\","
+    },
+    {
+      "file": "docs/EXCEL-PRICING-SYNC.md",
+      "line": 49,
+      "kinds": [
+        "schema_version",
+        "schema_identity"
+      ],
+      "excerpt": "\"schema_version\": 1,"
+    },
+    {
+      "file": "docs/EXCEL-PRICING-SYNC.md",
+      "line": 67,
+      "kinds": [
+        "schema_identity"
+      ],
+      "excerpt": "\"schema\": \"patris.excel-pricing-companion-request/v1\","
+    },
+    {
+      "file": "docs/EXCEL-PRICING-SYNC.md",
+      "line": 68,
+      "kinds": [
+        "schema_version",
+        "schema_identity"
+      ],
+      "excerpt": "\"schema_version\": 1,"
+    },
+    {
+      "file": "docs/EXCEL-PRICING-SYNC.md",
+      "line": 87,
+      "kinds": [
+        "schema_identity"
+      ],
+      "excerpt": "\"schema\": \"patris.excel-pricing-companion-request/v1\","
+    },
+    {
+      "file": "docs/EXCEL-PRICING-SYNC.md",
+      "line": 88,
+      "kinds": [
+        "schema_version",
+        "schema_identity"
+      ],
+      "excerpt": "\"schema_version\": 1,"
+    },
+    {
+      "file": "docs/RECENT-SALES-API.md",
+      "line": 114,
+      "kinds": [
+        "schema_identity"
+      ],
+      "excerpt": "\"schema\": \"patris.recent-sales-aggregate\","
+    },
+    {
+      "file": "docs/REMOTE-API-EXAMPLES.md",
+      "line": 220,
+      "kinds": [
+        "schema_identity"
+      ],
+      "excerpt": "\"schema\": \"patris.product-sync\","
+    },
+    {
+      "file": "integrations/javascript/src/native-worker.cjs",
+      "line": 38,
+      "kinds": [
+        "version_or_schema_guard"
+      ],
+      "excerpt": "const error = new Error(`Unsupported Patris Export ABI version ${abiVersion}; this bridge supports ABI 1.`);"
+    },
+    {
+      "file": "pkg/appconfig/config_test.go",
+      "line": 169,
+      "kinds": [
+        "schema_version"
+      ],
+      "excerpt": "for _, needle := range []string{`\"page_size\"`, `\"notification_sound_source\"`, `\"notifications\"`, `\"column_labels\"`, `\"schema_version\"`} {"
+    },
+    {
+      "file": "pkg/appconfig/config.go",
+      "line": 26,
+      "kinds": [
+        "schema_identity"
+      ],
+      "excerpt": "const SchemaVersion = 1"
+    },
+    {
+      "file": "pkg/appconfig/config.go",
+      "line": 36,
+      "kinds": [
+        "schema_version",
+        "schema_identity"
+      ],
+      "excerpt": "SchemaVersion int `json:\"schema_version\" yaml:\"schema_version\" toml:\"schema_version\"`"
+    },
+    {
+      "file": "pkg/appconfig/config.go",
+      "line": 183,
+      "kinds": [
+        "schema_identity"
+      ],
+      "excerpt": "SchemaVersion: SchemaVersion,"
+    },
+    {
+      "file": "pkg/appconfig/config.go",
+      "line": 1045,
+      "kinds": [
+        "schema_identity"
+      ],
+      "excerpt": "if cfg.SchemaVersion == 0 {"
+    },
+    {
+      "file": "pkg/appconfig/config.go",
+      "line": 1046,
+      "kinds": [
+        "schema_identity"
+      ],
+      "excerpt": "cfg.SchemaVersion = SchemaVersion"
+    },
+    {
+      "file": "pkg/canonical/canonical_test.go",
+      "line": 161,
+      "kinds": [
+        "schema_identity"
+      ],
+      "excerpt": "fmt.Fprint(w, `{\"data\":{\"schema\":\"digitalogic.integration-catalog\",\"revision\":\"r1\",\"currency\":{\"local\":\"IRT\",\"cny_to_local\":30000,\"cny_to_irt\":30000},\"pricing\":{\"formula_id\":\"landed_price\"},\"shipping_methods\":[{\"id\":\"air\",\"price_per_kg\":120,\"currency\":\"CNY \"}]}}`)"
+    },
+    {
+      "file": "pkg/canonical/canonical_test.go",
+      "line": 277,
+      "kinds": [
+        "schema_identity"
+      ],
+      "excerpt": "if envelope.Schema != ContractName || envelope.Source.Dataset != \"kala.db\" || envelope.Source.ID != \"kala.db\" {"
+    },
+    {
+      "file": "pkg/canonical/canonical_test.go",
+      "line": 385,
+      "kinds": [
+        "schema_identity"
+      ],
+      "excerpt": "fmt.Fprint(w, `{\"data\":{\"schema\":\"digitalogic.integration-catalog\",\"revision\":\"r1\",\"currency\":{\"local\":\"IRT\",\"cny_to_local\":null,\"cny_to_irt\":null,\"effective_date\":null,\"warnings\":[]},\"pricing\":{\"formula_id\":\"landed_price\"},\"selected_warehouses\":[],\"shipping_methods\":[{\"id\":\"air\",\"price_per_kg\":null,\"currency\":null}]}}`)"
+    },
+    {
+      "file": "pkg/canonical/canonical_test.go",
+      "line": 389,
+      "kinds": [
+        "schema_identity"
+      ],
+      "excerpt": "fmt.Fprint(w, `{\"data\":{\"schema\":\"digitalogic.pricing-assignment-batch\",\"requested_count\":1,\"resolved_count\":1,\"error_count\":0,\"maximum_codes\":500,\"default_percentage_markup\":{\"schema\":\"digitalogic.default-percentage-markup\",\"configured\":false,\"type\":\"percentage\",\"profit_percent\":null,\"source\":\"unset\",\"revision\":\"r1\"},\"results\":[{\"code\":\"NULL-REFERENCE\",\"status\":\"ok\",\"assignment\":{\"code\":\"NULL-REFERENCE\",\"shipping_method_id\":\"air\",\"profit_percent\":null,\"profit_percent_source\":\"unset\",\"pricing_warnings\":[\"markup_percent_missing\"]}}]}}`)"
+    },
+    {
+      "file": "pkg/canonical/canonical_test.go",
+      "line": 413,
+      "kinds": [
+        "schema_identity"
+      ],
+      "excerpt": "if err := json.Unmarshal([]byte(`{\"schema\":\"patris.product-sync\",\"obsolete_field\":true}`), &envelope); err == nil {"
+    },
+    {
+      "file": "pkg/canonical/canonical_test.go",
+      "line": 424,
+      "kinds": [
+        "schema_identity"
+      ],
+      "excerpt": "if err := json.Unmarshal([]byte(`{\"schema\":\"patris.product-sync\",\"source\":{\"id\":\"A\",\"obsolete_field\":true}}`), &envelope); err == nil {"
+    },
+    {
+      "file": "pkg/canonical/canonical_test.go",
+      "line": 427,
+      "kinds": [
+        "schema_identity"
+      ],
+      "excerpt": "if err := json.Unmarshal([]byte(`{\"schema\":\"patris.product-sync\",\"deleted_codes\":[{\"product_code\":\"A\",\"deleted\":true,\"obsolete_field\":true}]}`), &envelope); err == nil {"
+    },
+    {
+      "file": "pkg/canonical/canonical_test.go",
+      "line": 553,
+      "kinds": [
+        "schema_identity"
+      ],
+      "excerpt": "fmt.Fprint(w, `{\"data\":{\"schema\":\"digitalogic.integration-catalog\",\"revision\":\"r1\",\"currency\":{\"local\":\"IRT\",\"cny_to_local\":29000,\"cny_to_irt\":29000},\"pricing\":{\"formula_id\":\"landed_price\"},\"shipping_methods\":[{\"id\":\"air\",\"price_per_kg\":120,\"currency\":\"CNY\"}]}}`)"
+    },
+    {
+      "file": "pkg/canonical/canonical_test.go",
+      "line": 571,
+      "kinds": [
+        "schema_identity"
+      ],
+      "excerpt": "\"schema\": \"digitalogic.pricing-assignment-batch\","
+    },
+    {
+      "file": "pkg/canonical/canonical_test.go",
+      "line": 574,
+      "kinds": [
+        "schema_identity"
+      ],
+      "excerpt": "\"schema\": \"digitalogic.default-percentage-markup\", \"configured\": true, \"type\": \"percentage\", \"profit_percent\": \"30\", \"source\": \"global_default\", \"revision\": \"rev-30\","
+    },
+    {
+      "file": "pkg/canonical/category_test.go",
+      "line": 46,
+      "kinds": [
+        "schema_identity"
+      ],
+      "excerpt": "if envelope.Schema != ContractName {"
+    },
+    {
+      "file": "pkg/canonical/contract_context_test.go",
+      "line": 101,
+      "kinds": [
+        "schema_identity"
+      ],
+      "excerpt": "Schema: `patris.<sync>`,"
+    },
+    {
+      "file": "pkg/canonical/contract_context_test.go",
+      "line": 128,
+      "kinds": [
+        "schema_identity"
+      ],
+      "excerpt": "Schema string `json:\"schema\"`"
+    },
+    {
+      "file": "pkg/canonical/contract_context_test.go",
+      "line": 140,
+      "kinds": [
+        "schema_identity"
+      ],
+      "excerpt": "Schema: envelope.Schema, EventType: envelope.EventType,"
+    },
+    {
+      "file": "pkg/canonical/contract_context_test.go",
+      "line": 168,
+      "kinds": [
+        "schema_identity"
+      ],
+      "excerpt": "Schema: ContractName,"
+    },
+    {
+      "file": "pkg/canonical/contract.go",
+      "line": 17,
+      "kinds": [
+        "schema_identity"
+      ],
+      "excerpt": "ContractName = \"patris.product-sync\""
+    },
+    {
+      "file": "pkg/canonical/contract.go",
+      "line": 46,
+      "kinds": [
+        "strict_decoder"
+      ],
+      "excerpt": "if err := rejectUnknownJSONFields(raw, \"product-sync source\", []string{\"id\", \"dataset\", \"revision\"}); err != nil {"
+    },
+    {
+      "file": "pkg/canonical/contract.go",
+      "line": 68,
+      "kinds": [
+        "strict_decoder"
+      ],
+      "excerpt": "if err := rejectUnknownJSONFields(raw, \"product tombstone\", []string{\"product_code\", \"deleted\"}); err != nil {"
+    },
+    {
+      "file": "pkg/canonical/contract.go",
+      "line": 81,
+      "kinds": [
+        "schema_identity"
+      ],
+      "excerpt": "Schema string `json:\"schema\"`"
+    },
+    {
+      "file": "pkg/canonical/contract.go",
+      "line": 102,
+      "kinds": [
+        "strict_decoder"
+      ],
+      "excerpt": "if err := rejectUnknownJSONFields(raw, \"product-sync envelope\", []string{"
+    },
+    {
+      "file": "pkg/canonical/contract.go",
+      "line": 128,
+      "kinds": [
+        "strict_decoder"
+      ],
+      "excerpt": "func rejectUnknownJSONFields(raw map[string]json.RawMessage, kind string, allowed []string) error {"
+    },
+    {
+      "file": "pkg/canonical/contract.go",
+      "line": 216,
+      "kinds": [
+        "schema_identity"
+      ],
+      "excerpt": "Schema: ContractName,"
+    },
+    {
+      "file": "pkg/canonical/contract.go",
+      "line": 283,
+      "kinds": [
+        "schema_identity"
+      ],
+      "excerpt": "Schema: snapshot.Schema,"
+    },
+    {
+      "file": "pkg/canonical/contract.go",
+      "line": 427,
+      "kinds": [
+        "schema_identity"
+      ],
+      "excerpt": "if err := writeStringField(`{\"schema\":`, envelope.Schema); err != nil {"
+    },
+    {
+      "file": "pkg/canonical/kala.go",
+      "line": 903,
+      "kinds": [
+        "strict_decoder"
+      ],
+      "excerpt": "if err := rejectUnknownJSONFields(raw, \"product\", []string{"
+    },
+    {
+      "file": "pkg/canonical/kala.go",
+      "line": 1113,
+      "kinds": [
+        "strict_decoder"
+      ],
+      "excerpt": "if err := rejectUnknownJSONFields(raw, \"category\", []string{"
+    },
+    {
+      "file": "pkg/canonical/verify_test.go",
+      "line": 123,
+      "kinds": [
+        "schema_identity"
+      ],
+      "excerpt": "\"schema\":\"patris.product-sync\","
+    },
+    {
+      "file": "pkg/canonical/verify_test.go",
+      "line": 142,
+      "kinds": [
+        "schema_identity"
+      ],
+      "excerpt": "payload := `{\"schema\":\"patris.product-sync\",\"schema\":\"patris.product-sync\"}`"
+    },
+    {
+      "file": "pkg/canonical/verify_test.go",
+      "line": 150,
+      "kinds": [
+        "schema_identity"
+      ],
+      "excerpt": "Schema: ContractName,"
+    },
+    {
+      "file": "pkg/canonical/verify.go",
+      "line": 144,
+      "kinds": [
+        "schema_identity"
+      ],
+      "excerpt": "if envelope.Schema != ContractName {"
+    },
+    {
+      "file": "pkg/canonical/verify.go",
+      "line": 295,
+      "kinds": [
+        "schema_identity"
+      ],
+      "excerpt": "Schema: envelope.Schema,"
+    },
+    {
+      "file": "pkg/embedded/engine.go",
+      "line": 381,
+      "kinds": [
+        "schema_identity"
+      ],
+      "excerpt": "if wrapped.Config.SchemaVersion == 0 {"
+    },
+    {
+      "file": "pkg/pricingcatalog/catalog_test.go",
+      "line": 319,
+      "kinds": [
+        "schema_identity"
+      ],
+      "excerpt": "fmt.Fprint(w, `{\"success\":true,\"data\":{\"schema\":\"digitalogic.integration-catalog\",\"revision\":\"sha256:test\",\"currency\":{\"local\":\"IRT\",\"cny_to_local\":29000,\"cny_to_irt\":29000,\"effective_date\":\"2026-07-16\"},\"pricing\":{\"formula_id\":\"landed_price\"},\"selected_warehouses\":[\"1\",\"6\"],\"shipping_methods\":[{\"id\":\"air_express\",\"enabled\":true,\"price_per_kg\":120,\"currency\":\"CNY\"}]}}`)"
+    },
+    {
+      "file": "pkg/pricingcatalog/catalog_test.go",
+      "line": 371,
+      "kinds": [
+        "schema_identity"
+      ],
+      "excerpt": "fmt.Fprintf(w, `{\"data\":{\"schema\":\"digitalogic.integration-catalog\",\"revision\":\"r1\",\"currency\":{\"local\":\"IRT\",\"cny_to_local\":30000,\"cny_to_irt\":30000},\"pricing\":{\"formula_id\":\"landed_price\"},\"shipping_methods\":[{\"id\":\"air\",%s}]}}`, test.methodFields)"
+    },
+    {
+      "file": "pkg/pricingcatalog/catalog_test.go",
+      "line": 413,
+      "kinds": [
+        "schema_identity"
+      ],
+      "excerpt": "fmt.Fprint(w, `{\"data\":{\"schema\":\"digitalogic.integration-catalog\",\"revision\":\"sha256:test\",\"currency\":{\"local\":\"IRT\",\"cny_to_local\":29000,\"cny_to_irt\":29000},\"pricing\":{\"formula_id\":\"landed_price\"},\"shipping_methods\":[{\"id\":\"air\",\"enabled\":true,\"price_per_kg\":100,\"currency\":\"CNY\"}]}}`)"
+    },
+    {
+      "file": "pkg/pricingcatalog/catalog_test.go",
+      "line": 482,
+      "kinds": [
+        "schema_identity"
+      ],
+      "excerpt": "fmt.Fprint(w, `{\"data\":{\"schema\":\"digitalogic.integration-catalog\",\"revision\":\"r1\",\"currency\":{\"local\":\"IRT\",\"cny_to_local\":1,\"cny_to_irt\":1},\"pricing\":{\"formula_id\":\"landed_price\"},\"shipping_methods\":[{\"id\":\"air\",\"price_per_kg\":1,\"currency\":\"CNY\"}]}}`)"
+    },
+    {
+      "file": "pkg/pricingcatalog/catalog_test.go",
+      "line": 510,
+      "kinds": [
+        "schema_identity"
+      ],
+      "excerpt": "\"schema\": \"digitalogic.pricing-assignment-batch\","
+    },
+    {
+      "file": "pkg/pricingcatalog/catalog_test.go",
+      "line": 513,
+      "kinds": [
+        "schema_identity"
+      ],
+      "excerpt": "\"schema\": \"digitalogic.default-percentage-markup\", \"configured\": true, \"type\": \"percentage\", \"profit_percent\": \"30\", \"source\": \"global_default\", \"revision\": \"rev-30\","
+    },
+    {
+      "file": "pkg/pricingcatalog/catalog_test.go",
+      "line": 572,
+      "kinds": [
+        "schema_identity"
+      ],
+      "excerpt": "fmt.Fprint(w, `{\"data\":{\"schema\":\"digitalogic.integration-catalog\",\"revision\":\"r1\",\"currency\":{\"local\":\"IRT\",\"cny_to_local\":1,\"cny_to_irt\":1},\"pricing\":{\"formula_id\":\"landed_price\"},\"shipping_methods\":[{\"id\":\"air\",\"price_per_kg\":1,\"currency\":\"CNY\"}]}}`)"
+    },
+    {
+      "file": "pkg/pricingcatalog/catalog_test.go",
+      "line": 600,
+      "kinds": [
+        "schema_identity"
+      ],
+      "excerpt": "fmt.Fprint(w, `{\"data\":{\"schema\":\"digitalogic.integration-catalog\",\"revision\":\"r1\",\"currency\":{\"local\":\"IRT\",\"cny_to_local\":29000,\"cny_to_irt\":29000},\"pricing\":{\"formula_id\":\"landed_price\"},\"shipping_methods\":[{\"id\":\"air_express\",\"price_per_kg\":120,\"currency\":\"CNY\"}]}}`)"
+    },
+    {
+      "file": "pkg/pricingcatalog/catalog_test.go",
+      "line": 657,
+      "kinds": [
+        "schema_identity"
+      ],
+      "excerpt": "fmt.Fprint(w, `{\"data\":{\"schema\":\"digitalogic.integration-catalog\",\"revision\":\"r1\",\"currency\":{\"local\":\"IRT\",\"cny_to_local\":29000,\"cny_to_irt\":29000},\"pricing\":{\"formula_id\":\"landed_price\"},\"shipping_methods\":[{\"id\":\"air\",\"price_per_kg\":120,\"currency\":\"CNY\"}]}}`)"
+    },
+    {
+      "file": "pkg/pricingcatalog/catalog_test.go",
+      "line": 659,
+      "kinds": [
+        "schema_identity"
+      ],
+      "excerpt": "fmt.Fprint(w, `{\"data\":{\"schema\":\"digitalogic.pricing-assignment-batch\",\"requested_count\":1,\"resolved_count\":1,\"error_count\":0,\"maximum_codes\":500,\"default_percentage_markup\":{\"schema\":\"digitalogic.default-percentage-markup\",\"configured\":true,\"type\":\"percentage\",\"profit_percent\":\"30\",\"source\":\"global_default\",\"revision\":\"rev-30\"},\"results\":[{\"code\":\"EXACT\",\"status\":\"ok\",\"assignment\":{\"code\":\"EXACT\",\"shipping_method_id\":\"air\",\"profit_percent\":\"12.500000000001\",\"profit_percent_source\":\"product_override\",\"pricing_warnings\":[]}}]}}`)"
+    },
+    {
+      "file": "pkg/pricingcatalog/catalog_test.go",
+      "line": 680,
+      "kinds": [
+        "schema_identity"
+      ],
+      "excerpt": "fmt.Fprint(w, `{\"data\":{\"schema\":\"digitalogic.integration-catalog\",\"revision\":\"r1\",\"currency\":{\"local\":\"IRT\",\"cny_to_local\":1,\"cny_to_irt\":1},\"pricing\":{\"formula_id\":\"landed_price\"},\"shipping_methods\":[{\"id\":\"air\",\"price_per_kg\":1,\"currency\":\"CNY\"}]}}`)"
+    },
+    {
+      "file": "pkg/pricingcatalog/catalog_test.go",
+      "line": 682,
+      "kinds": [
+        "schema_identity"
+      ],
+      "excerpt": "fmt.Fprint(w, `{\"data\":{\"schema\":\"digitalogic.pricing-assignment-batch\",\"requested_count\":1,\"resolved_count\":0,\"error_count\":1,\"maximum_codes\":500,\"default_percentage_markup\":{\"schema\":\"digitalogic.default-percentage-markup\",\"configured\":false,\"type\":\"percentage\",\"source\":\"unset\",\"revision\":\"rev-unset\"},\"results\":[{\"code\":\"A\",\"status\":\"error\",\"error\":{\"code\":\"digitalogic_pricing_temporarily_unavailable\",\"http_status\":503,\"retryable\":true}}]}}`)"
+    },
+    {
+      "file": "pkg/pricingcatalog/catalog_test.go",
+      "line": 704,
+      "kinds": [
+        "schema_identity"
+      ],
+      "excerpt": "fmt.Fprint(w, `{\"data\":{\"schema\":\"digitalogic.integration-catalog\",\"revision\":\"r1\",\"currency\":{\"local\":\"IRT\",\"cny_to_local\":1,\"cny_to_irt\":1},\"pricing\":{\"formula_id\":\"landed_price\"},\"shipping_methods\":[{\"id\":\"air\",\"price_per_kg\":1,\"currency\":\"CNY\"}]}}`)"
+    },
+    {
+      "file": "pkg/pricingcatalog/catalog_test.go",
+      "line": 706,
+      "kinds": [
+        "schema_identity"
+      ],
+      "excerpt": "fmt.Fprint(w, `{\"data\":{\"schema\":\"digitalogic.pricing-assignment-batch\",\"requested_count\":1,\"resolved_count\":1,\"error_count\":0,\"maximum_codes\":500,\"default_percentage_markup\":{\"schema\":\"digitalogic.default-percentage-markup\",\"configured\":true,\"type\":\"percentage\",\"profit_percent\":\"30\",\"source\":\"global_default\",\"revision\":\"rev-30\"},\"results\":[{\"code\":\"A\",\"status\":\"ok\",\"assignment\":{\"code\":\"A\",\"shipping_method_id\":\"air\",\"profit_percent\":\"31\",\"profit_percent_source\":\"global_default\",\"pricing_warnings\":[]}}]}}`)"
+    },
+    {
+      "file": "pkg/pricingcatalog/catalog_test.go",
+      "line": 744,
+      "kinds": [
+        "schema_identity"
+      ],
+      "excerpt": "fmt.Fprint(w, `{\"data\":{\"schema\":\"digitalogic.integration-catalog\",\"revision\":\"r1\",\"currency\":{\"local\":\"IRT\",\"cny_to_local\":1,\"cny_to_irt\":1},\"pricing\":{\"formula_id\":\"landed_price\"},\"shipping_methods\":[]}}`)"
+    },
+    {
+      "file": "pkg/pricingcatalog/catalog_test.go",
+      "line": 747,
+      "kinds": [
+        "schema_identity"
+      ],
+      "excerpt": "fmt.Fprintf(w, `{\"data\":{\"schema\":\"digitalogic.pricing-assignment-batch\",\"requested_count\":1,\"resolved_count\":1,\"error_count\":0,\"maximum_codes\":500,\"default_percentage_markup\":{\"schema\":\"digitalogic.default-percentage-markup\",\"configured\":true,\"type\":\"percentage\",\"profit_percent\":%s,\"source\":\"global_default\",\"revision\":%q},\"results\":[{\"code\":\"A\",\"status\":\"ok\",\"assignment\":{\"code\":\"A\",\"shipping_method_id\":\"air\",\"profit_percent\":%s,\"profit_percent_source\":\"%s\",\"pricing_warnings\":[]}}]}}`, test.defaultProfit, test.revision, test.assignmentProfit, test.assignmentSource)"
+    },
+    {
+      "file": "pkg/pricingcatalog/catalog_test.go",
+      "line": 770,
+      "kinds": [
+        "schema_identity"
+      ],
+      "excerpt": "fmt.Fprint(w, `{\"data\":{\"schema\":\"digitalogic.integration-catalog\",\"revision\":\"r1\",\"currency\":{\"local\":\"IRT\",\"cny_to_local\":1,\"cny_to_irt\":1},\"pricing\":{\"formula_id\":\"landed_price\"},\"shipping_methods\":[{\"id\":\"air\",\"price_per_kg\":1,\"currency\":\"CNY\"}]}}`)"
+    },
+    {
+      "file": "pkg/pricingcatalog/catalog_test.go",
+      "line": 786,
+      "kinds": [
+        "schema_identity"
+      ],
+      "excerpt": "\"schema\": \"digitalogic.pricing-assignment-batch\","
+    },
+    {
+      "file": "pkg/pricingcatalog/catalog_test.go",
+      "line": 789,
+      "kinds": [
+        "schema_identity"
+      ],
+      "excerpt": "\"schema\": \"digitalogic.default-percentage-markup\", \"configured\": true, \"type\": \"percentage\", \"profit_percent\": profit, \"source\": \"global_default\", \"revision\": revision,"
+    },
+    {
+      "file": "pkg/pricingcatalog/catalog_test.go",
+      "line": 828,
+      "kinds": [
+        "schema_identity"
+      ],
+      "excerpt": "fmt.Fprint(w, `{\"data\":{\"schema\":\"digitalogic.integration-catalog\",\"revision\":\"r1\",\"currency\":{\"local\":\"IRT\",\"cny_to_local\":1,\"cny_to_irt\":1},\"pricing\":{\"formula_id\":\"landed_price\"},\"shipping_methods\":[{\"id\":\"air\",\"price_per_kg\":1,\"currency\":\"CNY\"}]}}`)"
+    },
+    {
+      "file": "pkg/pricingcatalog/catalog_test.go",
+      "line": 855,
+      "kinds": [
+        "schema_identity"
+      ],
+      "excerpt": "fmt.Fprintf(w, `{\"data\":{\"schema\":\"digitalogic.integration-catalog\",\"revision\":\"r1\",\"currency\":{\"local\":\"IRT\",\"cny_to_local\":1,\"cny_to_irt\":1},\"pricing\":{\"formula_id\":\"landed_price\"},\"shipping_methods\":[{\"id\":\"air\",\"price_per_kg\":1,\"currency\":\"CNY\",%q:1}]}}`, field)"
+    },
+    {
+      "file": "pkg/pricingcatalog/catalog_test.go",
+      "line": 869,
+      "kinds": [
+        "schema_identity"
+      ],
+      "excerpt": "fmt.Fprint(w, `{\"data\":{\"schema\":\"digitalogic.integration-catalog\",\"unexpected\":true,\"revision\":\"r1\",\"currency\":{\"local\":\"IRT\",\"cny_to_local\":1,\"cny_to_irt\":1},\"pricing\":{\"formula_id\":\"landed_price\"},\"shipping_methods\":[]}}`)"
+    },
+    {
+      "file": "pkg/pricingcatalog/catalog_test.go",
+      "line": 882,
+      "kinds": [
+        "schema_identity"
+      ],
+      "excerpt": "fmt.Fprint(w, `{\"data\":{\"schema\":\"digitalogic.integration-catalog\"},\"unexpected\":true}`)"
+    },
+    {
+      "file": "pkg/pricingcatalog/catalog_test.go",
+      "line": 897,
+      "kinds": [
+        "schema_identity"
+      ],
+      "excerpt": "fmt.Fprint(w, `{\"data\":{\"schema\":\"digitalogic.integration-catalog\",\"revision\":\"r1\",\"currency\":{\"local\":\"IRT\",\"cny_to_local\":1,\"cny_to_irt\":1},\"pricing\":{\"formula_id\":\"landed_price\"},\"shipping_methods\":[{\"id\":\"air\",\"price_per_kg\":1,\"currency\":\"CNY\"}]}}`)"
+    },
+    {
+      "file": "pkg/pricingcatalog/catalog_test.go",
+      "line": 899,
+      "kinds": [
+        "schema_identity"
+      ],
+      "excerpt": "fmt.Fprint(w, `{\"data\":{\"schema\":\"digitalogic.pricing-assignment-batch\",\"requested_count\":1,\"resolved_count\":1,\"error_count\":0,\"maximum_codes\":500,\"default_percentage_markup\":{\"schema\":\"digitalogic.default-percentage-markup\",\"configured\":true,\"type\":\"percentage\",\"profit_percent\":\"30\",\"source\":\"global_default\",\"revision\":\"r1\"},\"results\":[{\"code\":\"A\",\"status\":\"ok\",\"assignment\":{\"code\":\"A\",\"shipping_method_id\":\"air\",\"profit_percent\":\"30\",\"profit_percent_source\":\"global_default\",\"pricing_warnings\":[],\"unexpected_assignment_field\":\"1\"}}]}}`)"
+    },
+    {
+      "file": "pkg/pricingcatalog/catalog_test.go",
+      "line": 921,
+      "kinds": [
+        "schema_identity"
+      ],
+      "excerpt": "fmt.Fprint(w, `{\"data\":{\"schema\":\"digitalogic.integration-catalog\",\"revision\":\"r1\",\"currency\":{\"local\":\"IRT\",\"cny_to_local\":1,\"cny_to_irt\":1},\"pricing\":{\"formula_id\":\"landed_price\"},\"shipping_methods\":[{\"id\":\"air\",\"price_per_kg\":1,\"currency\":\"CNY\"}]}}`)"
+    },
+    {
+      "file": "pkg/pricingcatalog/catalog_test.go",
+      "line": 923,
+      "kinds": [
+        "schema_identity"
+      ],
+      "excerpt": "fmt.Fprint(w, `{\"data\":{\"schema\":\"wrong\",\"results\":[]}}`)"
+    },
+    {
+      "file": "pkg/pricingcatalog/catalog_test.go",
+      "line": 956,
+      "kinds": [
+        "schema_identity"
+      ],
+      "excerpt": "fmt.Fprint(w, `{\"data\":{\"schema\":\"digitalogic.integration-catalog\",\"revision\":\"r1\",\"currency\":{\"local\":\"IRT\",\"cny_to_local\":1,\"cny_to_irt\":1},\"pricing\":{\"formula_id\":\"landed_price\"},\"shipping_methods\":[]}}`)"
+    },
+    {
+      "file": "pkg/pricingcatalog/catalog_test.go",
+      "line": 970,
+      "kinds": [
+        "schema_identity"
+      ],
+      "excerpt": "fmt.Fprint(w, `{\"data\":{\"schema\":\"wrong\",\"results\":[]}}`)"
+    },
+    {
+      "file": "pkg/pricingcatalog/catalog_test.go",
+      "line": 1001,
+      "kinds": [
+        "schema_identity"
+      ],
+      "excerpt": "fmt.Fprint(w, `{\"data\":{\"schema\":\"digitalogic.integration-catalog\",\"revision\":\"r1\",\"currency\":{\"local\":\"IRT\",\"cny_to_local\":1,\"cny_to_irt\":1},\"pricing\":{\"formula_id\":\"landed_price\"},\"shipping_methods\":[]}}`)"
+    },
+    {
+      "file": "pkg/pricingcatalog/catalog_test.go",
+      "line": 1003,
+      "kinds": [
+        "schema_identity"
+      ],
+      "excerpt": "fmt.Fprint(w, `{\"data\":{\"schema\":\"digitalogic.pricing-assignment-batch\",\"requested_count\":1,\"resolved_count\":0,\"error_count\":1,\"maximum_codes\":500,\"default_percentage_markup\":{\"schema\":\"digitalogic.default-percentage-markup\",\"configured\":false,\"type\":\"percentage\",\"source\":\"unset\",\"revision\":\"rev-unset\"},\"results\":[{\"code\":\"COLLISION\",\"status\":\"error\",\"error\":{\"code\":\"digitalogic_product_code_ambiguous\",\"http_status\":409,\"retryable\":false}}]}}`)"
+    },
+    {
+      "file": "pkg/pricingcatalog/catalog_test.go",
+      "line": 1024,
+      "kinds": [
+        "schema_identity"
+      ],
+      "excerpt": "fmt.Fprint(w, `{\"data\":{\"schema\":\"digitalogic.integration-catalog\",\"revision\":\"r1\",\"currency\":{\"local\":\"IRT\",\"cny_to_local\":1,\"cny_to_irt\":1},\"pricing\":{\"formula_id\":\"landed_price\"},\"shipping_methods\":[{\"id\":\"air\",\"price_per_kg\":1,\"currency\":\"CNY\"}]}}`)"
+    },
+    {
+      "file": "pkg/pricingcatalog/catalog_test.go",
+      "line": 1077,
+      "kinds": [
+        "schema_identity"
+      ],
+      "excerpt": "fmt.Fprint(w, `{\"data\":{\"schema\":\"digitalogic.integration-catalog\",\"revision\":\"r1\",\"currency\":{\"local\":\"IRT\",\"cny_to_local\":1,\"cny_to_irt\":1},\"pricing\":{\"formula_id\":\"landed_price\"},\"shipping_methods\":[]}}`)"
+    },
+    {
+      "file": "pkg/pricingcatalog/catalog_test.go",
+      "line": 1140,
+      "kinds": [
+        "schema_identity"
+      ],
+      "excerpt": "fmt.Fprint(w, `{\"data\":{\"schema\":\"digitalogic.integration-catalog\",\"revision\":\"r1\",\"currency\":{\"local\":\"IRT\",\"cny_to_local\":1,\"cny_to_irt\":1},\"pricing\":{\"formula_id\":\"landed_price\"},\"shipping_methods\":[{\"id\":\"air\",\"price_per_kg\":1,\"currency\":\"CNY\"}]}}`)"
+    },
+    {
+      "file": "pkg/pricingcatalog/catalog_test.go",
+      "line": 1192,
+      "kinds": [
+        "version_or_schema_guard"
+      ],
+      "excerpt": "{name: \"schema\", schema: \"wrong\", localCurrency: \"IRT\", formulaID: \"landed_price\", expectedWarning: \"pricing_catalog_schema_incompatible\"},"
+    },
+    {
+      "file": "pkg/pricingcatalog/catalog_test.go",
+      "line": 1202,
+      "kinds": [
+        "schema_identity"
+      ],
+      "excerpt": "\"schema\": test.schema, \"revision\": \"r1\","
+    },
+    {
+      "file": "pkg/pricingcatalog/catalog_test.go",
+      "line": 1235,
+      "kinds": [
+        "schema_identity"
+      ],
+      "excerpt": "\"schema\": \"digitalogic.integration-catalog\", \"revision\": \"r1\","
+    },
+    {
+      "file": "pkg/pricingcatalog/catalog_test.go",
+      "line": 1267,
+      "kinds": [
+        "schema_identity"
+      ],
+      "excerpt": "fmt.Fprint(w, `{\"data\":{\"schema\":\"digitalogic.integration-catalog\",\"revision\":\"r1\",\"currency\":{\"local\":\"IRT\",\"cny_to_local\":25300,\"cny_to_irt\":25300},\"pricing\":{\"formula_id\":\"landed_price\"},\"shipping_methods\":[{\"id\":\"air\",\"price_per_kg\":85,\"currency\":\"CNY\"}]}}`)"
+    },
+    {
+      "file": "pkg/pricingcatalog/catalog_test.go",
+      "line": 1270,
+      "kinds": [
+        "schema_identity"
+      ],
+      "excerpt": "fmt.Fprint(w, `{\"data\":{\"schema\":\"digitalogic.pricing-assignment-batch\",\"requested_count\":1,\"resolved_count\":1,\"error_count\":0,\"maximum_codes\":500,\"default_percentage_markup\":{\"schema\":\"digitalogic.default-percentage-markup\",\"configured\":true,\"type\":\"percentage\",\"profit_percent\":\"30\",\"source\":\"global_default\",\"revision\":\"rev-30\"},\"results\":[{\"code\":\"A\",\"status\":\"ok\",\"assignment\":{\"code\":\"A\",\"shipping_method_id\":\"air\",\"profit_percent\":\"30\",\"profit_percent_source\":\"global_default\",\"pricing_warnings\":[]}}]}}`)"
+    },
+    {
+      "file": "pkg/pricingcatalog/http.go",
+      "line": 900,
+      "kinds": [
+        "schema_identity"
+      ],
+      "excerpt": "Schema string `json:\"schema\"`"
+    },
+    {
+      "file": "pkg/pricingcatalog/http.go",
+      "line": 946,
+      "kinds": [
+        "schema_identity"
+      ],
+      "excerpt": "schemaCompatible := wire.Schema == \"digitalogic.integration-catalog\""
+    },
+    {
+      "file": "pkg/pricingcatalog/http.go",
+      "line": 948,
+      "kinds": [
+        "version_or_schema_guard"
+      ],
+      "excerpt": "warnings = append(warnings, \"pricing_catalog_schema_incompatible\")"
+    },
+    {
+      "file": "pkg/pricingcatalog/http.go",
+      "line": 1089,
+      "kinds": [
+        "schema_identity"
+      ],
+      "excerpt": "Schema string `json:\"schema\"`"
+    },
+    {
+      "file": "pkg/pricingcatalog/http.go",
+      "line": 1095,
+      "kinds": [
+        "schema_identity"
+      ],
+      "excerpt": "Schema string `json:\"schema\"`"
+    },
+    {
+      "file": "pkg/pricingcatalog/http.go",
+      "line": 1118,
+      "kinds": [
+        "schema_identity"
+      ],
+      "excerpt": "if wire.Schema != \"digitalogic.pricing-assignment-batch\" {"
+    },
+    {
+      "file": "pkg/pricingcatalog/http.go",
+      "line": 1121,
+      "kinds": [
+        "schema_identity"
+      ],
+      "excerpt": "if wire.DefaultMarkup.Schema != \"digitalogic.default-percentage-markup\" {"
+    },
+    {
+      "file": "pkg/pricingcatalog/http.go",
+      "line": 1156,
+      "kinds": [
+        "strict_decoder"
+      ],
+      "excerpt": "if err := decodeStrictJSON(result.Assignment, &assignment); err != nil {"
+    },
+    {
+      "file": "pkg/pricingcatalog/http.go",
+      "line": 1352,
+      "kinds": [
+        "strict_decoder"
+      ],
+      "excerpt": "if err := decodeStrictJSON(data, &envelope); err != nil {"
+    },
+    {
+      "file": "pkg/pricingcatalog/http.go",
+      "line": 1364,
+      "kinds": [
+        "strict_decoder"
+      ],
+      "excerpt": "if err := decodeStrictJSON(data, target); err != nil {"
+    },
+    {
+      "file": "pkg/pricingcatalog/http.go",
+      "line": 1370,
+      "kinds": [
+        "strict_decoder"
+      ],
+      "excerpt": "func decodeStrictJSON(data []byte, target interface{}) error {"
+    },
+    {
+      "file": "pkg/pricingcatalog/http.go",
+      "line": 1372,
+      "kinds": [
+        "strict_decoder"
+      ],
+      "excerpt": "decoder.DisallowUnknownFields()"
+    },
+    {
+      "file": "pkg/pricingcatalog/method_presence.go",
+      "line": 29,
+      "kinds": [
+        "strict_decoder"
+      ],
+      "excerpt": "if err := decodeStrictJSON(data, &decoded); err != nil {"
+    },
+    {
+      "file": "pkg/pricingcatalog/prefetch_concurrency_test.go",
+      "line": 185,
+      "kinds": [
+        "schema_identity"
+      ],
+      "excerpt": "body := `{\"data\":{\"schema\":\"digitalogic.integration-catalog\",\"revision\":\"r1\",\"currency\":{\"local\":\"IRT\",\"cny_to_local\":29000,\"cny_to_irt\":29000},\"pricing\":{\"formula_id\":\"landed_price\"},\"shipping_methods\":[{\"id\":\"air\",\"price_per_kg\":120,\"currency\":\"CNY\"}]}}`"
+    },
+    {
+      "file": "pkg/pricingcatalog/prefetch_concurrency_test.go",
+      "line": 392,
+      "kinds": [
+        "schema_identity"
+      ],
+      "excerpt": "fmt.Fprint(w, `{\"data\":{\"schema\":\"digitalogic.integration-catalog\",\"revision\":\"r1\",\"currency\":{\"local\":\"IRT\",\"cny_to_local\":29000,\"cny_to_irt\":29000},\"pricing\":{\"formula_id\":\"landed_price\"},\"shipping_methods\":[{\"id\":\"air\",\"price_per_kg\":120,\"currency\":\"CNY\"}]}}`)"
+    },
+    {
+      "file": "pkg/pricingcatalog/prefetch_concurrency_test.go",
+      "line": 408,
+      "kinds": [
+        "schema_identity"
+      ],
+      "excerpt": "\"schema\": \"digitalogic.pricing-assignment-batch\","
+    },
+    {
+      "file": "pkg/pricingcatalog/prefetch_concurrency_test.go",
+      "line": 411,
+      "kinds": [
+        "schema_identity"
+      ],
+      "excerpt": "\"schema\": \"digitalogic.default-percentage-markup\", \"configured\": true, \"type\": \"percentage\","
+    },
+    {
+      "file": "pkg/pricingcatalog/static_presence.go",
+      "line": 17,
+      "kinds": [
+        "strict_decoder"
+      ],
+      "excerpt": "if err := decodeStrictJSON(data, &decoded); err != nil {"
+    },
+    {
+      "file": "pkg/recentsales/contract_test.go",
+      "line": 100,
+      "kinds": [
+        "schema_identity"
+      ],
+      "excerpt": "if got.Schema != SchemaName || got.Version != SchemaVersion || got.Source.ID != \"office-sales\" ||"
+    },
+    {
+      "file": "pkg/recentsales/contract.go",
+      "line": 12,
+      "kinds": [
+        "schema_identity"
+      ],
+      "excerpt": "SchemaName = \"patris.recent-sales-aggregate\""
+    },
+    {
+      "file": "pkg/recentsales/contract.go",
+      "line": 13,
+      "kinds": [
+        "schema_identity"
+      ],
+      "excerpt": "SchemaVersion = 1"
+    },
+    {
+      "file": "pkg/recentsales/contract.go",
+      "line": 187,
+      "kinds": [
+        "schema_identity"
+      ],
+      "excerpt": "Schema string `json:\"schema\"`"
+    },
+    {
+      "file": "pkg/recentsales/source.go",
+      "line": 97,
+      "kinds": [
+        "schema_identity"
+      ],
+      "excerpt": "Schema: SchemaName,"
+    },
+    {
+      "file": "pkg/recordpipe/pipeline_test.go",
+      "line": 216,
+      "kinds": [
+        "schema_identity"
+      ],
+      "excerpt": "Schema: canonical.ContractName,"
+    },
+    {
+      "file": "pkg/recordpipe/xlsx.go",
+      "line": 17,
+      "kinds": [
+        "schema_identity"
+      ],
+      "excerpt": "Schema: \"patris-export.records\","
+    },
+    {
+      "file": "pkg/recordpipe/xlsx.go",
+      "line": 24,
+      "kinds": [
+        "schema_identity"
+      ],
+      "excerpt": "Schema: contract.Schema,"
+    },
+    {
+      "file": "pkg/recordsink/sql_diagnostic.go",
+      "line": 42,
+      "kinds": [
+        "version_or_schema_guard"
+      ],
+      "excerpt": "SQLFailureSchema SQLFailureCode = \"schema_incompatible\""
+    },
+    {
+      "file": "pkg/recordsink/sql_diagnostic.go",
+      "line": 210,
+      "kinds": [
+        "version_or_schema_guard"
+      ],
+      "excerpt": "return \"The SQL target schema is incompatible.\""
+    },
+    {
+      "file": "pkg/recordsink/xlsx_test.go",
+      "line": 40,
+      "kinds": [
+        "schema_identity"
+      ],
+      "excerpt": "Schema: \"patris.product-sync\","
+    },
+    {
+      "file": "pkg/recordsink/xlsx_test.go",
+      "line": 113,
+      "kinds": [
+        "schema_identity"
+      ],
+      "excerpt": "\"schema\": \"patris.product-sync\","
+    },
+    {
+      "file": "pkg/recordsink/xlsx.go",
+      "line": 154,
+      "kinds": [
+        "schema_identity"
+      ],
+      "excerpt": "options.Metadata.Schema = \"patris-export.records\""
+    },
+    {
+      "file": "pkg/server/excel_pricing_test.go",
+      "line": 145,
+      "kinds": [
+        "schema_version",
+        "schema_identity"
+      ],
+      "excerpt": "\"missing\": `{\"schema\":\"patris.excel-pricing-companion-request/v1\",\"schema_version\":1,\"operation\":\"state\",\"page\":1,\"limit\":1,\"locale\":\"fa\"}`,"
+    },
+    {
+      "file": "pkg/server/excel_pricing_test.go",
+      "line": 469,
+      "kinds": [
+        "schema_identity"
+      ],
+      "excerpt": "_, _ = io.WriteString(w, `{\"schema\":\"`+excelPricingStateSchema+`\",\"state_revision\":\"`+"
+    },
+    {
+      "file": "pkg/server/excel_pricing_test.go",
+      "line": 519,
+      "kinds": [
+        "schema_identity"
+      ],
+      "excerpt": "`{\"schema\":\"`+excelPricingLocalRequestSchema+`\",\"padding\":\"`+"
+    },
+    {
+      "file": "pkg/server/excel_pricing_test.go",
+      "line": 615,
+      "kinds": [
+        "schema_identity"
+      ],
+      "excerpt": "Schema string `json:\"schema\"`"
+    },
+    {
+      "file": "pkg/server/excel_pricing_test.go",
+      "line": 621,
+      "kinds": [
+        "schema_identity"
+      ],
+      "excerpt": "if payload.Schema != excelPricingSessionSchema {"
+    },
+    {
+      "file": "pkg/server/excel_pricing_test.go",
+      "line": 644,
+      "kinds": [
+        "schema_identity"
+      ],
+      "excerpt": "\"schema\": excelPricingLocalRequestSchema,"
+    },
+    {
+      "file": "pkg/server/excel_pricing_test.go",
+      "line": 645,
+      "kinds": [
+        "schema_version",
+        "schema_identity"
+      ],
+      "excerpt": "\"schema_version\": 1,"
+    },
+    {
+      "file": "pkg/server/excel_pricing_test.go",
+      "line": 669,
+      "kinds": [
+        "schema_identity"
+      ],
+      "excerpt": "\"schema\": excelPricingLocalRequestSchema,"
+    },
+    {
+      "file": "pkg/server/excel_pricing_test.go",
+      "line": 670,
+      "kinds": [
+        "schema_version",
+        "schema_identity"
+      ],
+      "excerpt": "\"schema_version\": 1,"
+    },
+    {
+      "file": "pkg/server/excel_pricing_test.go",
+      "line": 698,
+      "kinds": [
+        "schema_identity"
+      ],
+      "excerpt": "Schema: canonical.ContractName,"
+    },
+    {
+      "file": "pkg/server/excel_pricing_test.go",
+      "line": 715,
+      "kinds": [
+        "schema_identity"
+      ],
+      "excerpt": "\"schema\": schema,"
+    },
+    {
+      "file": "pkg/server/excel_pricing.go",
+      "line": 60,
+      "kinds": [
+        "schema_identity"
+      ],
+      "excerpt": "Schema string `json:\"schema\"`"
+    },
+    {
+      "file": "pkg/server/excel_pricing.go",
+      "line": 61,
+      "kinds": [
+        "schema_version",
+        "schema_identity"
+      ],
+      "excerpt": "SchemaVersion int `json:\"schema_version\"`"
+    },
+    {
+      "file": "pkg/server/excel_pricing.go",
+      "line": 76,
+      "kinds": [
+        "schema_identity"
+      ],
+      "excerpt": "Schema string `json:\"schema\"`"
+    },
+    {
+      "file": "pkg/server/excel_pricing.go",
+      "line": 77,
+      "kinds": [
+        "schema_version",
+        "schema_identity"
+      ],
+      "excerpt": "SchemaVersion int `json:\"schema_version\"`"
+    },
+    {
+      "file": "pkg/server/excel_pricing.go",
+      "line": 172,
+      "kinds": [
+        "schema_identity"
+      ],
+      "excerpt": "\"schema\": excelPricingSessionSchema,"
+    },
+    {
+      "file": "pkg/server/excel_pricing.go",
+      "line": 298,
+      "kinds": [
+        "schema_identity"
+      ],
+      "excerpt": "if result.Contract == nil || result.Contract.Schema != canonical.ContractName ||"
+    },
+    {
+      "file": "pkg/server/excel_pricing.go",
+      "line": 321,
+      "kinds": [
+        "schema_identity"
+      ],
+      "excerpt": "Schema: excelPricingRemoteRequestSchema,"
+    },
+    {
+      "file": "pkg/server/excel_pricing.go",
+      "line": 322,
+      "kinds": [
+        "schema_identity"
+      ],
+      "excerpt": "SchemaVersion: 1,"
+    },
+    {
+      "file": "pkg/server/excel_pricing.go",
+      "line": 406,
+      "kinds": [
+        "version_or_schema_guard"
+      ],
+      "excerpt": "expectedSchema := excelPricingExpectedSchema(operation)"
+    },
+    {
+      "file": "pkg/server/excel_pricing.go",
+      "line": 408,
+      "kinds": [
+        "schema_identity"
+      ],
+      "excerpt": "Schema string `json:\"schema\"`"
+    },
+    {
+      "file": "pkg/server/excel_pricing.go",
+      "line": 412,
+      "kinds": [
+        "schema_identity",
+        "version_or_schema_guard"
+      ],
+      "excerpt": "metadata.Schema != expectedSchema ||"
+    },
+    {
+      "file": "pkg/server/excel_pricing.go",
+      "line": 456,
+      "kinds": [
+        "schema_identity"
+      ],
+      "excerpt": "Schema: excelPricingLocalRequestSchema,"
+    },
+    {
+      "file": "pkg/server/excel_pricing.go",
+      "line": 457,
+      "kinds": [
+        "schema_identity"
+      ],
+      "excerpt": "SchemaVersion: 1,"
+    },
+    {
+      "file": "pkg/server/excel_pricing.go",
+      "line": 489,
+      "kinds": [
+        "schema_identity"
+      ],
+      "excerpt": "if request.Schema != excelPricingLocalRequestSchema || request.SchemaVersion != 1 || request.Operation != operation {"
+    },
+    {
+      "file": "pkg/server/excel_pricing.go",
+      "line": 633,
+      "kinds": [
+        "version_or_schema_guard"
+      ],
+      "excerpt": "func excelPricingExpectedSchema(operation string) string {"
+    },
+    {
+      "file": "pkg/server/excel_pricing.go",
+      "line": 687,
+      "kinds": [
+        "strict_decoder"
+      ],
+      "excerpt": "decoder.DisallowUnknownFields()"
+    },
+    {
+      "file": "pkg/server/recent_sales_test.go",
+      "line": 101,
+      "kinds": [
+        "schema_identity"
+      ],
+      "excerpt": "Schema string `json:\"schema\"`"
+    },
+    {
+      "file": "pkg/server/recent_sales_test.go",
+      "line": 108,
+      "kinds": [
+        "schema_identity"
+      ],
+      "excerpt": "if payload.Schema != recentsales.SchemaName || payload.Source.ID != \"nightly-sales\" ||"
+    },
+    {
+      "file": "pkg/server/server_test.go",
+      "line": 695,
+      "kinds": [
+        "schema_identity"
+      ],
+      "excerpt": "if envelope.Schema != canonical.ContractName || len(envelope.Categories) != 54 {"
+    },
+    {
+      "file": "pkg/server/server_test.go",
+      "line": 758,
+      "kinds": [
+        "schema_identity"
+      ],
+      "excerpt": "\"schema\": envelope.Schema,"
+    },
+    {
+      "file": "pkg/server/server_test.go",
+      "line": 868,
+      "kinds": [
+        "schema_identity"
+      ],
+      "excerpt": "if message.Type != \"initial\" || message.Contract.Schema != canonical.ContractName {"
+    },
+    {
+      "file": "pkg/server/server_test.go",
+      "line": 937,
+      "kinds": [
+        "schema_identity"
+      ],
+      "excerpt": "if envelope.Schema != canonical.ContractName || envelope.Source.Dataset != \"kala.db\" {"
+    },
+    {
+      "file": "pkg/server/sql_operations.go",
+      "line": 1191,
+      "kinds": [
+        "strict_decoder"
+      ],
+      "excerpt": "decoder.DisallowUnknownFields()"
+    },
+    {
+      "file": "pkg/server/startup_timeout_test.go",
+      "line": 262,
+      "kinds": [
+        "schema_identity"
+      ],
+      "excerpt": "fmt.Fprint(w, `{\"data\":{\"schema\":\"digitalogic.integration-catalog\",\"revision\":\"r1\",\"currency\":{\"local\":\"IRT\",\"cny_to_local\":29000,\"cny_to_irt\":29000},\"pricing\":{\"formula_id\":\"landed_price\"},\"selected_warehouses\":[],\"shipping_methods\":[{\"id\":\"air\",\"price_per_kg\":120,\"currency\":\"CNY\"}]}}`)"
+    },
+    {
+      "file": "pkg/updateout/updateout_test.go",
+      "line": 211,
+      "kinds": [
+        "schema_identity"
+      ],
+      "excerpt": "if decoded.Schema != canonical.ContractName || len(decoded.Products) != 1 || decoded.Products[0].ProductCode != \"113007045\" {"
+    },
+    {
+      "file": "pkg/updateout/updateout_test.go",
+      "line": 685,
+      "kinds": [
+        "schema_identity"
+      ],
+      "excerpt": "err = Dispatch(t.Context(), cfg, Event{Type: \"update\", Contract: &canonical.Envelope{Schema: canonical.ContractName}})"
+    },
+    {
+      "file": "pkg/updateout/updateout.go",
+      "line": 352,
+      "kinds": [
+        "schema_identity"
+      ],
+      "excerpt": "if cfg.URL == \"\" || cfg.Format != \"json\" || contract == nil || contract.Schema != canonical.ContractName {"
+    },
+    {
+      "file": "pkg/updateout/updateout.go",
+      "line": 434,
+      "kinds": [
+        "schema_identity"
+      ],
+      "excerpt": "isProductSync := contract != nil && contract.Schema == canonical.ContractName"
+    },
+    {
+      "file": "scripts/examples/patris-delivery-adapter.test.cjs",
+      "line": 74,
+      "kinds": [
+        "schema_version"
+      ],
+      "excerpt": "assert.equal(Object.hasOwn(payload, 'schema_version'), false);"
+    },
+    {
+      "file": "scripts/examples/patris-delivery-adapter.test.cjs",
+      "line": 165,
+      "kinds": [
+        "schema_identity"
+      ],
+      "excerpt": "const raw = '{\"schema\":\"patris.product-sync\",\"event_type\":\"update\",\"event_id\":\"evt-exact\",\"source\":{\"id\":\"patris-test\"},\"products\":[{\"product_code\":\"EXACT\",\"final_price\":100000000000000001,\"foreign_price\":0.1000000000000000006}]}';"
+    },
+    {
+      "file": "scripts/watch-websocket.sh",
+      "line": 86,
+      "kinds": [
+        "schema_version"
+      ],
+      "excerpt": "print(f\"[{timestamp}] config_update schema={config.get('schema_version')}\", flush=True)"
+    },
+    {
+      "file": "scripts/windows/Install-PatrisExportScheduledTask.ps1",
+      "line": 168,
+      "kinds": [
+        "schema_version"
+      ],
+      "excerpt": "$schemaVersion = [int]$state.schema_version"
+    },
+    {
+      "file": "scripts/windows/Run-PatrisExportScheduledTask.ps1",
+      "line": 156,
+      "kinds": [
+        "schema_version"
+      ],
+      "excerpt": "[int]$existingState.schema_version -notin @(1, 2) -or"
+    },
+    {
+      "file": "scripts/windows/Run-PatrisExportScheduledTask.ps1",
+      "line": 164,
+      "kinds": [
+        "schema_version"
+      ],
+      "excerpt": "if ([int]$existingState.schema_version -eq 2 -and"
+    },
+    {
+      "file": "scripts/windows/Run-PatrisExportScheduledTask.ps1",
+      "line": 212,
+      "kinds": [
+        "schema_version"
+      ],
+      "excerpt": "schema_version = 2"
+    },
+    {
+      "file": "scripts/windows/Run-PatrisExportScheduledTask.ps1",
+      "line": 241,
+      "kinds": [
+        "schema_version"
+      ],
+      "excerpt": "schema_version = 2"
+    },
+    {
+      "file": "scripts/windows/Test-ScheduledTaskEnvironmentBridge.ps1",
+      "line": 188,
+      "kinds": [
+        "schema_version"
+      ],
+      "excerpt": "schema_version = 1"
+    },
+    {
+      "file": "scripts/windows/Watch-WebSocat.ps1",
+      "line": 53,
+      "kinds": [
+        "schema_version"
+      ],
+      "excerpt": "return \"[$timestamp] config_update schema=$($message.config.schema_version)\""
+    },
+    {
+      "file": "testdata/digitalogic-pricing-assignment-batch.golden.json",
+      "line": 2,
+      "kinds": [
+        "schema_identity"
+      ],
+      "excerpt": "\"schema\": \"digitalogic.pricing-assignment-batch\","
+    },
+    {
+      "file": "testdata/digitalogic-pricing-assignment-batch.golden.json",
+      "line": 8,
+      "kinds": [
+        "schema_identity"
+      ],
+      "excerpt": "\"schema\": \"digitalogic.default-percentage-markup\","
+    },
+    {
+      "file": "testdata/patris-product-sync.standalone.json",
+      "line": 2,
+      "kinds": [
+        "schema_identity"
+      ],
+      "excerpt": "\"schema\": \"patris.product-sync\","
+    },
+    {
+      "file": "testdata/patris-product-sync.synthetic.json",
+      "line": 2,
+      "kinds": [
+        "schema_identity"
+      ],
+      "excerpt": "\"schema\": \"patris.product-sync\","
+    }
+  ]
+}
