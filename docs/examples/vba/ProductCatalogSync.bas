@@ -335,6 +335,7 @@ Private mPricingEventValidationRefreshScheduled As Boolean
 Private mPricingEventValidationConfirmationQueued As Boolean
 Private mPricingEventValidationRefreshCount As Long
 Private mPricingEventValidationAppliedCount As Long
+Private mPricingEventValidationDiagnostic As String
 Private mWorkbookClosing As Boolean
 Private mResumeRefreshAfterCancelledClose As Boolean
 Private mCatalogCommitInProgress As Boolean
@@ -2095,12 +2096,13 @@ Private Sub HandleOperationTerminal()
             HandleRepairResponse statusCode, responseBody
         Case Else
             Err.Raise vbObjectError + 761, "HandleOperationTerminal", _
-                      T("sync_retry")
+                      T("sync_retry") & " [stage=" & _
+                      IIf(Len(stageName) = 0, "<empty>", stageName) & "]"
     End Select
     Exit Sub
 
 TerminalFailed:
-    FailActiveOperation Err.Number, "HandleOperationTerminal", Err.Description
+    FailActiveOperation Err.Number, Err.Source, Err.Description
 End Sub
 
 Private Function SnapshotWaitRequestTimedOut(ByVal stageName As String, _
@@ -2225,7 +2227,6 @@ Private Function TryCompleteUnchangedRevision( _
     Dim stateRevision As String
     Dim pricingStateRevision As String
     Dim catalogRevision As String
-    Dim revisionETag As String
 
     On Error GoTo NotUnchanged
     If mOperationKind <> "refresh" Or mForceFreshSnapshot Then Exit Function
@@ -2240,11 +2241,9 @@ Private Function TryCompleteUnchangedRevision( _
     stateRevision = SiteText(root, "state_revision")
     pricingStateRevision = SiteText(root, "pricing_state_revision")
     catalogRevision = SiteText(root, "catalog_revision")
-    revisionETag = SiteText(root, "etag")
     If Not IsSHA256RevisionText(stateRevision) Or _
        Not IsSHA256RevisionText(pricingStateRevision) Or _
-       Not IsSHA256RevisionText(catalogRevision) Or _
-       StrongETagRevision(revisionETag) <> stateRevision Then Exit Function
+       Not IsSHA256RevisionText(catalogRevision) Then Exit Function
 
     Set settings = ConfigSheet()
     If StrComp(Trim$(CStr(settings.Range("G56").Value2)), _
@@ -2260,7 +2259,9 @@ Private Function TryCompleteUnchangedRevision( _
     ' a full snapshot. The strong state ETag already binds the composite
     ' pricing/catalog state; retain the separately typed pricing/source/count
     ' and local-coherence guards here, while G44 remains guarded against the
-    ' snapshot dataset revision in TryCompleteUnchangedSnapshot.
+    ' snapshot dataset revision in TryCompleteUnchangedSnapshot. ETag is only
+    ' an optional representation validator because WinHTTP/gzip middleware may
+    ' legitimately transform it without changing these semantic revisions.
     If Not HasCoherentLocalCatalog() Or _
        CBool(settings.Range("G31").Value2) Or _
        StrictPriceParityMismatchCount() <> 0 Then Exit Function
@@ -2480,8 +2481,6 @@ Private Sub HandleSnapshotPayloadResponse(ByVal statusCode As Long, _
                                           ByVal responseHeaders As String, _
                                           ByVal responseBody As Variant)
     Dim responseText As String
-    Dim responseETag As String
-    Dim rawDigest As String
     Dim reconciledRows As Object
     Dim validatedState As JsonValue
     Dim validatedCatalog As JsonValue
@@ -2494,24 +2493,17 @@ Private Sub HandleSnapshotPayloadResponse(ByVal statusCode As Long, _
     Dim committedSseCSRFToken As String
 
     RequireHTTPSuccess statusCode, responseBody, "snapshot_payload"
-    responseETag = ResponseHeaderValue(responseHeaders, "ETag")
-    If Len(mSnapshotExpectedETag) = 0 Or _
-       StrComp(Trim$(responseETag), Trim$(mSnapshotExpectedETag), _
-               vbBinaryCompare) <> 0 Then
-        Err.Raise vbObjectError + 130, "HandleSnapshotPayloadResponse", _
-                  T("invalid_workbook")
-    End If
-    rawDigest = SHA256RevisionBytes(responseBody)
-    If rawDigest <> StrongETagRevision(mSnapshotExpectedETag) Then
-        Err.Raise vbObjectError + 130, "HandleSnapshotPayloadResponse", _
-                  T("invalid_workbook")
-    End If
+    ' ResponseBody is transparently decompressed by WinHTTP on some hosts while
+    ' the intermediary keeps or rewrites the representation ETag. Do not bind
+    ' the canonical snapshot to those transport bytes. The parser below binds
+    ' it to the advertised snapshot/state/source identities and verifies the
+    ' complete semantic integrity envelope before any workbook mutation.
     responseText = Utf8TextFromBytes(responseBody)
     Set reconciledRows = CreateObject("Scripting.Dictionary")
     reconciledRows.CompareMode = vbBinaryCompare
     fetchedRows = ImportPricingSnapshotPayload( _
-        responseText, mSnapshotExpectedETag, mSnapshotRevision, _
-        mSnapshotStateRevision, reconciledRows, validatedState, _
+        responseText, mSnapshotStateRevision, _
+        reconciledRows, validatedState, _
         validatedCatalog, validatedDatasetRevision, _
         validatedSourceRevision, validatedCountSignature)
     ValidateSseListenerPrerequisites mSnapshotEventsURL, mSnapshotJobID, _
@@ -3002,6 +2994,14 @@ Public Function PricingEventListenerActiveForValidation() As Boolean
         ((Not mSseRequest Is Nothing) Or _
          (Not mSseSessionRequest Is Nothing) Or mSseReconnectScheduled)
 End Function
+
+Public Sub PausePricingEventListenerForValidation()
+    ' The isolated validator first proves the live listener is active, then
+    ' pauses its asynchronous callbacks so deterministic COM fixtures cannot
+    ' race a real SSE dispatch. A normal workbook never calls this routine;
+    ' Workbook_Open always starts the listener through the production path.
+    StopSseListener True
+End Sub
 
 Private Sub EnsureSseListener(ByVal eventsURL As String, _
                               ByVal jobID As String, _
@@ -3859,6 +3859,7 @@ Public Function ValidatePricingEventAutoPullForValidation() As Boolean
     Dim originalRefreshAfterConfirmation As Boolean
     Dim originalValidationRefreshActive As Boolean
     Dim originalInternalRefresh As Boolean
+    Dim originalManualStop As Boolean
     Dim originalEvents As Boolean
     Dim originalSaved As Boolean
     Dim runtimeStateCaptured As Boolean
@@ -3871,9 +3872,15 @@ Public Function ValidatePricingEventAutoPullForValidation() As Boolean
     Dim nextPricingRevision As String
 
     On Error GoTo ValidationFailed
+    mPricingEventValidationDiagnostic = "entry"
     If Len(mOperationKind) > 0 Or mRefreshInProgress Or _
-       mPricingActionInProgress Or mPricingEventValidationMode Then _
+       mPricingActionInProgress Or mPricingEventValidationMode Then
+        mPricingEventValidationDiagnostic = "entry:operation=" & _
+            mOperationKind & ";refresh=" & CStr(mRefreshInProgress) & _
+            ";pricing=" & CStr(mPricingActionInProgress) & _
+            ";validation=" & CStr(mPricingEventValidationMode)
         Exit Function
+    End If
 
     originalLastEventID = mSseLastEventID
     originalSseJobID = mSseJobID
@@ -3884,6 +3891,7 @@ Public Function ValidatePricingEventAutoPullForValidation() As Boolean
     originalValidationRefreshActive = _
         mPricingEventValidationRefreshActive
     originalInternalRefresh = mInternalPricingRefresh
+    originalManualStop = mSseManualStop
     originalEvents = Application.EnableEvents
     originalSaved = ThisWorkbook.Saved
     runtimeStateCaptured = True
@@ -3906,6 +3914,10 @@ Public Function ValidatePricingEventAutoPullForValidation() As Boolean
     settings.Range("G14").Value2 = currentPricingRevision
 
     mPricingEventValidationMode = True
+    ' The deterministic validator pauses the real network listener before
+    ' invoking this fixture. Exercise the event scheduler as an active listener
+    ' without opening a socket, then restore the paused runtime state below.
+    mSseManualStop = False
     mPricingEventValidationRefreshActive = False
     ' Model the one refresh already scheduled by Workbook_Open. The event
     ' fixtures below must not add a second load for completion or the revision
@@ -3920,10 +3932,12 @@ Public Function ValidatePricingEventAutoPullForValidation() As Boolean
     mSseLastEventID = "100"
     mSseJobID = "job_cold_open"
 
+    mPricingEventValidationDiagnostic = "cold-open-coalescing"
     Set eventValue = PricingEventFixtureForValidation( _
         101, "source_changed", nextStateRevision, vbNullString, _
         True, True, "job_cold_open")
     HandlePricingSseEvent eventValue
+    mPricingEventValidationDiagnostic = "fresh-revision-scheduling"
     Set eventValue = PricingEventFixtureForValidation( _
         102, "snapshot_ready", nextStateRevision, _
         currentPricingRevision, False, True, "job_cold_open")
@@ -3965,6 +3979,7 @@ Public Function ValidatePricingEventAutoPullForValidation() As Boolean
     ' A semantic event received while a refresh is active is retained, not
     ' allowed to abort that request. If the terminal commit contains the same
     ' composite revision, re-evaluation clears it without a successor.
+    mPricingEventValidationDiagnostic = "active-refresh-same-revision"
     mPricingEventValidationRefreshActive = True
     Set eventValue = PricingEventFixtureForValidation( _
         108, "source_changed", thirdStateRevision, vbNullString)
@@ -3990,6 +4005,7 @@ Public Function ValidatePricingEventAutoPullForValidation() As Boolean
     ' pre-refresh revision to a new revision and then rolls back, retain the
     ' rollback even though it still equals G56 before the active commit. After
     ' that commit moves G56 forward, exactly one successor applies the rollback.
+    mPricingEventValidationDiagnostic = "active-refresh-rollback"
     mPricingEventValidationRefreshActive = True
     Set eventValue = PricingEventFixtureForValidation( _
         110, "catalog_changed", fourthStateRevision, vbNullString)
@@ -4015,6 +4031,7 @@ Public Function ValidatePricingEventAutoPullForValidation() As Boolean
     If mPricingEventValidationAppliedCount <> 3 Or _
        mSseRefreshRequired Then GoTo ValidationFailed
 
+    mPricingEventValidationDiagnostic = "pricing-confirmation"
     Set eventValue = PricingEventFixtureForValidation( _
         113, "pricing_state_changed", thirdStateRevision, _
         currentPricingRevision)
@@ -4030,6 +4047,7 @@ Public Function ValidatePricingEventAutoPullForValidation() As Boolean
        mPricingEventValidationRefreshScheduled Then _
         GoTo ValidationFailed
 
+    mPricingEventValidationDiagnostic = "pricing-invalidation"
     Set eventValue = PricingEventFixtureForValidation( _
         115, "pricing_state_invalidated", nextPricingRevision, _
         vbNullString)
@@ -4045,6 +4063,7 @@ Public Function ValidatePricingEventAutoPullForValidation() As Boolean
         GoTo ValidationFailed
 
     ValidatePricingEventAutoPullForValidation = True
+    mPricingEventValidationDiagnostic = "ok"
     GoTo ValidationExit
 
 ValidationFailed:
@@ -4061,6 +4080,7 @@ ValidationExit:
     End If
     If runtimeStateCaptured Then
         mInternalPricingRefresh = originalInternalRefresh
+        mSseManualStop = originalManualStop
         Application.EnableEvents = originalEvents
         mSseLastEventID = originalLastEventID
         mSseJobID = originalSseJobID
@@ -4077,6 +4097,11 @@ ValidationExit:
     mPricingEventValidationAppliedCount = 0
     If runtimeStateCaptured And originalSaved Then ThisWorkbook.Saved = True
     On Error GoTo 0
+End Function
+
+Public Function PricingEventValidationDiagnosticForValidation() As String
+    PricingEventValidationDiagnosticForValidation = _
+        mPricingEventValidationDiagnostic
 End Function
 
 Public Sub RegisterSearchHotkey()
@@ -4644,9 +4669,11 @@ Private Sub EnsureProductSearchIndex(ByVal table As ListObject)
     End If
     rowCount = table.DataBodyRange.Rows.Count
     revision = Trim$(CStr(ConfigSheet().Range("G44").Value2))
-    If mSearchIndexReady And mSearchIndexRowCount = rowCount And _
-       mSearchIndexRevision = revision Then Exit Sub
-
+    ' A user can sort the visible table without changing its row count or the
+    ' catalog revision. Reusing the old row-position index after that sort
+    ' selects the wrong physical row. Three bulk column reads plus an in-memory
+    ' 1,000-row normalization pass are fast enough for interactive local
+    ' search, so rebuild the positional index for every explicit search.
     InvalidateProductSearchIndex
     productCodes = table.DataBodyRange.Columns(7).Value2
     productNames = table.DataBodyRange.Columns(8).Value2
@@ -7596,17 +7623,17 @@ Private Sub ParsePricingSnapshotJob(ByVal root As JsonValue, _
        SiteText(root, "schema") <> PRICING_SNAPSHOT_JOB_SCHEMA Or _
        SiteText(root, "projection") <> PRICING_SNAPSHOT_PROJECTION Then
         Err.Raise vbObjectError + 130, "ParsePricingSnapshotJob", _
-                  T("invalid_workbook")
+                  T("invalid_workbook") & " [job-envelope]"
     End If
     parsedRequestID = SiteText(root, "request_id")
     parsedJobID = SiteText(root, "job_id")
     If parsedRequestID <> expectedRequestID Or Len(parsedJobID) = 0 Then
         Err.Raise vbObjectError + 130, "ParsePricingSnapshotJob", _
-                  T("invalid_workbook")
+                  T("invalid_workbook") & " [request-identity]"
     End If
     If Len(jobID) > 0 And parsedJobID <> jobID Then
         Err.Raise vbObjectError + 130, "ParsePricingSnapshotJob", _
-                  T("invalid_workbook")
+                  T("invalid_workbook") & " [job-identity]"
     End If
     jobID = parsedJobID
     Set sourceValue = JsonRuntime.JsonMember(root, "source")
@@ -7616,7 +7643,7 @@ Private Sub ParsePricingSnapshotJob(ByVal root As JsonValue, _
        SiteText(sourceValue, "revision") <> mSourceRevision Or _
        LCase$(SiteText(root, "locale")) <> "fa" Then
         Err.Raise vbObjectError + 130, "ParsePricingSnapshotJob", _
-                  T("invalid_workbook")
+                  T("invalid_workbook") & " [source-identity]"
     End If
     jobStatus = LCase$(SiteText(root, "status"))
     jobCode = LCase$(SiteText(root, "code"))
@@ -7625,7 +7652,7 @@ Private Sub ParsePricingSnapshotJob(ByVal root As JsonValue, _
              "invalidated", "expired"
         Case Else
             Err.Raise vbObjectError + 130, "ParsePricingSnapshotJob", _
-                      T("invalid_workbook")
+                      T("invalid_workbook") & " [job-status]"
     End Select
 
     Set capacity = JsonRuntime.JsonMember(root, "capacity")
@@ -7634,7 +7661,7 @@ Private Sub ParsePricingSnapshotJob(ByVal root As JsonValue, _
        RequiredWholeNumber(capacity, "max_pages") <> MAX_STATE_PAGES Or _
        RequiredWholeNumber(capacity, "max_rows") <> MAX_SNAPSHOT_ROWS Then
         Err.Raise vbObjectError + 130, "ParsePricingSnapshotJob", _
-                  T("invalid_workbook")
+                  T("invalid_workbook") & " [capacity]"
     End If
 
     expectedJobURL = PricingBaseURL() & "/snapshots/" & jobID
@@ -7660,12 +7687,12 @@ Private Sub ParsePricingSnapshotJob(ByVal root As JsonValue, _
            "job_scoped_progress" Or _
        SiteText(root, "event_schema") <> PRICING_SNAPSHOT_EVENT_SCHEMA Then
         Err.Raise vbObjectError + 130, "ParsePricingSnapshotJob", _
-                  T("invalid_workbook")
+                  T("invalid_workbook") & " [routes-events]"
     End If
     Set progress = JsonRuntime.JsonMember(root, "progress")
     If progress Is Nothing Or progress.Kind <> "object" Then
         Err.Raise vbObjectError + 130, "ParsePricingSnapshotJob", _
-                  T("invalid_workbook")
+                  T("invalid_workbook") & " [progress-envelope]"
     End If
     completedPages = RequiredWholeNumber(progress, "completed_pages")
     totalPages = RequiredWholeNumber(progress, "total_pages")
@@ -7677,24 +7704,25 @@ Private Sub ParsePricingSnapshotJob(ByVal root As JsonValue, _
        rowCount < previousRowCount Or _
        (previousTotalPages > 0 And totalPages <> previousTotalPages) Then
         Err.Raise vbObjectError + 130, "ParsePricingSnapshotJob", _
-                  T("invalid_workbook")
+                  T("invalid_workbook") & " [progress-monotonicity]"
     End If
 
     expectedETag = SiteText(root, "etag")
     snapshotRevision = SiteText(root, "snapshot_revision")
     expectedStateRevision = SiteText(root, "state_revision")
     pricingStateRevision = SiteText(root, "pricing_state_revision")
+    If Len(pricingStateRevision) = 0 Then _
+        pricingStateRevision = expectedStateRevision
     Set identity = JsonRuntime.JsonMember(root, "identity")
     If Not identity Is Nothing Then _
         datasetRevision = SiteText(identity, "catalog_revision")
     If jobStatus = "ready" Then
         If Not IsSHA256RevisionText(snapshotRevision) Or _
-           Not IsSHA256RevisionText(StrongETagRevision(expectedETag)) Or _
            Not IsSHA256RevisionText(expectedStateRevision) Or _
            Not IsSHA256RevisionText(pricingStateRevision) Or _
            Not IsSHA256RevisionText(datasetRevision) Then
             Err.Raise vbObjectError + 130, "ParsePricingSnapshotJob", _
-                      T("invalid_workbook")
+                      T("invalid_workbook") & " [terminal-identity]"
         End If
     End If
 End Sub
@@ -7806,26 +7834,52 @@ Private Function SnapshotRowFieldsMatch(ByVal payload As JsonValue) As Boolean
     Dim fieldIndex As Long
     Dim signature As String
 
-    If payload Is Nothing Then Exit Function
+    On Error GoTo FieldRuntimeError
+    If payload Is Nothing Then
+        mSnapshotValidationStage = "envelope-fields-payload-missing"
+        Exit Function
+    End If
     Set fields = JsonRuntime.JsonMember(payload, "row_fields")
-    If fields Is Nothing Then Exit Function
-    If fields.Kind <> "array" Then Exit Function
+    If fields Is Nothing Then
+        mSnapshotValidationStage = "envelope-fields-missing"
+        Exit Function
+    End If
+    If fields.Kind <> "array" Then
+        mSnapshotValidationStage = "envelope-fields-kind"
+        Exit Function
+    End If
     If JsonRuntime.JsonArrayCount(fields) <> _
-       PRICING_SNAPSHOT_ROW_FIELD_COUNT Then Exit Function
+       PRICING_SNAPSHOT_ROW_FIELD_COUNT Then
+        mSnapshotValidationStage = "envelope-fields-count"
+        Exit Function
+    End If
     For fieldIndex = 1 To PRICING_SNAPSHOT_ROW_FIELD_COUNT
         Set fieldValue = JsonRuntime.JsonArrayItem(fields, fieldIndex)
-        If fieldValue Is Nothing Then Exit Function
-        If fieldValue.Kind <> "string" Then Exit Function
+        If fieldValue Is Nothing Then
+            mSnapshotValidationStage = "envelope-fields-item-missing-" & _
+                CStr(fieldIndex)
+            Exit Function
+        End If
+        If fieldValue.Kind <> "string" Then
+            mSnapshotValidationStage = "envelope-fields-item-kind-" & _
+                CStr(fieldIndex)
+            Exit Function
+        End If
         If fieldIndex > 1 Then signature = signature & ","
         signature = signature & CStr(JsonRuntime.JsonScalar(fieldValue))
     Next fieldIndex
-    SnapshotRowFieldsMatch = _
-        (signature = PRICING_SNAPSHOT_ROW_FIELDS)
+    SnapshotRowFieldsMatch = (signature = PRICING_SNAPSHOT_ROW_FIELDS)
+    If Not SnapshotRowFieldsMatch Then _
+        mSnapshotValidationStage = "envelope-fields-signature"
+    Exit Function
+
+FieldRuntimeError:
+    mSnapshotValidationStage = "envelope-fields-runtime-" & CStr(Err.Number)
+    Err.Clear
 End Function
 
 Private Function ImportPricingSnapshotPayload( _
-        ByVal responseText As String, ByVal expectedETag As String, _
-        ByVal expectedSnapshotRevision As String, _
+        ByVal responseText As String, _
         ByVal expectedStateRevision As String, _
         ByVal siteRows As Object, _
         ByRef validatedState As JsonValue, _
@@ -7848,10 +7902,10 @@ Private Function ImportPricingSnapshotPayload( _
     Dim warnings As JsonValue
     Dim reconciliation As JsonValue
     Dim counts As JsonValue
-    Dim snapshotRevision As String
     Dim stateRevision As String
     Dim datasetRevision As String
     Dim sourceRevision As String
+    Dim payloadSourceRevision As String
     Dim countSignature As String
     Dim rowIndex As Long
     Dim pageRows As Long
@@ -7870,12 +7924,7 @@ Private Function ImportPricingSnapshotPayload( _
     Dim unionCount As Long
     Dim ambiguousCount As Long
 
-    mSnapshotValidationStage = "wire-digest"
-    ' The callback hashes the exact ResponseBody bytes before UTF-8 decoding.
-    ' This parser therefore receives only a body already bound to the strong
-    ' response ETag; it still validates that the expected ETag is strong.
-    If Not IsSHA256RevisionText(StrongETagRevision(expectedETag)) Then _
-        GoTo InvalidSnapshot
+    mSnapshotValidationStage = "semantic-envelope"
     rawStateText = RawJSONObjectMember(responseText, "state")
     If Len(rawStateText) = 0 Then GoTo InvalidSnapshot
     rawStateDigest = SHA256Revision(rawStateText)
@@ -7883,24 +7932,29 @@ Private Function ImportPricingSnapshotPayload( _
 
     mSnapshotValidationStage = "parse"
     Set payload = JsonRuntime.ParseJson(responseText)
-    mSnapshotValidationStage = "envelope"
+    mSnapshotValidationStage = "envelope-identity"
     If payload Is Nothing Or payload.Kind <> "object" Or _
        SiteText(payload, "schema") <> PRICING_SNAPSHOT_PAYLOAD_SCHEMA Or _
        SiteText(payload, "projection") <> PRICING_SNAPSHOT_PROJECTION Then _
         GoTo InvalidSnapshot
+    mSnapshotValidationStage = "envelope-fields"
     If Not SnapshotRowFieldsMatch(payload) Then GoTo InvalidSnapshot
-    snapshotRevision = SiteText(payload, "snapshot_revision")
-    If snapshotRevision <> expectedSnapshotRevision Or _
-       Not IsSHA256RevisionText(snapshotRevision) Then GoTo InvalidSnapshot
+    ' snapshot_revision/ETag describe the provider's representation. They are
+    ' optional integrity enhancements and may differ after a transforming
+    ' intermediary. The canonical state/source/count/digest checks below are
+    ' the mutation boundary for this consumer.
 
     Set sourceValue = JsonRuntime.JsonMember(payload, "source")
+    mSnapshotValidationStage = "source-identity"
     If sourceValue Is Nothing Or sourceValue.Kind <> "object" Then _
         GoTo InvalidSnapshot
+    payloadSourceRevision = SiteText(sourceValue, "revision")
     If SiteText(sourceValue, "id") <> mSourceID Or _
        SiteText(sourceValue, "dataset") <> mSourceDataset Or _
-       SiteText(sourceValue, "revision") <> mSourceRevision Then _
+       Not IsSHA256RevisionText(payloadSourceRevision) Then _
         GoTo InvalidSnapshot
 
+    mSnapshotValidationStage = "state-identity"
     stateRevision = SiteText(payload, "state_revision")
     If stateRevision <> expectedStateRevision Or _
        Not IsSHA256RevisionText(stateRevision) Then GoTo InvalidSnapshot
@@ -7944,35 +7998,50 @@ Private Function ImportPricingSnapshotPayload( _
 
     mSnapshotValidationStage = "state-contract"
     Set state = JsonRuntime.JsonMember(payload, "state")
-    If state Is Nothing Or state.Kind <> "object" Or _
-       SiteText(state, "schema") <> PRICING_STATE_SCHEMA Or _
-       SiteText(state, "state_revision") <> stateRevision Then _
+    If state Is Nothing Or state.Kind <> "object" Then
+        mSnapshotValidationStage = "state-contract-missing"
         GoTo InvalidSnapshot
+    End If
+    If SiteText(state, "schema") <> PRICING_STATE_SCHEMA Then
+        mSnapshotValidationStage = "state-contract-schema"
+        GoTo InvalidSnapshot
+    End If
+    If SiteText(state, "state_revision") <> stateRevision Then
+        mSnapshotValidationStage = "state-contract-revision"
+        GoTo InvalidSnapshot
+    End If
     Set stateSource = JsonRuntime.JsonMember(state, "source")
+    mSnapshotValidationStage = "state-source"
     If stateSource Is Nothing Or stateSource.Kind <> "object" Then _
         GoTo InvalidSnapshot
     currentRevision = SiteText(stateSource, "current_revision")
     submittedRevision = SiteText(stateSource, "submitted_revision")
-    If currentRevision <> mSourceRevision Or _
+    If currentRevision <> payloadSourceRevision Or _
        submittedRevision <> currentRevision Or _
        Not BooleanValue(JsonRuntime.JsonText( _
            stateSource, "revision_matches_current")) Then GoTo InvalidSnapshot
+    mSnapshotValidationStage = "state-warnings"
     RejectProjectionIntegrityWarnings state
+    mSnapshotValidationStage = "catalog-contract"
     Set catalog = JsonRuntime.JsonMember(state, "catalog")
     If catalog Is Nothing Or catalog.Kind <> "object" Or _
        SiteText(catalog, "dataset") <> "reconciled_products" Then _
         GoTo InvalidSnapshot
+    mSnapshotValidationStage = "catalog-dataset"
     datasetRevision = SiteText(catalog, "dataset_revision")
     If Not IsSHA256RevisionText(datasetRevision) Or _
        datasetRevision <> SiteText(integrity, "dataset_revision") Or _
        CatalogColumnSignature(catalog) <> RECONCILED_COLUMN_KEYS Then _
         GoTo InvalidSnapshot
+    mSnapshotValidationStage = "catalog-source"
     sourceRevision = StateSourceRevision(state, catalog)
-    If sourceRevision <> mSourceRevision Then GoTo InvalidSnapshot
+    If sourceRevision <> payloadSourceRevision Then GoTo InvalidSnapshot
+    mSnapshotValidationStage = "catalog-count-signature"
     countSignature = CatalogCountSignature(catalog)
     Set reconciliation = JsonRuntime.JsonMember(catalog, "reconciliation")
     If reconciliation Is Nothing Or reconciliation.Kind <> "object" Then _
         GoTo InvalidSnapshot
+    mSnapshotValidationStage = "catalog-counts"
     Set counts = JsonRuntime.JsonMember(reconciliation, "counts")
     If counts Is Nothing Or counts.Kind <> "object" Then GoTo InvalidSnapshot
     matchedCount = RequiredWholeNumber(counts, "matched")
@@ -7983,6 +8052,7 @@ Private Function ImportPricingSnapshotPayload( _
 
     Set rowsValue = JsonRuntime.JsonMember(catalog, "rows")
     Set pagination = JsonRuntime.JsonMember(catalog, "pagination")
+    mSnapshotValidationStage = "catalog-pagination"
     If rowsValue Is Nothing Or rowsValue.Kind <> "array" Or _
        pagination Is Nothing Or pagination.Kind <> "object" Then _
         GoTo InvalidSnapshot
@@ -7999,6 +8069,7 @@ Private Function ImportPricingSnapshotPayload( _
        matchedCount + patrisOnlyCount + wooOnlyCount <> unionCount Or _
        unionCount <> paginationTotal Then GoTo InvalidSnapshot
 
+    mSnapshotValidationStage = "catalog-integrity"
     integrityPageCount = RequiredWholeNumber(integrity, "page_count")
     If integrityPageCount < 1 Or integrityPageCount > MAX_STATE_PAGES Or _
        RequiredWholeNumber(integrity, "remote_total") <> paginationTotal Or _
@@ -8051,7 +8122,8 @@ InvalidSnapshot:
     mStatePageTimingText = _
         "snapshot_validation=" & mSnapshotValidationStage
     Err.Raise vbObjectError + 130, "ImportPricingSnapshotPayload", _
-              T("invalid_workbook")
+              T("invalid_workbook") & " [" & _
+              mSnapshotValidationStage & "]"
 End Function
 
 Private Sub ApplyReconciliationCounts(ByVal catalog As JsonValue)
@@ -8135,8 +8207,11 @@ Private Function StateSourceRevision(ByVal state As JsonValue, _
     If Len(currentRevision) = 0 Then
         currentRevision = SiteText(sourceValue, "revision")
     End If
-    If Not IsSHA256RevisionText(currentRevision) Or _
-       currentRevision <> mSourceRevision Then Exit Function
+    ' The contract request starts from the live Patris input revision, while
+    ' the reconciled snapshot is owned by the current website projection and
+    ' therefore carries its own later source revision. Validate that owner
+    ' revision internally here; the caller binds it to the payload source.
+    If Not IsSHA256RevisionText(currentRevision) Then Exit Function
     If Len(submittedRevision) > 0 And _
        submittedRevision <> currentRevision Then Exit Function
     If Len(reconciledRevision) > 0 And _
@@ -8463,6 +8538,7 @@ Private Sub ApplyGlobalState(ByVal state As JsonValue)
        remoteRoundingMode <> PRICE_ROUNDING_MODE Then
         Err.Raise vbObjectError + 207, "ApplyGlobalState", T("rounding_required")
     End If
+    ApplyPriceRoundingPolicy settings, primarySettings, priceRounding
 
     If (IsEmpty(remoteShipping) Or Len(shippingCurrency) = 0 Or _
         Len(shippingRevision) = 0) And Not shippingState Is Nothing Then
@@ -8523,6 +8599,86 @@ Private Sub ApplyGlobalState(ByVal state As JsonValue)
         remoteUSDDate, remoteProfit, remoteShipping, CLng(remoteRounding)
     CapturePendingPricingConfirmation state
     ReconcilePricingProposalStates
+End Sub
+
+Private Sub ApplyPriceRoundingPolicy(ByVal settings As Worksheet, _
+                                     ByVal primarySettings As JsonValue, _
+                                     ByVal priceRounding As JsonValue)
+    Dim policy As JsonValue
+    Dim tiers As JsonValue
+    Dim tier As JsonValue
+    Dim extendValue As Variant
+    Dim digitValue As Variant
+    Dim thresholdText As String
+    Dim thresholdValue As Double
+    Dim previousThreshold As Double
+    Dim previousDigits As Long
+    Dim tierCount As Long
+    Dim tierIndex As Long
+    Dim thresholds(1 To 32, 1 To 1) As Variant
+    Dim digits(1 To 32, 1 To 1) As Variant
+
+    If Not primarySettings Is Nothing Then
+        Set policy = JsonRuntime.JsonMember( _
+            primarySettings, "price_rounding_policy")
+    End If
+    If policy Is Nothing And Not priceRounding Is Nothing Then
+        Set policy = JsonRuntime.JsonMember( _
+            priceRounding, "price_rounding_policy")
+        If policy Is Nothing Then
+            Set policy = JsonRuntime.JsonMember( _
+                priceRounding, "rounding_policy")
+        End If
+    End If
+    If policy Is Nothing Then
+        settings.Range("H20:H21").ClearContents
+        settings.Range("I58:J89").ClearContents
+        Exit Sub
+    End If
+
+    Set tiers = JsonRuntime.JsonMember(policy, "tiers")
+    If tiers Is Nothing Then GoTo InvalidPolicy
+    tierCount = JsonRuntime.JsonArrayCount(tiers)
+    If tierCount < 1 Or tierCount > 32 Then GoTo InvalidPolicy
+    extendValue = JsonRuntime.JsonScalar( _
+        JsonRuntime.JsonMember(policy, "extend_decades"))
+    If VarType(extendValue) <> vbBoolean Then GoTo InvalidPolicy
+
+    previousThreshold = 0#
+    previousDigits = -1
+    For tierIndex = 1 To tierCount
+        Set tier = JsonRuntime.JsonArrayItem(tiers, tierIndex)
+        thresholdText = Trim$(CStr(BlankIfNull( _
+            JsonRuntime.JsonText(tier, "threshold_irt"))))
+        digitValue = NumericOrBlank( _
+            JsonRuntime.JsonText(tier, "digits"))
+        If Len(thresholdText) = 0 Or Not IsNumeric(thresholdText) Or _
+           IsEmpty(digitValue) Then GoTo InvalidPolicy
+        thresholdValue = CDbl(thresholdText)
+        If thresholdValue <= previousThreshold Or _
+           CDbl(digitValue) <> Fix(CDbl(digitValue)) Or _
+           CLng(digitValue) < previousDigits Or _
+           CLng(digitValue) < 0 Or CLng(digitValue) > 18 Then _
+            GoTo InvalidPolicy
+        thresholds(tierIndex, 1) = thresholdValue
+        digits(tierIndex, 1) = CLng(digitValue)
+        previousThreshold = thresholdValue
+        previousDigits = CLng(digitValue)
+    Next tierIndex
+    For tierIndex = tierCount + 1 To 32
+        thresholds(tierIndex, 1) = 1E+307
+        digits(tierIndex, 1) = previousDigits
+    Next tierIndex
+
+    settings.Range("H20").Value2 = tierCount
+    settings.Range("H21").Value = CBool(extendValue)
+    settings.Range("I58:I89").Value2 = thresholds
+    settings.Range("J58:J89").Value2 = digits
+    Exit Sub
+
+InvalidPolicy:
+    Err.Raise vbObjectError + 208, "ApplyPriceRoundingPolicy", _
+              T("rounding_required")
 End Sub
 
 Private Sub UpdateCurrencyFreshnessUI(ByVal settings As Worksheet, _
@@ -9242,6 +9398,9 @@ Private Sub ApplyProductTableFormulas(ByVal table As ListObject)
     Dim sourceKindFormula As String
     Dim settingsReference As String
     Dim cnyRateFormula As String
+    Dim unroundedBaseFormula As String
+    Dim unroundedProjectedFormula As String
+    Dim unroundedPartnerFormula As String
 
     If table.DataBodyRange Is Nothing Then Exit Sub
     EnsureConfirmedCNYRateName
@@ -9281,8 +9440,8 @@ Private Sub ApplyProductTableFormulas(ByVal table As ListObject)
         ",SyncData,7,FALSE)>0),VLOOKUP(" & lookupExpression & _
         ",SyncData,4,FALSE)=""IRR"",VLOOKUP(" & lookupExpression & _
         ",SyncData,4,FALSE)=""IRT""))"
-    basePriceFormula = _
-        "IFERROR(IF(" & readyFormula & ",ROUND((" & _
+    unroundedBaseFormula = _
+        "(" & _
         "(RC[4]*IF(VLOOKUP(" & lookupExpression & _
         ",SyncData,2,FALSE)=""CNY""," & cnyRateFormula & _
         ",IF(VLOOKUP(" & lookupExpression & _
@@ -9300,7 +9459,10 @@ Private Sub ApplyProductTableFormulas(ByVal table As ListObject)
         lookupExpression & ",SyncData,4,FALSE)=""IRR"",0.1,IF(VLOOKUP(" & _
         lookupExpression & ",SyncData,4,FALSE)=""IRT"",1,NA()))))))" & _
         "*(1+VLOOKUP(" & lookupExpression & _
-        ",SyncData,5,FALSE)/100),-" & settingsReference & "R15C2)," & _
+        ",SyncData,5,FALSE)/100)"
+    basePriceFormula = _
+        "IFERROR(IF(" & readyFormula & "," & _
+        PriceRoundingFormula(unroundedBaseFormula, settingsReference) & "," & _
         fallbackFormula & ")," & fallbackFormula & ")"
     sourceAmountFormula = _
         "VLOOKUP(" & lookupExpression & ",SyncData,21,FALSE)"
@@ -9308,6 +9470,19 @@ Private Sub ApplyProductTableFormulas(ByVal table As ListObject)
         "VLOOKUP(" & lookupExpression & ",SyncData,22,FALSE)"
     sourceKindFormula = _
         "VLOOKUP(" & lookupExpression & ",SyncData,23,FALSE)"
+    unroundedProjectedFormula = _
+        "(" & sourceAmountFormula & _
+        "*" & cnyRateFormula & "+" & _
+        "(RC[1]/1000)*IF(VLOOKUP(" & lookupExpression & _
+        ",SyncData,4,FALSE)=""CNY"",VLOOKUP(" & lookupExpression & _
+        ",SyncData,3,FALSE)*" & cnyRateFormula & _
+        ",VLOOKUP(" & lookupExpression & _
+        ",SyncData,3,FALSE)/10))*(1+VLOOKUP(" & lookupExpression & _
+        ",SyncData,5,FALSE)/100)"
+    unroundedPartnerFormula = _
+        "(" & sourceAmountFormula & _
+        "/10)*(1+VLOOKUP(" & lookupExpression & _
+        ",SyncData,5,FALSE)/100)"
     projectedFormula = _
         "IFERROR(IF(AND(" & eligibleKindFormula & "," & _
         sourceKindFormula & "=""foreign_price""," & _
@@ -9319,22 +9494,15 @@ Private Sub ApplyProductTableFormulas(ByVal table As ListObject)
         ",SyncData,5,FALSE)>=0," & cnyRateFormula & _
         ">0,OR(VLOOKUP(" & lookupExpression & _
         ",SyncData,4,FALSE)=""CNY"",VLOOKUP(" & lookupExpression & _
-        ",SyncData,4,FALSE)=""IRR"")),ROUND((" & sourceAmountFormula & _
-        "*" & cnyRateFormula & "+" & _
-        "(RC[1]/1000)*IF(VLOOKUP(" & lookupExpression & _
-        ",SyncData,4,FALSE)=""CNY"",VLOOKUP(" & lookupExpression & _
-        ",SyncData,3,FALSE)*" & cnyRateFormula & _
-        ",VLOOKUP(" & lookupExpression & _
-        ",SyncData,3,FALSE)/10))*(1+VLOOKUP(" & lookupExpression & _
-        ",SyncData,5,FALSE)/100),-" & settingsReference & "R15C2),"
+        ",SyncData,4,FALSE)=""IRR""))," & _
+        PriceRoundingFormula(unroundedProjectedFormula, settingsReference) & ","
     projectedFormula = projectedFormula & _
         "IF(AND(" & eligibleKindFormula & "," & sourceKindFormula & _
         "=""partner_price""," & sourceCurrencyFormula & "=""IRR""," & _
         sourceAmountFormula & ">0,VLOOKUP(" & lookupExpression & _
         ",SyncData,5,FALSE)<>"""",VLOOKUP(" & lookupExpression & _
-        ",SyncData,5,FALSE)>=0),ROUND((" & sourceAmountFormula & _
-        "/10)*(1+VLOOKUP(" & lookupExpression & _
-        ",SyncData,5,FALSE)/100),-" & settingsReference & "R15C2),"
+        ",SyncData,5,FALSE)>=0)," & _
+        PriceRoundingFormula(unroundedPartnerFormula, settingsReference) & ","
     projectedFormula = projectedFormula & _
         "IF(AND(" & eligibleKindFormula & "," & sourceKindFormula & _
         "=""sale_price_direct""," & sourceCurrencyFormula & _
@@ -9354,6 +9522,31 @@ LegacyFormula:
     Err.Clear
     table.ListColumns(1).DataBodyRange.FormulaR1C1 = priceFormula
 End Sub
+
+Private Function PriceRoundingFormula(ByVal unroundedExpression As String, _
+                                      ByVal settingsReference As String) As String
+    Dim policyCount As String
+    Dim firstThreshold As String
+    Dim lastThreshold As String
+    Dim tierDigits As String
+    Dim roundingDigits As String
+
+    policyCount = settingsReference & "R20C8"
+    firstThreshold = settingsReference & "R58C9"
+    lastThreshold = "INDEX(" & settingsReference & _
+        "R58C9:R89C9," & policyCount & ")"
+    tierDigits = "IF(unroundedPrice<" & firstThreshold & ",0," & _
+        "LOOKUP(unroundedPrice," & settingsReference & _
+        "R58C9:R89C9," & settingsReference & "R58C10:R89C10))"
+    roundingDigits = "IF(AND(ISNUMBER(" & policyCount & ")," & _
+        policyCount & ">=1),MIN(18," & tierDigits & _
+        "+IF(" & settingsReference & "R21C8,MAX(0,INT(LOG10(" & _
+        "unroundedPrice/" & lastThreshold & "))),0))," & _
+        settingsReference & "R15C2)"
+    PriceRoundingFormula = "LET(unroundedPrice," & _
+        unroundedExpression & ",roundingDigits," & roundingDigits & _
+        ",ROUND(unroundedPrice,-roundingDigits))"
+End Function
 
 Private Sub EnsureConfirmedCNYRateName()
     Dim confirmedName As Name

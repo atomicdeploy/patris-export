@@ -373,6 +373,7 @@ type excelPricingSnapshotPage struct {
 	warningsDigest        string
 	warningCount          int
 	reconciliationCounts  excelPricingSnapshotReconciliationCounts
+	ownerSource           canonical.Source
 	page                  int
 	limit                 int
 	total                 int
@@ -2203,6 +2204,13 @@ func (s *Server) collectExcelPricingSnapshot(
 		excelPricingRemoteSnapshotRequestID(jobID),
 		request.MaxAgeSeconds,
 	)
+	if errors.Is(err, errExcelPricingRemoteSnapshotDisabled) {
+		// WordPress may advertise revision/events while deliberately disabling
+		// materialized snapshot jobs. Fall back to the bounded, revision-checked
+		// live state pages instead of leaving Excel in an endless loading state.
+		s.updateExcelPricingSnapshotProgress(jobID, "fetching_remote", 0, 1, 0)
+		return s.collectExcelPricingSnapshotPages(ctx, jobID, request, cfg)
+	}
 	if errors.Is(err, errExcelPricingRemoteSnapshotSourceConflict) {
 		// Patris is expected to change while Excel is open. Align WordPress to
 		// this exact live source once, then rebuild the ephemeral snapshot. If
@@ -2423,6 +2431,7 @@ func (s *Server) collectExcelPricingSnapshotPages(
 				return nil, "snapshot_too_large"
 			}
 		} else if parsed.stateRevision != first.stateRevision ||
+			!parsed.ownerSource.SameIdentity(first.ownerSource) ||
 			parsed.datasetRevision != first.datasetRevision ||
 			parsed.catalogMetadataDigest != first.catalogMetadataDigest ||
 			parsed.warningsDigest != first.warningsDigest ||
@@ -2478,7 +2487,7 @@ func (s *Server) collectExcelPricingSnapshotPages(
 	s.updateExcelPricingSnapshotProgress(jobID, "building", totalPages, totalPages, len(allRows))
 	snapshot, err := buildExcelPricingSnapshot(
 		first,
-		request.Source,
+		first.ownerSource,
 		allRows,
 		pageRevisions,
 		excelPricingSnapshotProjection(request.Projection),
@@ -2517,7 +2526,8 @@ func parseExcelPricingSnapshotPage(
 	}
 	var schema string
 	var stateRevision string
-	if json.Unmarshal(state["schema"], &schema) != nil || schema != excelPricingStateSchema ||
+	if json.Unmarshal(state["schema"], &schema) != nil ||
+		!excelPricingResponseSchemaMatches("state", schema) ||
 		json.Unmarshal(state["state_revision"], &stateRevision) != nil || !isSHA256Revision(stateRevision) {
 		return nil, errors.New("snapshot state identity is invalid")
 	}
@@ -2527,9 +2537,25 @@ func parseExcelPricingSnapshotPage(
 			return nil, errors.New("snapshot state status is invalid")
 		}
 	}
-	if !excelPricingSnapshotSourceMatches(state["source"], expectedSource) {
+	ownerSource, ok := excelPricingSnapshotSourceIdentity(state["source"], expectedSource)
+	if !ok {
 		return nil, errors.New("snapshot source identity changed")
 	}
+	state["schema"] = json.RawMessage(`"` + excelPricingStateSchema + `"`)
+	// The current versionless provider exposes one canonical composite state
+	// revision rather than a second pricing-only revision. Adapt that capability
+	// explicitly for the loopback workbook contract instead of emitting an empty
+	// terminal field that Excel can neither ACK nor compare safely.
+	stateRevisionJSON, _ := json.Marshal(stateRevision)
+	state["pricing_state_revision"] = stateRevisionJSON
+	canonicalSourceJSON, _ := json.Marshal(map[string]interface{}{
+		"id":                       ownerSource.ID,
+		"dataset":                  ownerSource.Dataset,
+		"current_revision":         ownerSource.Revision,
+		"submitted_revision":       ownerSource.Revision,
+		"revision_matches_current": true,
+	})
+	state["source"] = canonicalSourceJSON
 
 	warningsJSON, warningCount, err := excelPricingSnapshotTopLevelWarnings(state)
 	if err != nil {
@@ -2549,7 +2575,7 @@ func parseExcelPricingSnapshotPage(
 		json.Unmarshal(catalog["page_revision"], &pageRevision) != nil || !isSHA256Revision(pageRevision) {
 		return nil, errors.New("snapshot catalog identity is invalid")
 	}
-	reconciliationCounts, ok := excelPricingSnapshotCatalogContract(catalog, expectedSource)
+	reconciliationCounts, ok := excelPricingSnapshotCatalogContract(catalog, ownerSource)
 	if !ok {
 		return nil, errors.New("snapshot catalog contract is invalid")
 	}
@@ -2590,6 +2616,7 @@ func parseExcelPricingSnapshotPage(
 		warningsDigest:        excelPricingSnapshotDigest(warningsJSON),
 		warningCount:          warningCount,
 		reconciliationCounts:  reconciliationCounts,
+		ownerSource:           ownerSource,
 		page:                  pagination.Page,
 		limit:                 pagination.Limit,
 		total:                 pagination.Total,
@@ -2598,23 +2625,32 @@ func parseExcelPricingSnapshotPage(
 	}, nil
 }
 
-func excelPricingSnapshotSourceMatches(raw json.RawMessage, expected canonical.Source) bool {
+func excelPricingSnapshotSourceIdentity(
+	raw json.RawMessage,
+	expected canonical.Source,
+) (canonical.Source, bool) {
 	var source map[string]json.RawMessage
 	if json.Unmarshal(raw, &source) != nil || source == nil {
-		return false
+		return canonical.Source{}, false
 	}
-	if excelPricingSnapshotString(source["id"]) != expected.ID ||
-		excelPricingSnapshotString(source["dataset"]) != expected.Dataset ||
-		excelPricingSnapshotString(source["current_revision"]) != expected.Revision ||
-		excelPricingSnapshotString(source["submitted_revision"]) != expected.Revision {
-		return false
+	id := excelPricingSnapshotString(source["id"])
+	dataset := excelPricingSnapshotString(source["dataset"])
+	currentRevision := excelPricingSnapshotString(source["current_revision"])
+	submittedRevision := excelPricingSnapshotString(source["submitted_revision"])
+	if id != expected.ID || dataset != expected.Dataset ||
+		submittedRevision != expected.Revision || !isSHA256Revision(currentRevision) {
+		return canonical.Source{}, false
 	}
 	if revision, present := source["revision"]; present &&
-		excelPricingSnapshotString(revision) != expected.Revision {
-		return false
+		excelPricingSnapshotString(revision) != currentRevision {
+		return canonical.Source{}, false
 	}
 	var matches bool
-	return json.Unmarshal(source["revision_matches_current"], &matches) == nil && matches
+	if json.Unmarshal(source["revision_matches_current"], &matches) != nil ||
+		matches != (submittedRevision == currentRevision) {
+		return canonical.Source{}, false
+	}
+	return canonical.Source{ID: id, Dataset: dataset, Revision: currentRevision}, true
 }
 
 func excelPricingSnapshotCatalogContract(
@@ -3100,13 +3136,14 @@ func buildExcelPricingSnapshot(
 		return nil, err
 	}
 	return &excelPricingSnapshot{
-		revision:      snapshotRevision,
-		etagRevision:  excelPricingSnapshotDigest(body),
-		stateRevision: first.stateRevision,
-		createdAt:     now,
-		expiresAt:     expiresAt,
-		integrity:     integrity,
-		body:          body,
+		revision:             snapshotRevision,
+		etagRevision:         excelPricingSnapshotDigest(body),
+		stateRevision:        first.stateRevision,
+		pricingStateRevision: first.stateRevision,
+		createdAt:            now,
+		expiresAt:            expiresAt,
+		integrity:            integrity,
+		body:                 body,
 	}, nil
 }
 

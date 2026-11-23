@@ -275,12 +275,16 @@ try {
     }
 
     $outExe = Join-Path $resolvedStageRoot "patris-export-windows-amd64.exe"
-    $exeBuildArguments = @("build") + $tagArguments + @("-ldflags", $linkerFlags, "-o", $outExe, ".\cmd\patris-export")
+    # The binary already receives the exact reviewed commit through ldflags.
+    # Go 1.26's automatic VCS probe can fail for managed Windows worktrees even
+    # when `git` itself is healthy, so do not make that duplicate probe a build
+    # blocker.
+    $exeBuildArguments = @("build", "-buildvcs=false") + $tagArguments + @("-ldflags", $linkerFlags, "-o", $outExe, ".\cmd\patris-export")
     Invoke-Checked $go $exeBuildArguments
     Copy-Item $outExe (Join-Path $resolvedStageRoot "patris-export.exe") -Force
 
     $outDll = Join-Path $resolvedStageRoot "patris-export.dll"
-    $dllBuildArguments = @("build") + $tagArguments + @("-buildmode=c-shared", "-ldflags", $linkerFlags, "-o", $outDll, ".\cmd\patris-export-lib")
+    $dllBuildArguments = @("build", "-buildvcs=false") + $tagArguments + @("-buildmode=c-shared", "-ldflags", $linkerFlags, "-o", $outDll, ".\cmd\patris-export-lib")
     Invoke-Checked $go $dllBuildArguments
     if (-not (Test-Path (Join-Path $resolvedStageRoot "patris-export.h"))) {
         throw "The Windows shared-library build did not produce patris-export.h."
