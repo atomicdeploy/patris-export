@@ -117,7 +117,10 @@ func probeSourceDeliveryReceipt(ctx context.Context, cfg appconfig.Config, input
 
 func sourceDeliveryReceiptProbeURL(destination string) (string, error) {
 	endpoint, err := url.Parse(strings.TrimSpace(destination))
-	if err != nil || endpoint.Scheme == "" || endpoint.Host == "" || endpoint.User != nil || endpoint.RawQuery != "" || endpoint.Fragment != "" {
+	if err != nil || (endpoint.Scheme != "http" && endpoint.Scheme != "https") || endpoint.Host == "" || endpoint.User != nil || endpoint.RawQuery != "" || endpoint.Fragment != "" {
+		return "", errSourceDeliveryReceiptProbe
+	}
+	if endpoint.Scheme != "https" && !hostnameIsLoopback(endpoint.Hostname()) {
 		return "", errSourceDeliveryReceiptProbe
 	}
 	endpoint.Path = strings.TrimRight(endpoint.Path, "/") + "/receipt"

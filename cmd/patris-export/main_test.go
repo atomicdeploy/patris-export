@@ -78,3 +78,32 @@ func TestSummarizeNamingWarningsIncludesCanonicalCategoryOnlyRows(t *testing.T) 
 		t.Fatalf("category-only naming summary = %+v, want one row and one violation", summary)
 	}
 }
+
+func TestValidateServeEventDeliveryRejectsSilentCanonicalDisable(t *testing.T) {
+	cfg := appconfig.Default()
+	cfg.SendUpdates.Enabled = true
+	cfg.SendUpdates.RequireContract = true
+	if err := validateServeEventDelivery(false, cfg); err == nil {
+		t.Fatal("canonical delivery was silently accepted with watching disabled")
+	}
+	if err := validateServeEventDelivery(true, cfg); err != nil {
+		t.Fatalf("canonical delivery with event observation was rejected: %v", err)
+	}
+	hashesDisabled := false
+	cfg.Canonical.Hashes.Enabled = &hashesDisabled
+	if err := validateServeEventDelivery(true, cfg); err == nil {
+		t.Fatal("canonical delivery without durable identity hashes was accepted")
+	}
+	hashesEnabled := true
+	cfg.Canonical.Hashes.Enabled = &hashesEnabled
+
+	cfg.SendUpdates.RequireContract = false
+	cfg.SendUpdates.ProductSyncSecretEnv = "PATRIS_TEST_PRODUCT_SYNC_SECRET"
+	if err := validateServeEventDelivery(false, cfg); err == nil {
+		t.Fatal("authenticated canonical delivery was accepted with watching disabled")
+	}
+	cfg.SendUpdates.ProductSyncSecretEnv = ""
+	if err := validateServeEventDelivery(false, cfg); err != nil {
+		t.Fatalf("non-contract/manual delivery unexpectedly required watching: %v", err)
+	}
+}

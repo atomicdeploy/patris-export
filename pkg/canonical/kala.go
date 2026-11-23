@@ -348,6 +348,66 @@ func TransformContext(ctx context.Context, rows []map[string]interface{}, source
 	return productRows, envelope, nil
 }
 
+// TransformContextWithTextConverter preserves TransformContext's public
+// compatibility while letting a caller pin the same text converter used for
+// the rest of one record projection. Canonical normalization only invokes it
+// for byte strings that become invalid UTF-8 after percent decoding (or that
+// arrived invalid), avoiding a process-global RTL/mapping read mid-build.
+func TransformContextWithTextConverter(
+	ctx context.Context,
+	rows []map[string]interface{},
+	source string,
+	cfg Config,
+	provider pricingcatalog.Provider,
+	generatedAt time.Time,
+	convert func(string) string,
+) ([]map[string]interface{}, *Envelope, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	prepared, err := prepareCanonicalTextRows(ctx, rows, convert)
+	if err != nil {
+		return nil, nil, err
+	}
+	return TransformContext(ctx, prepared, source, cfg, provider, generatedAt)
+}
+
+func prepareCanonicalTextRows(ctx context.Context, rows []map[string]interface{}, convert func(string) string) ([]map[string]interface{}, error) {
+	if convert == nil {
+		return rows, nil
+	}
+	prepared := make([]map[string]interface{}, len(rows))
+	for index, row := range rows {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		copyRow := make(map[string]interface{}, len(row))
+		for field, value := range row {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+			text, ok := value.(string)
+			if !ok {
+				copyRow[field] = value
+				continue
+			}
+			if strings.Contains(text, "%") {
+				if decoded, decodeErr := url.PathUnescape(text); decodeErr == nil && decoded != text && !utf8.ValidString(decoded) {
+					copyRow[field] = convert(decoded)
+					continue
+				}
+			}
+			if !utf8.ValidString(text) {
+				copyRow[field] = convert(text)
+				continue
+			}
+			copyRow[field] = text
+		}
+		prepared[index] = copyRow
+	}
+	return prepared, nil
+}
+
 // classifyKalaRows applies the verified Patris hierarchy to the complete
 // snapshot. It deliberately fails closed for ambiguous numeric rows: category
 // headers and accounting/service entries must never become Woo products.

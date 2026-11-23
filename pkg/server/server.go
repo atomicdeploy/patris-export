@@ -46,52 +46,59 @@ import (
 
 // Server represents the HTTP/WebSocket server
 type Server struct {
-	router                 *mux.Router
-	dbPath                 string
-	charMap                converter.CharMapping
-	dataSource             datasource.DataSource
-	dataSourceMu           sync.RWMutex
-	watcher                *watcher.FileWatcher
-	wsClients              map[*websocket.Conn]*sync.Mutex
-	wsClientsMu            sync.RWMutex
-	upgrader               websocket.Upgrader
-	lastRecords            []map[string]interface{}
-	lastRecordsMu          sync.RWMutex
-	lastRecordsReady       bool
-	lastContractRevision   string
-	lastModTime            time.Time
-	lastModTimeMu          sync.RWMutex
-	useTempFile            bool
-	config                 *appconfig.Manager
-	configWatcher          *appconfig.ConfigWatcher
-	version                version.Info
-	processMu              sync.Mutex
-	processStatusCache     map[string]interface{}
-	processStatusAt        time.Time
-	lastSourceHash         string
-	lastSourceHashMu       sync.Mutex
-	eventSubscribers       map[chan map[string]interface{}]struct{}
-	eventSubscribersMu     sync.RWMutex
-	catalogProvider        pricingcatalog.Provider
-	catalogProviderKey     string
-	catalogProviderMu      sync.Mutex
-	pricingCommands        pricingCommandState
-	sourceDeliveryAck      sourceDeliveryAcknowledgement
-	sourceDeliveryOutbox   *sourceDeliveryOutbox
-	canonicalProjection    *canonicalProjectionCache
-	pricingPublication     *canonicalProjectionCache
-	pricingActuation       *pricingActuator
-	refreshDiagnosticMu    sync.Mutex
-	refreshDiagnostic      *refreshOperationDiagnostic
-	lastPreDispatchFailure *preDispatchFailure
-	sqlOperations          *sqlOperationsState
-	excelPricing           *excelPricingState
-	excelPricingRemote     *excelPricingRemoteEventsBridge
-	excelPricingWrites     *excelPricingWritebackQueue
-	backgroundCtx          context.Context
-	backgroundCancel       context.CancelFunc
-	backgroundWG           sync.WaitGroup
-	serviceWG              sync.WaitGroup
+	router                  *mux.Router
+	dbPath                  string
+	charMap                 converter.CharMapping
+	dataSource              datasource.DataSource
+	dataSourceMu            sync.RWMutex
+	watcher                 *watcher.FileWatcher
+	watcherMu               sync.RWMutex
+	runtimeConfigApplyMu    sync.Mutex
+	runtimeConfigMu         sync.Mutex
+	lastValidRuntimeConfig  appconfig.Config
+	lastValidBaseConfig     appconfig.Config
+	lastValidRuntimeSet     bool
+	pendingSourceCatchUpKey string
+	wsClients               map[*websocket.Conn]*sync.Mutex
+	wsClientsMu             sync.RWMutex
+	upgrader                websocket.Upgrader
+	lastRecords             []map[string]interface{}
+	lastRecordsMu           sync.RWMutex
+	lastRecordsReady        bool
+	lastContractRevision    string
+	lastModTime             time.Time
+	lastModTimeMu           sync.RWMutex
+	useTempFile             bool
+	config                  *appconfig.Manager
+	configWatcher           *appconfig.ConfigWatcher
+	version                 version.Info
+	processMu               sync.Mutex
+	processStatusCache      map[string]interface{}
+	processStatusAt         time.Time
+	lastSourceHash          string
+	lastSourceHashMu        sync.Mutex
+	eventSubscribers        map[chan map[string]interface{}]struct{}
+	eventSubscribersMu      sync.RWMutex
+	catalogProvider         pricingcatalog.Provider
+	catalogProviderKey      string
+	catalogProviderMu       sync.Mutex
+	pricingCommands         pricingCommandState
+	sourceDeliveryAck       sourceDeliveryAcknowledgement
+	sourceDeliveryOutbox    *sourceDeliveryOutbox
+	canonicalProjection     *canonicalProjectionCache
+	pricingPublication      *canonicalProjectionCache
+	pricingActuation        *pricingActuator
+	refreshDiagnosticMu     sync.Mutex
+	refreshDiagnostic       *refreshOperationDiagnostic
+	lastPreDispatchFailure  *preDispatchFailure
+	sqlOperations           *sqlOperationsState
+	excelPricing            *excelPricingState
+	excelPricingRemote      *excelPricingRemoteEventsBridge
+	excelPricingWrites      *excelPricingWritebackQueue
+	backgroundCtx           context.Context
+	backgroundCancel        context.CancelFunc
+	backgroundWG            sync.WaitGroup
+	serviceWG               sync.WaitGroup
 }
 
 type Options struct {
@@ -147,6 +154,8 @@ const (
 	refreshWaitMaxRequestBytes = 1024
 	refreshWaitTimeout         = 8 * time.Minute
 )
+
+var errRuntimeConfigAwaitingApply = errors.New("runtime configuration is awaiting validated catch-up")
 
 type refreshRequest struct {
 	Delivery    string `json:"delivery"`
@@ -262,11 +271,47 @@ func NewServerWithOptions(dbPath string, charMap converter.CharMapping, options 
 	s.setupRoutes()
 
 	if s.config != nil {
-		converter.SetRTLConversion(s.config.Get().Database.RTLConversion)
-		w, err := s.config.Watch(func(cfg appconfig.Config) {
+		initialConfig := s.config.Get()
+		if ValidateEventDeliveryWatch(initialConfig.Server.Watch, initialConfig) == nil {
+			s.rememberRuntimeConfig(initialConfig)
+		}
+		w, err := s.config.WatchGuarded(&s.runtimeConfigApplyMu, func(_ appconfig.Config) {
 			log.Printf("⚙️ Config reloaded: %s", s.config.Path())
+			base, cfg := s.config.Snapshots()
+			previous, hadPrevious := s.previousRuntimeConfig()
+			if err := validateRuntimeConfigTransition(previous, cfg, hadPrevious); err != nil {
+				log.Printf("⚠️ Reverting restart-required runtime configuration: %v", err)
+				if priorBase, ok := s.lastRuntimeConfig(); ok {
+					if replaceErr := s.config.Replace(priorBase); replaceErr != nil {
+						log.Printf("⚠️ Failed to restore last valid runtime configuration")
+					}
+				}
+				return
+			}
+			if err := ValidateEventDeliveryWatch(cfg.Server.Watch && s.sourceWatcherActive(), cfg); err != nil {
+				log.Printf("⚠️ Reverting invalid canonical source delivery configuration: %v", err)
+				if priorBase, ok := s.lastRuntimeConfig(); ok {
+					if replaceErr := s.config.Replace(priorBase); replaceErr != nil {
+						log.Printf("⚠️ Failed to restore last valid source delivery configuration")
+					}
+				}
+				return
+			}
+			if sourceDeliveryCatchUpRequired(previous, cfg, hadPrevious) {
+				priorCatchUpKey := s.markSourceDeliveryCatchUp(cfg)
+				if triggerErr := s.triggerSourceCatchUp(); triggerErr != nil {
+					s.restoreSourceDeliveryCatchUp(priorCatchUpKey)
+					log.Printf("⚠️ Reverting configuration after canonical catch-up could not be queued: %v", triggerErr)
+					if priorBase, ok := s.lastRuntimeConfig(); ok {
+						if replaceErr := s.config.Replace(priorBase); replaceErr != nil {
+							log.Printf("⚠️ Failed to restore configuration after catch-up failure")
+						}
+					}
+					return
+				}
+			}
+			s.rememberRuntimeConfigSnapshots(base, cfg)
 			s.invalidateCanonicalProjection(false)
-			converter.SetRTLConversion(cfg.Database.RTLConversion)
 			s.excelPricingRemote.configChanged(cfg)
 			s.broadcastConfig(cfg)
 		})
@@ -677,11 +722,14 @@ func (s *Server) recordsRaw() ([]map[string]interface{}, error) {
 func (s *Server) recordOptions() recordpipe.Options {
 	cfg := s.Config()
 	return recordpipe.Options{
-		Raw:             cfg.Database.Raw,
-		Mapping:         cfg.Transform,
-		Canonical:       cfg.Canonical,
-		CatalogProvider: s.pricingCatalogProvider(cfg),
-		GeneratedAt:     time.Now(),
+		Raw:              cfg.Database.Raw,
+		RTLConversion:    cfg.Database.RTLConversion,
+		RTLConversionSet: true,
+		CharMapping:      s.charMap,
+		Mapping:          cfg.Transform,
+		Canonical:        cfg.Canonical,
+		CatalogProvider:  s.pricingCatalogProvider(cfg),
+		GeneratedAt:      time.Now(),
 	}
 }
 
@@ -729,15 +777,192 @@ func (s *Server) replaceDataSource(path string, records []map[string]interface{}
 	return nil
 }
 
+func (s *Server) rememberRuntimeConfig(cfg appconfig.Config) {
+	base := cfg
+	if s.config != nil {
+		base, cfg = s.config.Snapshots()
+	}
+	s.rememberRuntimeConfigSnapshots(base, cfg)
+}
+
+func (s *Server) rememberRuntimeConfigSnapshots(base, effective appconfig.Config) {
+	s.runtimeConfigMu.Lock()
+	s.lastValidRuntimeConfig = effective
+	s.lastValidBaseConfig = base
+	s.lastValidRuntimeSet = true
+	s.runtimeConfigMu.Unlock()
+}
+
+func (s *Server) lastRuntimeConfig() (appconfig.Config, bool) {
+	s.runtimeConfigMu.Lock()
+	defer s.runtimeConfigMu.Unlock()
+	return s.lastValidBaseConfig, s.lastValidRuntimeSet
+}
+
+func (s *Server) previousRuntimeConfig() (appconfig.Config, bool) {
+	s.runtimeConfigMu.Lock()
+	defer s.runtimeConfigMu.Unlock()
+	return s.lastValidRuntimeConfig, s.lastValidRuntimeSet
+}
+
+func (s *Server) markSourceDeliveryCatchUp(cfg appconfig.Config) string {
+	key := sourceDeliveryRuntimeKey(cfg)
+	s.runtimeConfigMu.Lock()
+	previous := s.pendingSourceCatchUpKey
+	s.pendingSourceCatchUpKey = key
+	s.runtimeConfigMu.Unlock()
+	return previous
+}
+
+func (s *Server) sourceDeliveryCatchUpPending(cfg appconfig.Config) bool {
+	key := sourceDeliveryRuntimeKey(cfg)
+	s.runtimeConfigMu.Lock()
+	defer s.runtimeConfigMu.Unlock()
+	return key != "" && s.pendingSourceCatchUpKey == key
+}
+
+func (s *Server) clearSourceDeliveryCatchUp(cfg appconfig.Config) {
+	key := sourceDeliveryRuntimeKey(cfg)
+	s.runtimeConfigMu.Lock()
+	if s.pendingSourceCatchUpKey == key {
+		s.pendingSourceCatchUpKey = ""
+	}
+	s.runtimeConfigMu.Unlock()
+}
+
+func (s *Server) restoreSourceDeliveryCatchUp(key string) {
+	s.runtimeConfigMu.Lock()
+	s.pendingSourceCatchUpKey = key
+	s.runtimeConfigMu.Unlock()
+}
+
+func (s *Server) sourceWatcherActive() bool {
+	s.watcherMu.RLock()
+	defer s.watcherMu.RUnlock()
+	return s.watcher != nil
+}
+
+func (s *Server) installSourceWatcher(candidate *watcher.FileWatcher) bool {
+	s.watcherMu.Lock()
+	defer s.watcherMu.Unlock()
+	if s.watcher != nil {
+		return false
+	}
+	s.watcher = candidate
+	return true
+}
+
+func (s *Server) removeSourceWatcher(candidate *watcher.FileWatcher) {
+	s.watcherMu.Lock()
+	if s.watcher == candidate {
+		s.watcher = nil
+	}
+	s.watcherMu.Unlock()
+}
+
+func (s *Server) takeSourceWatcher() *watcher.FileWatcher {
+	s.watcherMu.Lock()
+	current := s.watcher
+	s.watcher = nil
+	s.watcherMu.Unlock()
+	return current
+}
+
+func (s *Server) triggerSourceCatchUp() error {
+	s.watcherMu.RLock()
+	defer s.watcherMu.RUnlock()
+	if s.watcher == nil {
+		return fmt.Errorf("source watcher is not running")
+	}
+	return s.watcher.Trigger(s.currentDBPath(), watcher.EventStartup)
+}
+
+func sourceDeliveryCatchUpRequired(previous, current appconfig.Config, hadPrevious bool) bool {
+	if !EventDeliveryRequiresWatch(current) {
+		return false
+	}
+	delivery := updateout.Normalize(current.SendUpdates)
+	if !delivery.Initial && sourceDeliveryDestinationKey(current) == "" {
+		// A generic consumer that opted out of initial snapshots must continue
+		// receiving ordinary deltas. Promoting its next change to "initial" would
+		// make dispatch intentionally skip the only observed update.
+		return false
+	}
+	if !hadPrevious || !EventDeliveryRequiresWatch(previous) {
+		return true
+	}
+	return sourceDeliveryRuntimeKey(previous) != sourceDeliveryRuntimeKey(current)
+}
+
+func sourceDeliveryRuntimeKey(cfg appconfig.Config) string {
+	material, err := json.Marshal([]interface{}{
+		sourceDeliveryDestinationKey(cfg),
+		updateout.Normalize(cfg.SendUpdates),
+		cfg.Database.Path,
+		cfg.Database.Raw,
+		cfg.Database.RTLConversion,
+		cfg.Transform,
+		cfg.Canonical,
+	})
+	if err != nil {
+		return ""
+	}
+	digest := sha256.Sum256(material)
+	return fmt.Sprintf("%x", digest[:])
+}
+
+func validateRuntimeConfigTransition(previous, current appconfig.Config, hadPrevious bool) error {
+	if hadPrevious && !sameRuntimeDatabasePath(previous.Database.Path, current.Database.Path) {
+		return fmt.Errorf("database.path cannot be changed while the server is running; restart with the desired source")
+	}
+	return nil
+}
+
+func sameRuntimeDatabasePath(left, right string) bool {
+	left = strings.TrimSpace(left)
+	right = strings.TrimSpace(right)
+	if filecopy.IsURL(left) || filecopy.IsURL(right) {
+		return left == right
+	}
+	left = filepath.Clean(left)
+	right = filepath.Clean(right)
+	if os.PathSeparator == '\\' {
+		return strings.EqualFold(left, right)
+	}
+	return left == right
+}
+
 // ReplaceConfig persists and broadcasts a new configuration snapshot.
 func (s *Server) ReplaceConfig(cfg appconfig.Config) (appconfig.Config, error) {
+	s.runtimeConfigApplyMu.Lock()
+	defer s.runtimeConfigApplyMu.Unlock()
 	if s.config == nil {
 		return appconfig.Default(), fmt.Errorf("configuration storage is not enabled")
 	}
-	if err := s.config.Replace(cfg); err != nil {
+	previous, hadPrevious := s.previousRuntimeConfig()
+	previousBase, _, generation := s.config.SnapshotsVersion()
+	effective := s.config.Effective(cfg)
+	if err := validateRuntimeConfigTransition(previous, effective, hadPrevious); err != nil {
 		return appconfig.Config{}, err
 	}
-	cfg = s.config.Get()
+	if err := ValidateEventDeliveryWatch(effective.Server.Watch && s.sourceWatcherActive(), effective); err != nil {
+		return appconfig.Config{}, err
+	}
+	if err := s.config.ReplaceEffectiveAtGeneration(cfg, generation); err != nil {
+		return appconfig.Config{}, err
+	}
+	base, cfg := s.config.Snapshots()
+	if sourceDeliveryCatchUpRequired(previous, cfg, hadPrevious) {
+		priorCatchUpKey := s.markSourceDeliveryCatchUp(cfg)
+		if err := s.triggerSourceCatchUp(); err != nil {
+			s.restoreSourceDeliveryCatchUp(priorCatchUpKey)
+			if restoreErr := s.config.Replace(previousBase); restoreErr != nil {
+				return appconfig.Config{}, fmt.Errorf("queue canonical source delivery catch-up: %v (configuration rollback also failed)", err)
+			}
+			return appconfig.Config{}, fmt.Errorf("queue canonical source delivery catch-up: %w", err)
+		}
+	}
+	s.rememberRuntimeConfigSnapshots(base, cfg)
 	s.invalidateCanonicalProjection(false)
 	s.excelPricingRemote.configChanged(cfg)
 	s.broadcastConfig(cfg)
@@ -748,6 +973,11 @@ func (s *Server) ReplaceConfig(cfg appconfig.Config) (appconfig.Config, error) {
 // by GET /api/status.
 func (s *Server) Status() map[string]interface{} {
 	status := s.processStatus()
+	cfg := s.Config()
+	status["source_delivery_watch"] = map[string]interface{}{
+		"required": EventDeliveryRequiresWatch(cfg),
+		"active":   s.sourceWatcherActive(),
+	}
 	// The permit covers startup/source delivery, synchronous refresh and owner
 	// actuation. The owner worker's phase alone does not describe this shared work.
 	status["pricing_operation"] = s.refreshDiagnosticStatus(s.excelPricing != nil && len(s.excelPricing.permit) != 0)
@@ -2305,8 +2535,23 @@ func (s *Server) broadcastInitialSnapshot(reason string) {
 }
 
 // broadcastUpdate broadcasts database changes to all connected WebSocket clients
-func (s *Server) broadcastUpdate() error {
-	preparedAt := time.Now()
+func (s *Server) broadcastUpdate(observedAt ...time.Time) error {
+	ctx := s.backgroundCtx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	bounded, cancel := context.WithTimeout(ctx, canonicalRequestTimeout(s.Config()))
+	defer cancel()
+	return s.broadcastUpdateContext(bounded, observedAt...)
+}
+
+func (s *Server) broadcastUpdateContext(ctx context.Context, observedAt ...time.Time) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	preparedAt := time.Now().UTC()
+	observed := sourceObservationTime(preparedAt, observedAt)
+	sourceEvent := len(observedAt) != 0 && !observedAt[0].IsZero()
 	s.wsClientsMu.RLock()
 	clientCount := len(s.wsClients)
 	s.wsClientsMu.RUnlock()
@@ -2319,14 +2564,12 @@ func (s *Server) broadcastUpdate() error {
 	log.Printf("📡 Broadcasting update to %d clients", clientCount)
 
 	// Get current records
-	result, err := s.RecordResult()
+	result, err := s.RecordResultContext(ctx)
 	if err != nil {
 		s.recordPreDispatchFailure("update", "source_prepare", preparedAt, err)
 		log.Printf("Failed to read records: %v", err)
 		return err
 	}
-	records := result.Rows
-
 	// Compute changes
 	changeSet, contractChanged := s.computeRecordUpdate(result)
 	changeSet.Raw = result.Raw
@@ -2336,9 +2579,43 @@ func (s *Server) broadcastUpdate() error {
 		changes["contract"] = contract
 	}
 
-	// Log what we're sending
+	// Persist canonical delivery before publishing any local side effect. A
+	// transient read/outbox failure can then retry the same observation without
+	// repeatedly fencing pricing snapshots or duplicating WebSocket/toast events.
 	added, modified, deleted := changeSet.Counts()
 	log.Printf("📊 Broadcasting: %d added, %d modified, %d deleted", added, modified, deleted)
+	changed := added+modified+deleted > 0 || contractChanged
+	rawCanonicalDelivery := result.Raw && EventDeliveryRequiresWatch(s.Config())
+	if rawCanonicalDelivery {
+		deliveryResult, deliveryErr := s.freshCanonicalRecordResultContext(ctx)
+		if deliveryErr != nil {
+			s.recordPreDispatchFailure("update", "canonical_source_prepare", preparedAt, deliveryErr)
+			return deliveryErr
+		}
+		if err := s.dispatchUpdateEvent(sourceSnapshotEvent(deliveryResult, browserSafeURL(s.currentDBPath()), observed), preparedAt); err != nil {
+			go s.broadcastProcessInfo()
+			return err
+		}
+		s.commitRecordBaseline(result)
+	} else if changed {
+		if contractChanged && added+modified+deleted == 0 {
+			log.Printf("Catalog structure changed without product-row changes")
+		}
+		if err := s.dispatchUpdateAndCommitBaseline(result, sourceUpdateEvent(result, &changeSet, browserSafeURL(s.currentDBPath()), observed), preparedAt); err != nil {
+			// Keep the previous watcher baseline. The retained source observation
+			// retries without republishing local side effects.
+			go s.broadcastProcessInfo()
+			return err
+		}
+	} else {
+		s.commitRecordBaseline(result)
+	}
+
+	// The source revision is now durably captured (or there was no canonical
+	// change), so these process-local effects are emitted exactly once.
+	if sourceEvent {
+		s.notifyFileUpdated(s.currentDBPath())
+	}
 
 	// Broadcast to all clients
 	s.wsClientsMu.RLock()
@@ -2355,45 +2632,63 @@ func (s *Server) broadcastUpdate() error {
 	s.wsClientsMu.RUnlock()
 
 	log.Printf("✅ Broadcast complete")
-	if added+modified+deleted > 0 || contractChanged {
-		if contractChanged && added+modified+deleted == 0 {
-			log.Printf("Catalog structure changed without product-row changes")
-		}
+	if changed {
 		s.notifyConfigured("row_updated", "Patris rows changed", s.rowChangeMessage(added, modified, deleted, changes))
-		if err := s.dispatchUpdateAndCommitBaseline(result, updateout.Event{
-			Type:             "update",
-			Timestamp:        changeSet.Timestamp,
-			Source:           browserSafeURL(s.currentDBPath()),
-			Raw:              result.Raw,
-			Records:          records,
-			Changes:          &changeSet,
-			KeyField:         result.KeyField,
-			Contract:         result.SyncEnvelope(&changeSet),
-			SnapshotContract: result.SyncEnvelope(nil),
-		}, preparedAt); err != nil {
-			// Keep the previous watcher baseline. A later source notification will
-			// rediscover the same revision instead of silently losing it.
-			go s.broadcastProcessInfo()
-			return err
-		}
-	} else {
-		s.commitRecordBaseline(result)
 	}
 	go s.broadcastProcessInfo()
 	return nil
 }
 
-func (s *Server) dispatchInitialUpdate(ctx context.Context) error {
-	preparedAt := time.Now()
+func sourceUpdateEvent(result recordpipe.Result, changes *recorddiff.ChangeSet, source string, observedAt time.Time) updateout.Event {
+	timestamp := ""
+	if changes != nil {
+		timestamp = changes.Timestamp
+	}
+	return updateout.Event{
+		Type:             "update",
+		Timestamp:        timestamp,
+		SourceObservedAt: observedAt,
+		Source:           source,
+		Raw:              result.Raw,
+		Records:          result.Rows,
+		Changes:          changes,
+		KeyField:         result.KeyField,
+		Contract:         result.SyncEnvelope(changes),
+		SnapshotContract: result.SyncEnvelope(nil),
+	}
+}
+
+func sourceSnapshotEvent(result recordpipe.Result, source string, observedAt time.Time) updateout.Event {
+	return updateout.Event{
+		Type:             "initial",
+		Timestamp:        time.Now().UTC().Format(time.RFC3339Nano),
+		SourceObservedAt: observedAt,
+		Source:           source,
+		Raw:              result.Raw,
+		Records:          result.Rows,
+		KeyField:         result.KeyField,
+		Contract:         result.SyncEnvelope(nil),
+		SnapshotContract: result.SyncEnvelope(nil),
+	}
+}
+
+func (s *Server) freshCanonicalRecordResultContext(ctx context.Context) (recordpipe.Result, error) {
+	options := s.recordOptions()
+	options.Raw = false
+	return s.recordResultContext(ctx, options)
+}
+
+func (s *Server) dispatchInitialUpdate(ctx context.Context, observedAt ...time.Time) error {
+	preparedAt := time.Now().UTC()
 	cfg := s.Config().SendUpdates
 	if !cfg.Enabled {
 		return nil
 	}
-	return s.dispatchSourceSnapshot(ctx, preparedAt, "source_prepare")
+	return s.dispatchSourceSnapshot(ctx, preparedAt, "source_prepare", observedAt...)
 }
 
-func (s *Server) dispatchSourceSnapshot(ctx context.Context, preparedAt time.Time, failureStage string) error {
-	result, err := s.RecordResultContext(ctx)
+func (s *Server) dispatchSourceSnapshot(ctx context.Context, preparedAt time.Time, failureStage string, observedAt ...time.Time) error {
+	viewerResult, err := s.RecordResultContext(ctx)
 	if err != nil {
 		s.recordPreDispatchFailure("initial", failureStage, preparedAt, err)
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
@@ -2402,16 +2697,20 @@ func (s *Server) dispatchSourceSnapshot(ctx context.Context, preparedAt time.Tim
 		log.Printf("Failed to prepare initial send update payload: %v", err)
 		return err
 	}
-	return s.dispatchUpdateAndCommitBaseline(result, updateout.Event{
-		Type:             "initial",
-		Timestamp:        time.Now().UTC().Format(time.RFC3339Nano),
-		Source:           browserSafeURL(s.currentDBPath()),
-		Raw:              result.Raw,
-		Records:          result.Rows,
-		KeyField:         result.KeyField,
-		Contract:         result.SyncEnvelope(nil),
-		SnapshotContract: result.SyncEnvelope(nil),
-	}, preparedAt)
+	deliveryResult := viewerResult
+	if viewerResult.Raw && EventDeliveryRequiresWatch(s.Config()) {
+		deliveryResult, err = s.freshCanonicalRecordResultContext(ctx)
+		if err != nil {
+			s.recordPreDispatchFailure("initial", failureStage, preparedAt, err)
+			return err
+		}
+	}
+	event := sourceSnapshotEvent(deliveryResult, browserSafeURL(s.currentDBPath()), sourceObservationTime(preparedAt, observedAt))
+	if err := s.dispatchUpdateEvent(event, preparedAt); err != nil {
+		return err
+	}
+	s.commitRecordBaseline(viewerResult)
+	return nil
 }
 
 func (s *Server) dispatchUpdateEvent(event updateout.Event, preparedAt time.Time) error {
@@ -2420,11 +2719,28 @@ func (s *Server) dispatchUpdateEvent(event updateout.Event, preparedAt time.Time
 	if !cfg.Enabled {
 		return nil
 	}
-	if event.Type == "initial" && !cfg.Initial && !(s.sourceDeliveryOutbox != nil && canonicalSourceDeliveryEvent(event)) {
+	if EventDeliveryRequiresWatch(operationConfig) && !canonicalSourceDeliveryEvent(event) {
+		err := fmt.Errorf("canonical source delivery contract is unavailable")
+		s.recordPreDispatchFailure(event.Type, "canonical_contract", preparedAt, err)
+		return err
+	}
+	delivery := updateout.Normalize(cfg)
+	if strings.TrimSpace(delivery.ProductSyncSecretEnv) != "" && !sourceDeliveryOutboxConfigured(delivery) {
+		err := fmt.Errorf("authenticated canonical source delivery configuration is invalid")
+		s.recordPreDispatchFailure(event.Type, "outbox_config", preparedAt, err)
+		return err
+	}
+	if strings.TrimSpace(delivery.ProductSyncSecretEnv) != "" && s.sourceDeliveryOutbox == nil {
+		err := fmt.Errorf("authenticated canonical source delivery outbox is unavailable")
+		s.recordPreDispatchFailure(event.Type, "outbox_config", preparedAt, err)
+		return err
+	}
+	durableReceiptLane := s.sourceDeliveryOutbox != nil && sourceDeliveryDestinationKey(operationConfig) != ""
+	if event.Type == "initial" && !cfg.Initial && !(durableReceiptLane && canonicalSourceDeliveryEvent(event)) {
 		return nil
 	}
 	queuedAt := time.Now()
-	if s.sourceDeliveryOutbox != nil && canonicalSourceDeliveryEvent(event) {
+	if durableReceiptLane && canonicalSourceDeliveryEvent(event) {
 		if err := s.sourceDeliveryOutbox.enqueue(operationConfig, event, preparedAt, queuedAt); err != nil {
 			s.recordPreDispatchFailure(event.Type, "outbox_persist", queuedAt, err)
 			log.Printf("Failed to persist source delivery before dispatch")
@@ -2472,6 +2788,11 @@ func (s *Server) dispatchUpdateEventNow(operationConfig appconfig.Config, event 
 	}
 	diagnostic := s.beginQueuedPricingOperationDiagnostic(operation, "dispatch", queuedAt)
 	diagnostic.includePreparation(preparedAt)
+	contract := event.Contract
+	if (updateout.Normalize(cfg).Mode == "full" || event.Type == "initial") && event.SnapshotContract != nil {
+		contract = event.SnapshotContract
+	}
+	diagnostic.includeSourceObservation(event.SourceObservedAt, preparedAt, queuedAt, contract)
 	terminalCode := "request_aborted"
 	defer func() { diagnostic.finish(terminalCode, "", "") }()
 	started := time.Now()
@@ -2480,10 +2801,6 @@ func (s *Server) dispatchUpdateEventNow(operationConfig appconfig.Config, event 
 	result, err := updateout.DispatchWithResult(ctx, cfg, event)
 	s.recordSourceDeliveryAcknowledgement(ackKey, cfg, event, result, err)
 	details := refreshDispatchDetails(result, err, started)
-	contract := event.Contract
-	if (updateout.Normalize(cfg).Mode == "full" || event.Type == "initial") && event.SnapshotContract != nil {
-		contract = event.SnapshotContract
-	}
 	terminalCode = backgroundDeliveryOutcome(result, err, contract)
 	if terminalCode == "delivery_outcome_unknown" {
 		details.Retryable = false
@@ -3300,14 +3617,17 @@ func (s *Server) StartWatching(debounceDuration time.Duration) error {
 		return fmt.Errorf("failed to create file watcher: %w", err)
 	}
 
-	s.watcher = fw
-	s.updateSourceHash()
-
 	if err := fw.WatchEvents(dbPath, func(event watcher.Event) error {
 		return s.handleSourceWatchEvent(event)
 	}, debounceDuration); err != nil {
+		_ = fw.Close()
 		return fmt.Errorf("failed to watch file: %w", err)
 	}
+	if !s.installSourceWatcher(fw) {
+		_ = fw.Close()
+		return fmt.Errorf("source watcher is already running")
+	}
+	s.updateSourceHash()
 
 	fw.Start()
 	ext := filepath.Ext(dbPath)
@@ -3317,36 +3637,110 @@ func (s *Server) StartWatching(debounceDuration time.Duration) error {
 	}
 	log.Printf("👀 Watching %s file: %s", fileType, filepath.Base(dbPath))
 	if err := fw.Trigger(dbPath, watcher.EventStartup); err != nil {
+		s.removeSourceWatcher(fw)
 		_ = fw.Close()
-		s.watcher = nil
 		return fmt.Errorf("failed to queue startup catch-up: %w", err)
 	}
 	return nil
 }
 
 func (s *Server) handleSourceWatchEvent(event watcher.Event) error {
+	// Keep one observed projection on a single effective configuration. A
+	// runtime replacement may queue a startup catch-up while this callback is
+	// already reserved, but cannot change its destination or transform policy
+	// midway through materialization.
+	s.runtimeConfigApplyMu.Lock()
+	defer s.runtimeConfigApplyMu.Unlock()
 	cfg := s.Config()
+	previous, hadPrevious := s.previousRuntimeConfig()
+	if err := validateRuntimeConfigTransition(previous, cfg, hadPrevious); err != nil {
+		return err
+	}
+	if err := ValidateEventDeliveryWatch(cfg.Server.Watch && s.sourceWatcherActive(), cfg); err != nil {
+		return err
+	}
+	catchUpPending := s.sourceDeliveryCatchUpPending(cfg)
+	if sourceDeliveryCatchUpRequired(previous, cfg, hadPrevious) && !catchUpPending {
+		// Manager.Reload commits its snapshot before its callback can acquire
+		// runtimeConfigApplyMu. Retry this observation after that callback has
+		// validated the transition and armed the mandatory full catch-up.
+		return errRuntimeConfigAwaitingApply
+	}
+	if catchUpPending {
+		event.Reason = watcher.EventStartup
+	}
 	ctx := s.backgroundCtx
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	bounded, cancel := context.WithTimeout(ctx, canonicalRequestTimeout(cfg))
 	defer cancel()
+	var err error
 	switch event.Reason {
 	case watcher.EventStartup:
 		log.Printf("🔄 Startup catalog catch-up: %s", filepath.Base(event.Path))
-		return s.dispatchInitialUpdate(bounded)
+		err = s.dispatchInitialUpdate(bounded, event.ObservedAt)
 	case watcher.EventOverflow:
 		log.Printf("⚠️  Watch overflow recovery snapshot: %s", filepath.Base(event.Path))
 		if !cfg.SendUpdates.Enabled {
 			return nil
 		}
-		return s.dispatchSourceSnapshot(bounded, time.Now(), "source_overflow_prepare")
+		err = s.dispatchSourceSnapshot(bounded, time.Now().UTC(), "source_overflow_prepare", event.ObservedAt)
 	default:
 		log.Printf("🔄 File changed: %s", filepath.Base(event.Path))
-		s.notifyFileUpdated(event.Path)
-		return s.broadcastUpdate()
+		err = s.broadcastUpdateContext(bounded, event.ObservedAt)
 	}
+	if err == nil && event.Reason == watcher.EventStartup {
+		s.clearSourceDeliveryCatchUp(cfg)
+	}
+	return err
+}
+
+func sourceObservationTime(preparedAt time.Time, candidates []time.Time) time.Time {
+	if preparedAt.IsZero() {
+		preparedAt = time.Now().UTC()
+	}
+	for _, candidate := range candidates {
+		if !candidate.IsZero() && !candidate.After(preparedAt) {
+			return candidate.UTC()
+		}
+	}
+	return preparedAt.UTC()
+}
+
+// EventDeliveryRequiresWatch identifies canonical/authenticated source
+// delivery configurations whose correctness depends on OS source events. The
+// product-sync secret also selects this lane even when a legacy config omitted
+// require_contract.
+func EventDeliveryRequiresWatch(cfg appconfig.Config) bool {
+	delivery := updateout.Normalize(cfg.SendUpdates)
+	return delivery.Enabled && cfg.Canonical.Enabled && canonicalDeliveryConfigured(delivery)
+}
+
+func canonicalDeliveryConfigured(delivery updateout.Config) bool {
+	return delivery.RequireContract || strings.TrimSpace(delivery.ProductSyncSecretEnv) != ""
+}
+
+// ValidateEventDeliveryWatch prevents a configured canonical delivery lane
+// from silently running without source observation.
+func ValidateEventDeliveryWatch(watching bool, cfg appconfig.Config) error {
+	delivery := updateout.Normalize(cfg.SendUpdates)
+	if !delivery.Enabled || !canonicalDeliveryConfigured(delivery) {
+		return nil
+	}
+	if strings.TrimSpace(delivery.ProductSyncSecretEnv) != "" && !sourceDeliveryOutboxConfigured(delivery) {
+		return fmt.Errorf("authenticated canonical send_updates requires one HTTP JSON POST destination with header-only secret authentication and HTTPS except on loopback")
+	}
+	if !cfg.Canonical.Enabled {
+		return fmt.Errorf("canonical send_updates requires an enabled canonical profile")
+	}
+	if !cfg.Canonical.HashesEnabled() {
+		return fmt.Errorf("canonical send_updates requires canonical hashes for durable source and event identity")
+	}
+	if !watching {
+		return fmt.Errorf("canonical send_updates requires event observation; enable server.watch or pass --watch=true")
+	}
+	return nil
 }
 
 // Close cleans up server resources
@@ -3363,11 +3757,11 @@ func (s *Server) Close() error {
 			firstErr = err
 		}
 	}
-	if s.watcher != nil {
-		if err := s.watcher.Close(); err != nil && firstErr == nil {
+	if sourceWatcher := s.takeSourceWatcher(); sourceWatcher != nil {
+		if err := sourceWatcher.Close(); err != nil && firstErr == nil {
 			firstErr = err
 		}
-		s.watcher.WaitCallbacks()
+		sourceWatcher.WaitCallbacks()
 	}
 	s.dataSourceMu.Lock()
 	ds := s.dataSource

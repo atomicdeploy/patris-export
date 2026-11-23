@@ -63,7 +63,9 @@ Read the existing local `GET /api/status` response and its `pricing_operation`:
 | `busy` | Shared pricing permit is held; false alone does not prove delivery |
 | `active` | The recorded operation has not reached its terminal diagnostic |
 | `elapsed_ms` | Recorded operation time; terminal values remain available |
-| `stage_ms` | Accumulated `owner_inputs`, `canonical_input`, and `dispatch` durations as applicable |
+| `source_observed_at`, `source_prepared_at`, `source_queued_at` | First retained OS observation, materialization start, and durable queue time for source delivery |
+| `source_revision`, `event_id` | Exact canonical identity selected for the recorded source delivery |
+| `stage_ms` | Accumulated `observation_wait`, `source_prepare`, `permit_wait`, `owner_inputs`, `canonical_input`, and `dispatch` durations as applicable |
 | `dispatch_diagnostic.delivery` | Actual receiver receipt, never synthesized from requested input |
 | `code` | Terminal classification; inspect this together with the receipt and pending/deferred counts |
 
@@ -83,6 +85,10 @@ and `delivery_deferred` must not be displayed as successful price delivery.
 `delivery_outcome_unknown` means the receiver may have committed; inspect its
 receipt before deciding on another request.
 The latest operation replaces the prior diagnostic; it is not a durable history.
+The sibling `source_delivery_watch` object reports whether event observation is
+required by the active canonical/authenticated delivery configuration and whether
+a watcher is active. See SOURCE-PREPARATION-DIAGNOSTICS.md for ordering, fallback,
+coalescing, and persistence boundaries.
 
 Live measured manual example: 13.626 seconds at the CLI, 13.527 seconds on the
 server: owner inputs 1.385 seconds, canonical input 4.559 seconds, dispatch 7.581

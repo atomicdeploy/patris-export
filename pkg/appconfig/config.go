@@ -178,11 +178,15 @@ type RowIconAppearance struct {
 }
 
 type Manager struct {
-	path  string
-	paths []string
-	mu    sync.RWMutex
-	cfg   Config
+	path           string
+	paths          []string
+	mu             sync.RWMutex
+	cfg            Config
+	runtimeOverlay func(*Config)
+	generation     uint64
 }
+
+var ErrConfigGenerationChanged = errors.New("configuration changed concurrently")
 
 func Default() Config {
 	return Config{
@@ -449,24 +453,150 @@ func (m *Manager) Paths() []string {
 }
 
 func (m *Manager) Get() Config {
+	_, effective := m.Snapshots()
+	return effective
+}
+
+// Snapshots returns a file-backed and effective configuration pair from the
+// same manager generation. The overlay function itself is captured while the
+// base snapshot is locked, so callers never pair a newer base with an older
+// effective value (or vice versa).
+func (m *Manager) Snapshots() (Config, Config) {
+	base, effective, _ := m.SnapshotsVersion()
+	return base, effective
+}
+
+// SnapshotsVersion also returns a generation suitable for a compare-and-set
+// replacement. It lets a full config.set avoid overwriting a file reload that
+// completed after the caller prepared its candidate.
+func (m *Manager) SnapshotsVersion() (Config, Config, uint64) {
+	m.mu.RLock()
+	base := cloneConfig(m.cfg)
+	overlay := m.runtimeOverlay
+	generation := m.generation
+	m.mu.RUnlock()
+	effective := cloneConfig(base)
+	if overlay != nil {
+		overlay(&effective)
+		normalize(&effective)
+	}
+	return base, effective, generation
+}
+
+// Base returns the file-backed snapshot before process-local overlays.
+func (m *Manager) Base() Config {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	return m.cfg
+	return cloneConfig(m.cfg)
+}
+
+func (m *Manager) HasRuntimeOverlay() bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.runtimeOverlay != nil
+}
+
+func cloneConfig(cfg Config) Config {
+	return cloneConfigValue(reflect.ValueOf(cfg)).Interface().(Config)
+}
+
+func cloneConfigValue(value reflect.Value) reflect.Value {
+	if !value.IsValid() {
+		return value
+	}
+	switch value.Kind() {
+	case reflect.Interface:
+		if value.IsNil() {
+			return reflect.Zero(value.Type())
+		}
+		cloned := cloneConfigValue(value.Elem())
+		result := reflect.New(value.Type()).Elem()
+		result.Set(cloned)
+		return result
+	case reflect.Pointer:
+		if value.IsNil() {
+			return reflect.Zero(value.Type())
+		}
+		result := reflect.New(value.Type().Elem())
+		result.Elem().Set(cloneConfigValue(value.Elem()))
+		return result
+	case reflect.Struct:
+		result := reflect.New(value.Type()).Elem()
+		// Copy the complete value first. Per-field reflection cannot Set private
+		// fields from nested package types (for example pricing presence bits),
+		// but a same-type struct assignment preserves them. Exported reference
+		// fields are then recursively cloned below.
+		result.Set(value)
+		for index := 0; index < value.NumField(); index++ {
+			if result.Field(index).CanSet() {
+				result.Field(index).Set(cloneConfigValue(value.Field(index)))
+			}
+		}
+		return result
+	case reflect.Slice:
+		if value.IsNil() {
+			return reflect.Zero(value.Type())
+		}
+		result := reflect.MakeSlice(value.Type(), value.Len(), value.Len())
+		for index := 0; index < value.Len(); index++ {
+			result.Index(index).Set(cloneConfigValue(value.Index(index)))
+		}
+		return result
+	case reflect.Map:
+		if value.IsNil() {
+			return reflect.Zero(value.Type())
+		}
+		result := reflect.MakeMapWithSize(value.Type(), value.Len())
+		iterator := value.MapRange()
+		for iterator.Next() {
+			result.SetMapIndex(cloneConfigValue(iterator.Key()), cloneConfigValue(iterator.Value()))
+		}
+		return result
+	default:
+		return value
+	}
+}
+
+// Effective applies the manager's process-local overlay to a candidate without
+// writing either the candidate or overlaid values.
+func (m *Manager) Effective(cfg Config) Config {
+	cfg = cloneConfig(cfg)
+	m.mu.RLock()
+	overlay := m.runtimeOverlay
+	m.mu.RUnlock()
+	if overlay != nil {
+		overlay(&cfg)
+	}
+	normalize(&cfg)
+	return cfg
 }
 
 func (m *Manager) Update(fn func(*Config)) error {
 	m.mu.Lock()
-	fn(&m.cfg)
-	normalize(&m.cfg)
-	data, err := encodeConfig(m.path, m.cfg)
-	m.mu.Unlock()
+	defer m.mu.Unlock()
+	next := cloneConfig(m.cfg)
+	fn(&next)
+	normalize(&next)
+	return m.replaceLocked(next)
+}
+
+// replaceLocked writes and commits a normalized snapshot while m.mu is held.
+// Serializing the file write with Reload/Update prevents an older operation
+// from overwriting a newer configuration after releasing the manager lock.
+func (m *Manager) replaceLocked(next Config) error {
+	data, err := encodeConfig(m.path, next)
 	if err != nil {
 		return err
 	}
 	if err := os.MkdirAll(filepath.Dir(m.path), 0755); err != nil {
 		return err
 	}
-	return os.WriteFile(m.path, data, 0644)
+	if err := os.WriteFile(m.path, data, 0644); err != nil {
+		return err
+	}
+	m.cfg = next
+	m.generation++
+	return nil
 }
 
 func (m *Manager) Save() error {
@@ -479,7 +609,83 @@ func (m *Manager) Replace(cfg Config) error {
 	})
 }
 
+// ReplaceEffective persists user-controlled fields while preserving the
+// file-backed values of fields currently controlled by a runtime overlay.
+// This keeps embedded config.set functional without materializing environment
+// secrets or constructor-only paths/options in the config file.
+func (m *Manager) ReplaceEffective(cfg Config) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.replaceEffectiveLocked(cfg)
+}
+
+// ReplaceEffectiveAtGeneration is the compare-and-set form used by callers
+// that prepared a complete replacement from an earlier snapshot.
+func (m *Manager) ReplaceEffectiveAtGeneration(cfg Config, generation uint64) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.generation != generation {
+		return ErrConfigGenerationChanged
+	}
+	return m.replaceEffectiveLocked(cfg)
+}
+
+func (m *Manager) replaceEffectiveLocked(cfg Config) error {
+	base := cloneConfig(m.cfg)
+	overlay := m.runtimeOverlay
+	if overlay == nil {
+		normalize(&cfg)
+		return m.replaceLocked(cloneConfig(cfg))
+	}
+	effectiveBase := cloneConfig(base)
+	overlay(&effectiveBase)
+	normalize(&effectiveBase)
+	desiredBase := cloneConfig(cfg)
+	normalize(&desiredBase)
+	effectiveDesired := cloneConfig(desiredBase)
+	overlay(&effectiveDesired)
+	normalize(&effectiveDesired)
+	restoreRuntimeControlledFields(
+		reflect.ValueOf(base),
+		reflect.ValueOf(effectiveBase),
+		reflect.ValueOf(&desiredBase).Elem(),
+		reflect.ValueOf(effectiveDesired),
+	)
+	normalize(&desiredBase)
+	return m.replaceLocked(desiredBase)
+}
+
+func restoreRuntimeControlledFields(base, effectiveBase, desired, effectiveDesired reflect.Value) {
+	if !base.IsValid() || !effectiveBase.IsValid() || !desired.IsValid() || !effectiveDesired.IsValid() || !desired.CanSet() ||
+		base.Type() != effectiveBase.Type() || base.Type() != desired.Type() || base.Type() != effectiveDesired.Type() {
+		return
+	}
+	baseControlled := !reflect.DeepEqual(base.Interface(), effectiveBase.Interface())
+	desiredControlled := !reflect.DeepEqual(desired.Interface(), effectiveDesired.Interface())
+	if !baseControlled && !desiredControlled {
+		return
+	}
+	if base.Kind() == reflect.Struct {
+		for index := 0; index < base.NumField(); index++ {
+			restoreRuntimeControlledFields(base.Field(index), effectiveBase.Field(index), desired.Field(index), effectiveDesired.Field(index))
+		}
+		return
+	}
+	desired.Set(cloneConfigValue(base))
+}
+
+// SetRuntimeOverlay applies process-local environment/constructor options to
+// every Get (including after Reload) without persisting those values.
+func (m *Manager) SetRuntimeOverlay(overlay func(*Config)) {
+	m.mu.Lock()
+	m.runtimeOverlay = overlay
+	m.generation++
+	m.mu.Unlock()
+}
+
 func (m *Manager) Reload() error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	cfg := Default()
 	loaded := false
 	for _, p := range m.paths {
@@ -497,9 +703,8 @@ func (m *Manager) Reload() error {
 		}
 	}
 	normalize(&cfg)
-	m.mu.Lock()
 	m.cfg = cfg
-	m.mu.Unlock()
+	m.generation++
 	return nil
 }
 
@@ -669,6 +874,17 @@ func (watcher *ConfigWatcher) Close() error {
 }
 
 func (m *Manager) Watch(onChange func(Config)) (*ConfigWatcher, error) {
+	return m.watchGuarded(nil, onChange)
+}
+
+// WatchGuarded serializes the reload commit and its callback with a caller's
+// operation boundary. This is useful when an effective configuration must not
+// change midway through a long-running source materialization.
+func (m *Manager) WatchGuarded(guard sync.Locker, onChange func(Config)) (*ConfigWatcher, error) {
+	return m.watchGuarded(guard, onChange)
+}
+
+func (m *Manager) watchGuarded(guard sync.Locker, onChange func(Config)) (*ConfigWatcher, error) {
 	w, err := fsnotify.NewWatcher()
 	if err != nil {
 		return nil, err
@@ -718,9 +934,7 @@ func (m *Manager) Watch(onChange func(Config)) (*ConfigWatcher, error) {
 				timerChannel = timer.C
 			case <-timerChannel:
 				timerChannel = nil
-				if err := m.Reload(); err == nil && onChange != nil {
-					onChange(m.Get())
-				}
+				m.reloadAndNotify(guard, onChange)
 			case _, ok := <-w.Errors:
 				if !ok {
 					return
@@ -729,6 +943,16 @@ func (m *Manager) Watch(onChange func(Config)) (*ConfigWatcher, error) {
 		}
 	}()
 	return watcher, nil
+}
+
+func (m *Manager) reloadAndNotify(guard sync.Locker, onChange func(Config)) {
+	if guard != nil {
+		guard.Lock()
+		defer guard.Unlock()
+	}
+	if err := m.Reload(); err == nil && onChange != nil {
+		onChange(m.Get())
+	}
 }
 
 func (c Config) Addr() string {

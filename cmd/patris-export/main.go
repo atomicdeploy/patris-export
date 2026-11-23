@@ -563,6 +563,7 @@ func effectiveConfig(cmd *cobra.Command) (*appconfig.Manager, appconfig.Config) 
 	if !rootFlags.Changed("rtl") {
 		rtlMode = cfg.Database.RTLConversion
 	}
+	cfg.Database.RTLConversion = rtlMode
 	if rootFlags.Changed("raw") {
 		cfg.Database.Raw = rawMode
 		cfg.Convert.Raw = rawMode
@@ -822,11 +823,14 @@ func convertFile(dbFile string, charMap converter.CharMapping, useStdout bool, c
 		return recordpipe.Result{}, err
 	}
 	result, err := recordpipe.Build(rawRows, dbFile, recordpipe.Options{
-		Raw:             cfg.Convert.Raw || cfg.Database.Raw,
-		Mapping:         cfg.Transform,
-		Canonical:       cfg.Canonical,
-		CatalogProvider: catalogProvider,
-		GeneratedAt:     time.Now(),
+		Raw:              cfg.Convert.Raw || cfg.Database.Raw,
+		RTLConversion:    cfg.Database.RTLConversion,
+		RTLConversionSet: true,
+		CharMapping:      charMap,
+		Mapping:          cfg.Transform,
+		Canonical:        cfg.Canonical,
+		CatalogProvider:  catalogProvider,
+		GeneratedAt:      time.Now(),
 	})
 	if err != nil {
 		return recordpipe.Result{}, err
@@ -1556,6 +1560,7 @@ func runServe(cmd *cobra.Command, args []string) {
 	if !cmd.Flags().Changed("watch") {
 		watchFile = cfg.Server.Watch
 	}
+	cfg.Server.Watch = watchFile
 	if !cmd.Flags().Changed("debounce") {
 		debounceStr = cfg.Server.Debounce
 	}
@@ -1570,6 +1575,10 @@ func runServe(cmd *cobra.Command, args []string) {
 	}
 	if !httpEnabled && !cfg.Server.IPC.Enabled {
 		errorColor.Println("At least one transport must be enabled. Use --http=true or --ipc.")
+		os.Exit(1)
+	}
+	if err := validateServeEventDelivery(watchFile, cfg); err != nil {
+		errorColor.Printf("❌ %v\n", err)
 		os.Exit(1)
 	}
 	addr = cfg.Addr()
@@ -1652,4 +1661,8 @@ func runServe(cmd *cobra.Command, args []string) {
 		errorColor.Printf("❌ Server error: %v\n", err)
 		os.Exit(1)
 	}
+}
+
+func validateServeEventDelivery(watchFile bool, cfg appconfig.Config) error {
+	return server.ValidateEventDeliveryWatch(watchFile, cfg)
 }

@@ -9,6 +9,8 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"unicode"
 )
 
@@ -31,8 +33,9 @@ type CharMappingIssue struct {
 
 var (
 	defaultMapping       CharMapping
+	defaultMappingMu     sync.RWMutex
 	dashFixEnabled       = true
-	rtlConversionEnabled = false
+	rtlConversionEnabled atomic.Bool
 	zwnjSpacingPattern   = regexp.MustCompile(`\[zwnj\][ \t\f\v]*`)
 )
 
@@ -103,6 +106,8 @@ func ParseCharMappingReport(reader io.Reader) (CharMapping, []CharMappingIssue, 
 
 // DefaultCharMapping returns a copy of the embedded default Patris81 character mapping.
 func DefaultCharMapping() CharMapping {
+	defaultMappingMu.RLock()
+	defer defaultMappingMu.RUnlock()
 	copied := make(CharMapping, len(defaultMapping))
 	for key, value := range defaultMapping {
 		copied[key] = value
@@ -136,12 +141,25 @@ func codepoints(value string) []string {
 
 // SetDefaultMapping sets the default character mapping
 func SetDefaultMapping(mapping CharMapping) {
-	defaultMapping = mapping
+	copied := make(CharMapping, len(mapping))
+	for key, value := range mapping {
+		copied[key] = value
+	}
+	defaultMappingMu.Lock()
+	defaultMapping = copied
+	defaultMappingMu.Unlock()
 }
 
 // Patris2Fa converts Patris-encoded text to Farsi/Persian
 func Patris2Fa(value string) string {
-	return Patris2FaWithMapping(value, defaultMapping)
+	return Patris2FaWithMappingAndRTL(value, DefaultCharMapping(), rtlConversionEnabled.Load())
+}
+
+// Patris2FaWithRTL converts Patris-encoded text with an operation-scoped RTL
+// policy. Long-running callers should prefer this over changing the process
+// default while a record set is being materialized.
+func Patris2FaWithRTL(value string, rtl bool) string {
+	return Patris2FaWithMappingAndRTL(value, DefaultCharMapping(), rtl)
 }
 
 // Patris2FaWithMapping converts Patris81-encoded text to Persian/Farsi
@@ -160,8 +178,15 @@ func Patris2Fa(value string) string {
 // 4. Re-reverse digit sequences to restore correct number order
 // 5. Clean up spacing and zero-width non-joiners
 func Patris2FaWithMapping(value string, mapping CharMapping) string {
+	return Patris2FaWithMappingAndRTL(value, mapping, rtlConversionEnabled.Load())
+}
+
+// Patris2FaWithMappingAndRTL converts Patris81-encoded text using one captured
+// mapping and RTL policy. The policy is never re-read while a field is being
+// converted, so callers can keep an entire record projection consistent.
+func Patris2FaWithMappingAndRTL(value string, mapping CharMapping, rtl bool) string {
 	if mapping == nil {
-		mapping = defaultMapping
+		mapping = DefaultCharMapping()
 	}
 
 	// Patris uses both CR and LF as item separators. Normalize their encoding
@@ -207,7 +232,7 @@ func Patris2FaWithMapping(value string, mapping CharMapping) string {
 	// outer padding is transport noise and remains safe to trim.
 	result = strings.TrimSpace(result)
 
-	if rtlConversionEnabled {
+	if rtl {
 		result = ConvertLTRVisualToRTL(result)
 	}
 
@@ -328,12 +353,12 @@ func SetDashFix(enabled bool) {
 // SetRTLConversion enables or disables optional conversion from LTR visual order
 // into RTL logical order for mixed Persian/Latin display contexts.
 func SetRTLConversion(enabled bool) {
-	rtlConversionEnabled = enabled
+	rtlConversionEnabled.Store(enabled)
 }
 
 // RTLConversionEnabled reports whether optional RTL logical conversion is enabled.
 func RTLConversionEnabled() bool {
-	return rtlConversionEnabled
+	return rtlConversionEnabled.Load()
 }
 
 // ConvertLTRVisualToRTL converts already-decoded text from Patris-style LTR

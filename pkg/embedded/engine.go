@@ -53,41 +53,26 @@ func New(options Options) (*Engine, error) {
 	if err != nil {
 		return nil, fmt.Errorf("load config: %w", err)
 	}
+	manager.SetRuntimeOverlay(func(cfg *appconfig.Config) {
+		appconfig.ApplyEnv(cfg)
+		applyOptions(cfg, options)
+	})
 	cfg := manager.Get()
-	appconfig.ApplyEnv(&cfg)
-	if options.DatabasePath != "" {
-		cfg.Database.Path = options.DatabasePath
-	}
-	if options.CharmapPath != "" {
-		cfg.Database.Charmap = options.CharmapPath
-	}
-	if options.TempDir != "" {
-		cfg.Runtime.TempDir = options.TempDir
-	}
-	if options.DirectAccessSet {
-		cfg.Database.DirectAccess = options.DirectAccess
-	}
-	if options.WatchSet {
-		cfg.Server.Watch = options.Watch
-	}
-	if options.Debounce != "" {
-		cfg.Server.Debounce = options.Debounce
-	}
 	if strings.TrimSpace(cfg.Database.Path) == "" {
 		return nil, errors.New("database path is required")
+	}
+	if err := server.ValidateEventDeliveryWatch(cfg.Server.Watch, cfg); err != nil {
+		return nil, err
 	}
 
 	filecopy.SetTempDir(appconfig.ResolveTempDir(cfg.Runtime.TempDir))
 	filecopy.SetTempPolicy(cfg.Runtime.TempStrategy, appconfig.TempMemoryLimitBytes(cfg.Runtime.TempMemoryLimitMB))
-	converter.SetRTLConversion(cfg.Database.RTLConversion)
-
 	var charMap converter.CharMapping
 	if cfg.Database.Charmap != "" {
 		charMap, err = converter.LoadCharMapping(cfg.Database.Charmap)
 		if err != nil {
 			return nil, fmt.Errorf("load charmap: %w", err)
 		}
-		converter.SetDefaultMapping(charMap)
 	}
 
 	info := options.Version
@@ -114,6 +99,27 @@ func New(options Options) (*Engine, error) {
 		}
 	}
 	return e, nil
+}
+
+func applyOptions(cfg *appconfig.Config, options Options) {
+	if options.DatabasePath != "" {
+		cfg.Database.Path = options.DatabasePath
+	}
+	if options.CharmapPath != "" {
+		cfg.Database.Charmap = options.CharmapPath
+	}
+	if options.TempDir != "" {
+		cfg.Runtime.TempDir = options.TempDir
+	}
+	if options.DirectAccessSet {
+		cfg.Database.DirectAccess = options.DirectAccess
+	}
+	if options.WatchSet {
+		cfg.Server.Watch = options.Watch
+	}
+	if options.Debounce != "" {
+		cfg.Server.Debounce = options.Debounce
+	}
 }
 
 func (e *Engine) Server() *server.Server {

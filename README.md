@@ -504,7 +504,7 @@ Start the REST API and WebSocket server.
 
 **Flags:**
 - `-a, --addr` - Server address (default: :8080)
-- `-w, --watch` - Watch a local file and broadcast event-driven updates (default: true)
+- `-w, --watch` - Watch a local file and broadcast event-driven updates (default: true). Authenticated canonical `send_updates` requires this to remain enabled so startup catch-up and later source delivery cannot be silently skipped.
 - `-d, --debounce` - Debounce duration for local file events (default: 0s)
 
 **URL example:**

@@ -5,9 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -57,6 +59,86 @@ func TestBuildRawSkipsTransformAndMapping(t *testing.T) {
 	}
 	if _, exists := result.Rows[0]["warnings"]; exists {
 		t.Fatal("raw mode must not add derived naming warnings")
+	}
+}
+
+func TestBuildCapturesExplicitRTLPolicyAcrossConcurrentProjections(t *testing.T) {
+	originalMapping := converter.DefaultCharMapping()
+	defer converter.SetDefaultMapping(originalMapping)
+	defer converter.SetRTLConversion(false)
+	mapping := converter.CharMapping{
+		0xa1: "ا", 0xa5: "ب", 0xb8: "ژ", 0xbc: "ش", 0xd0: "ک",
+		0xd3: "ل", 0xd6: "م", 0xd9: "و", 0xdb: "ه",
+		0xf3: "0", 0xf5: "2", 0xfa: "7", 0xfb: "8",
+	}
+	converter.SetDefaultMapping(mapping)
+	converter.SetRTLConversion(true)
+	encoded := "LAN\xfb\xfa\xf5\xf3 \xdb\xd0\xa5\xbc \xd3\xd9\xb8\xa1\xd6"
+	rows := make([]map[string]interface{}, 32)
+	for index := range rows {
+		rows[index] = map[string]interface{}{"Code": fmt.Sprintf("%03d", index+1), "Name": encoded}
+	}
+
+	type outcome struct {
+		rtl    bool
+		result Result
+		err    error
+	}
+	results := make(chan outcome, 2)
+	var group sync.WaitGroup
+	for _, rtl := range []bool{false, true} {
+		rtl := rtl
+		group.Add(1)
+		go func() {
+			defer group.Done()
+			result, err := BuildContext(context.Background(), rows, "products.db", Options{RTLConversion: rtl, RTLConversionSet: true, CharMapping: mapping})
+			results <- outcome{rtl: rtl, result: result, err: err}
+		}()
+	}
+	group.Wait()
+	close(results)
+	for outcome := range results {
+		if outcome.err != nil {
+			t.Fatal(outcome.err)
+		}
+		want := "LAN8720 ماژول شبکه"
+		if outcome.rtl {
+			want = "ماژول شبکه LAN8720"
+		}
+		for _, row := range outcome.result.Rows {
+			if got := fmt.Sprint(row["Name"]); got != want {
+				t.Fatalf("rtl=%t row name=%q, want %q", outcome.rtl, got, want)
+			}
+		}
+	}
+}
+
+func TestBuildCanonicalUsesCapturedRTLForPercentEncodedPatrisText(t *testing.T) {
+	originalMapping := converter.DefaultCharMapping()
+	defer converter.SetDefaultMapping(originalMapping)
+	defer converter.SetRTLConversion(false)
+	mapping := converter.CharMapping{
+		0xa1: "ا", 0xa5: "ب", 0xb8: "ژ", 0xbc: "ش", 0xd0: "ک",
+		0xd3: "ل", 0xd6: "م", 0xd9: "و", 0xdb: "ه",
+		0xf3: "0", 0xf5: "2", 0xfa: "7", 0xfb: "8",
+	}
+	converter.SetDefaultMapping(mapping)
+	converter.SetRTLConversion(false)
+	encoded := "LAN\xfb\xfa\xf5\xf3 \xdb\xd0\xa5\xbc \xd3\xd9\xb8\xa1\xd6"
+	result := mustBuild(t, []map[string]interface{}{{
+		"Code": "123456789", "Name": url.PathEscape(encoded), "ANBAR1": 1, "ALLANBAR": 1,
+	}}, "kala.db", Options{
+		RTLConversion:    true,
+		RTLConversionSet: true,
+		CharMapping:      mapping,
+		Canonical:        canonical.DefaultConfig(),
+		CatalogProvider:  pricingcatalog.NewProvider(pricingcatalog.Config{Mode: pricingcatalog.ModeNone}),
+	})
+	if result.Contract == nil || len(result.Contract.Products) != 1 {
+		t.Fatalf("canonical percent-encoded fixture was not materialized: %+v", result.Contract)
+	}
+	if got := result.Contract.Products[0].Name; got != "ماژول شبکه LAN8720" {
+		t.Fatalf("percent-encoded canonical name=%q, want captured RTL projection", got)
 	}
 }
 

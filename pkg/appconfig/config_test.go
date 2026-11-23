@@ -3,6 +3,7 @@ package appconfig
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -13,6 +14,19 @@ import (
 	"github.com/atomicdeploy/patris-export/pkg/pricingcatalog"
 	"github.com/atomicdeploy/patris-export/pkg/recentsales"
 )
+
+type observingConfigReloadLock struct {
+	mu        sync.Mutex
+	attempted chan struct{}
+	once      sync.Once
+}
+
+func (lock *observingConfigReloadLock) Lock() {
+	lock.once.Do(func() { close(lock.attempted) })
+	lock.mu.Lock()
+}
+
+func (lock *observingConfigReloadLock) Unlock() { lock.mu.Unlock() }
 
 func TestLoadFilesLayersJSONYAMLTOML(t *testing.T) {
 	dir := t.TempDir()
@@ -55,6 +69,43 @@ func TestLoadFilesLayersJSONYAMLTOML(t *testing.T) {
 	}
 	if mgr.Path() != tomlPath {
 		t.Fatalf("write path = %q, want %q", mgr.Path(), tomlPath)
+	}
+}
+
+func TestGuardedReloadCannotCommitBeforeOperationReleases(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	manager, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := manager.Get()
+	candidate := manager.Base()
+	candidate.UI.Language = "fa"
+	data, err := encodeConfig(path, candidate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	guard := &observingConfigReloadLock{attempted: make(chan struct{})}
+	guard.mu.Lock()
+	done := make(chan struct{})
+	go func() {
+		manager.reloadAndNotify(guard, func(Config) { close(done) })
+	}()
+	<-guard.attempted
+	if got := manager.Get().UI.Language; got != before.UI.Language {
+		t.Fatalf("guarded reload committed %q before operation release; want %q", got, before.UI.Language)
+	}
+	guard.mu.Unlock()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("guarded reload did not commit after operation release")
+	}
+	if got := manager.Get().UI.Language; got != "fa" {
+		t.Fatalf("guarded reload language=%q, want fa", got)
 	}
 }
 
@@ -101,6 +152,115 @@ func TestConfigWatcherCloseJoinsInFlightCallback(t *testing.T) {
 	}
 	if err := watcher.Close(); err != nil {
 		t.Fatalf("idempotent watcher Close: %v", err)
+	}
+}
+
+func TestRuntimeOverlaySurvivesReloadWithoutMutatingBase(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(path, []byte("{}\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	manager, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	baseLabel := manager.Base().UI.RowIconRules[0].Label
+	manager.SetRuntimeOverlay(func(cfg *Config) {
+		cfg.Database.Path = "runtime-only.db"
+		cfg.UI.RowIconRules[0].Label = "runtime-only-label"
+	})
+	if err := manager.Reload(); err != nil {
+		t.Fatal(err)
+	}
+	const readers = 24
+	var wait sync.WaitGroup
+	wait.Add(readers)
+	for range readers {
+		go func() {
+			defer wait.Done()
+			for range 20 {
+				cfg := manager.Get()
+				if cfg.Database.Path != "runtime-only.db" || cfg.UI.RowIconRules[0].Label != "runtime-only-label" {
+					t.Errorf("runtime overlay changed: %+v", cfg)
+					return
+				}
+			}
+		}()
+	}
+	wait.Wait()
+	base := manager.Base()
+	if base.Database.Path != "" || base.UI.RowIconRules[0].Label != baseLabel {
+		t.Fatalf("runtime overlay mutated file-backed config: %+v", base)
+	}
+}
+
+func TestManagerSnapshotsPreservePricingExplicitNullPresence(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	input := `{"canonical":{"pricing":{"mode":"static","static":{"rounding_digits":null,"shipping_methods":[{"id":"air","price_per_kg":null,"currency":null}]}}}}`
+	if err := os.WriteFile(path, []byte(input), 0600); err != nil {
+		t.Fatal(err)
+	}
+	manager, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	base, effective := manager.Snapshots()
+	for name, cfg := range map[string]Config{"base": base, "effective": effective, "get": manager.Get()} {
+		encoded, err := json.Marshal(cfg.Canonical.Pricing.Static)
+		if err != nil {
+			t.Fatalf("marshal %s pricing: %v", name, err)
+		}
+		text := string(encoded)
+		for _, want := range []string{`"rounding_digits":null`, `"price_per_kg":null`, `"currency":null`} {
+			if !strings.Contains(text, want) {
+				t.Fatalf("%s snapshot lost explicit presence %s: %s", name, want, text)
+			}
+		}
+	}
+}
+
+func TestReplaceEffectiveProtectsOverlayFieldEqualToBase(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(path, []byte(`{"server":{"port":18080}}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	manager, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager.SetRuntimeOverlay(func(cfg *Config) { cfg.Server.Port = 18080 })
+	desired := manager.Get()
+	desired.Server.Port = 19090
+	desired.UI.Language = "fa"
+	if err := manager.ReplaceEffective(desired); err != nil {
+		t.Fatal(err)
+	}
+	base, effective := manager.Snapshots()
+	if base.Server.Port != 18080 || effective.Server.Port != 18080 {
+		t.Fatalf("runtime-controlled port was persisted: base=%d effective=%d", base.Server.Port, effective.Server.Port)
+	}
+	if base.UI.Language != "fa" || effective.UI.Language != "fa" {
+		t.Fatalf("uncontrolled field was not persisted: base=%q effective=%q", base.UI.Language, effective.UI.Language)
+	}
+}
+
+func TestReplaceEffectiveAtGenerationDoesNotOverwriteConcurrentUpdate(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	manager, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, desired, generation := manager.SnapshotsVersion()
+	desired.UI.Language = "fa"
+	if err := manager.Update(func(cfg *Config) { cfg.Server.Port = 19090 }); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.ReplaceEffectiveAtGeneration(desired, generation); !errors.Is(err, ErrConfigGenerationChanged) {
+		t.Fatalf("stale replacement error=%v, want ErrConfigGenerationChanged", err)
+	}
+	base := manager.Base()
+	if base.Server.Port != 19090 || base.UI.Language == "fa" {
+		t.Fatalf("stale replacement overwrote concurrent config: port=%d language=%q", base.Server.Port, base.UI.Language)
 	}
 }
 

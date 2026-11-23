@@ -78,4 +78,12 @@ func TestRTLConversionOptIn(t *testing.T) {
 	if got := Patris2Fa(input); got != "ماژول شبکه LAN8720" {
 		t.Fatalf("RTL enabled = %q", got)
 	}
+	if got := Patris2FaWithMappingAndRTL(input, mapping, false); got != "LAN8720 ماژول شبکه" {
+		t.Fatalf("explicit RTL false followed process default: %q", got)
+	}
+
+	SetRTLConversion(false)
+	if got := Patris2FaWithMappingAndRTL(input, mapping, true); got != "ماژول شبکه LAN8720" {
+		t.Fatalf("explicit RTL true followed process default: %q", got)
+	}
 }

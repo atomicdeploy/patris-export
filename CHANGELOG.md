@@ -37,6 +37,30 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Fixed
 
+- Retry an observed but unacknowledged source revision at a bounded cadence
+  after transient hash, read, projection, or outbox-capture failures. Debounce,
+  retries, and newer coalesced signals retain the first observation timestamp.
+- Reject CLI/embedded startup and runtime config replacement when authenticated
+  canonical delivery is enabled while file watching is disabled. Invalid
+  external config reloads are restored to the last valid runtime snapshot.
+- Correlate the latest source delivery status with its first observation,
+  preparation, queue, canonical source revision, and exact event identity.
+  These fields are diagnostics and do not expand delivery acceptance.
+- Keep raw viewer mode independent from authenticated delivery by projecting a
+  fresh canonical full snapshot externally, and queue a full catch-up when the
+  delivery lane or its destination/transformation identity is enabled/changed.
+- Keep embedded environment/options as a non-persisted runtime overlay across
+  config reloads while allowing unrelated `config.set` fields to persist.
+- Serialize external config reload commits with in-flight source
+  materialization, and capture the RTL policy and character map once per
+  projection so a reload cannot produce mixed-direction rows.
+- Reserve the durable receipt outbox for a structurally valid authenticated
+  JSON `POST` receiver (HTTPS except on loopback). Generic webhooks keep their
+  established dispatch path, while every unproved/new durable destination
+  starts with a full snapshot before later deltas.
+- Restore the in-memory active outbox entry when completion-state persistence
+  fails, so recovery probes continue instead of leaving pending disk state
+  without a running retry.
 - Couple watcher baseline advancement to durable outbox persistence. A failed
   outbox write now leaves the prior baseline discoverable and retains the event
   in memory for recovery instead of silently losing the revision.
