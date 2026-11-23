@@ -166,7 +166,7 @@ atomic document; shipping is never applied separately.
 Changing a website-backed proposal cell does not make a request. Excel records
 the changed key and edit generation locally, keeps formulas on the last
 site-confirmed values, and colors the proposal amber. The single
-**همگام‌سازی اکنون** action submits
+**به‌روزرسانی** action submits
 `patris.pricing-settings-writeback-request/v2` with:
 
 - only the changed setting keys;
@@ -305,11 +305,11 @@ do not invent, transmit, or apply receiver publication policy.
 On the Persian `تنظیمات` sheet:
 
 1. Open the template and let its deferred refresh populate `محصولات`, or
-   select **همگام‌سازی اکنون** for an explicit reload.
+   select **به‌روزرسانی** for an explicit reload.
 2. Review or edit the highlighted yuan/dollar rates, their effective dates,
    profit margin, air-express shipping price, or rounding digits. Changed cells
    remain local and amber; formulas continue using confirmed live values.
-3. Select **همگام‌سازی اکنون** once to send the changed settings as one batch.
+3. Select **به‌روزرسانی** once to send the changed settings as one batch.
    There is no second confirmation dialog. Wait for green confirmation; red
    means the website did not provide the required acknowledgement/readback.
 

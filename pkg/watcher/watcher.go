@@ -27,7 +27,7 @@ type debounceTimer struct {
 	timer                  *time.Timer
 	timerGeneration        uint64
 	registrationGeneration uint64
-	reason                 EventReason
+	event                  Event
 }
 
 // EventReason describes the operating-system signal that caused a source
@@ -46,8 +46,10 @@ const (
 // Event is acknowledged only when its callback returns nil. This lets callers
 // durably persist work before the watcher advances its file-content baseline.
 type Event struct {
-	Path   string
-	Reason EventReason
+	Path       string
+	Reason     EventReason
+	ObservedAt time.Time
+	Retry      bool
 }
 
 // FileWatcher watches database files for changes.
@@ -58,7 +60,7 @@ type FileWatcher struct {
 	callbacks       map[string]func(string)
 	eventCallbacks  map[string]func(Event) error
 	inFlight        map[string]bool
-	pendingReasons  map[string]EventReason
+	pendingEvents   map[string]Event
 	debounce        map[string]time.Duration
 	watchedDirs     map[string]int
 	pathDirs        map[string]string
@@ -67,6 +69,7 @@ type FileWatcher struct {
 	registrations   map[string]uint64
 	registrationSeq uint64
 	hashForPath     func(string) (string, error)
+	retryDelay      time.Duration
 	startOnce       sync.Once
 	closeOnce       sync.Once
 	eventWG         sync.WaitGroup
@@ -87,12 +90,13 @@ func NewFileWatcher() (*FileWatcher, error) {
 		callbacks:      make(map[string]func(string)),
 		eventCallbacks: make(map[string]func(Event) error),
 		inFlight:       make(map[string]bool),
-		pendingReasons: make(map[string]EventReason),
+		pendingEvents:  make(map[string]Event),
 		debounce:       make(map[string]time.Duration),
 		watchedDirs:    make(map[string]int),
 		pathDirs:       make(map[string]string),
 		timers:         make(map[string]debounceTimer),
 		registrations:  make(map[string]uint64),
+		retryDelay:     time.Second,
 	}
 	fw.hashForPath = fw.getHashForPath
 	return fw, nil
@@ -281,43 +285,73 @@ func (fw *FileWatcher) queueFileChange(path string) {
 }
 
 func (fw *FileWatcher) queueFileChangeReason(path string, reason EventReason) {
+	fw.queueFileEvent(Event{
+		Path:       path,
+		Reason:     reason,
+		ObservedAt: time.Now().UTC(),
+	}, 0, 0)
+}
+
+// queueFileEvent preserves the first observation time while coalescing newer
+// filesystem signals. minimumDelay is used only for autonomous retries so a
+// zero-debounce watch cannot spin after a transient read or callback failure.
+func (fw *FileWatcher) queueFileEvent(event Event, minimumDelay time.Duration, expectedGeneration uint64) {
+	path := event.Path
+	if event.ObservedAt.IsZero() {
+		event.ObservedAt = time.Now().UTC()
+	}
 	fw.mu.Lock()
 	if fw.closed {
 		fw.mu.Unlock()
 		return
 	}
 	registrationGeneration, watched := fw.registrations[path]
-	if !watched {
+	if !watched || (expectedGeneration != 0 && registrationGeneration != expectedGeneration) {
 		fw.mu.Unlock()
 		return
+	}
+	if fw.inFlight[path] {
+		fw.pendingEvents[path] = mergeEvents(fw.pendingEvents[path], event)
+		fw.mu.Unlock()
+		return
+	}
+	if scheduled, exists := fw.timers[path]; exists {
+		event = mergeEvents(scheduled.event, event)
+		fw.stopDebounceTimerLocked(path)
 	}
 
 	debounceDuration := fw.debounce[path]
+	if debounceDuration < minimumDelay {
+		debounceDuration = minimumDelay
+	}
 	if debounceDuration <= 0 {
+		if fw.eventCallbacks[path] != nil {
+			fw.inFlight[path] = true
+			fw.eventWG.Add(1)
+			fw.mu.Unlock()
+			go fw.runReservedFileEvent(path, registrationGeneration, event)
+			return
+		}
 		fw.mu.Unlock()
-		go fw.handleFileEvent(path, registrationGeneration, reason)
+		go fw.handleFileEvent(path, registrationGeneration, event)
 		return
 	}
 
-	if scheduled, exists := fw.timers[path]; exists {
-		reason = strongerReason(scheduled.reason, reason)
-	}
-	fw.stopDebounceTimerLocked(path)
 	fw.timerSeq++
 	timerGeneration := fw.timerSeq
 	timer := time.AfterFunc(debounceDuration, func() {
-		fw.fireDebounced(path, timerGeneration, registrationGeneration, reason)
+		fw.fireDebounced(path, timerGeneration, registrationGeneration)
 	})
 	fw.timers[path] = debounceTimer{
 		timer:                  timer,
 		timerGeneration:        timerGeneration,
 		registrationGeneration: registrationGeneration,
-		reason:                 reason,
+		event:                  event,
 	}
 	fw.mu.Unlock()
 }
 
-func (fw *FileWatcher) fireDebounced(path string, timerGeneration, registrationGeneration uint64, reason EventReason) {
+func (fw *FileWatcher) fireDebounced(path string, timerGeneration, registrationGeneration uint64) {
 	fw.mu.Lock()
 	scheduled, exists := fw.timers[path]
 	if fw.closed || !exists ||
@@ -328,8 +362,20 @@ func (fw *FileWatcher) fireDebounced(path string, timerGeneration, registrationG
 		return
 	}
 	delete(fw.timers, path)
+	if fw.eventCallbacks[path] != nil {
+		if fw.inFlight[path] {
+			fw.pendingEvents[path] = mergeEvents(fw.pendingEvents[path], scheduled.event)
+			fw.mu.Unlock()
+			return
+		}
+		fw.inFlight[path] = true
+		fw.eventWG.Add(1)
+		fw.mu.Unlock()
+		fw.runReservedFileEvent(path, registrationGeneration, scheduled.event)
+		return
+	}
 	fw.mu.Unlock()
-	fw.handleFileEvent(path, registrationGeneration, reason)
+	fw.handleFileEvent(path, registrationGeneration, scheduled.event)
 }
 
 // stopDebounceTimerLocked cancels one registered timer. The caller must hold
@@ -345,23 +391,71 @@ func (fw *FileWatcher) stopDebounceTimerLocked(path string) {
 }
 
 func (fw *FileWatcher) handleFileChange(path string, registrationGeneration uint64) {
-	fw.handleFileEvent(path, registrationGeneration, EventChange)
+	fw.queueFileEvent(Event{
+		Path:       path,
+		Reason:     EventChange,
+		ObservedAt: time.Now().UTC(),
+	}, 0, registrationGeneration)
 }
 
-func (fw *FileWatcher) handleFileEvent(path string, registrationGeneration uint64, reason EventReason) {
+func (fw *FileWatcher) handleFileEvent(path string, registrationGeneration uint64, event Event) {
+	event.Path = path
+	if event.ObservedAt.IsZero() {
+		event.ObservedAt = time.Now().UTC()
+	}
+
+	// Direct callers (principally focused tests) enter through the same
+	// reservation gate as fsnotify. Reserving before hashing is what makes the
+	// first observed timestamp deterministic when a later signal hashes faster.
+	fw.mu.Lock()
+	if fw.closed || fw.registrations[path] != registrationGeneration {
+		fw.mu.Unlock()
+		return
+	}
+	if fw.eventCallbacks[path] != nil {
+		if fw.inFlight[path] {
+			fw.pendingEvents[path] = mergeEvents(fw.pendingEvents[path], event)
+			fw.mu.Unlock()
+			return
+		}
+		fw.inFlight[path] = true
+		fw.eventWG.Add(1)
+		fw.mu.Unlock()
+		fw.runReservedFileEvent(path, registrationGeneration, event)
+		return
+	}
+	fw.mu.Unlock()
+	fw.processFileEvent(path, registrationGeneration, event)
+}
+
+func (fw *FileWatcher) runReservedFileEvent(path string, registrationGeneration uint64, event Event) {
+	defer fw.eventWG.Done()
+	fw.processFileEvent(path, registrationGeneration, event)
+}
+
+func (fw *FileWatcher) processFileEvent(path string, registrationGeneration uint64, event Event) {
+	event.Path = path
+	if event.ObservedAt.IsZero() {
+		event.ObservedAt = time.Now().UTC()
+	}
 	newHash, err := fw.hashForPath(path)
 	if err != nil {
 		if filecopy.IsURL(path) {
 			log.Printf("⚠️  Failed to get remote source hash")
+			fw.completeEventPreparation(path, registrationGeneration, event, true)
 			return
 		}
 		log.Printf("⚠️  Failed to get hash for %s: %v", path, err)
+		fw.completeEventPreparation(path, registrationGeneration, event, true)
 		return
 	}
 
-	if callback, claimed := fw.claimEventCallback(path, registrationGeneration, newHash, reason); claimed {
-		callbackErr := callback(Event{Path: path, Reason: reason})
-		fw.completeEventCallback(path, registrationGeneration, newHash, callbackErr)
+	if callback, claimed, skipped := fw.claimEventCallback(path, registrationGeneration, newHash, event); claimed {
+		callbackErr := callback(event)
+		fw.completeEventCallback(path, registrationGeneration, newHash, event, callbackErr)
+		return
+	} else if skipped {
+		fw.completeEventPreparation(path, registrationGeneration, event, false)
 		return
 	}
 	callback, claimed := fw.claimCallback(path, registrationGeneration, newHash)
@@ -371,32 +465,28 @@ func (fw *FileWatcher) handleFileEvent(path string, registrationGeneration uint6
 	callback(path)
 }
 
-func (fw *FileWatcher) claimEventCallback(path string, registrationGeneration uint64, newHash string, reason EventReason) (func(Event) error, bool) {
+func (fw *FileWatcher) claimEventCallback(path string, registrationGeneration uint64, newHash string, event Event) (func(Event) error, bool, bool) {
 	fw.mu.Lock()
 	defer fw.mu.Unlock()
 	if fw.closed || fw.registrations[path] != registrationGeneration {
-		return nil, false
+		return nil, false, false
 	}
 	callback := fw.eventCallbacks[path]
 	if callback == nil {
-		return nil, false
+		return nil, false, false
 	}
-	if fw.inFlight[path] {
-		fw.pendingReasons[path] = strongerReason(fw.pendingReasons[path], reason)
-		return nil, false
+	if !fw.inFlight[path] {
+		return nil, false, false
 	}
-	if reason == EventChange && fw.fileHashes[path] == newHash {
-		return nil, false
+	if event.Reason == EventChange && !event.Retry && fw.fileHashes[path] == newHash {
+		return nil, false, true
 	}
-	fw.inFlight[path] = true
-	// Reserve callback lifetime while holding the same lock used by Close. Once
-	// Close has acquired the lock no later Add can race with WaitCallbacks.
-	fw.eventWG.Add(1)
-	return callback, true
+	return callback, true, false
 }
 
-func (fw *FileWatcher) completeEventCallback(path string, registrationGeneration uint64, newHash string, callbackErr error) {
-	defer fw.eventWG.Done()
+func (fw *FileWatcher) completeEventCallback(path string, registrationGeneration uint64, newHash string, event Event, callbackErr error) {
+	var next Event
+	startNext := false
 	fw.mu.Lock()
 	if fw.registrations[path] != registrationGeneration {
 		fw.mu.Unlock()
@@ -407,13 +497,101 @@ func (fw *FileWatcher) completeEventCallback(path string, registrationGeneration
 	} else {
 		log.Printf("⚠️  Source event was not acknowledged for %s: %v", filepath.Base(path), callbackErr)
 	}
-	fw.inFlight[path] = false
-	pending, hasPending := fw.pendingReasons[path]
-	delete(fw.pendingReasons, path)
-	fw.mu.Unlock()
-	if hasPending {
-		go fw.handleFileEvent(path, registrationGeneration, pending)
+	pending, hasPending := fw.pendingEvents[path]
+	delete(fw.pendingEvents, path)
+	if callbackErr != nil {
+		if hasPending {
+			event = mergeEvents(event, pending)
+		}
+		fw.inFlight[path] = false
+		fw.scheduleEventRetryLocked(event, registrationGeneration)
+		fw.mu.Unlock()
+		return
 	}
+	fw.inFlight[path] = false
+	if hasPending {
+		fw.inFlight[path] = true
+		fw.eventWG.Add(1)
+		next = pending
+		startNext = true
+	}
+	fw.mu.Unlock()
+	if startNext {
+		go fw.runReservedFileEvent(path, registrationGeneration, next)
+	}
+}
+
+// completeEventPreparation releases the reservation held while hashing. A
+// failed preparation retries the entire unacknowledged observation batch; a
+// same-hash observation is dropped unless a newer signal arrived meanwhile.
+func (fw *FileWatcher) completeEventPreparation(path string, registrationGeneration uint64, event Event, retry bool) {
+	var next Event
+	startNext := false
+	fw.mu.Lock()
+	if fw.registrations[path] != registrationGeneration {
+		fw.mu.Unlock()
+		return
+	}
+	pending, hasPending := fw.pendingEvents[path]
+	delete(fw.pendingEvents, path)
+	if retry {
+		if hasPending {
+			event = mergeEvents(event, pending)
+		}
+		fw.inFlight[path] = false
+		fw.scheduleEventRetryLocked(event, registrationGeneration)
+		fw.mu.Unlock()
+		return
+	}
+	fw.inFlight[path] = false
+	if hasPending {
+		fw.inFlight[path] = true
+		fw.eventWG.Add(1)
+		next = mergeEvents(event, pending)
+		startNext = true
+	}
+	fw.mu.Unlock()
+	if startNext {
+		go fw.runReservedFileEvent(path, registrationGeneration, next)
+	}
+}
+
+func (fw *FileWatcher) scheduleEventRetryLocked(event Event, registrationGeneration uint64) {
+	event.Retry = true
+	delay := fw.retryDelay
+	if delay <= 0 {
+		delay = time.Second
+	}
+	if debounce := fw.debounce[event.Path]; debounce > delay {
+		delay = debounce
+	}
+	if scheduled, exists := fw.timers[event.Path]; exists {
+		event = mergeEvents(scheduled.event, event)
+	}
+	fw.stopDebounceTimerLocked(event.Path)
+	fw.timerSeq++
+	timerGeneration := fw.timerSeq
+	timer := time.AfterFunc(delay, func() {
+		fw.fireDebounced(event.Path, timerGeneration, registrationGeneration)
+	})
+	fw.timers[event.Path] = debounceTimer{
+		timer:                  timer,
+		timerGeneration:        timerGeneration,
+		registrationGeneration: registrationGeneration,
+		event:                  event,
+	}
+}
+
+func mergeEvents(current, candidate Event) Event {
+	if current.Path == "" {
+		return candidate
+	}
+	current.Reason = strongerReason(current.Reason, candidate.Reason)
+	current.Retry = current.Retry || candidate.Retry
+	if current.ObservedAt.IsZero() || (!candidate.ObservedAt.IsZero() && candidate.ObservedAt.Before(current.ObservedAt)) {
+		current.ObservedAt = candidate.ObservedAt
+	}
+	return current
 }
 
 // WaitCallbacks waits for durable-acknowledgement callbacks already claimed
@@ -505,7 +683,7 @@ func (fw *FileWatcher) close() error {
 	clear(fw.callbacks)
 	clear(fw.eventCallbacks)
 	clear(fw.inFlight)
-	clear(fw.pendingReasons)
+	clear(fw.pendingEvents)
 	clear(fw.fileHashes)
 	clear(fw.debounce)
 	clear(fw.pathDirs)
@@ -537,7 +715,7 @@ func (fw *FileWatcher) Unwatch(path string) error {
 	delete(fw.callbacks, key)
 	delete(fw.eventCallbacks, key)
 	delete(fw.inFlight, key)
-	delete(fw.pendingReasons, key)
+	delete(fw.pendingEvents, key)
 	delete(fw.debounce, key)
 	delete(fw.registrations, key)
 	dir := fw.pathDirs[key]

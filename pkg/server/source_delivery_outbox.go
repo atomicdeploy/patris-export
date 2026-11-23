@@ -32,13 +32,18 @@ var errSourceDeliveryOutbox = errors.New("source_delivery_outbox_unavailable")
 type sourceDeliveryOutboxEntry struct {
 	Event               updateout.Event                 `json:"event"`
 	TransmittedContract *sourceDeliveryContractIdentity `json:"transmitted_contract,omitempty"`
-	PreparedAt          time.Time                       `json:"prepared_at"`
-	QueuedAt            time.Time                       `json:"queued_at"`
-	Attempts            int                             `json:"attempts"`
-	ProbeAttempts       int                             `json:"probe_attempts,omitempty"`
-	State               string                          `json:"state"`
-	FailureCode         string                          `json:"failure_code,omitempty"`
-	OutcomeUnknown      bool                            `json:"outcome_unknown,omitempty"`
+	// SourceObservedAt is intentionally process-local. Persisting an additive
+	// field would make rollback binaries (which decode v1 with unknown-field
+	// rejection) unable to open a pending outbox. After restart diagnostics fall
+	// back to PreparedAt while delivery identity remains unchanged.
+	SourceObservedAt time.Time `json:"-"`
+	PreparedAt       time.Time `json:"prepared_at"`
+	QueuedAt         time.Time `json:"queued_at"`
+	Attempts         int       `json:"attempts"`
+	ProbeAttempts    int       `json:"probe_attempts,omitempty"`
+	State            string    `json:"state"`
+	FailureCode      string    `json:"failure_code,omitempty"`
+	OutcomeUnknown   bool      `json:"outcome_unknown,omitempty"`
 }
 
 type sourceDeliveryContractIdentity struct {
@@ -55,15 +60,19 @@ type sourceDeliveryOutboxState struct {
 }
 
 type sourceDeliveryOutbox struct {
-	mu        sync.Mutex
-	server    *Server
-	path      string
-	state     sourceDeliveryOutboxState
-	wake      chan struct{}
-	now       func() time.Time
-	retryBase time.Duration
-	deliver   func(appconfig.Config, updateout.Event, time.Time, time.Time) (updateout.DeliveryResult, string, error)
-	probe     func(context.Context, appconfig.Config, *canonical.Envelope) (sourceDeliveryReceiptProbe, error)
+	mu     sync.Mutex
+	server *Server
+	path   string
+	state  sourceDeliveryOutboxState
+	// deliveredDestinationKey is process-local on purpose. After a restart an
+	// empty outbox cannot prove which receiver baseline exists, so the first
+	// observed update is safely promoted to a full snapshot again.
+	deliveredDestinationKey string
+	wake                    chan struct{}
+	now                     func() time.Time
+	retryBase               time.Duration
+	deliver                 func(appconfig.Config, updateout.Event, time.Time, time.Time) (updateout.DeliveryResult, string, error)
+	probe                   func(context.Context, appconfig.Config, *canonical.Envelope) (sourceDeliveryReceiptProbe, error)
 }
 
 func newSourceDeliveryOutbox(server *Server, path string) (*sourceDeliveryOutbox, error) {
@@ -95,18 +104,29 @@ func canonicalSourceDeliveryEvent(event updateout.Event) bool {
 }
 
 func (outbox *sourceDeliveryOutbox) enqueue(cfg appconfig.Config, event updateout.Event, preparedAt, queuedAt time.Time) error {
+	key := sourceDeliveryDestinationKey(cfg)
+	if key == "" {
+		return errSourceDeliveryOutbox
+	}
 	transmitted := sourceDeliveryTransmittedContract(cfg.SendUpdates, event)
 	entry, err := sourceDeliveryOutboxEntryForEvent(event, transmitted, preparedAt, queuedAt)
 	if err != nil {
 		return err
 	}
-	key := sourceDeliveryDestinationKey(cfg)
-	if key == "" {
-		return errSourceDeliveryOutbox
-	}
 
 	outbox.mu.Lock()
 	defer outbox.mu.Unlock()
+	if event.Type != "initial" && outbox.deliveredDestinationKey != key &&
+		(outbox.state.Active == nil || outbox.state.DestinationKey != key) {
+		// A configuration change can race a previously reserved filesystem
+		// callback. Never let that callback establish a new receiver with a
+		// delta: the snapshot is already attached to the event and is the only
+		// safe first baseline for this destination.
+		entry, err = sourceDeliverySnapshotFallback(event, preparedAt, queuedAt)
+		if err != nil {
+			return err
+		}
+	}
 	if outbox.state.Active == nil || outbox.state.DestinationKey != key {
 		outbox.state = sourceDeliveryOutboxState{
 			Schema:         sourceDeliveryOutboxSchema,
@@ -114,8 +134,24 @@ func (outbox *sourceDeliveryOutbox) enqueue(cfg appconfig.Config, event updateou
 			Active:         entry,
 		}
 	} else if sourceDeliveryEntryID(outbox.state.Active) == sourceDeliveryEntryID(entry) {
+		// A prior atomic write may have failed after the candidate was retained
+		// in memory. Re-persist the same identity before acknowledging a watcher
+		// retry; returning nil here would advance its baseline without durable
+		// capture.
+		if err := outbox.persistLocked(); err != nil {
+			outbox.signal()
+			return err
+		}
+		outbox.signal()
 		return nil
 	} else {
+		if outbox.state.Latest != nil {
+			previousObservedAt := outbox.state.Latest.SourceObservedAt
+			if previousObservedAt.IsZero() || previousObservedAt.After(outbox.state.Latest.PreparedAt) {
+				previousObservedAt = outbox.state.Latest.PreparedAt
+			}
+			event.SourceObservedAt = earlierSourceObservation(event.SourceObservedAt, previousObservedAt)
+		}
 		latest, latestErr := sourceDeliverySnapshotFallback(event, preparedAt, queuedAt)
 		if latestErr != nil {
 			return latestErr
@@ -153,6 +189,10 @@ func sourceDeliveryOutboxEntryForEvent(event updateout.Event, transmitted *canon
 	if event.Timestamp == "" {
 		event.Timestamp = queuedAt.UTC().Format(time.RFC3339Nano)
 	}
+	observedAt := event.SourceObservedAt
+	if observedAt.IsZero() || observedAt.After(preparedAt) {
+		observedAt = preparedAt
+	}
 	return &sourceDeliveryOutboxEntry{
 		Event: event,
 		TransmittedContract: &sourceDeliveryContractIdentity{
@@ -160,9 +200,10 @@ func sourceDeliveryOutboxEntryForEvent(event updateout.Event, transmitted *canon
 			Source:      transmitted.Source,
 			GeneratedAt: transmitted.GeneratedAt,
 		},
-		PreparedAt: preparedAt.UTC(),
-		QueuedAt:   queuedAt.UTC(),
-		State:      "pending",
+		SourceObservedAt: observedAt.UTC(),
+		PreparedAt:       preparedAt.UTC(),
+		QueuedAt:         queuedAt.UTC(),
+		State:            "pending",
 	}, nil
 }
 
@@ -170,13 +211,21 @@ func sourceDeliverySnapshotFallback(event updateout.Event, preparedAt, queuedAt 
 	snapshot := event.SnapshotContract
 	fallback := updateout.Event{
 		Type:             "initial",
-		Timestamp:        queuedAt.UTC().Format(time.RFC3339Nano),
+		Timestamp:        event.Timestamp,
+		SourceObservedAt: event.SourceObservedAt,
 		Source:           event.Source,
 		KeyField:         event.KeyField,
 		Contract:         snapshot,
 		SnapshotContract: snapshot,
 	}
 	return sourceDeliveryOutboxEntryForEvent(fallback, snapshot, preparedAt, queuedAt)
+}
+
+func earlierSourceObservation(current, candidate time.Time) time.Time {
+	if current.IsZero() || (!candidate.IsZero() && candidate.Before(current)) {
+		return candidate
+	}
+	return current
 }
 
 func sourceDeliveryTransmittedContract(delivery updateout.Config, event updateout.Event) *canonical.Envelope {
@@ -234,7 +283,7 @@ func validateSourceDeliveryContracts(selected, snapshot *canonical.Envelope) err
 
 func sourceDeliveryDestinationKey(cfg appconfig.Config) string {
 	delivery := updateout.Normalize(cfg.SendUpdates)
-	if !delivery.Enabled || delivery.URL == "" || delivery.ProductSyncSecretEnv == "" || len(delivery.Command) != 0 {
+	if !sourceDeliveryOutboxConfigured(delivery) {
 		return ""
 	}
 	material, err := json.Marshal([]any{
@@ -251,6 +300,32 @@ func sourceDeliveryDestinationKey(cfg appconfig.Config) string {
 	}
 	digest := sha256.Sum256(material)
 	return hex.EncodeToString(digest[:])
+}
+
+// sourceDeliveryOutboxConfigured selects only the authenticated HTTP JSON
+// receiver that exposes the authoritative companion receipt route. Generic
+// REST webhooks, contract-only endpoints, and command delivery retain the
+// established non-outbox dispatch path.
+func sourceDeliveryOutboxConfigured(delivery updateout.Config) bool {
+	delivery = updateout.Normalize(delivery)
+	if !delivery.Enabled || delivery.URL == "" || delivery.Method != "POST" || delivery.Format != "json" ||
+		!portableEnvironmentReference(delivery.ProductSyncSecretEnv) || len(delivery.Command) != 0 {
+		return false
+	}
+	_, err := sourceDeliveryReceiptProbeURL(delivery.URL)
+	return err == nil
+}
+
+func portableEnvironmentReference(value string) bool {
+	value = strings.TrimSpace(value)
+	for index, char := range value {
+		if (char >= 'A' && char <= 'Z') || (char >= 'a' && char <= 'z') || char == '_' ||
+			(index > 0 && char >= '0' && char <= '9') {
+			continue
+		}
+		return false
+	}
+	return value != ""
 }
 
 func sourceDeliveryEntryID(entry *sourceDeliveryOutboxEntry) string {
@@ -344,7 +419,7 @@ func (outbox *sourceDeliveryOutbox) processOnce() (bool, time.Duration) {
 		if probeErr != nil {
 			active.State = "receipt_probe_inconclusive"
 			active.OutcomeUnknown = true
-			active.FailureCode = "receipt_probe_failed"
+			active.FailureCode = sourceDeliveryReceiptProbeFailureCode(probeErr)
 			_ = outbox.persistLocked()
 			attempts := active.ProbeAttempts
 			outbox.mu.Unlock()
@@ -414,6 +489,10 @@ func (outbox *sourceDeliveryOutbox) processOnce() (bool, time.Duration) {
 	// authoritative receipt probe runs.
 	deliveryConfig := cfg
 	deliveryConfig.SendUpdates.RetryAttempts = 1
+	entry.Event.SourceObservedAt = entry.SourceObservedAt
+	if entry.Event.SourceObservedAt.IsZero() || entry.Event.SourceObservedAt.After(entry.PreparedAt) {
+		entry.Event.SourceObservedAt = entry.PreparedAt
+	}
 	result, terminalCode, dispatchErr := outbox.deliver(deliveryConfig, entry.Event, entry.PreparedAt, entry.QueuedAt)
 	success := dispatchErr == nil && terminalCode == "receipt_received"
 	outbox.mu.Lock()
@@ -474,6 +553,8 @@ func (outbox *sourceDeliveryOutbox) completeActiveLocked(entry sourceDeliveryOut
 	if outbox.state.Active == nil || sourceDeliveryEntryID(outbox.state.Active) != sourceDeliveryEntryID(&entry) {
 		return outbox.state.Active != nil, nil
 	}
+	previousState := outbox.state
+	completedDestinationKey := outbox.state.DestinationKey
 	outbox.state.Active = outbox.state.Latest
 	outbox.state.Latest = nil
 	if outbox.state.Active != nil && outbox.state.Active.Event.SnapshotContract != nil && outbox.state.Active.Event.SnapshotContract.Source.SameIdentity(completedSource) {
@@ -483,8 +564,10 @@ func (outbox *sourceDeliveryOutbox) completeActiveLocked(entry sourceDeliveryOut
 		outbox.state.DestinationKey = ""
 	}
 	if err := outbox.persistLocked(); err != nil {
+		outbox.state = previousState
 		return true, err
 	}
+	outbox.deliveredDestinationKey = completedDestinationKey
 	return outbox.state.Active != nil, nil
 }
 
@@ -542,16 +625,32 @@ func (outbox *sourceDeliveryOutbox) status() map[string]interface{} {
 		"coalesced": outbox.state.Latest != nil,
 	}
 	if active := outbox.state.Active; active != nil {
-		result["state"] = active.State
-		result["attempts"] = active.Attempts
-		result["probe_attempts"] = active.ProbeAttempts
-		result["failure_code"] = active.FailureCode
-		result["outcome_unknown"] = active.OutcomeUnknown
-		if transmitted := sourceDeliveryEntryContract(active); transmitted != nil {
-			result["event_id"] = transmitted.EventID
-			result["source"] = transmitted.Source
-			result["generated_at"] = transmitted.GeneratedAt
+		for key, value := range sourceDeliveryStatusEntry(active) {
+			result[key] = value
 		}
+	}
+	if latest := outbox.state.Latest; latest != nil {
+		result["coalesced_latest"] = sourceDeliveryStatusEntry(latest)
+	}
+	return result
+}
+
+func sourceDeliveryStatusEntry(entry *sourceDeliveryOutboxEntry) map[string]interface{} {
+	result := map[string]interface{}{
+		"state":           entry.State,
+		"attempts":        entry.Attempts,
+		"probe_attempts":  entry.ProbeAttempts,
+		"failure_code":    entry.FailureCode,
+		"outcome_unknown": entry.OutcomeUnknown,
+	}
+	if transmitted := sourceDeliveryEntryContract(entry); transmitted != nil {
+		result["event_id"] = transmitted.EventID
+		result["source"] = canonical.Source{
+			ID:       transmitted.Source.ID,
+			Dataset:  transmitted.Source.Dataset,
+			Revision: transmitted.Source.Revision,
+		}
+		result["generated_at"] = transmitted.GeneratedAt
 	}
 	return result
 }

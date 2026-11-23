@@ -200,6 +200,11 @@ func (t *pricingSnapshotTiming) snapshot(started time.Time) *pricingSnapshotTimi
 type refreshOperationDiagnostic struct {
 	mu                sync.Mutex
 	started           time.Time
+	sourceObservedAt  time.Time
+	sourcePreparedAt  time.Time
+	sourceQueuedAt    time.Time
+	sourceRevision    string
+	eventID           string
 	phaseStarted      time.Time
 	stageMS           map[string]int64
 	ended             time.Time
@@ -230,6 +235,11 @@ type refreshOperationStatus struct {
 	Phase                  string                       `json:"phase,omitempty"`
 	Active                 bool                         `json:"active"`
 	StartedAt              time.Time                    `json:"started_at,omitempty"`
+	SourceObservedAt       *time.Time                   `json:"source_observed_at,omitempty"`
+	SourcePreparedAt       *time.Time                   `json:"source_prepared_at,omitempty"`
+	SourceQueuedAt         *time.Time                   `json:"source_queued_at,omitempty"`
+	SourceRevision         string                       `json:"source_revision,omitempty"`
+	EventID                string                       `json:"event_id,omitempty"`
 	ElapsedMS              int64                        `json:"elapsed_ms"`
 	PhaseElapsedMS         int64                        `json:"phase_elapsed_ms"`
 	StageMS                map[string]int64             `json:"stage_ms,omitempty"`
@@ -303,6 +313,11 @@ func (s *Server) refreshDiagnosticStatus(busy bool) refreshOperationStatus {
 		r.Active = true
 	}
 	r.Phase, r.StartedAt, r.ElapsedMS, r.PhaseElapsedMS = d.phase, d.started, end.Sub(d.started).Milliseconds(), end.Sub(d.phaseStarted).Milliseconds()
+	if !d.sourceObservedAt.IsZero() {
+		observedAt, preparedAt, queuedAt := d.sourceObservedAt, d.sourcePreparedAt, d.sourceQueuedAt
+		r.SourceObservedAt, r.SourcePreparedAt, r.SourceQueuedAt = &observedAt, &preparedAt, &queuedAt
+	}
+	r.SourceRevision, r.EventID = d.sourceRevision, d.eventID
 	r.Operation = d.operation
 	r.StageMS = make(map[string]int64, len(d.stageMS)+1)
 	for stage, ms := range d.stageMS {
@@ -350,6 +365,34 @@ func (d *refreshOperationDiagnostic) includePreparation(start time.Time) {
 	}
 	d.stageMS["source_prepare"] = d.started.Sub(start).Milliseconds()
 	d.started = start
+}
+
+// includeSourceObservation extends the existing dispatch timing backwards to
+// the first retained OS observation. It is diagnostic only: canonical identity
+// and receiver delivery acceptance remain authoritative.
+func (d *refreshOperationDiagnostic) includeSourceObservation(observedAt, preparedAt, queuedAt time.Time, contract *canonical.Envelope) {
+	if observedAt.IsZero() || preparedAt.IsZero() || observedAt.After(preparedAt) {
+		observedAt = preparedAt
+	}
+	observedAt = observedAt.UTC()
+	preparedAt = preparedAt.UTC()
+	queuedAt = queuedAt.UTC()
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.stageMS == nil {
+		d.stageMS = make(map[string]int64)
+	}
+	d.stageMS["observation_wait"] = preparedAt.Sub(observedAt).Milliseconds()
+	d.sourceObservedAt = observedAt
+	d.sourcePreparedAt = preparedAt
+	d.sourceQueuedAt = queuedAt
+	if observedAt.Before(d.started) {
+		d.started = observedAt
+	}
+	if contract != nil {
+		d.sourceRevision = contract.Source.Revision
+		d.eventID = contract.EventID
+	}
 }
 
 // Keep one historical failure without replacing another operation's active status.

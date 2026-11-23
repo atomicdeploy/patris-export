@@ -790,8 +790,11 @@ func TestFileWatcherEventsDoesNotAcknowledgeFailedCallback(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer fw.Close()
+	fw.retryDelay = 10 * time.Millisecond
 	var calls atomic.Int32
-	if err := fw.WatchEvents(tmpFile, func(Event) error {
+	observed := make(chan Event, 2)
+	if err := fw.WatchEvents(tmpFile, func(event Event) error {
+		observed <- event
 		if calls.Add(1) == 1 {
 			return errors.New("durable capture failed")
 		}
@@ -804,7 +807,12 @@ func TestFileWatcherEventsDoesNotAcknowledgeFailedCallback(t *testing.T) {
 	if err := os.WriteFile(tmpFile, []byte("revision-2"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	fw.handleFileEvent(absPath, generation, EventChange)
+	firstObservedAt := time.Now().UTC().Add(-time.Second)
+	fw.handleFileEvent(absPath, generation, Event{
+		Path:       absPath,
+		Reason:     EventChange,
+		ObservedAt: firstObservedAt,
+	})
 	fw.mu.RLock()
 	acknowledgedAfterFailure := fw.fileHashes[absPath]
 	fw.mu.RUnlock()
@@ -815,15 +823,344 @@ func TestFileWatcherEventsDoesNotAcknowledgeFailedCallback(t *testing.T) {
 	if acknowledgedAfterFailure == wantHash {
 		t.Fatal("failed durable callback advanced the watcher hash")
 	}
-	fw.handleFileEvent(absPath, generation, EventChange)
-	if calls.Load() != 2 {
-		t.Fatalf("unacknowledged revision was not rediscovered: calls=%d", calls.Load())
+	deadline := time.After(5 * time.Second)
+	for calls.Load() != 2 {
+		select {
+		case <-deadline:
+			t.Fatalf("unacknowledged revision was not retried autonomously: calls=%d", calls.Load())
+		case <-time.After(time.Millisecond):
+		}
+	}
+	first := <-observed
+	second := <-observed
+	fw.WaitCallbacks()
+	if !first.ObservedAt.Equal(firstObservedAt) || !second.ObservedAt.Equal(firstObservedAt) {
+		t.Fatalf("retry reset first observation: first=%s second=%s want=%s", first.ObservedAt, second.ObservedAt, firstObservedAt)
 	}
 	fw.mu.RLock()
 	acknowledgedAfterSuccess := fw.fileHashes[absPath]
 	fw.mu.RUnlock()
 	if acknowledgedAfterSuccess != wantHash {
 		t.Fatal("successful durable callback did not advance the watcher hash")
+	}
+}
+
+func TestFileWatcherRetryCoalescesLatestRevisionWithoutMaskingFirstObservation(t *testing.T) {
+	tmpFile := filepath.Join(t.TempDir(), "kala.db")
+	if err := os.WriteFile(tmpFile, []byte("initial"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	fw, err := NewFileWatcher()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer fw.Close()
+	fw.retryDelay = 25 * time.Millisecond
+	started := make(chan Event, 1)
+	release := make(chan struct{})
+	completed := make(chan Event, 1)
+	var calls atomic.Int32
+	if err := fw.WatchEvents(tmpFile, func(event Event) error {
+		if calls.Add(1) == 1 {
+			started <- event
+			<-release
+			return errors.New("transient projection failure")
+		}
+		completed <- event
+		return nil
+	}, 0); err != nil {
+		t.Fatal(err)
+	}
+	absPath, _ := filepath.Abs(tmpFile)
+	generation := registeredGeneration(t, fw, tmpFile)
+	firstObservedAt := time.Now().UTC().Add(-2 * time.Second)
+	if err := os.WriteFile(tmpFile, []byte("revision-2"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	go fw.handleFileEvent(absPath, generation, Event{
+		Path:       absPath,
+		Reason:     EventChange,
+		ObservedAt: firstObservedAt,
+	})
+	select {
+	case <-started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("first observation did not reach callback")
+	}
+	if err := os.WriteFile(tmpFile, []byte("latest-revision"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	fw.queueFileEvent(Event{
+		Path:       absPath,
+		Reason:     EventCompanion,
+		ObservedAt: time.Now().UTC(),
+	}, 0, generation)
+	close(release)
+	select {
+	case event := <-completed:
+		if event.Reason != EventCompanion {
+			t.Fatalf("retry reason=%q, want companion", event.Reason)
+		}
+		if !event.ObservedAt.Equal(firstObservedAt) {
+			t.Fatalf("coalesced retry masked first observation: got=%s want=%s", event.ObservedAt, firstObservedAt)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("coalesced latest revision was not retried")
+	}
+	fw.WaitCallbacks()
+	wantHash, err := fw.getFileHash(absPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fw.mu.RLock()
+	acknowledged := fw.fileHashes[absPath]
+	fw.mu.RUnlock()
+	if acknowledged != wantHash {
+		t.Fatal("retry did not acknowledge the latest coalesced revision")
+	}
+}
+
+func TestFileWatcherRetriesTransientHashFailureWithoutPolling(t *testing.T) {
+	tmpFile := filepath.Join(t.TempDir(), "kala.db")
+	if err := os.WriteFile(tmpFile, []byte("initial"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	fw, err := NewFileWatcher()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer fw.Close()
+	fw.retryDelay = 20 * time.Millisecond
+	observed := make(chan Event, 1)
+	if err := fw.WatchEvents(tmpFile, func(event Event) error {
+		observed <- event
+		return nil
+	}, 0); err != nil {
+		t.Fatal(err)
+	}
+	absPath, _ := filepath.Abs(tmpFile)
+	generation := registeredGeneration(t, fw, tmpFile)
+	if err := os.WriteFile(tmpFile, []byte("revision-2"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	realHash := fw.getFileHash
+	var attempts atomic.Int32
+	var attemptMu sync.Mutex
+	var attemptTimes []time.Time
+	fw.hashForPath = func(path string) (string, error) {
+		attemptMu.Lock()
+		attemptTimes = append(attemptTimes, time.Now())
+		attemptMu.Unlock()
+		if attempts.Add(1) == 1 {
+			return "", errors.New("transient access denied")
+		}
+		return realHash(path)
+	}
+	firstObservedAt := time.Now().UTC().Add(-time.Second)
+	fw.handleFileEvent(absPath, generation, Event{
+		Path:       absPath,
+		Reason:     EventChange,
+		ObservedAt: firstObservedAt,
+	})
+	select {
+	case event := <-observed:
+		if !event.ObservedAt.Equal(firstObservedAt) {
+			t.Fatalf("hash retry reset first observation: got=%s want=%s", event.ObservedAt, firstObservedAt)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("transient hash failure was not retried")
+	}
+	fw.WaitCallbacks()
+	if attempts.Load() != 2 {
+		t.Fatalf("hash attempts=%d, want one failure plus one retry", attempts.Load())
+	}
+	attemptMu.Lock()
+	times := append([]time.Time(nil), attemptTimes...)
+	attemptMu.Unlock()
+	if len(times) != 2 || times[1].Sub(times[0]) < fw.retryDelay {
+		t.Fatalf("hash retry was not bounded: attempts=%v delay=%s", times, fw.retryDelay)
+	}
+}
+
+func TestFileWatcherNewSignalConsumesScheduledRetryOnce(t *testing.T) {
+	tmpFile := filepath.Join(t.TempDir(), "kala.db")
+	if err := os.WriteFile(tmpFile, []byte("stable"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	fw, err := NewFileWatcher()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer fw.Close()
+	fw.retryDelay = 250 * time.Millisecond
+	firstObservedAt := time.Now().UTC().Add(-time.Second)
+	failed := make(chan struct{}, 1)
+	succeeded := make(chan Event, 1)
+	unexpected := make(chan Event, 1)
+	var calls atomic.Int32
+	if err := fw.WatchEvents(tmpFile, func(event Event) error {
+		switch calls.Add(1) {
+		case 1:
+			failed <- struct{}{}
+			return errors.New("transient durable capture failure")
+		case 2:
+			succeeded <- event
+			return nil
+		default:
+			unexpected <- event
+			return nil
+		}
+	}, 0); err != nil {
+		t.Fatal(err)
+	}
+	absPath, _ := filepath.Abs(tmpFile)
+	generation := registeredGeneration(t, fw, tmpFile)
+	fw.handleFileEvent(absPath, generation, Event{Path: absPath, Reason: EventCompanion, ObservedAt: firstObservedAt})
+	select {
+	case <-failed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("failed callback did not schedule retry")
+	}
+	fw.queueFileEvent(Event{Path: absPath, Reason: EventChange, ObservedAt: time.Now().UTC()}, 0, generation)
+	select {
+	case event := <-succeeded:
+		if event.Reason != EventCompanion || !event.ObservedAt.Equal(firstObservedAt) {
+			t.Fatalf("new signal did not consume scheduled retry identity: %+v", event)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("new signal did not consume scheduled retry")
+	}
+	fw.WaitCallbacks()
+	select {
+	case event := <-unexpected:
+		t.Fatalf("stale retry timer emitted a duplicate callback: %+v", event)
+	case <-time.After(fw.retryDelay + 100*time.Millisecond):
+	}
+	if got := calls.Load(); got != 2 {
+		t.Fatalf("callback count=%d, want failure plus one success", got)
+	}
+}
+
+func TestFileWatcherFailedRevisionRetryCapturesSourceRevert(t *testing.T) {
+	tmpFile := filepath.Join(t.TempDir(), "kala.db")
+	if err := os.WriteFile(tmpFile, []byte("revision-a"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	fw, err := NewFileWatcher()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer fw.Close()
+	fw.retryDelay = 100 * time.Millisecond
+	firstFailed := make(chan struct{}, 1)
+	recovered := make(chan Event, 1)
+	var calls atomic.Int32
+	if err := fw.WatchEvents(tmpFile, func(event Event) error {
+		if calls.Add(1) == 1 {
+			firstFailed <- struct{}{}
+			return errors.New("durable capture failed after retaining revision-b")
+		}
+		recovered <- event
+		return nil
+	}, 0); err != nil {
+		t.Fatal(err)
+	}
+	absPath, _ := filepath.Abs(tmpFile)
+	generation := registeredGeneration(t, fw, tmpFile)
+	firstObservedAt := time.Now().UTC().Add(-time.Second)
+	if err := os.WriteFile(tmpFile, []byte("revision-b"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	fw.handleFileEvent(absPath, generation, Event{Path: absPath, Reason: EventChange, ObservedAt: firstObservedAt})
+	select {
+	case <-firstFailed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("revision-b did not reach the failing callback")
+	}
+	if err := os.WriteFile(tmpFile, []byte("revision-a"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case event := <-recovered:
+		if !event.Retry || !event.ObservedAt.Equal(firstObservedAt) {
+			t.Fatalf("revert retry lost forced identity: %+v", event)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("source revert was suppressed by the acknowledged hash")
+	}
+	fw.WaitCallbacks()
+	if got := calls.Load(); got != 2 {
+		t.Fatalf("callback count=%d, want failed revision plus revert snapshot", got)
+	}
+}
+
+func TestFileWatcherReservesFirstObservationBeforeHashing(t *testing.T) {
+	tmpFile := filepath.Join(t.TempDir(), "kala.db")
+	if err := os.WriteFile(tmpFile, []byte("initial"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	fw, err := NewFileWatcher()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer fw.Close()
+	observed := make(chan Event, 1)
+	if err := fw.WatchEvents(tmpFile, func(event Event) error {
+		observed <- event
+		return nil
+	}, 0); err != nil {
+		t.Fatal(err)
+	}
+	absPath, _ := filepath.Abs(tmpFile)
+	generation := registeredGeneration(t, fw, tmpFile)
+	realHash := fw.getFileHash
+	firstHashStarted := make(chan struct{})
+	releaseFirstHash := make(chan struct{})
+	var attempts atomic.Int32
+	fw.hashForPath = func(path string) (string, error) {
+		if attempts.Add(1) == 1 {
+			close(firstHashStarted)
+			<-releaseFirstHash
+		}
+		return realHash(path)
+	}
+	firstObservedAt := time.Now().UTC().Add(-2 * time.Second)
+	if err := os.WriteFile(tmpFile, []byte("revision-2"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	go fw.handleFileEvent(absPath, generation, Event{Path: absPath, Reason: EventChange, ObservedAt: firstObservedAt})
+	select {
+	case <-firstHashStarted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("first observation did not begin hashing")
+	}
+	if err := os.WriteFile(tmpFile, []byte("latest-revision"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	go fw.handleFileEvent(absPath, generation, Event{Path: absPath, Reason: EventChange, ObservedAt: time.Now().UTC()})
+	time.Sleep(20 * time.Millisecond)
+	if got := attempts.Load(); got != 1 {
+		t.Fatalf("later observation hashed before the first reservation completed: attempts=%d", got)
+	}
+	close(releaseFirstHash)
+	select {
+	case event := <-observed:
+		if !event.ObservedAt.Equal(firstObservedAt) {
+			t.Fatalf("later hash masked first observation: got=%s want=%s", event.ObservedAt, firstObservedAt)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("reserved observation did not reach callback")
+	}
+	fw.WaitCallbacks()
+	wantHash, err := realHash(absPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fw.mu.RLock()
+	acknowledged := fw.fileHashes[absPath]
+	fw.mu.RUnlock()
+	if acknowledged != wantHash {
+		t.Fatal("reserved callback did not acknowledge the latest revision")
 	}
 }
 

@@ -17,11 +17,14 @@ import (
 )
 
 type Options struct {
-	Raw             bool
-	Mapping         recordmap.Config
-	Canonical       canonical.Config
-	CatalogProvider pricingcatalog.Provider
-	GeneratedAt     time.Time
+	Raw              bool
+	RTLConversion    bool
+	RTLConversionSet bool
+	CharMapping      converter.CharMapping
+	Mapping          recordmap.Config
+	Canonical        canonical.Config
+	CatalogProvider  pricingcatalog.Provider
+	GeneratedAt      time.Time
 }
 
 type Result struct {
@@ -64,7 +67,23 @@ func BuildContext(ctx context.Context, rawRows []map[string]interface{}, source 
 	if err != nil {
 		return Result{}, err
 	}
-	exp := converter.NewExporter(converter.Patris2Fa)
+	rtl := converter.RTLConversionEnabled()
+	if options.RTLConversionSet {
+		rtl = options.RTLConversion
+	}
+	mapping := options.CharMapping
+	if mapping == nil {
+		mapping = converter.DefaultCharMapping()
+	} else {
+		captured := make(converter.CharMapping, len(mapping))
+		for key, value := range mapping {
+			captured[key] = value
+		}
+		mapping = captured
+	}
+	exp := converter.NewExporter(func(value string) string {
+		return converter.Patris2FaWithMappingAndRTL(value, mapping, rtl)
+	})
 	if _, ok := canonical.ProfileFor(source, options.Canonical); ok {
 		converted, err := exp.ConvertRecordsContext(ctx, records)
 		if err != nil {
@@ -83,7 +102,9 @@ func BuildContext(ctx context.Context, rawRows []map[string]interface{}, source 
 				row[naming.InternalWarningsField] = warnings
 			}
 		}
-		rows, contract, err := canonical.TransformContext(ctx, rows, source, options.Canonical, options.CatalogProvider, options.GeneratedAt)
+		rows, contract, err := canonical.TransformContextWithTextConverter(ctx, rows, source, options.Canonical, options.CatalogProvider, options.GeneratedAt, func(value string) string {
+			return converter.Patris2FaWithMappingAndRTL(value, mapping, rtl)
+		})
 		if err != nil {
 			return Result{}, err
 		}

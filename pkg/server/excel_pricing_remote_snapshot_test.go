@@ -193,9 +193,7 @@ func TestExcelPricingRemoteSnapshotIdentityEncodingPreservesOriginETags(t *testi
 				return response, err
 			},
 		)
-		if _, err := client.fetchRevision(context.Background()); !errors.Is(
-			err, errExcelPricingRemoteSnapshotProtocol,
-		) {
+		if _, err := client.fetchRevision(context.Background()); err != nil {
 			t.Fatalf("compressed representation revision error = %v", err)
 		}
 		if !autoDecompressed {
@@ -240,9 +238,7 @@ func TestExcelPricingRemoteSnapshotIdentityEncodingPreservesOriginETags(t *testi
 				return response, err
 			},
 		)
-		if _, err := client.fetchSnapshot(context.Background(), build, revision); !errors.Is(
-			err, errExcelPricingRemoteSnapshotProtocol,
-		) {
+		if _, err := client.fetchSnapshot(context.Background(), build, revision); err != nil {
 			t.Fatalf("compressed representation payload error = %v", err)
 		}
 		if !autoDecompressed {
@@ -578,6 +574,39 @@ func TestExcelPricingRemoteSnapshotCollectAnnotatesEveryRemoteStage(t *testing.T
 		fixture.assertCalls(t, 1, 0, 0, 0, 0)
 	})
 
+	t.Run("revision transformed ETag is optional", func(t *testing.T) {
+		fixture := newExcelPricingRemoteSnapshotFixture(t, "revision_transformed_etag")
+		defer fixture.Close()
+		result, err := fixture.Client(t).Collect(context.Background(), fixture.requestID, 60)
+		if err != nil {
+			t.Fatalf("Collect() with transformed revision ETag: %v", err)
+		}
+		if result == nil || result.CompositeStateRevision != fixture.revision.StateRevision {
+			t.Fatalf("result = %#v", result)
+		}
+		fixture.assertCalls(t, 1, 1, 1, 0, 0)
+	})
+
+	t.Run("revision binds current owner projection to input source", func(t *testing.T) {
+		fixture := newExcelPricingRemoteSnapshotFixture(t, "ready")
+		defer fixture.Close()
+		input := fixture.source
+		fixture.revision.InputSource = &input
+		fixture.revision.OwnerCatalogRevision = testExcelPricingRevision('a')
+		fixture.revision.Source = canonical.Source{
+			ID: input.ID, Dataset: input.Dataset, Revision: testExcelPricingRevision('b'),
+		}
+		result, err := fixture.Client(t).fetchRevision(context.Background())
+		if err != nil {
+			t.Fatalf("fetchRevision() owner projection: %v", err)
+		}
+		if !result.Source.SameIdentity(fixture.revision.Source) ||
+			result.OwnerCatalogRevision != fixture.revision.OwnerCatalogRevision {
+			t.Fatalf("result = %#v", result)
+		}
+		fixture.assertCalls(t, 1, 0, 0, 0, 0)
+	})
+
 	for name, mode := range map[string]string{
 		"revision fetch empty body":     "revision_empty_body",
 		"revision fetch oversized body": "revision_oversized_body",
@@ -680,13 +709,13 @@ func TestExcelPricingRemoteSnapshotCollectAnnotatesEveryRemoteStage(t *testing.T
 			"snapshot_remote_terminal_failed")
 	})
 
-	t.Run("snapshot payload protocol", func(t *testing.T) {
+	t.Run("snapshot payload representation ETag is optional", func(t *testing.T) {
 		fixture := newExcelPricingRemoteSnapshotFixture(t, "ready")
 		defer fixture.Close()
 		fixture.badETag = true
-		_, err := fixture.Client(t).Collect(context.Background(), fixture.requestID, 60)
-		assertStage(t, err, excelPricingRemoteSnapshotStageSnapshotPayload,
-			"snapshot_payload_protocol_failed")
+		if _, err := fixture.Client(t).Collect(context.Background(), fixture.requestID, 60); err != nil {
+			t.Fatalf("Collect() error = %v", err)
+		}
 		fixture.assertCalls(t, 1, 1, 1, 0, 0)
 	})
 
@@ -700,16 +729,16 @@ func TestExcelPricingRemoteSnapshotCollectAnnotatesEveryRemoteStage(t *testing.T
 		if result.ETag != `"`+fixture.payload.Digest+`"` {
 			t.Fatalf("result ETag = %q", result.ETag)
 		}
-		fixture.assertCalls(t, 1, 1, 2, 0, 0)
-		fixture.assertConditionalPayloadCalls(t, 1)
+		fixture.assertCalls(t, 1, 1, 1, 0, 0)
+		fixture.assertConditionalPayloadCalls(t, 0)
 	})
 
 	t.Run("snapshot payload present empty ETag does not fall back", func(t *testing.T) {
 		fixture := newExcelPricingRemoteSnapshotFixture(t, "payload_present_empty_etag")
 		defer fixture.Close()
-		_, err := fixture.Client(t).Collect(context.Background(), fixture.requestID, 60)
-		assertStage(t, err, excelPricingRemoteSnapshotStageSnapshotPayload,
-			"snapshot_payload_protocol_failed")
+		if _, err := fixture.Client(t).Collect(context.Background(), fixture.requestID, 60); err != nil {
+			t.Fatalf("Collect() error = %v", err)
+		}
 		fixture.assertCalls(t, 1, 1, 1, 0, 0)
 		fixture.assertConditionalPayloadCalls(t, 0)
 	})
@@ -717,9 +746,9 @@ func TestExcelPricingRemoteSnapshotCollectAnnotatesEveryRemoteStage(t *testing.T
 	t.Run("snapshot payload duplicate ETag does not fall back", func(t *testing.T) {
 		fixture := newExcelPricingRemoteSnapshotFixture(t, "payload_duplicate_etag")
 		defer fixture.Close()
-		_, err := fixture.Client(t).Collect(context.Background(), fixture.requestID, 60)
-		assertStage(t, err, excelPricingRemoteSnapshotStageSnapshotPayload,
-			"snapshot_payload_protocol_failed")
+		if _, err := fixture.Client(t).Collect(context.Background(), fixture.requestID, 60); err != nil {
+			t.Fatalf("Collect() error = %v", err)
+		}
 		fixture.assertCalls(t, 1, 1, 1, 0, 0)
 		fixture.assertConditionalPayloadCalls(t, 0)
 	})
@@ -727,9 +756,9 @@ func TestExcelPricingRemoteSnapshotCollectAnnotatesEveryRemoteStage(t *testing.T
 	t.Run("snapshot payload wrong strong ETag does not fall back", func(t *testing.T) {
 		fixture := newExcelPricingRemoteSnapshotFixture(t, "payload_wrong_strong_etag")
 		defer fixture.Close()
-		_, err := fixture.Client(t).Collect(context.Background(), fixture.requestID, 60)
-		assertStage(t, err, excelPricingRemoteSnapshotStageSnapshotPayload,
-			"snapshot_payload_protocol_failed")
+		if _, err := fixture.Client(t).Collect(context.Background(), fixture.requestID, 60); err != nil {
+			t.Fatalf("Collect() error = %v", err)
+		}
 		fixture.assertCalls(t, 1, 1, 1, 0, 0)
 		fixture.assertConditionalPayloadCalls(t, 0)
 	})
@@ -742,11 +771,11 @@ func TestExcelPricingRemoteSnapshotCollectAnnotatesEveryRemoteStage(t *testing.T
 		t.Run(name, func(t *testing.T) {
 			fixture := newExcelPricingRemoteSnapshotFixture(t, mode)
 			defer fixture.Close()
-			_, err := fixture.Client(t).Collect(context.Background(), fixture.requestID, 60)
-			assertStage(t, err, excelPricingRemoteSnapshotStageSnapshotPayload,
-				"snapshot_payload_protocol_failed")
-			fixture.assertCalls(t, 1, 1, 2, 0, 0)
-			fixture.assertConditionalPayloadCalls(t, 1)
+			if _, err := fixture.Client(t).Collect(context.Background(), fixture.requestID, 60); err != nil {
+				t.Fatalf("Collect() error = %v", err)
+			}
+			fixture.assertCalls(t, 1, 1, 1, 0, 0)
+			fixture.assertConditionalPayloadCalls(t, 0)
 		})
 	}
 
@@ -1356,12 +1385,6 @@ func TestExcelPricingRemoteSnapshotFailsClosedOnIntegrityViolations(t *testing.T
 		mutate func(*excelPricingRemoteSnapshotFixture)
 	}{
 		{
-			name: "weak payload etag",
-			mutate: func(fixture *excelPricingRemoteSnapshotFixture) {
-				fixture.badETag = true
-			},
-		},
-		{
 			name: "wrong pinned column order",
 			mutate: func(fixture *excelPricingRemoteSnapshotFixture) {
 				var columns []map[string]json.RawMessage
@@ -1611,6 +1634,11 @@ func (fixture *excelPricingRemoteSnapshotFixture) handle(w http.ResponseWriter, 
 		if fixture.mode == "revision_wrong_content_type" {
 			w.Header().Set("Content-Type", "text/html; charset=UTF-8")
 		}
+		if fixture.mode == "revision_transformed_etag" {
+			w.Header().Set("ETag", `"`+fixture.revision.StateRevision+`-gzip"`)
+			_ = json.NewEncoder(w).Encode(fixture.revision)
+			return
+		}
 		if fixture.mode == "cdn_rewritten_etag" {
 			body, err := json.Marshal(fixture.revision)
 			if err != nil {
@@ -1664,6 +1692,7 @@ func (fixture *excelPricingRemoteSnapshotFixture) handle(w http.ResponseWriter, 
 		}
 		build := fixture.buildResponse()
 		if fixture.mode == "ready" || fixture.mode == "cdn_rewritten_etag" ||
+			fixture.mode == "revision_transformed_etag" ||
 			fixture.mode == "payload_wrong_content_type" ||
 			fixture.mode == "payload_empty_body" || fixture.mode == "payload_oversized_body" ||
 			fixture.mode == "payload_present_empty_etag" || fixture.mode == "payload_duplicate_etag" ||

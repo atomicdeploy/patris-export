@@ -38,6 +38,22 @@ func TestEncodeCSVFullPayload(t *testing.T) {
 	}
 }
 
+func TestEventSourceObservationIsNotPartOfPublicJSON(t *testing.T) {
+	materializedAt := time.Now().UTC()
+	event := Event{
+		Type:             "update",
+		Timestamp:        materializedAt.Format(time.RFC3339Nano),
+		SourceObservedAt: materializedAt.Add(-time.Second),
+	}
+	encoded, err := json.Marshal(event)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), "observed") || !strings.Contains(string(encoded), event.Timestamp) {
+		t.Fatalf("public event JSON changed timestamp contract: %s", encoded)
+	}
+}
+
 func TestNormalizeDefaults(t *testing.T) {
 	cfg := Normalize(Config{})
 	if cfg.Method != "POST" || cfg.Format != "json" || cfg.Mode != "changes" || cfg.Timeout != "10s" {

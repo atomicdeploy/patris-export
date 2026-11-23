@@ -74,3 +74,15 @@ func TestTransformContextRejectsPreCancelledContext(t *testing.T) {
 		t.Fatalf("pre-cancelled transform returned output: rows=%#v envelope=%#v", rows, envelope)
 	}
 }
+
+func TestTransformContextWithTextConverterAcceptsNilContext(t *testing.T) {
+	rows, envelope, err := TransformContextWithTextConverter(nil, []map[string]interface{}{{
+		"Code": "123456789", "Name": "fixture", "ANBAR1": 1, "ALLANBAR": 1,
+	}}, "kala.db", DefaultConfig(), nil, time.Unix(1, 0).UTC(), func(value string) string { return value })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if envelope == nil || len(rows) != 1 {
+		t.Fatalf("nil-context transform did not materialize its fixture: rows=%d envelope=%v", len(rows), envelope != nil)
+	}
+}

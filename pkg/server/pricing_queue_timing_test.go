@@ -7,8 +7,38 @@ import (
 	"testing"
 	"time"
 
+	"github.com/atomicdeploy/patris-export/pkg/canonical"
 	"github.com/atomicdeploy/patris-export/pkg/updateout"
 )
+
+func TestSourceObservationTimingRetainsExactIdentityAndFirstTimestamp(t *testing.T) {
+	s := &Server{}
+	queuedAt := time.Now().UTC().Add(-time.Second)
+	preparedAt := queuedAt.Add(-2 * time.Second)
+	observedAt := preparedAt.Add(-3 * time.Second)
+	contract := &canonical.Envelope{
+		EventID: excelPricingRevisionForTest("observed-event"),
+		Source: canonical.Source{
+			Revision: excelPricingRevisionForTest("observed-source"),
+		},
+	}
+	diagnostic := s.beginQueuedPricingOperationDiagnostic("source_delivery", "dispatch", queuedAt)
+	diagnostic.includePreparation(preparedAt)
+	diagnostic.includeSourceObservation(observedAt, preparedAt, queuedAt, contract)
+	diagnostic.finish("complete", "", "")
+
+	got := s.refreshDiagnosticStatus(false)
+	if got.SourceObservedAt == nil || got.SourcePreparedAt == nil || got.SourceQueuedAt == nil ||
+		!got.SourceObservedAt.Equal(observedAt) || !got.SourcePreparedAt.Equal(preparedAt) || !got.SourceQueuedAt.Equal(queuedAt) {
+		t.Fatalf("source trace timestamps changed: %+v", got)
+	}
+	if got.StartedAt != observedAt || got.StageMS["observation_wait"] != 3000 || got.StageMS["source_prepare"] != 2000 {
+		t.Fatalf("source trace stages changed: %+v", got)
+	}
+	if got.EventID != contract.EventID || got.SourceRevision != contract.Source.Revision {
+		t.Fatalf("source trace identity changed: %+v", got)
+	}
+}
 
 func TestQueuedStartupRetainsActiveOwnerUntilPermitReleased(t *testing.T) {
 	called := make(chan struct{}, 1)

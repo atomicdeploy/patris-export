@@ -141,8 +141,12 @@ func (e *DeliveryError) Error() string {
 }
 
 type Event struct {
-	Type             string                   `json:"type"`
-	Timestamp        string                   `json:"timestamp"`
+	Type      string `json:"type"`
+	Timestamp string `json:"timestamp"`
+	// SourceObservedAt is process-local delivery metadata. It is deliberately
+	// excluded from webhook/command payloads so Timestamp retains its existing
+	// materialization-time contract for generic consumers.
+	SourceObservedAt time.Time                `json:"-"`
 	Source           string                   `json:"source,omitempty"`
 	Raw              bool                     `json:"raw,omitempty"`
 	Records          []map[string]interface{} `json:"records,omitempty"`

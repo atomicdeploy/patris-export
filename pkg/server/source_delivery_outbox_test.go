@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -8,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -76,6 +78,166 @@ func enqueueSourceDeliveryOutboxTestEvent(t *testing.T, outbox *sourceDeliveryOu
 
 func completeSourceDeliveryResult(input *canonical.Envelope) updateout.DeliveryResult {
 	return verifiedSourceAcknowledgement(input)
+}
+
+func TestSourceDeliveryOutboxEligibilityExcludesGenericAndCommandDestinations(t *testing.T) {
+	base := updateout.Config{
+		Enabled:              true,
+		URL:                  "https://digitalogic.invalid/wp-json/digitalogic/patris/product-sync",
+		Method:               "POST",
+		Format:               "json",
+		ProductSyncSecretEnv: sourceDeliveryOutboxTestSecretEnv,
+	}
+	for _, test := range []struct {
+		name     string
+		mutate   func(*updateout.Config)
+		eligible bool
+	}{
+		{name: "authenticated_http", mutate: func(*updateout.Config) {}, eligible: true},
+		{name: "generic_contract_webhook", mutate: func(cfg *updateout.Config) { cfg.ProductSyncSecretEnv = "" }},
+		{name: "command_also_configured", mutate: func(cfg *updateout.Config) { cfg.Command = []string{"delivery-helper"} }},
+		{name: "disabled", mutate: func(cfg *updateout.Config) { cfg.Enabled = false }},
+		{name: "csv", mutate: func(cfg *updateout.Config) { cfg.Format = "csv" }},
+		{name: "non_post", mutate: func(cfg *updateout.Config) { cfg.Method = "PUT" }},
+		{name: "invalid_secret_reference", mutate: func(cfg *updateout.Config) { cfg.ProductSyncSecretEnv = "9INVALID" }},
+		{name: "remote_plain_http", mutate: func(cfg *updateout.Config) { cfg.URL = "http://receiver.invalid/product-sync" }},
+		{name: "query_bearing_url", mutate: func(cfg *updateout.Config) { cfg.URL += "?token=forbidden" }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			cfg := base
+			test.mutate(&cfg)
+			if got := sourceDeliveryOutboxConfigured(cfg); got != test.eligible {
+				t.Fatalf("eligible=%t, want %t for %+v", got, test.eligible, cfg)
+			}
+		})
+	}
+}
+
+func TestAuthenticatedSourceDeliveryRejectsInvalidOutboxShapesBeforeObservation(t *testing.T) {
+	base := updateout.Config{
+		Enabled:              true,
+		URL:                  "https://digitalogic.invalid/wp-json/digitalogic/patris/product-sync",
+		Method:               "POST",
+		Format:               "json",
+		ProductSyncSecretEnv: sourceDeliveryOutboxTestSecretEnv,
+	}
+	for _, test := range []struct {
+		name   string
+		mutate func(*updateout.Config)
+	}{
+		{name: "remote_plain_http", mutate: func(cfg *updateout.Config) { cfg.URL = "http://receiver.invalid/product-sync" }},
+		{name: "csv", mutate: func(cfg *updateout.Config) { cfg.Format = "csv" }},
+		{name: "put", mutate: func(cfg *updateout.Config) { cfg.Method = "PUT" }},
+		{name: "query", mutate: func(cfg *updateout.Config) { cfg.URL += "?token=forbidden" }},
+		{name: "command", mutate: func(cfg *updateout.Config) { cfg.Command = []string{"delivery-helper"} }},
+		{name: "invalid_secret_reference", mutate: func(cfg *updateout.Config) { cfg.ProductSyncSecretEnv = "9INVALID" }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			delivery := base
+			test.mutate(&delivery)
+			cfg := appconfig.Default()
+			cfg.SendUpdates = delivery
+			if err := ValidateEventDeliveryWatch(true, cfg); err == nil {
+				t.Fatalf("invalid authenticated lane passed watcher validation: %+v", delivery)
+			}
+
+			server, outbox, _ := sourceDeliveryOutboxTestServer(t, filepath.Join(t.TempDir(), "outbox.json"))
+			if err := server.config.Replace(cfg); err != nil {
+				t.Fatal(err)
+			}
+			event := sourceDeliveryOutboxTestEvent(t, []canonical.Product{{ProductCode: "A", Name: "one"}})
+			if err := server.dispatchUpdateEvent(event, time.Now().UTC()); err == nil {
+				t.Fatal("invalid authenticated lane advanced asynchronously")
+			}
+			if outbox.state.Active != nil {
+				t.Fatal("invalid authenticated lane entered durable outbox")
+			}
+		})
+	}
+}
+
+func TestGenericCanonicalWebhookBypassesDurableReceiptOutbox(t *testing.T) {
+	received := make(chan struct{}, 1)
+	receiver := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		received <- struct{}{}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer receiver.Close()
+	server, outbox, cfg := sourceDeliveryOutboxTestServer(t, filepath.Join(t.TempDir(), "outbox.json"))
+	cfg.SendUpdates.URL = receiver.URL
+	cfg.SendUpdates.ProductSyncSecretEnv = ""
+	cfg.SendUpdates.RequireContract = true
+	cfg.SendUpdates.Initial = true
+	if err := server.config.Replace(cfg); err != nil {
+		t.Fatal(err)
+	}
+	event := sourceDeliveryOutboxTestEvent(t, []canonical.Product{{ProductCode: "A", Name: "one"}})
+	if err := server.dispatchUpdateEvent(event, time.Now().UTC()); err != nil {
+		t.Fatalf("generic canonical webhook was forced into receipt outbox: %v", err)
+	}
+	select {
+	case <-received:
+	case <-time.After(2 * time.Second):
+		t.Fatal("generic canonical webhook was not dispatched")
+	}
+	outbox.mu.Lock()
+	active := outbox.state.Active
+	outbox.mu.Unlock()
+	if active != nil {
+		t.Fatalf("generic canonical webhook entered receipt outbox: %#v", active)
+	}
+
+	cfg.SendUpdates.Initial = false
+	if err := server.config.Replace(cfg); err != nil {
+		t.Fatal(err)
+	}
+	if err := server.dispatchUpdateEvent(event, time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-received:
+		t.Fatal("initial=false was bypassed merely because an outbox object existed")
+	case <-time.After(100 * time.Millisecond):
+	}
+}
+
+func TestSourceDeliveryOutboxStartsEachUnprovedDestinationWithSnapshot(t *testing.T) {
+	_, outbox, cfg := sourceDeliveryOutboxTestServer(t, filepath.Join(t.TempDir(), "outbox.json"))
+	makeUpdate := func(products []canonical.Product, added string) updateout.Event {
+		snapshot := freshAckSnapshot(t, products, "patris-office")
+		delta := canonical.ChangeEnvelope(snapshot, &recorddiff.ChangeSet{KeyField: "product_code", Added: []map[string]interface{}{{"product_code": added}}})
+		return updateout.Event{Type: "update", Timestamp: time.Now().UTC().Format(time.RFC3339Nano), Source: "kala.db", KeyField: "Code", Contract: delta, SnapshotContract: snapshot}
+	}
+	outbox.deliver = func(deliveryConfig appconfig.Config, event updateout.Event, _, _ time.Time) (updateout.DeliveryResult, string, error) {
+		transmitted := sourceDeliveryTransmittedContract(deliveryConfig.SendUpdates, event)
+		return completeSourceDeliveryResult(transmitted), "receipt_received", nil
+	}
+
+	first := makeUpdate([]canonical.Product{{ProductCode: "A", Name: "one"}}, "A")
+	enqueueSourceDeliveryOutboxTestEvent(t, outbox, cfg, first)
+	if outbox.state.Active == nil || outbox.state.Active.Event.Type != "initial" || outbox.state.Active.Event.Contract.EventType != "snapshot" {
+		t.Fatalf("first unproved destination event was not promoted to snapshot: %#v", outbox.state.Active)
+	}
+	if pending, _ := outbox.processOnce(); pending {
+		t.Fatal("first destination snapshot did not complete")
+	}
+
+	second := makeUpdate([]canonical.Product{{ProductCode: "A", Name: "one"}, {ProductCode: "B", Name: "two"}}, "B")
+	enqueueSourceDeliveryOutboxTestEvent(t, outbox, cfg, second)
+	if outbox.state.Active == nil || outbox.state.Active.Event.Type != "update" || outbox.state.Active.Event.Contract.EventType != "update" {
+		t.Fatalf("proved destination lost delta delivery: %#v", outbox.state.Active)
+	}
+	if pending, _ := outbox.processOnce(); pending {
+		t.Fatal("same-destination delta did not complete")
+	}
+
+	changed := cfg
+	changed.SendUpdates.URL = "https://replacement.invalid/wp-json/digitalogic/patris/product-sync"
+	third := makeUpdate([]canonical.Product{{ProductCode: "A", Name: "one"}, {ProductCode: "B", Name: "two"}, {ProductCode: "C", Name: "three"}}, "C")
+	enqueueSourceDeliveryOutboxTestEvent(t, outbox, changed, third)
+	if outbox.state.Active == nil || outbox.state.Active.Event.Type != "initial" || outbox.state.Active.Event.Contract.EventType != "snapshot" {
+		t.Fatalf("changed destination began with a delta: %#v", outbox.state.Active)
+	}
 }
 
 func TestSourceDeliveryOutboxRetriesDefinitiveTransientFailure(t *testing.T) {
@@ -246,7 +408,15 @@ func TestSourceDeliveryOutboxPersistsAcrossRestart(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "outbox.json")
 	server, outbox, cfg := sourceDeliveryOutboxTestServer(t, path)
 	event := sourceDeliveryOutboxTestEvent(t, []canonical.Product{{ProductCode: "A", Name: "one"}})
+	event.SourceObservedAt = time.Now().UTC().Add(-time.Minute)
 	enqueueSourceDeliveryOutboxTestEvent(t, outbox, cfg, event)
+	persisted, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(persisted, []byte("source_observed_at")) {
+		t.Fatal("v1 outbox persisted a field that rollback binaries reject")
+	}
 
 	restarted, err := newSourceDeliveryOutbox(server, path)
 	if err != nil {
@@ -257,6 +427,9 @@ func TestSourceDeliveryOutboxPersistsAcrossRestart(t *testing.T) {
 		deliveries++
 		if got.Contract.EventID != event.Contract.EventID {
 			t.Fatalf("restarted event=%s, want %s", got.Contract.EventID, event.Contract.EventID)
+		}
+		if !got.SourceObservedAt.Equal(restarted.state.Active.PreparedAt) {
+			t.Fatalf("restart observation=%s, want preparation fallback %s", got.SourceObservedAt, restarted.state.Active.PreparedAt)
 		}
 		return completeSourceDeliveryResult(got.Contract), "receipt_received", nil
 	}
@@ -336,16 +509,20 @@ func TestSourceDeliveryOutboxCoalescesGL850CreationIntoFullSnapshot(t *testing.T
 	enqueueSourceDeliveryOutboxTestEvent(t, outbox, cfg, first)
 	unknown := true
 	var delivered []*canonical.Envelope
-	outbox.deliver = func(_ appconfig.Config, event updateout.Event, _, _ time.Time) (updateout.DeliveryResult, string, error) {
+	var deliveredObserved []time.Time
+	deliver := func(_ appconfig.Config, event updateout.Event, _, _ time.Time) (updateout.DeliveryResult, string, error) {
 		delivered = append(delivered, event.Contract)
+		deliveredObserved = append(deliveredObserved, event.SourceObservedAt)
 		if len(delivered) == 1 {
 			return updateout.DeliveryResult{FailureCode: "response_read_failed", OutcomeUnknown: &unknown}, "delivery_outcome_unknown", errors.New("response lost")
 		}
 		return completeSourceDeliveryResult(event.Contract), "receipt_received", nil
 	}
-	outbox.probe = func(_ context.Context, _ appconfig.Config, input *canonical.Envelope) (sourceDeliveryReceiptProbe, error) {
+	probe := func(_ context.Context, _ appconfig.Config, input *canonical.Envelope) (sourceDeliveryReceiptProbe, error) {
 		return sourceDeliveryReceiptProbe{Status: sourceDeliveryReceiptApplied, EventID: input.EventID, Source: input.Source}, nil
 	}
+	outbox.deliver = deliver
+	outbox.probe = probe
 	outbox.processOnce()
 
 	canonicalConfig := canonical.DefaultConfig()
@@ -359,8 +536,34 @@ func TestSourceDeliveryOutboxCoalescesGL850CreationIntoFullSnapshot(t *testing.T
 	}
 	changes := &recorddiff.ChangeSet{KeyField: "Code", Added: []map[string]interface{}{{"Code": "116038"}}}
 	delta := canonical.ChangeEnvelope(snapshot, changes)
-	event := updateout.Event{Type: "update", Timestamp: time.Now().UTC().Format(time.RFC3339Nano), Source: "kala.db", KeyField: "Code", Contract: delta, SnapshotContract: snapshot}
+	firstObservedAt := time.Now().UTC().Add(-2 * time.Second)
+	event := updateout.Event{Type: "update", Timestamp: time.Now().UTC().Format(time.RFC3339Nano), SourceObservedAt: firstObservedAt, Source: "kala.db", KeyField: "Code", Contract: delta, SnapshotContract: snapshot}
 	enqueueSourceDeliveryOutboxTestEvent(t, outbox, cfg, event)
+	restarted, err := newSourceDeliveryOutbox(outbox.server, outbox.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	restarted.deliver = deliver
+	restarted.probe = probe
+	outbox = restarted
+	if outbox.state.Latest == nil || !outbox.state.Latest.SourceObservedAt.IsZero() {
+		t.Fatalf("restart unexpectedly persisted process-local observation: %#v", outbox.state.Latest)
+	}
+	restartFallbackAt := outbox.state.Latest.PreparedAt
+	_, newestSnapshot, err := canonical.TransformContext(context.Background(), []map[string]interface{}{
+		{"Code": "A", "name": "existing", "ALLANBAR": 1},
+		{"Code": "116038", "name": "GL850G 4 PORT USB2/0 HUB", "ANBAR1": 1, "ALLANBAR": 1},
+		{"Code": "B", "name": "newest", "ALLANBAR": 1},
+	}, "kala.db", canonicalConfig, nil, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	newestDelta := canonical.ChangeEnvelope(newestSnapshot, &recorddiff.ChangeSet{KeyField: "Code", Added: []map[string]interface{}{{"Code": "B"}}})
+	newest := updateout.Event{Type: "update", Timestamp: time.Now().UTC().Format(time.RFC3339Nano), SourceObservedAt: time.Now().UTC(), Source: "kala.db", KeyField: "Code", Contract: newestDelta, SnapshotContract: newestSnapshot}
+	enqueueSourceDeliveryOutboxTestEvent(t, outbox, cfg, newest)
+	if outbox.state.Latest == nil || !outbox.state.Latest.SourceObservedAt.Equal(restartFallbackAt) {
+		t.Fatalf("coalesced fallback observation=%v, want restart fallback %v", outbox.state.Latest, restartFallbackAt)
+	}
 
 	if pending, _ := outbox.processOnce(); !pending {
 		t.Fatal("coalesced snapshot was dropped after acknowledging the older event")
@@ -371,17 +574,24 @@ func TestSourceDeliveryOutboxCoalescesGL850CreationIntoFullSnapshot(t *testing.T
 	if len(delivered) != 2 {
 		t.Fatalf("deliveries=%d, want 2", len(delivered))
 	}
+	if !deliveredObserved[1].Equal(restartFallbackAt) {
+		t.Fatalf("delivered fallback observation=%s, want %s", deliveredObserved[1], restartFallbackAt)
+	}
 	full := delivered[1]
 	if full.EventType != "snapshot" {
 		t.Fatalf("fallback event_type=%q, want snapshot", full.EventType)
 	}
 	found := false
+	foundNewest := false
 	for _, product := range full.Products {
 		if product.ProductCode == "116038" {
 			found = true
 		}
+		if product.ProductCode == "B" {
+			foundNewest = true
+		}
 	}
-	if !found {
+	if !found || !foundNewest {
 		t.Fatalf("GL850-like creation is absent from the full-snapshot fallback: %#v", full.Products)
 	}
 }
@@ -406,14 +616,66 @@ func TestSourceDeliveryOutboxWriteFailureDoesNotAdvanceWatcherBaseline(t *testin
 	if err := server.dispatchUpdateAndCommitBaseline(result, event, time.Now().Add(-time.Second)); err == nil {
 		t.Fatal("unwritable outbox was accepted")
 	}
+	if err := server.dispatchUpdateAndCommitBaseline(result, event, time.Now().Add(-time.Second)); err == nil {
+		t.Fatal("second retry of the same in-memory event bypassed durable persistence")
+	}
 	server.lastRecordsMu.RLock()
-	defer server.lastRecordsMu.RUnlock()
 	if len(server.lastRecords) != 1 || server.lastRecords[0]["Code"] != "A" || server.lastContractRevision != "sha256:before" {
+		server.lastRecordsMu.RUnlock()
 		t.Fatal("watcher baseline advanced despite outbox persistence failure")
 	}
+	server.lastRecordsMu.RUnlock()
 	if outbox.state.Active == nil {
 		t.Fatal("failed persistence did not retain a recoverable in-memory event")
 	}
+	outbox.path = filepath.Join(root, "recovered-outbox.json")
+	if err := server.dispatchUpdateAndCommitBaseline(result, event, time.Now().Add(-time.Second)); err != nil {
+		t.Fatalf("recovered outbox did not durably acknowledge the retained event: %v", err)
+	}
+	server.lastRecordsMu.RLock()
+	defer server.lastRecordsMu.RUnlock()
+	if len(server.lastRecords) != 2 || server.lastContractRevision != event.SnapshotContract.Source.Revision {
+		t.Fatal("watcher baseline did not advance after durable persistence recovered")
+	}
+}
+
+func TestSourceDeliveryOutboxRestoresActiveEntryWhenCompletionPersistFails(t *testing.T) {
+	root := t.TempDir()
+	server, outbox, cfg := sourceDeliveryOutboxTestServer(t, filepath.Join(root, "outbox.json"))
+	event := sourceDeliveryOutboxTestEvent(t, []canonical.Product{{ProductCode: "A", Name: "one"}})
+	enqueueSourceDeliveryOutboxTestEvent(t, outbox, cfg, event)
+	blockedParent := filepath.Join(root, "not-a-directory")
+	if err := os.WriteFile(blockedParent, []byte("blocked"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	writes := 0
+	outbox.deliver = func(_ appconfig.Config, got updateout.Event, _, _ time.Time) (updateout.DeliveryResult, string, error) {
+		writes++
+		outbox.path = filepath.Join(blockedParent, "outbox.json")
+		return completeSourceDeliveryResult(sourceDeliveryTransmittedContract(cfg.SendUpdates, got)), "receipt_received", nil
+	}
+	if pending, _ := outbox.processOnce(); !pending {
+		t.Fatal("completion persistence failure discarded pending work")
+	}
+	if outbox.state.Active == nil || sourceDeliveryEntryID(outbox.state.Active) != event.SnapshotContract.EventID {
+		t.Fatalf("completion persistence failure lost active identity: %#v", outbox.state.Active)
+	}
+	outbox.path = filepath.Join(root, "recovered-outbox.json")
+	probes := 0
+	outbox.probe = func(_ context.Context, _ appconfig.Config, input *canonical.Envelope) (sourceDeliveryReceiptProbe, error) {
+		probes++
+		return sourceDeliveryReceiptProbe{Status: sourceDeliveryReceiptApplied, EventID: input.EventID, Source: input.Source}, nil
+	}
+	if pending, _ := outbox.processOnce(); pending {
+		t.Fatal("recovered completion persistence did not clear applied receipt")
+	}
+	if writes != 1 || probes != 1 {
+		t.Fatalf("writes=%d probes=%d, want one write and one recovery probe", writes, probes)
+	}
+	if _, err := os.Stat(outbox.path); err != nil {
+		t.Fatalf("recovered state was not persisted: %v", err)
+	}
+	_ = server
 }
 
 func TestSourceDeliveryReceiptProbeMatchesAuthenticatedWordPressContract(t *testing.T) {
@@ -461,6 +723,44 @@ func TestSourceDeliveryReceiptProbeFailsClosedOnInconclusiveHistory(t *testing.T
 	cfg.SendUpdates = updateout.Config{Enabled: true, URL: receiver.URL + "/wp-json/digitalogic/patris/product-sync", Method: "POST", Format: "json", Timeout: "1s", RetryAttempts: 1, ProductSyncSecretEnv: sourceDeliveryOutboxTestSecretEnv}
 	if _, err := probeSourceDeliveryReceipt(context.Background(), cfg, input); !errors.Is(err, errSourceDeliveryReceiptProbe) {
 		t.Fatalf("503 receipt history was not inconclusive: %v", err)
+	} else if code := sourceDeliveryReceiptProbeFailureCode(err); code != "receipt_history_inconclusive" {
+		t.Fatalf("503 receipt history code=%q, want receipt_history_inconclusive", code)
+	}
+}
+
+func TestSourceDeliveryReceiptProbeDoesNotReflectUnknownReceiverCode(t *testing.T) {
+	t.Setenv(sourceDeliveryOutboxTestSecretEnv, "test-product-sync-secret")
+	input := freshAckSnapshot(t, []canonical.Product{{ProductCode: "A", Name: "one"}}, "patris-office")
+	receiver := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, `{"code":"receiver_private_context"}`, http.StatusServiceUnavailable)
+	}))
+	defer receiver.Close()
+	cfg := appconfig.Default()
+	cfg.SendUpdates = updateout.Config{Enabled: true, URL: receiver.URL + "/wp-json/digitalogic/patris/product-sync", Method: "POST", Format: "json", Timeout: "1s", RetryAttempts: 1, ProductSyncSecretEnv: sourceDeliveryOutboxTestSecretEnv}
+	if _, err := probeSourceDeliveryReceipt(context.Background(), cfg, input); !errors.Is(err, errSourceDeliveryReceiptProbe) {
+		t.Fatalf("unknown receiver code was not rejected: %v", err)
+	} else if code := sourceDeliveryReceiptProbeFailureCode(err); code != "receipt_probe_failed" {
+		t.Fatalf("unknown receiver code escaped as %q", code)
+	}
+}
+
+func TestSourceDeliveryReceiptProbeAcceptsExactSupersededReceipt(t *testing.T) {
+	t.Setenv(sourceDeliveryOutboxTestSecretEnv, "test-product-sync-secret")
+	input := freshAckSnapshot(t, []canonical.Product{{ProductCode: "A", Name: "one"}}, "patris-office")
+	receiver := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(sourceDeliveryReceiptResponse{Success: true, Data: sourceDeliveryReceiptProbe{
+			Schema: sourceDeliveryReceiptSchema, Status: sourceDeliveryReceiptSuperseded,
+			EventID: input.EventID, GeneratedAt: input.GeneratedAt, Source: input.Source,
+			ObservedAt: time.Now().UTC().Format(time.RFC3339),
+		}})
+	}))
+	defer receiver.Close()
+	cfg := appconfig.Default()
+	cfg.SendUpdates = updateout.Config{Enabled: true, URL: receiver.URL + "/wp-json/digitalogic/patris/product-sync", Method: "POST", Format: "json", Timeout: "1s", RetryAttempts: 1, ProductSyncSecretEnv: sourceDeliveryOutboxTestSecretEnv}
+	receipt, err := probeSourceDeliveryReceipt(context.Background(), cfg, input)
+	if err != nil || receipt.Status != sourceDeliveryReceiptSuperseded {
+		t.Fatalf("receipt=%#v err=%v", receipt, err)
 	}
 }
 
@@ -499,5 +799,39 @@ func TestSourceDeliveryStatusDeclaresEventDrivenWithoutSchedule(t *testing.T) {
 	}
 	if _, exists := outbox["reconcile_interval"]; exists {
 		t.Fatalf("removed reconciliation interval remains exposed: %#v", outbox)
+	}
+}
+
+func TestSourceDeliveryOutboxStatusExposesCoalescedIdentityWithoutPayload(t *testing.T) {
+	_, outbox, cfg := sourceDeliveryOutboxTestServer(t, filepath.Join(t.TempDir(), "outbox.json"))
+	active := sourceDeliveryOutboxTestEvent(t, []canonical.Product{{ProductCode: "A", Name: "active-product"}})
+	latest := sourceDeliveryOutboxTestEvent(t, []canonical.Product{{ProductCode: "A", Name: "latest-product"}, {ProductCode: "B", Name: "new-product"}})
+	enqueueSourceDeliveryOutboxTestEvent(t, outbox, cfg, active)
+	enqueueSourceDeliveryOutboxTestEvent(t, outbox, cfg, latest)
+	extensions := canonical.JSONExtensions{"private-extension": json.RawMessage(`{"product":"extension-product"}`)}
+	outbox.mu.Lock()
+	outbox.state.Latest.Event.SnapshotContract.Source.Extensions = &extensions
+	outbox.mu.Unlock()
+
+	status := outbox.status()
+	queued, ok := status["coalesced_latest"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("coalesced identity is absent: %#v", status)
+	}
+	if queued["event_id"] != latest.SnapshotContract.EventID || queued["generated_at"] != latest.SnapshotContract.GeneratedAt {
+		t.Fatalf("coalesced identity=%#v, want event %s generated %s", queued, latest.SnapshotContract.EventID, latest.SnapshotContract.GeneratedAt)
+	}
+	source, ok := queued["source"].(canonical.Source)
+	if !ok || !source.SameIdentity(latest.SnapshotContract.Source) {
+		t.Fatalf("coalesced source=%#v, want %#v", queued["source"], latest.SnapshotContract.Source)
+	}
+	encoded, err := json.Marshal(queued)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, forbidden := range []string{"active-product", "latest-product", "new-product", "private-extension", "extension-product", `"products"`, `"contract"`} {
+		if strings.Contains(string(encoded), forbidden) {
+			t.Fatalf("coalesced status leaked payload %q: %s", forbidden, encoded)
+		}
 	}
 }

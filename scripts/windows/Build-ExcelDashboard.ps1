@@ -1369,7 +1369,7 @@ try {
     # Settings edits stay local and amber until this one explicit batch action.
     # The companion performs preview/apply/readback in its background worker;
     # Excel turns fields green only after the website ACK is complete.
-    [void](Add-ActionButton $settings 'همگام‌سازی اکنون' 'ProductCatalogSync.SyncPricingSettingsNow' $settings.Range('A28') $settings.Range('A28:F29').Width $settings.Range('A28:F29').Height)
+    [void](Add-ActionButton $settings 'به‌روزرسانی' 'ProductCatalogSync.SyncPricingSettingsNow' $settings.Range('A28') $settings.Range('A28:F29').Width $settings.Range('A28:F29').Height)
 
     $settings.Range('A31:F37').ClearContents()
     $settings.Range('A31').Value2 = 'نمایش تصاویر محصولات'
@@ -1447,7 +1447,9 @@ try {
     $settings.Range('G18:G22').ClearContents()
     $settings.Range('G14:G15').ClearContents()
     $settings.Range('G26:G28').ClearContents()
-    $settings.Range('H14:H17').ClearContents()
+    $settings.Range('H14:H21').ClearContents()
+    $settings.Range('I58:J89').ClearContents()
+    $settings.Range('H20').Value2 = 0
     $settings.Range('G30:G55').ClearContents()
     $settings.Range('G30').Value2 = 0
     $settings.Range('G48').Value2 = 0
@@ -1455,6 +1457,7 @@ try {
     [void]$workbook.Names.Add('ProjectedPricePreviewRow', $settings.Range('G48'))
     $settings.Columns('G').Hidden = $true
     $settings.Columns('H').Hidden = $true
+    $settings.Columns('I:J').Hidden = $true
 
     # Never format only the first column of several adjacent merged rows.
     # Excel silently coalesces those rows into one large MergeArea, which
