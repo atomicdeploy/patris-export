@@ -128,3 +128,21 @@ func TestCategoryChangesParticipateInRevisionAndEventIdentity(t *testing.T) {
 		t.Fatalf("delta lost category snapshot: %+v", delta.Categories)
 	}
 }
+
+func TestTransformQuarantinesDashOnlyProductNames(t *testing.T) {
+	rows := []map[string]interface{}{
+		{"Code": "113001011", "Name": "---"},
+		{"Code": "102007005", "Name": " —‐\u200f—\t"},
+		{"Code": "106001002", "Name": "&mdash;&#8722;", "ANBAR": []interface{}{4}},
+		{"Code": "113003156", "Name": "-------"},
+		{"Code": "113001012", "Name": "ESP32-C3 — Display"},
+	}
+	cfg := DefaultConfig()
+	products, envelope := Transform(context.Background(), rows, "kala.db", cfg, pricingcatalog.NewProvider(cfg.Pricing), time.Unix(10, 0))
+	if len(products) != 1 || products[0]["product_code"] != "113001012" {
+		t.Fatalf("expected only the named model, got %#v", products)
+	}
+	if want := []string{"102007005", "106001002", "113001011", "113003156"}; !reflect.DeepEqual(envelope.QuarantinedCodes, want) {
+		t.Fatalf("quarantined codes = %#v, want %#v", envelope.QuarantinedCodes, want)
+	}
+}
