@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"html"
 	"math"
 	"math/big"
 	"net/url"
@@ -15,6 +16,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/atomicdeploy/patris-export/pkg/converter"
@@ -465,7 +467,7 @@ func classifyKalaRowsContext(ctx context.Context, rows []map[string]interface{},
 		if err := ctx.Err(); err != nil {
 			return nil, nil, nil, err
 		}
-		if codeCounts[code] != 1 || !asciiDigits(code) {
+		if codeCounts[code] != 1 {
 			continue
 		}
 		if _, reserved := reservedNonMerchandiseCodes[code]; reserved {
@@ -473,6 +475,14 @@ func classifyKalaRowsContext(ctx context.Context, rows []map[string]interface{},
 			continue
 		}
 		row := rowByCode[code]
+		if isDashOnlyName(normalizeText(firstValue(row, "name", "Name", "part_number"))) {
+			// Quarantine protects an existing destination identity from deletion.
+			quarantined[code] = true
+			continue
+		}
+		if !asciiDigits(code) {
+			continue
+		}
 		if len(code) == 3 {
 			if categoryHasStrongProductSignals(row) {
 				quarantined[code] = true
@@ -520,6 +530,20 @@ func classifyKalaRowsContext(ctx context.Context, rows []map[string]interface{},
 		return nil, nil, nil, err
 	}
 	return categories, sortedSet(excluded), sortedSet(quarantined), nil
+}
+
+func isDashOnlyName(name string) bool {
+	hasDash := false
+	for _, r := range html.UnescapeString(name) {
+		switch {
+		case unicode.Is(unicode.Dash, r):
+			hasDash = true
+		case unicode.IsSpace(r), unicode.Is(unicode.Cf, r):
+		default:
+			return false
+		}
+	}
+	return hasDash
 }
 
 func asciiDigits(value string) bool {
